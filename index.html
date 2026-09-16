@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="id">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>Ringkasan Harian</title>
+    <meta name="description" content="Ringkasan berita dunia & Indonesia setiap hari jam 20:00." />
+
+    <link rel="manifest" href="manifest.webmanifest" />
+    <meta name="theme-color" content="#4338ca" />
+
+    <!-- Dukungan "Add to Home Screen" di iOS/Safari -->
+    <link rel="apple-touch-icon" href="icons/icon-192.png" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Ringkasan" />
+
+    <link rel="icon" href="icons/icon-192.png" />
+    <link rel="stylesheet" href="src/style.css" />
+  </head>
+  <body>
+    <div id="app">
+      <header class="topbar">
+        <h1 class="brand">📰 <span data-i18n="brand">Ringkasan Harian</span></h1>
+        <div class="topbar-actions">
+          <button id="lang-toggle" class="icon-btn" title="Ganti bahasa / Switch language" aria-label="Ganti bahasa">
+            <span id="lang-label">ID</span>
+          </button>
+          <button id="theme-toggle" class="icon-btn" title="Ganti tema" aria-label="Ganti tema">
+            <span id="theme-icon">🌙</span>
+          </button>
+        </div>
+      </header>
+
+      <main class="content">
+        <section class="notify-card" id="notify-card">
+          <p id="notify-text" data-i18n="notify_prompt">
+            Aktifkan notifikasi supaya kamu tahu begitu ringkasan hari ini siap.
+          </p>
+          <button id="notify-btn" class="primary-btn" data-i18n="notify_btn">Aktifkan Notifikasi</button>
+        </section>
+
+        <section class="date-nav">
+          <label for="date-select" data-i18n="pick_date">Pilih tanggal:</label>
+          <select id="date-select"></select>
+        </section>
+
+        <section id="summary-section" class="summary-card">
+          <div id="summary-status" class="status-text" data-i18n="loading">Memuat ringkasan…</div>
+          <article id="summary-content" class="summary-content"></article>
+        </section>
+
+        <section id="sources-section" class="sources-card" hidden>
+          <h2 data-i18n="sources_title">Sumber &amp; bacaan lebih lanjut</h2>
+          <div class="sources-group">
+            <h3 data-i18n="sources_indonesia">🇮🇩 Indonesia</h3>
+            <ul id="sources-indonesia" class="sources-list"></ul>
+          </div>
+          <div class="sources-group">
+            <h3 data-i18n="sources_dunia">🌍 Dunia</h3>
+            <ul id="sources-dunia" class="sources-list"></ul>
+          </div>
+        </section>
+      </main>
+
+      <footer class="footer">
+        <p data-i18n="footer_note">
+          Dibuat otomatis tiap hari jam 20:00 WITA dari berbagai sumber berita publik.
+        </p>
+      </footer>
+    </div>
+
+    <script type="module" src="src/main.js"></script>
+  </body>
+</html>
