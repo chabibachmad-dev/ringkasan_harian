@@ -124,7 +124,10 @@ Lalu jalankan perintah `npx supabase secrets set VAPID_KEYS_JSON='...'` yang dic
 ```powershell
 npx supabase functions deploy generate-summary
 npx supabase functions deploy send-push
+npx supabase functions deploy subscribe
 ```
+
+*(`subscribe` dipakai frontend untuk menyimpan Web Push subscription — sengaja lewat Edge Function, bukan insert langsung dari browser, karena alasan teknis RLS + upsert yang dijelaskan di komentar `supabase/migrations/0001_init.sql`.)*
 
 ## 7. Aktifkan jadwal otomatis (pg_cron)
 

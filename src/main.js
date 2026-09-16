@@ -194,18 +194,33 @@ function setNotifyState(mode, extra) {
 }
 
 async function saveSubscription(subJson) {
-  const { endpoint, keys } = subJson;
-  const { error } = await supabase
-    .from("push_subscriptions")
-    .upsert(
-      { endpoint, p256dh: keys.p256dh, auth: keys.auth, user_agent: navigator.userAgent, last_seen_at: new Date().toISOString() },
-      { onConflict: "endpoint" }
-    );
-  if (error) {
-    console.error("Gagal simpan subscription:", error);
-    return { ok: false, message: `${error.message || error.code || "unknown error"}` };
+  // Disimpan lewat Edge Function `subscribe` (bukan insert langsung dari
+  // browser) -- lihat komentar di supabase/functions/subscribe/index.ts
+  // dan supabase/migrations/0003_lock_push_subscriptions.sql soal alasannya.
+  const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
+  const anonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
+
+  try {
+    const res = await fetch(`${supabaseUrl}/functions/v1/subscribe`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${anonKey}`
+      },
+      body: JSON.stringify(subJson)
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.ok === false) {
+      const message = data.error || `HTTP ${res.status}`;
+      console.error("Gagal simpan subscription:", message);
+      return { ok: false, message };
+    }
+    return { ok: true };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error("Gagal simpan subscription:", err);
+    return { ok: false, message };
   }
-  return { ok: true };
 }
 
 async function initNotifyCard() {

@@ -40,11 +40,19 @@ create index if not exists summaries_date_idx on public.summaries (summary_date 
 -- Aplikasi ini dipakai sendiri (personal), tapi anon key tetap publik
 -- secara desain (dibaca oleh browser siapa saja yang membuka PWA-nya),
 -- jadi kita kunci apa yang boleh dilakukan oleh anon key:
---   - summaries       : boleh dibaca semua orang, TIDAK boleh ditulis/diubah lewat anon key
---   - push_subscriptions : boleh DITAMBAH (insert) oleh anon key (supaya device bisa subscribe
---                          sendiri dari browser), tapi TIDAK boleh dibaca/diubah/dihapus.
--- Insert & update summaries hanya lewat Edge Function pakai service_role key
--- (service_role otomatis bypass RLS).
+--   - summaries          : boleh dibaca semua orang, TIDAK boleh ditulis/diubah lewat anon key.
+--   - push_subscriptions : TIDAK boleh dibaca/ditulis/diubah sama sekali lewat anon key.
+--
+-- Kenapa push_subscriptions dikunci total (bukan dikasih izin insert kayak
+-- versi awal)? Karena aplikasi menyimpan subscription pakai UPSERT
+-- (ON CONFLICT DO UPDATE), dan menurut dokumentasi Postgres, UPSERT jenis
+-- itu SELALU butuh izin SELECT pada tabelnya -- walau barisnya baru pertama
+-- kali di-insert. Kalau anon dikasih izin SELECT supaya upsert-nya lolos,
+-- konsekuensinya semua orang jadi bisa baca endpoint+keys push subscription
+-- siapa saja (bisa disalahgunakan buat spam kirim notifikasi ke device
+-- orang). Jadi penyimpanan subscription lewat Edge Function `subscribe`
+-- (jalan pakai service_role, otomatis bypass RLS) -- lihat
+-- supabase/functions/subscribe/index.ts.
 -- ================================================================
 
 alter table public.summaries enable row level security;
@@ -56,16 +64,7 @@ create policy "summaries_public_read"
   to anon, authenticated
   using (true);
 
-drop policy if exists "push_subscriptions_public_insert" on public.push_subscriptions;
-create policy "push_subscriptions_public_insert"
-  on public.push_subscriptions for insert
-  to anon, authenticated
-  with check (true);
-
--- Izinkan browser update last_seen_at / upsert endpoint yang sama (on conflict).
-drop policy if exists "push_subscriptions_public_update_own" on public.push_subscriptions;
-create policy "push_subscriptions_public_update_own"
-  on public.push_subscriptions for update
-  to anon, authenticated
-  using (true)
-  with check (true);
+-- Sengaja TIDAK ada policy apa pun untuk anon/authenticated di
+-- push_subscriptions -- RLS aktif + nol policy = akses langsung ditolak
+-- total. service_role (dipakai Edge Function) tetap bisa baca/tulis
+-- normal karena service_role selalu bypass RLS.
