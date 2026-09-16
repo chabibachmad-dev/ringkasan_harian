@@ -154,8 +154,8 @@ async function renderCurrentSummary() {
   }
 }
 
-function setNotifyState(mode) {
-  // mode: "idle" | "on" | "need_install" | "unsupported" | "denied" | "error"
+function setNotifyState(mode, extra) {
+  // mode: "idle" | "on" | "need_install" | "unsupported" | "denied" | "error" | "save_error"
   els.notifyBtn.disabled = false;
   switch (mode) {
     case "on":
@@ -180,7 +180,9 @@ function setNotifyState(mode) {
       els.notifyBtn.hidden = false;
       break;
     case "save_error":
-      els.notifyText.textContent = t(state.lang, "notify_save_error");
+      els.notifyText.textContent = extra
+        ? `${t(state.lang, "notify_save_error")} [${extra}]`
+        : t(state.lang, "notify_save_error");
       els.notifyBtn.textContent = t(state.lang, "notify_retry_btn");
       els.notifyBtn.hidden = false;
       break;
@@ -201,9 +203,9 @@ async function saveSubscription(subJson) {
     );
   if (error) {
     console.error("Gagal simpan subscription:", error);
-    return false;
+    return { ok: false, message: `${error.message || error.code || "unknown error"}` };
   }
-  return true;
+  return { ok: true };
 }
 
 async function initNotifyCard() {
@@ -221,8 +223,8 @@ async function initNotifyCard() {
 
   const existing = await getExistingSubscription();
   if (existing) {
-    const saved = await saveSubscription(existing.toJSON());
-    setNotifyState(saved ? "on" : "save_error");
+    const result = await saveSubscription(existing.toJSON());
+    setNotifyState(result.ok ? "on" : "save_error", result.message);
     return;
   }
 
@@ -270,8 +272,8 @@ function wireEvents() {
         setNotifyState(result.reason === "denied" ? "denied" : "error");
         return;
       }
-      const saved = await saveSubscription(result.subscription);
-      setNotifyState(saved ? "on" : "save_error");
+      const saveResult = await saveSubscription(result.subscription);
+      setNotifyState(saveResult.ok ? "on" : "save_error", saveResult.message);
     } catch (err) {
       console.error(err);
       setNotifyState("error");
