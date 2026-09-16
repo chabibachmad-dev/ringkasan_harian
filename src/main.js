@@ -176,10 +176,17 @@ function setNotifyState(mode) {
       break;
     case "error":
       els.notifyText.textContent = t(state.lang, "notify_error");
+      els.notifyBtn.textContent = t(state.lang, "notify_btn");
+      els.notifyBtn.hidden = false;
+      break;
+    case "save_error":
+      els.notifyText.textContent = t(state.lang, "notify_save_error");
+      els.notifyBtn.textContent = t(state.lang, "notify_retry_btn");
       els.notifyBtn.hidden = false;
       break;
     default:
       els.notifyText.textContent = t(state.lang, "notify_prompt");
+      els.notifyBtn.textContent = t(state.lang, "notify_btn");
       els.notifyBtn.hidden = false;
   }
 }
@@ -192,7 +199,11 @@ async function saveSubscription(subJson) {
       { endpoint, p256dh: keys.p256dh, auth: keys.auth, user_agent: navigator.userAgent, last_seen_at: new Date().toISOString() },
       { onConflict: "endpoint" }
     );
-  if (error) console.error("Gagal simpan subscription:", error);
+  if (error) {
+    console.error("Gagal simpan subscription:", error);
+    return false;
+  }
+  return true;
 }
 
 async function initNotifyCard() {
@@ -210,8 +221,8 @@ async function initNotifyCard() {
 
   const existing = await getExistingSubscription();
   if (existing) {
-    setNotifyState("on");
-    saveSubscription(existing.toJSON());
+    const saved = await saveSubscription(existing.toJSON());
+    setNotifyState(saved ? "on" : "save_error");
     return;
   }
 
@@ -259,8 +270,8 @@ function wireEvents() {
         setNotifyState(result.reason === "denied" ? "denied" : "error");
         return;
       }
-      await saveSubscription(result.subscription);
-      setNotifyState("on");
+      const saved = await saveSubscription(result.subscription);
+      setNotifyState(saved ? "on" : "save_error");
     } catch (err) {
       console.error(err);
       setNotifyState("error");

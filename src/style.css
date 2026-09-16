@@ -169,9 +169,13 @@ body {
 }
 
 .summary-content p {
-  line-height: 1.65;
+  font-size: 0.92rem;
+  line-height: 1.7;
   margin: 0 0 12px;
   color: var(--text);
+  text-align: justify;
+  text-align-last: left;
+  hyphens: auto;
 }
 
 .sources-card h2 {

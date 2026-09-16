@@ -9,6 +9,9 @@ export const STRINGS = {
     notify_unsupported: "Browser ini belum mendukung notifikasi push.",
     notify_denied: "Izin notifikasi ditolak. Aktifkan lewat pengaturan notifikasi Safari untuk situs ini.",
     notify_error: "Gagal mengaktifkan notifikasi, coba lagi nanti.",
+    notify_save_error:
+      "Notifikasi aktif di perangkat ini, tapi gagal tersimpan ke server (jadi belum akan menerima kiriman). Tap tombol di bawah untuk coba simpan ulang.",
+    notify_retry_btn: "Coba Simpan Ulang",
     pick_date: "Pilih tanggal:",
     loading: "Memuat ringkasan…",
     no_summary: "Belum ada ringkasan untuk tanggal ini.",
@@ -30,6 +33,9 @@ export const STRINGS = {
     notify_unsupported: "This browser doesn't support push notifications yet.",
     notify_denied: "Notification permission was denied. Enable it from Safari's notification settings for this site.",
     notify_error: "Couldn't enable notifications, please try again later.",
+    notify_save_error:
+      "Notifications are active on this device, but failed to sync with the server (so you won't receive anything yet). Tap the button below to retry.",
+    notify_retry_btn: "Retry Saving",
     pick_date: "Pick a date:",
     loading: "Loading digest…",
     no_summary: "No digest available for this date yet.",

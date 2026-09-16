@@ -1,7 +1,7 @@
 // Service worker: (1) bikin PWA bisa di-install & jalan offline-ish (app shell caching),
 // (2) menerima & menampilkan Web Push notification, (3) buka app saat notifikasi diklik.
 
-const CACHE_NAME = "ringkasan-harian-v1";
+const CACHE_NAME = "ringkasan-harian-v2";
 const APP_SHELL = ["./", "./index.html", "./manifest.webmanifest"];
 
 self.addEventListener("install", (event) => {
@@ -20,25 +20,24 @@ self.addEventListener("activate", (event) => {
   );
 });
 
-// Cache-first hanya untuk request same-origin (app shell). Request ke Supabase
-// (origin berbeda) dibiarkan lewat langsung ke network supaya data selalu segar.
+// Network-first untuk file same-origin (app shell: HTML/JS/CSS/icons) — supaya
+// tiap kali ada update kode/deploy baru, versi terbarunya yang selalu dipakai.
+// Cache cuma jadi fallback kalau HP lagi offline (bukan sumber utama).
+// Request ke Supabase (origin berbeda) dibiarkan lewat langsung ke network.
 self.addEventListener("fetch", (event) => {
   const url = new URL(event.request.url);
   if (url.origin !== self.location.origin || event.request.method !== "GET") return;
 
   event.respondWith(
-    caches.match(event.request).then((cached) => {
-      const network = fetch(event.request)
-        .then((res) => {
-          if (res && res.ok) {
-            const clone = res.clone();
-            caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
-          }
-          return res;
-        })
-        .catch(() => cached);
-      return cached || network;
-    })
+    fetch(event.request)
+      .then((res) => {
+        if (res && res.ok) {
+          const clone = res.clone();
+          caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
+        }
+        return res;
+      })
+      .catch(() => caches.match(event.request))
   );
 });
 
