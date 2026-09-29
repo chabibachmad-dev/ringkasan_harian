@@ -298,7 +298,18 @@ body {
 .chat-messages {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 14px;
+}
+
+/* #chat-thread adalah wadah pesan-pesan chat (di dalam .chat-messages).
+   HARUS flex column juga -- kalau tidak, align-self: flex-end/flex-start
+   di .chat-bubble.user/.assistant tidak berlaku sama sekali (align-self
+   hanya berfungsi untuk direct child dari flex/grid container), sehingga
+   semua bubble melebar penuh & menempel tanpa jarak satu sama lain. */
+#chat-thread {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
 }
 
 .chat-input-bar {

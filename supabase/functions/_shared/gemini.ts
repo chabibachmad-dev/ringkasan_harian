@@ -148,15 +148,6 @@ Jawab pertanyaan atau ajak diskusi dengan ramah, jelas, dan seringkas mungkin ta
 Gunakan Bahasa Indonesia kecuali pengguna jelas menulis/minta bahasa lain.
 Kamu PUNYA akses ke pencarian Google secara real-time -- pakai untuk mencari info/berita/link terbaru saat relevan (termasuk mencarikan link video YouTube, artikel, atau halaman web lain yang diminta pengguna), dan tuliskan link hasil pencarian yang relevan dalam format markdown [label](url) supaya bisa diklik. Kalau setelah mencari tetap tidak menemukan info yang pasti, katakan terus terang bahwa kamu tidak menemukannya, jangan mengarang.`;
 
-// Deteksi error dari API yang menandakan model tidak mendukung parameter
-// "tools" (grounding/Google Search) -- supaya bisa fallback tanpa tools
-// alih-alih gagal total, misalnya kalau model yang dipakai (lewat secret
-// GEMINI_MODEL) ternyata versi yang belum mendukung fitur ini.
-function isToolsUnsupportedError(err: unknown): boolean {
-  if (!(err instanceof Error)) return false;
-  return /Gemini API error 400/i.test(err.message) && /(tool|google_search)/i.test(err.message);
-}
-
 export async function generateChatReply(messages: ChatMessage[], apiKey: string): Promise<string> {
   const model = Deno.env.get("GEMINI_MODEL") || DEFAULT_MODEL;
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
@@ -178,11 +169,13 @@ export async function generateChatReply(messages: ChatMessage[], apiKey: string)
   try {
     data = (await callGeminiWithRetry(url, buildBody(true))) as typeof data;
   } catch (err) {
-    // Model/versi API yang dipakai mungkin belum mendukung Google Search
-    // grounding -- coba lagi tanpa tools supaya chat tetap jalan walau
-    // tanpa akses internet, daripada gagal total.
-    if (!isToolsUnsupportedError(err)) throw err;
-    console.warn("Gemini menolak parameter tools (google_search), coba ulang tanpa akses internet...");
+    // Apa pun sebab gagalnya percobaan pertama (model/versi API belum
+    // dukung parameter tools/google_search, format error yang tidak
+    // terduga, dll), coba lagi TANPA tools supaya chat tetap jalan
+    // (walau berarti tanpa akses internet saat itu) daripada gagal total
+    // dan pengguna cuma lihat "Gagal mengirim pesan".
+    const reason = err instanceof Error ? err.message : String(err);
+    console.warn(`Percobaan chat dengan Google Search grounding gagal (${reason}), coba ulang tanpa tools...`);
     data = (await callGeminiWithRetry(url, buildBody(false))) as typeof data;
   }
 
