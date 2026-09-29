@@ -2,6 +2,7 @@ import { supabase } from "./supabaseClient.js";
 import { applyStaticI18n, t } from "./i18n.js";
 import { renderMiniMarkdown } from "./markdown.js";
 import { isIOS, isStandalone, pushSupported, registerServiceWorker, getExistingSubscription, subscribeToPush } from "./push.js";
+import { getStoredChatCode, setStoredChatCode, clearStoredChatCode, fetchChatHistory, sendChatMessage } from "./chat.js";
 
 const VAPID_PUBLIC_KEY = import.meta.env.VITE_VAPID_PUBLIC_KEY;
 
@@ -18,7 +19,18 @@ const els = {
   summaryContent: document.getElementById("summary-content"),
   sourcesSection: document.getElementById("sources-section"),
   sourcesIndonesia: document.getElementById("sources-indonesia"),
-  sourcesDunia: document.getElementById("sources-dunia")
+  sourcesDunia: document.getElementById("sources-dunia"),
+  chatLocked: document.getElementById("chat-locked"),
+  chatLockedText: document.getElementById("chat-locked-text"),
+  chatCodeForm: document.getElementById("chat-code-form"),
+  chatCodeInput: document.getElementById("chat-code-input"),
+  chatCodeError: document.getElementById("chat-code-error"),
+  chatBody: document.getElementById("chat-body"),
+  chatMessages: document.getElementById("chat-messages"),
+  chatStatus: document.getElementById("chat-status"),
+  chatForm: document.getElementById("chat-form"),
+  chatInput: document.getElementById("chat-input"),
+  chatSendBtn: document.getElementById("chat-send-btn")
 };
 
 const state = {
@@ -26,8 +38,15 @@ const state = {
   theme: localStorage.getItem("rh_theme") || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"),
   summaries: [], // { summary_date, status }
   currentDate: null,
-  cache: new Map() // summary_date -> full row
+  cache: new Map(), // summary_date -> full row
+  chatCode: ""
 };
+
+// Tanggal "hari ini" di zona WITA (UTC+8) -- sama persis dengan cara
+// Edge Function generate-summary/chat menghitungnya, supaya konsisten.
+function todayWita() {
+  return new Date(Date.now() + 8 * 60 * 60 * 1000).toISOString().slice(0, 10);
+}
 
 function applyTheme() {
   document.documentElement.setAttribute("data-theme", state.theme);
@@ -60,6 +79,15 @@ async function loadDateList() {
   }
 
   state.summaries = data || [];
+
+  // Pastikan tanggal hari ini (WITA) selalu ada di daftar, walau ringkasan
+  // buat hari itu belum sempat dibuat cron -- supaya diskusi/chat hari ini
+  // tetap bisa diakses dari awal, tidak harus menunggu jam 20:00.
+  const today = todayWita();
+  if (!state.summaries.some((row) => row.summary_date === today)) {
+    state.summaries.unshift({ summary_date: today, status: "none" });
+  }
+
   els.dateSelect.innerHTML = "";
   for (const row of state.summaries) {
     const opt = document.createElement("option");
@@ -251,6 +279,85 @@ async function initNotifyCard() {
   setNotifyState("idle");
 }
 
+function setChatStatus(text) {
+  if (!text) {
+    els.chatStatus.hidden = true;
+    els.chatStatus.textContent = "";
+    return;
+  }
+  els.chatStatus.hidden = false;
+  els.chatStatus.textContent = text;
+}
+
+function appendChatBubble(role, content) {
+  const emptyEl = els.chatMessages.querySelector(".chat-empty-text");
+  if (emptyEl) emptyEl.remove();
+
+  const bubble = document.createElement("div");
+  bubble.className = `chat-bubble ${role === "assistant" ? "assistant" : "user"}`;
+  bubble.textContent = content;
+  els.chatMessages.appendChild(bubble);
+  els.chatMessages.scrollTop = els.chatMessages.scrollHeight;
+}
+
+function renderChatMessages(messages) {
+  els.chatMessages.innerHTML = "";
+  if (!messages || messages.length === 0) {
+    const p = document.createElement("p");
+    p.className = "chat-empty-text";
+    p.textContent = t(state.lang, "chat_empty");
+    els.chatMessages.appendChild(p);
+    return;
+  }
+  for (const msg of messages) {
+    appendChatBubble(msg.role, msg.content);
+  }
+}
+
+function showChatLocked(errorText) {
+  els.chatLocked.hidden = false;
+  els.chatBody.hidden = true;
+  els.chatCodeError.hidden = !errorText;
+  els.chatCodeError.textContent = errorText || "";
+}
+
+function showChatUnlocked() {
+  els.chatLocked.hidden = true;
+  els.chatBody.hidden = false;
+}
+
+async function loadChatForDate(date) {
+  if (!state.chatCode) return;
+  setChatStatus(t(state.lang, "loading"));
+  const result = await fetchChatHistory(date, state.chatCode);
+  if (!result.ok) {
+    if (result.unauthorized) {
+      // Kode yang tersimpan di browser ternyata sudah tidak cocok lagi
+      // dengan CHAT_ACCESS_CODE di server -- minta dimasukkan ulang.
+      state.chatCode = "";
+      clearStoredChatCode();
+      setChatStatus("");
+      showChatLocked(t(state.lang, "chat_code_wrong"));
+      return;
+    }
+    setChatStatus(t(state.lang, "chat_load_error"));
+    return;
+  }
+  setChatStatus("");
+  renderChatMessages(result.messages);
+}
+
+async function initChat() {
+  const stored = getStoredChatCode();
+  if (!stored) {
+    showChatLocked();
+    return;
+  }
+  state.chatCode = stored;
+  showChatUnlocked();
+  await loadChatForDate(state.currentDate || todayWita());
+}
+
 function wireEvents() {
   els.langToggle.addEventListener("click", () => {
     state.lang = state.lang === "id" ? "en" : "id";
@@ -261,6 +368,9 @@ function wireEvents() {
       renderCurrentSummary();
     });
     initNotifyCard();
+    if (state.chatCode) {
+      loadChatForDate(state.currentDate || todayWita());
+    }
   });
 
   els.themeToggle.addEventListener("click", () => {
@@ -272,6 +382,80 @@ function wireEvents() {
   els.dateSelect.addEventListener("change", (e) => {
     state.currentDate = e.target.value;
     renderCurrentSummary();
+    if (state.chatCode) {
+      loadChatForDate(state.currentDate);
+    }
+  });
+
+  els.chatCodeForm.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const code = els.chatCodeInput.value.trim();
+    if (!code) return;
+
+    const submitBtn = els.chatCodeForm.querySelector("button[type=submit]");
+    submitBtn.disabled = true;
+    els.chatCodeError.hidden = true;
+
+    const date = state.currentDate || todayWita();
+    const result = await fetchChatHistory(date, code);
+    submitBtn.disabled = false;
+
+    if (!result.ok) {
+      els.chatCodeError.hidden = false;
+      els.chatCodeError.textContent = result.unauthorized ? t(state.lang, "chat_code_wrong") : result.message;
+      return;
+    }
+
+    state.chatCode = code;
+    setStoredChatCode(code);
+    els.chatCodeInput.value = "";
+    showChatUnlocked();
+    renderChatMessages(result.messages);
+  });
+
+  els.chatForm.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const text = els.chatInput.value.trim();
+    if (!text || !state.chatCode) return;
+
+    els.chatInput.value = "";
+    els.chatInput.style.height = "auto";
+    els.chatSendBtn.disabled = true;
+    appendChatBubble("user", text);
+    setChatStatus(t(state.lang, "chat_sending"));
+
+    const date = state.currentDate || todayWita();
+    const result = await sendChatMessage(date, state.chatCode, text);
+
+    els.chatSendBtn.disabled = false;
+    setChatStatus("");
+
+    if (!result.ok) {
+      if (result.unauthorized) {
+        state.chatCode = "";
+        clearStoredChatCode();
+        showChatLocked(t(state.lang, "chat_code_wrong"));
+        return;
+      }
+      setChatStatus(t(state.lang, "chat_error"));
+      return;
+    }
+
+    appendChatBubble("assistant", result.reply);
+  });
+
+  // Enter buat kirim, Shift+Enter buat baris baru.
+  els.chatInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      els.chatForm.requestSubmit();
+    }
+  });
+
+  // Auto-resize textarea sederhana biar mengikuti panjang teks.
+  els.chatInput.addEventListener("input", () => {
+    els.chatInput.style.height = "auto";
+    els.chatInput.style.height = `${els.chatInput.scrollHeight}px`;
   });
 
   els.notifyBtn.addEventListener("click", async () => {
@@ -301,7 +485,8 @@ async function main() {
   applyLang();
   wireEvents();
   await registerServiceWorker();
-  await Promise.all([loadDateList().then(renderCurrentSummary), initNotifyCard()]);
+  await loadDateList();
+  await Promise.all([renderCurrentSummary(), initNotifyCard(), initChat()]);
 }
 
 main();

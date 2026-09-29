@@ -29,6 +29,8 @@ PWA (GitHub Pages) — dibuka & di-"Add to Home Screen" di iPhone
 
 Tidak ada server yang perlu kamu jalankan sendiri 24 jam — semuanya jalan otomatis di Supabase (cron + function) dan GitHub Pages (hosting statis).
 
+Selain alur otomatis di atas, ada juga fitur **Diskusi/chat pribadi** yang terpisah: PWA memanggil Edge Function `chat` (diproteksi kode akses) setiap kamu kirim pesan, function-nya menyimpan pesan ke tabel `chat_messages` (dikelompokkan per tanggal) lalu membalas pakai Gemini API yang sama. Lihat langkah 11 di bawah untuk setup-nya.
+
 ---
 
 ## 0. Yang kamu butuhkan
@@ -195,6 +197,27 @@ curl -X POST https://alkpmwowhlyffdwfvyeu.supabase.co/functions/v1/send-push \
 
 ---
 
+## 11. Fitur Diskusi/Chat pribadi
+
+Selain ringkasan berita otomatis, aplikasi ini juga punya kotak diskusi/chat pribadi (ditenagai Gemini, sama seperti ringkasan) yang tersimpan per tanggal — tiap hari mulai obrolan baru dari kosong.
+
+Karena situs ini publik (siapa saja yang tahu link-nya bisa buka), tabel percakapannya dikunci total dari anon key (mirip `push_subscriptions`) dan diproteksi kode akses supaya cuma kamu yang bisa baca/pakai.
+
+1. Jalankan migration-nya di **SQL Editor** Supabase Dashboard: isi file `supabase/migrations/0004_chat.sql`.
+2. Bikin kode akses bebas (angka/huruf apa saja, cuma kamu yang perlu ingat), lalu set sebagai secret:
+   ```powershell
+   npx supabase secrets set CHAT_ACCESS_CODE=isi-dengan-kode-rahasia-kamu
+   ```
+3. Deploy function-nya:
+   ```powershell
+   npx supabase functions deploy chat
+   ```
+4. Buka aplikasinya, scroll ke bagian **Diskusi**, masukkan kode akses yang kamu set di langkah 2 → langsung bisa dipakai chat. Kode tersimpan di browser (localStorage) supaya tidak perlu dimasukkan ulang tiap buka aplikasi.
+
+Kalau suatu saat mau ganti kode akses, tinggal `npx supabase secrets set CHAT_ACCESS_CODE=kode-baru` — device lama otomatis diminta masukkan kode baru begitu kode lamanya ditolak server.
+
+---
+
 ## Menambah/mengganti sumber berita
 
 Edit `supabase/functions/_shared/rss-sources.ts` — tinggal tambah/hapus item di array `FEED_SOURCES`, lalu `npx supabase functions deploy generate-summary` lagi. Cari RSS feed media lain lewat `<nama-media>.com/rss` atau situs seperti feedspot.com.
@@ -207,9 +230,10 @@ Baris di tabel `summaries` untuk tanggal itu akan berstatus `failed` dengan pesa
 
 Aplikasi ini didesain untuk dipakai sendiri, tanpa sistem login (supaya tetap simpel). Konsekuensinya:
 
-- `anon key` Supabase ada di kode frontend yang publik (memang begitu desainnya Supabase) — siapa pun yang tahu key itu bisa membaca tabel `summaries` (memang dimaksudkan publik-terbaca) dan menambah/mengubah baris di `push_subscriptions`. Tidak ada data pribadi sensitif di kedua tabel itu, jadi risikonya rendah, tapi ini bukan pola yang cocok kalau nanti kamu mau tambah data pribadi lain ke database yang sama.
+- `anon key` Supabase ada di kode frontend yang publik (memang begitu desainnya Supabase) — siapa pun yang tahu key itu bisa membaca tabel `summaries` (memang dimaksudkan publik-terbaca, isinya cuma ringkasan berita). Tabel `push_subscriptions` dan `chat_messages` dikunci total dari anon key (RLS aktif tanpa policy sama sekali) — satu-satunya jalan masuk/keluar adalah lewat Edge Function (`subscribe`, `chat`) yang jalan pakai `service_role`.
 - Edge Function `generate-summary` & `send-push` dilindungi header `x-cron-secret` supaya orang lain tidak bisa memicu Gemini API / kirim notifikasi memakai kuota kamu — pastikan secret `CRON_SECRET` di langkah 5 benar-benar di-set, karena kalau kosong pengecekan ini otomatis dilewati.
-- `SUPABASE_SERVICE_ROLE_KEY` dan `VAPID_KEYS_JSON` **tidak pernah** ada di frontend — hanya tersimpan sebagai Supabase secret di server.
+- Edge Function `chat` dilindungi kode akses (`CHAT_ACCESS_CODE`) yang wajib ada — kalau secret ini belum di-set, function-nya menolak semua request (bukan fail-open seperti `x-cron-secret`).
+- `SUPABASE_SERVICE_ROLE_KEY`, `VAPID_KEYS_JSON`, dan `CHAT_ACCESS_CODE` **tidak pernah** ada di frontend — hanya tersimpan sebagai Supabase secret di server. Kode akses chat yang dimasukkan lewat browser cuma disimpan di `localStorage` device kamu sendiri, tidak pernah di-commit ke Git.
 
 ## Batasan tier gratis yang perlu diketahui
 

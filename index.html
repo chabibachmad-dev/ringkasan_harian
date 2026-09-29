@@ -61,6 +61,42 @@
             <ul id="sources-dunia" class="sources-list"></ul>
           </div>
         </section>
+
+        <section id="chat-section" class="chat-card">
+          <h2 data-i18n="chat_title">Diskusi</h2>
+
+          <div id="chat-locked" class="chat-locked" hidden>
+            <p id="chat-locked-text" data-i18n="chat_code_prompt">
+              Fitur ini pribadi. Masukkan kode akses untuk membukanya.
+            </p>
+            <form id="chat-code-form" class="chat-code-form">
+              <input
+                id="chat-code-input"
+                type="password"
+                inputmode="numeric"
+                autocomplete="off"
+                data-i18n-placeholder="chat_code_placeholder"
+                placeholder="Kode akses"
+              />
+              <button type="submit" class="primary-btn" data-i18n="chat_code_submit">Buka</button>
+            </form>
+            <p id="chat-code-error" class="chat-code-error" hidden></p>
+          </div>
+
+          <div id="chat-body" class="chat-body" hidden>
+            <div id="chat-messages" class="chat-messages"></div>
+            <div id="chat-status" class="status-text" hidden></div>
+            <form id="chat-form" class="chat-form">
+              <textarea
+                id="chat-input"
+                rows="1"
+                data-i18n-placeholder="chat_placeholder"
+                placeholder="Tulis pertanyaan atau ajak diskusi…"
+              ></textarea>
+              <button type="submit" id="chat-send-btn" class="primary-btn" data-i18n="chat_send">Kirim</button>
+            </form>
+          </div>
+        </section>
       </main>
 
       <footer class="footer">

@@ -21,7 +21,18 @@ export const STRINGS = {
     sources_dunia: "🌍 Dunia",
     no_sources: "Tidak ada sumber tercatat.",
     footer_note: "Dibuat otomatis tiap hari jam 20:00 WITA dari berbagai sumber berita publik.",
-    load_error: "Gagal memuat data dari server. Cek koneksi internet kamu."
+    load_error: "Gagal memuat data dari server. Cek koneksi internet kamu.",
+    chat_title: "Diskusi",
+    chat_code_prompt: "Fitur ini pribadi. Masukkan kode akses untuk membukanya.",
+    chat_code_placeholder: "Kode akses",
+    chat_code_submit: "Buka",
+    chat_code_wrong: "Kode akses salah, coba lagi.",
+    chat_placeholder: "Tulis pertanyaan atau ajak diskusi…",
+    chat_send: "Kirim",
+    chat_empty: "Belum ada obrolan untuk tanggal ini. Mulai diskusi di bawah.",
+    chat_sending: "Mengetik…",
+    chat_error: "Gagal mengirim pesan. Coba lagi.",
+    chat_load_error: "Gagal memuat riwayat diskusi."
   },
   en: {
     brand: "Daily Digest",
@@ -45,7 +56,18 @@ export const STRINGS = {
     sources_dunia: "🌍 World",
     no_sources: "No sources recorded.",
     footer_note: "Generated automatically every day at 20:00 WITA (Indonesia time) from public news sources.",
-    load_error: "Couldn't load data from the server. Check your internet connection."
+    load_error: "Couldn't load data from the server. Check your internet connection.",
+    chat_title: "Discussion",
+    chat_code_prompt: "This is private. Enter the access code to unlock it.",
+    chat_code_placeholder: "Access code",
+    chat_code_submit: "Unlock",
+    chat_code_wrong: "Wrong access code, try again.",
+    chat_placeholder: "Ask something or start a discussion…",
+    chat_send: "Send",
+    chat_empty: "No messages yet for this date. Start the discussion below.",
+    chat_sending: "Typing…",
+    chat_error: "Couldn't send the message. Please try again.",
+    chat_load_error: "Couldn't load the discussion history."
   }
 };
 
@@ -57,6 +79,10 @@ export function applyStaticI18n(lang) {
   document.querySelectorAll("[data-i18n]").forEach((el) => {
     const key = el.getAttribute("data-i18n");
     el.textContent = t(lang, key);
+  });
+  document.querySelectorAll("[data-i18n-placeholder]").forEach((el) => {
+    const key = el.getAttribute("data-i18n-placeholder");
+    el.setAttribute("placeholder", t(lang, key));
   });
   document.documentElement.lang = lang;
 }

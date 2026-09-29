@@ -51,30 +51,66 @@ function stripCodeFence(text: string): string {
     .trim();
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Status yang layak dicoba ulang: 503 (model lagi sibuk/overload) dan
+// 429 (rate limit) -- keduanya biasanya bersifat sementara. Status lain
+// (400 API key salah, 404 model tidak ada, dll) langsung dilempar sebagai
+// error tanpa retry karena percobaan ulang tidak akan mengubah hasil.
+const RETRYABLE_STATUS = new Set([429, 503]);
+const MAX_ATTEMPTS = 4;
+const RETRY_DELAYS_MS = [3000, 8000, 15000]; // jeda sebelum percobaan ke-2, ke-3, ke-4
+
+export async function callGeminiWithRetry(url: string, requestBody: string): Promise<unknown> {
+  let lastErr: Error | null = null;
+
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: requestBody
+    });
+
+    if (res.ok) {
+      return await res.json();
+    }
+
+    const errText = await res.text();
+    lastErr = new Error(`Gemini API error ${res.status}: ${errText}`);
+
+    const isLastAttempt = attempt === MAX_ATTEMPTS;
+    if (!RETRYABLE_STATUS.has(res.status) || isLastAttempt) {
+      throw lastErr;
+    }
+
+    const delay = RETRY_DELAYS_MS[attempt - 1] ?? RETRY_DELAYS_MS[RETRY_DELAYS_MS.length - 1];
+    console.warn(`Gemini API ${res.status}, percobaan ${attempt}/${MAX_ATTEMPTS} gagal, coba lagi dalam ${delay}ms...`);
+    await sleep(delay);
+  }
+
+  // Tidak akan pernah sampai sini, tapi TypeScript butuh ini.
+  throw lastErr ?? new Error("Gemini API gagal tanpa pesan error.");
+}
+
 export async function generateSummary(items: NewsItem[], apiKey: string): Promise<SummaryResult> {
   const model = Deno.env.get("GEMINI_MODEL") || DEFAULT_MODEL;
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
 
   const prompt = buildPrompt(items);
 
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      contents: [{ parts: [{ text: prompt }] }],
-      generationConfig: {
-        temperature: 0.4,
-        responseMimeType: "application/json"
-      }
-    })
+  const requestBody = JSON.stringify({
+    contents: [{ parts: [{ text: prompt }] }],
+    generationConfig: {
+      temperature: 0.4,
+      responseMimeType: "application/json"
+    }
   });
 
-  if (!res.ok) {
-    const errText = await res.text();
-    throw new Error(`Gemini API error ${res.status}: ${errText}`);
-  }
-
-  const data = await res.json();
+  const data = (await callGeminiWithRetry(url, requestBody)) as {
+    candidates?: { content?: { parts?: { text?: string }[] } }[];
+  };
   const rawText: string | undefined = data?.candidates?.[0]?.content?.parts?.[0]?.text;
   if (!rawText) {
     throw new Error(`Respons Gemini tidak berisi teks yang diharapkan: ${JSON.stringify(data).slice(0, 500)}`);
@@ -95,4 +131,45 @@ export async function generateSummary(items: NewsItem[], apiKey: string): Promis
   }
 
   return parsed;
+}
+
+// ================================================================
+// Chat/diskusi -- dipakai oleh Edge Function `chat` untuk fitur diskusi
+// pribadi di dalam aplikasi (terpisah dari ringkasan berita harian).
+// ================================================================
+
+export interface ChatMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
+const CHAT_SYSTEM_PROMPT = `Kamu adalah asisten pribadi di dalam aplikasi "Ringkasan Harian" milik satu pengguna saja.
+Jawab pertanyaan atau ajak diskusi dengan ramah, jelas, dan seringkas mungkin tanpa kehilangan inti jawaban.
+Gunakan Bahasa Indonesia kecuali pengguna jelas menulis/minta bahasa lain.
+Kamu TIDAK punya akses internet real-time -- kalau ditanya soal berita/kejadian terbaru yang kamu tidak yakin datanya, katakan terus terang keterbatasan itu, dan kalau relevan sarankan pengguna cek ringkasan berita harian di halaman utama aplikasi ini.`;
+
+export async function generateChatReply(messages: ChatMessage[], apiKey: string): Promise<string> {
+  const model = Deno.env.get("GEMINI_MODEL") || DEFAULT_MODEL;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+
+  const contents = messages.map((m) => ({
+    role: m.role === "assistant" ? "model" : "user",
+    parts: [{ text: m.content }]
+  }));
+
+  const requestBody = JSON.stringify({
+    system_instruction: { parts: [{ text: CHAT_SYSTEM_PROMPT }] },
+    contents,
+    generationConfig: { temperature: 0.6 }
+  });
+
+  const data = (await callGeminiWithRetry(url, requestBody)) as {
+    candidates?: { content?: { parts?: { text?: string }[] } }[];
+  };
+  const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+  if (!rawText) {
+    throw new Error(`Respons Gemini (chat) tidak berisi teks yang diharapkan: ${JSON.stringify(data).slice(0, 500)}`);
+  }
+
+  return rawText.trim();
 }
