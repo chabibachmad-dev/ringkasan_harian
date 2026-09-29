@@ -63,10 +63,14 @@ const RETRYABLE_STATUS = new Set([429, 503]);
 const MAX_ATTEMPTS = 4;
 const RETRY_DELAYS_MS = [3000, 8000, 15000]; // jeda sebelum percobaan ke-2, ke-3, ke-4
 
-export async function callGeminiWithRetry(url: string, requestBody: string): Promise<unknown> {
+export async function callGeminiWithRetry(
+  url: string,
+  requestBody: string,
+  maxAttempts: number = MAX_ATTEMPTS
+): Promise<unknown> {
   let lastErr: Error | null = null;
 
-  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     const res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -80,13 +84,13 @@ export async function callGeminiWithRetry(url: string, requestBody: string): Pro
     const errText = await res.text();
     lastErr = new Error(`Gemini API error ${res.status}: ${errText}`);
 
-    const isLastAttempt = attempt === MAX_ATTEMPTS;
+    const isLastAttempt = attempt === maxAttempts;
     if (!RETRYABLE_STATUS.has(res.status) || isLastAttempt) {
       throw lastErr;
     }
 
     const delay = RETRY_DELAYS_MS[attempt - 1] ?? RETRY_DELAYS_MS[RETRY_DELAYS_MS.length - 1];
-    console.warn(`Gemini API ${res.status}, percobaan ${attempt}/${MAX_ATTEMPTS} gagal, coba lagi dalam ${delay}ms...`);
+    console.warn(`Gemini API ${res.status}, percobaan ${attempt}/${maxAttempts} gagal, coba lagi dalam ${delay}ms...`);
     await sleep(delay);
   }
 
@@ -167,15 +171,17 @@ export async function generateChatReply(messages: ChatMessage[], apiKey: string)
 
   let data: { candidates?: { content?: { parts?: { text?: string }[] } }[] };
   try {
-    data = (await callGeminiWithRetry(url, buildBody(true))) as typeof data;
+    // Percobaan dengan Google Search grounding sengaja HANYA 1x (tanpa
+    // retry) -- di tier gratis, jalur ini kadang lebih sering kena 503
+    // "model overloaded" dibanding jalur biasa, jadi kalau dipaksa retry
+    // penuh (3+8+15 detik) di sini, chat jadi lambat & tetap berpotensi
+    // gagal total. Begitu percobaan pertama gagal apa pun sebabnya,
+    // langsung pindah ke jalur tanpa tools yang jauh lebih stabil dan
+    // biarkan JALUR ITU yang pakai retry penuh sebagai andalan utama.
+    data = (await callGeminiWithRetry(url, buildBody(true), 1)) as typeof data;
   } catch (err) {
-    // Apa pun sebab gagalnya percobaan pertama (model/versi API belum
-    // dukung parameter tools/google_search, format error yang tidak
-    // terduga, dll), coba lagi TANPA tools supaya chat tetap jalan
-    // (walau berarti tanpa akses internet saat itu) daripada gagal total
-    // dan pengguna cuma lihat "Gagal mengirim pesan".
     const reason = err instanceof Error ? err.message : String(err);
-    console.warn(`Percobaan chat dengan Google Search grounding gagal (${reason}), coba ulang tanpa tools...`);
+    console.warn(`Percobaan chat dengan Google Search grounding gagal (${reason}), lanjut tanpa akses internet...`);
     data = (await callGeminiWithRetry(url, buildBody(false))) as typeof data;
   }
 
