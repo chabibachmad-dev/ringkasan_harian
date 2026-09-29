@@ -1,9 +1,16 @@
 // Client minimal untuk Gemini API (Google AI Studio) — tier gratis.
 // Dokumentasi & daftar model terbaru: https://ai.google.dev/gemini-api/docs/models
-// Kalau nama model di bawah sudah tidak berlaku, set secret GEMINI_MODEL
-// dengan nama model lain yang tersedia di akun kamu (tanpa perlu ubah kode).
+// Kalau nama model di bawah sudah tidak berlaku / sering kena error "model
+// overloaded", set secret GEMINI_MODEL (model utama) dan/atau
+// GEMINI_MODEL_FALLBACK (model cadangan yang otomatis dicoba kalau model
+// utama gagal) dengan nama model lain yang tersedia di akun kamu -- tanpa
+// perlu ubah kode sama sekali.
 
 const DEFAULT_MODEL = "gemini-3.6-flash";
+// Model cadangan: dicoba otomatis kalau model utama gagal terus (mis. 503
+// "model overloaded" karena model utama lagi tinggi permintaan). Model
+// "legacy" biasanya kapasitasnya lebih longgar dibanding model paling baru.
+const DEFAULT_FALLBACK_MODEL = "gemini-3.5-flash";
 
 export interface NewsItem {
   id: number;
@@ -98,23 +105,55 @@ export async function callGeminiWithRetry(
   throw lastErr ?? new Error("Gemini API gagal tanpa pesan error.");
 }
 
+type GeminiData = { candidates?: { content?: { parts?: { text?: string }[] } }[] };
+
+function buildGenerateUrl(model: string, apiKey: string): string {
+  return `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+}
+
+// Coba beberapa kombinasi (model, jumlah percobaan) berurutan sampai salah
+// satu berhasil -- dipakai supaya kalau model utama sedang "overloaded"
+// (503) dan tetap gagal walau sudah di-retry, permintaan otomatis dialihkan
+// ke model cadangan (GEMINI_MODEL_FALLBACK) alih-alih gagal total.
+async function callGeminiWithModelFallback(
+  apiKey: string,
+  buildBody: () => string,
+  steps: { model: string; maxAttempts: number }[]
+): Promise<GeminiData> {
+  let lastErr: unknown;
+  for (const step of steps) {
+    try {
+      return (await callGeminiWithRetry(buildGenerateUrl(step.model, apiKey), buildBody(), step.maxAttempts)) as GeminiData;
+    } catch (err) {
+      lastErr = err;
+      const reason = err instanceof Error ? err.message : String(err);
+      console.warn(`Model "${step.model}" gagal (${reason}), lanjut ke opsi berikutnya...`);
+    }
+  }
+  throw lastErr instanceof Error ? lastErr : new Error("Semua percobaan ke Gemini API gagal.");
+}
+
 export async function generateSummary(items: NewsItem[], apiKey: string): Promise<SummaryResult> {
-  const model = Deno.env.get("GEMINI_MODEL") || DEFAULT_MODEL;
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+  const primaryModel = Deno.env.get("GEMINI_MODEL") || DEFAULT_MODEL;
+  const fallbackModel = Deno.env.get("GEMINI_MODEL_FALLBACK") || DEFAULT_FALLBACK_MODEL;
 
   const prompt = buildPrompt(items);
 
-  const requestBody = JSON.stringify({
-    contents: [{ parts: [{ text: prompt }] }],
-    generationConfig: {
-      temperature: 0.4,
-      responseMimeType: "application/json"
-    }
-  });
+  const buildBody = () =>
+    JSON.stringify({
+      contents: [{ parts: [{ text: prompt }] }],
+      generationConfig: {
+        temperature: 0.4,
+        responseMimeType: "application/json"
+      }
+    });
 
-  const data = (await callGeminiWithRetry(url, requestBody)) as {
-    candidates?: { content?: { parts?: { text?: string }[] } }[];
-  };
+  const steps = [{ model: primaryModel, maxAttempts: MAX_ATTEMPTS }];
+  if (fallbackModel !== primaryModel) {
+    steps.push({ model: fallbackModel, maxAttempts: MAX_ATTEMPTS });
+  }
+
+  const data = await callGeminiWithModelFallback(apiKey, buildBody, steps);
   const rawText: string | undefined = data?.candidates?.[0]?.content?.parts?.[0]?.text;
   if (!rawText) {
     throw new Error(`Respons Gemini tidak berisi teks yang diharapkan: ${JSON.stringify(data).slice(0, 500)}`);
@@ -153,8 +192,8 @@ Gunakan Bahasa Indonesia kecuali pengguna jelas menulis/minta bahasa lain.
 Kamu PUNYA akses ke pencarian Google secara real-time -- pakai untuk mencari info/berita/link terbaru saat relevan (termasuk mencarikan link video YouTube, artikel, atau halaman web lain yang diminta pengguna), dan tuliskan link hasil pencarian yang relevan dalam format markdown [label](url) supaya bisa diklik. Kalau setelah mencari tetap tidak menemukan info yang pasti, katakan terus terang bahwa kamu tidak menemukannya, jangan mengarang.`;
 
 export async function generateChatReply(messages: ChatMessage[], apiKey: string): Promise<string> {
-  const model = Deno.env.get("GEMINI_MODEL") || DEFAULT_MODEL;
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+  const primaryModel = Deno.env.get("GEMINI_MODEL") || DEFAULT_MODEL;
+  const fallbackModel = Deno.env.get("GEMINI_MODEL_FALLBACK") || DEFAULT_FALLBACK_MODEL;
 
   const contents = messages.map((m) => ({
     role: m.role === "assistant" ? "model" : "user",
@@ -169,20 +208,26 @@ export async function generateChatReply(messages: ChatMessage[], apiKey: string)
       generationConfig: { temperature: 0.6 }
     });
 
-  let data: { candidates?: { content?: { parts?: { text?: string }[] } }[] };
+  // Urutan percobaan, dari yang paling ideal ke yang paling andal:
+  // 1. Model utama + akses internet -- 1x saja, jangan buang waktu retry di
+  //    sini kalau lagi "overloaded" (503), soalnya jalur ini yang paling
+  //    sering padat permintaannya di tier gratis.
+  // 2. Model utama tanpa akses internet -- diberi sisa jatah retry, supaya
+  //    kalau cuma jalur "tools"-nya yang sibuk, chat tetap jalan cepat.
+  // 3. Model cadangan (GEMINI_MODEL_FALLBACK) tanpa akses internet -- kalau
+  //    model utama sendiri yang sedang overloaded total (bukan cuma jalur
+  //    tools-nya), pindah ke model lain supaya pesan tidak gagal terkirim.
+  let data: GeminiData;
   try {
-    // Percobaan dengan Google Search grounding sengaja HANYA 1x (tanpa
-    // retry) -- di tier gratis, jalur ini kadang lebih sering kena 503
-    // "model overloaded" dibanding jalur biasa, jadi kalau dipaksa retry
-    // penuh (3+8+15 detik) di sini, chat jadi lambat & tetap berpotensi
-    // gagal total. Begitu percobaan pertama gagal apa pun sebabnya,
-    // langsung pindah ke jalur tanpa tools yang jauh lebih stabil dan
-    // biarkan JALUR ITU yang pakai retry penuh sebagai andalan utama.
-    data = (await callGeminiWithRetry(url, buildBody(true), 1)) as typeof data;
+    data = await callGeminiWithModelFallback(apiKey, () => buildBody(true), [{ model: primaryModel, maxAttempts: 1 }]);
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err);
     console.warn(`Percobaan chat dengan Google Search grounding gagal (${reason}), lanjut tanpa akses internet...`);
-    data = (await callGeminiWithRetry(url, buildBody(false))) as typeof data;
+    const steps = [{ model: primaryModel, maxAttempts: MAX_ATTEMPTS - 1 }];
+    if (fallbackModel !== primaryModel) {
+      steps.push({ model: fallbackModel, maxAttempts: MAX_ATTEMPTS - 1 });
+    }
+    data = await callGeminiWithModelFallback(apiKey, () => buildBody(false), steps);
   }
 
   const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
