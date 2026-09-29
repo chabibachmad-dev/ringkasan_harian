@@ -1,6 +1,15 @@
 import { supabase } from "./supabaseClient.js";
 import { applyStaticI18n, t } from "./i18n.js";
 import { renderMiniMarkdown, renderChatMarkdown } from "./markdown.js";
+import {
+  ICON_BELL_OUTLINE,
+  ICON_BELL_FILLED,
+  ICON_BELL_PLUS,
+  ICON_MOON,
+  ICON_SUN,
+  ICON_CHAT,
+  ICON_DOC
+} from "./icons.js";
 import { isIOS, isStandalone, pushSupported, registerServiceWorker, getExistingSubscription, subscribeToPush } from "./push.js";
 import {
   getStoredChatCode,
@@ -87,9 +96,14 @@ function markDateOpened(date) {
   }
 }
 
+const META_THEME_COLOR = document.getElementById("meta-theme-color");
+
 function applyTheme() {
   document.documentElement.setAttribute("data-theme", state.theme);
-  els.themeIcon.textContent = state.theme === "dark" ? "☀️" : "🌙";
+  els.themeIcon.innerHTML = state.theme === "dark" ? ICON_SUN : ICON_MOON;
+  if (META_THEME_COLOR) {
+    META_THEME_COLOR.setAttribute("content", state.theme === "dark" ? "#000000" : "#ffffff");
+  }
 }
 
 function applyLang() {
@@ -198,7 +212,7 @@ async function renderChatList() {
 
     const avatar = document.createElement("div");
     avatar.className = "chat-list-avatar";
-    avatar.textContent = lastMsg ? "💬" : "📰";
+    avatar.innerHTML = lastMsg ? ICON_CHAT : ICON_DOC;
 
     const main = document.createElement("div");
     main.className = "chat-list-main";
@@ -241,7 +255,7 @@ async function renderChatList() {
     if (row.status === "failed") {
       const badge = document.createElement("span");
       badge.className = "chat-list-badge";
-      badge.textContent = "⚠️";
+      badge.textContent = "!";
       badges.appendChild(badge);
     }
     if (unread) {
@@ -521,13 +535,13 @@ function openList() {
 }
 
 const NOTIFY_ICONS = {
-  on: "🔔",
-  need_install: "📲",
-  unsupported: "🔕",
-  denied: "🔕",
-  error: "🔔",
-  save_error: "🔔",
-  idle: "🔕"
+  on: ICON_BELL_FILLED,
+  need_install: ICON_BELL_PLUS,
+  unsupported: ICON_BELL_OUTLINE,
+  denied: ICON_BELL_OUTLINE,
+  error: ICON_BELL_OUTLINE,
+  save_error: ICON_BELL_OUTLINE,
+  idle: ICON_BELL_OUTLINE
 };
 
 const NOTIFY_ACTIONABLE = new Set(["idle", "error", "save_error"]);
@@ -537,7 +551,7 @@ function setNotifyState(mode, extra) {
   state.notifyMode = mode;
   state.notifyExtra = extra || "";
   els.notifyToggle.disabled = false;
-  els.notifyIcon.textContent = NOTIFY_ICONS[mode] || NOTIFY_ICONS.idle;
+  els.notifyIcon.innerHTML = NOTIFY_ICONS[mode] || NOTIFY_ICONS.idle;
   els.notifyToggle.classList.toggle("icon-btn--attn", mode === "error" || mode === "save_error");
 
   const key =

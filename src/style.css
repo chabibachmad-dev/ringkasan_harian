@@ -1,28 +1,28 @@
 :root {
-  --bg: #f8fafc;
+  --bg: #ffffff;
   --bg-card: #ffffff;
-  --text: #0f172a;
-  --text-muted: #475569;
-  --border: #e2e8f0;
-  --accent: #4338ca;
+  --text: #000000;
+  --text-muted: #5c5c5c;
+  --border: #000000;
+  --accent: #000000;
   --accent-contrast: #ffffff;
-  --notify-bg: #eef2ff;
-  --link: #4338ca;
-  --danger: #dc2626;
+  --notify-bg: #f0f0f0;
+  --link: #000000;
+  --danger: #000000;
   color-scheme: light;
 }
 
 :root[data-theme="dark"] {
-  --bg: #0b1120;
-  --bg-card: #131c31;
-  --text: #e2e8f0;
-  --text-muted: #94a3b8;
-  --border: #24314d;
-  --accent: #818cf8;
-  --accent-contrast: #0b1120;
-  --notify-bg: #1e2440;
-  --link: #a5b4fc;
-  --danger: #f87171;
+  --bg: #000000;
+  --bg-card: #000000;
+  --text: #ffffff;
+  --text-muted: #a6a6a6;
+  --border: #ffffff;
+  --accent: #ffffff;
+  --accent-contrast: #000000;
+  --notify-bg: #141414;
+  --link: #ffffff;
+  --danger: #ffffff;
   color-scheme: dark;
 }
 
@@ -45,7 +45,9 @@ body {
   padding: 0;
   background: var(--bg);
   color: var(--text);
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  /* Font monospace ala e-ink/"paper" (gaya Snail OS) -- murni hitam/putih,
+     tanpa warna, supaya enak dibaca & terasa seperti kertas, bukan layar. */
+  font-family: "Ubuntu Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
   -webkit-font-smoothing: antialiased;
 }
 
@@ -76,7 +78,9 @@ body {
 }
 
 .brand {
-  font-size: 1.25rem;
+  font-size: 1.15rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
   margin: 0;
 }
 
@@ -93,6 +97,7 @@ body {
   width: 40px;
   height: 40px;
   font-size: 1rem;
+  font-family: inherit;
   cursor: pointer;
   display: flex;
   align-items: center;
@@ -104,9 +109,13 @@ body {
   transform: scale(0.95);
 }
 
+/* Status "butuh perhatian" (error notifikasi dll) ditandai dengan warna
+   terbalik (isi penuh) -- bukan warna merah -- supaya tetap murni hitam/putih
+   tapi tetap jelas beda dari tombol biasa. */
 .icon-btn--attn {
-  border-color: var(--danger);
-  color: var(--danger);
+  background: var(--text);
+  color: var(--bg);
+  border-color: var(--text);
 }
 
 .content {
@@ -124,33 +133,36 @@ body {
   border: 1px solid var(--border);
   background: var(--bg-card);
   color: var(--text);
+  font-family: inherit;
   font-size: 0.9rem;
 }
 
 .primary-btn {
   background: var(--accent);
   color: var(--accent-contrast);
-  border: none;
+  border: 1.5px solid var(--text);
   border-radius: 10px;
   padding: 10px 16px;
+  font-family: inherit;
   font-size: 0.95rem;
-  font-weight: 600;
+  font-weight: 700;
   cursor: pointer;
 }
 
 .primary-btn:disabled {
-  opacity: 0.6;
+  opacity: 0.5;
   cursor: default;
 }
 
 .secondary-btn {
   background: none;
-  border: 1px solid var(--border);
+  border: 1.5px solid var(--border);
   color: var(--text);
   border-radius: 10px;
   padding: 10px 16px;
+  font-family: inherit;
   font-size: 0.9rem;
-  font-weight: 600;
+  font-weight: 700;
   cursor: pointer;
 }
 
@@ -158,8 +170,8 @@ body {
   flex: 1;
   min-width: 0;
   margin: 0;
-  font-size: 1.02rem;
-  font-weight: 600;
+  font-size: 0.98rem;
+  font-weight: 700;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -212,10 +224,11 @@ body {
   height: 44px;
   border-radius: 50%;
   background: var(--notify-bg);
+  border: 1px solid var(--border);
+  color: var(--text);
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 1.3rem;
 }
 
 .chat-list-main {
@@ -236,7 +249,7 @@ body {
 
 .chat-list-date {
   font-size: 0.92rem;
-  font-weight: 600;
+  font-weight: 700;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -266,7 +279,16 @@ body {
 }
 
 .chat-list-badge {
-  font-size: 0.8rem;
+  width: 16px;
+  height: 16px;
+  border: 1.3px solid var(--text);
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.65rem;
+  font-weight: 700;
+  line-height: 1;
 }
 
 .chat-list-unread-dot {
@@ -337,8 +359,9 @@ body {
   border: 1px solid var(--border);
   border-radius: 999px;
   padding: 10px 20px;
+  font-family: inherit;
   font-size: 0.9rem;
-  font-weight: 600;
+  font-weight: 700;
   color: var(--text);
   cursor: pointer;
 }
@@ -361,6 +384,7 @@ body {
 .chat-bubble-text a {
   color: inherit;
   text-decoration: underline;
+  text-underline-offset: 2px;
 }
 
 .chat-bubble-time {
@@ -369,23 +393,29 @@ body {
   opacity: 0.65;
 }
 
+/* Pesan dari saya: bubble "solid" (tinta penuh) -- rata kanan. */
 .chat-bubble.user {
   align-self: flex-end;
   background: var(--accent);
   color: var(--accent-contrast);
+  border: 1px solid var(--text);
   border-bottom-right-radius: 4px;
 }
 
+/* Balasan AI: bubble "garis" (outline di atas kertas) -- rata kiri. Dibuat
+   berbeda dari punya saya lewat isi solid vs garis, bukan lewat warna. */
 .chat-bubble.assistant {
   align-self: flex-start;
-  background: var(--notify-bg);
+  background: var(--bg-card);
   color: var(--text);
+  border: 1px solid var(--border);
   border-bottom-left-radius: 4px;
 }
 
 .chat-bubble--system {
   align-self: center;
   background: none;
+  border: none;
   color: var(--text-muted);
   font-size: 0.82rem;
   text-align: center;
@@ -401,7 +431,7 @@ body {
   position: relative;
   max-height: 260px;
   overflow: hidden;
-  font-size: 0.9rem;
+  font-size: 0.88rem;
   line-height: 1.6;
 }
 
@@ -416,14 +446,18 @@ body {
   left: 0;
   right: 0;
   height: 48px;
-  background: linear-gradient(transparent, var(--notify-bg));
+  background: linear-gradient(transparent, var(--bg-card));
   pointer-events: none;
 }
 
 .chat-summary-text h2 {
-  font-size: 0.98rem;
-  margin: 14px 0 6px;
-  color: var(--accent);
+  font-size: 0.85rem;
+  margin: 16px 0 8px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 4px;
 }
 
 .chat-summary-text h2:first-child {
@@ -432,9 +466,7 @@ body {
 
 .chat-summary-text p {
   margin: 0 0 10px;
-  text-align: justify;
-  text-align-last: left;
-  hyphens: auto;
+  text-align: left;
 }
 
 .chat-summary-toggle {
@@ -442,8 +474,11 @@ body {
   background: none;
   border: none;
   color: var(--link);
+  font-family: inherit;
   font-size: 0.85rem;
-  font-weight: 600;
+  font-weight: 700;
+  text-decoration: underline;
+  text-underline-offset: 2px;
   padding: 2px 0;
   cursor: pointer;
 }
@@ -475,13 +510,10 @@ body {
 
 .sources-list li a {
   color: var(--link);
-  text-decoration: none;
+  text-decoration: underline;
+  text-underline-offset: 2px;
   font-size: 0.88rem;
   line-height: 1.4;
-}
-
-.sources-list li a:hover {
-  text-decoration: underline;
 }
 
 .sources-list .source-name {
@@ -523,7 +555,7 @@ body {
   width: 42px;
   height: 42px;
   border-radius: 50%;
-  border: none;
+  border: 1px solid var(--text);
   background: var(--accent);
   color: var(--accent-contrast);
   display: flex;
@@ -533,14 +565,14 @@ body {
 }
 
 .chat-send-btn:disabled {
-  opacity: 0.6;
+  opacity: 0.5;
   cursor: default;
 }
 
 /* ---------- Popup kode akses ---------- */
 
 .chat-code-dialog {
-  border: none;
+  border: 1.5px solid var(--border);
   border-radius: 16px;
   padding: 0;
   width: min(360px, calc(100vw - 48px));
@@ -576,11 +608,13 @@ body {
   border: 1px solid var(--border);
   background: var(--bg);
   color: var(--text);
+  font-family: inherit;
   font-size: 0.95rem;
 }
 
 .chat-code-error {
   color: var(--danger);
+  font-weight: 700;
   font-size: 0.85rem;
   margin: 0;
 }
@@ -605,7 +639,7 @@ body {
 
 @media (max-width: 420px) {
   .brand {
-    font-size: 1.1rem;
+    font-size: 1.05rem;
   }
   .chat-card {
     padding: 12px;

@@ -7,7 +7,7 @@
     <meta name="description" content="Ringkasan berita dunia & Indonesia setiap hari jam 20:00." />
 
     <link rel="manifest" href="manifest.webmanifest" />
-    <meta name="theme-color" content="#4338ca" />
+    <meta id="meta-theme-color" name="theme-color" content="#ffffff" />
 
     <!-- Dukungan "Add to Home Screen" di iOS/Safari -->
     <link rel="apple-touch-icon" href="icons/icon-192.png" />
@@ -16,6 +16,15 @@
     <meta name="apple-mobile-web-app-title" content="Daily Insider" />
 
     <link rel="icon" href="icons/icon-192.png" />
+
+    <!-- Font monospace ala e-ink/"paper" (mengikuti gaya Snail OS) -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Ubuntu+Mono:wght@400;700&display=swap"
+      rel="stylesheet"
+    />
+
     <link rel="stylesheet" href="src/style.css" />
   </head>
   <body>
@@ -23,16 +32,16 @@
       <!-- Layar 1: daftar tanggal, mirip daftar chat WhatsApp -->
       <section id="screen-list" class="screen">
         <header class="topbar">
-          <h1 class="brand">📰 <span data-i18n="brand">Daily Insider</span></h1>
+          <h1 class="brand"><span data-i18n="brand">Daily Insider</span></h1>
           <div class="topbar-actions">
             <button id="notify-toggle" class="icon-btn" title="Notifikasi" aria-label="Notifikasi">
-              <span id="notify-icon">🔕</span>
+              <span id="notify-icon"></span>
             </button>
             <button id="lang-toggle" class="icon-btn" title="Ganti bahasa / Switch language" aria-label="Ganti bahasa">
               <span id="lang-label">ID</span>
             </button>
             <button id="theme-toggle" class="icon-btn" title="Ganti tema" aria-label="Ganti tema">
-              <span id="theme-icon">🌙</span>
+              <span id="theme-icon"></span>
             </button>
           </div>
         </header>
@@ -82,7 +91,11 @@
 
           <div id="chat-locked-bar" class="chat-locked-bar" hidden>
             <button type="button" id="chat-unlock-btn" class="chat-unlock-btn">
-              🔒 <span data-i18n="chat_unlock_btn">Buka Diskusi</span>
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <rect x="4" y="11" width="16" height="9" rx="1.5"></rect>
+                <path d="M8 11V7a4 4 0 0 1 8 0v4"></path>
+              </svg>
+              <span data-i18n="chat_unlock_btn">Buka Diskusi</span>
             </button>
           </div>
 
