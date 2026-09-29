@@ -143,10 +143,19 @@ export interface ChatMessage {
   content: string;
 }
 
-const CHAT_SYSTEM_PROMPT = `Kamu adalah asisten pribadi di dalam aplikasi "Ringkasan Harian" milik satu pengguna saja.
+const CHAT_SYSTEM_PROMPT = `Kamu adalah asisten pribadi di dalam aplikasi "Daily Insider" milik satu pengguna saja.
 Jawab pertanyaan atau ajak diskusi dengan ramah, jelas, dan seringkas mungkin tanpa kehilangan inti jawaban.
 Gunakan Bahasa Indonesia kecuali pengguna jelas menulis/minta bahasa lain.
-Kamu TIDAK punya akses internet real-time -- kalau ditanya soal berita/kejadian terbaru yang kamu tidak yakin datanya, katakan terus terang keterbatasan itu, dan kalau relevan sarankan pengguna cek ringkasan berita harian di halaman utama aplikasi ini.`;
+Kamu PUNYA akses ke pencarian Google secara real-time -- pakai untuk mencari info/berita/link terbaru saat relevan (termasuk mencarikan link video YouTube, artikel, atau halaman web lain yang diminta pengguna), dan tuliskan link hasil pencarian yang relevan dalam format markdown [label](url) supaya bisa diklik. Kalau setelah mencari tetap tidak menemukan info yang pasti, katakan terus terang bahwa kamu tidak menemukannya, jangan mengarang.`;
+
+// Deteksi error dari API yang menandakan model tidak mendukung parameter
+// "tools" (grounding/Google Search) -- supaya bisa fallback tanpa tools
+// alih-alih gagal total, misalnya kalau model yang dipakai (lewat secret
+// GEMINI_MODEL) ternyata versi yang belum mendukung fitur ini.
+function isToolsUnsupportedError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  return /Gemini API error 400/i.test(err.message) && /(tool|google_search)/i.test(err.message);
+}
 
 export async function generateChatReply(messages: ChatMessage[], apiKey: string): Promise<string> {
   const model = Deno.env.get("GEMINI_MODEL") || DEFAULT_MODEL;
@@ -157,15 +166,26 @@ export async function generateChatReply(messages: ChatMessage[], apiKey: string)
     parts: [{ text: m.content }]
   }));
 
-  const requestBody = JSON.stringify({
-    system_instruction: { parts: [{ text: CHAT_SYSTEM_PROMPT }] },
-    contents,
-    generationConfig: { temperature: 0.6 }
-  });
+  const buildBody = (withTools: boolean) =>
+    JSON.stringify({
+      system_instruction: { parts: [{ text: CHAT_SYSTEM_PROMPT }] },
+      contents,
+      ...(withTools ? { tools: [{ google_search: {} }] } : {}),
+      generationConfig: { temperature: 0.6 }
+    });
 
-  const data = (await callGeminiWithRetry(url, requestBody)) as {
-    candidates?: { content?: { parts?: { text?: string }[] } }[];
-  };
+  let data: { candidates?: { content?: { parts?: { text?: string }[] } }[] };
+  try {
+    data = (await callGeminiWithRetry(url, buildBody(true))) as typeof data;
+  } catch (err) {
+    // Model/versi API yang dipakai mungkin belum mendukung Google Search
+    // grounding -- coba lagi tanpa tools supaya chat tetap jalan walau
+    // tanpa akses internet, daripada gagal total.
+    if (!isToolsUnsupportedError(err)) throw err;
+    console.warn("Gemini menolak parameter tools (google_search), coba ulang tanpa akses internet...");
+    data = (await callGeminiWithRetry(url, buildBody(false))) as typeof data;
+  }
+
   const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
   if (!rawText) {
     throw new Error(`Respons Gemini (chat) tidak berisi teks yang diharapkan: ${JSON.stringify(data).slice(0, 500)}`);

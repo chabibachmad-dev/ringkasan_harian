@@ -74,40 +74,44 @@
               <div id="chat-summary-slot"></div>
               <div id="chat-thread"></div>
             </div>
-
-            <div id="chat-locked" class="chat-locked" hidden>
-              <p id="chat-locked-text" data-i18n="chat_code_prompt">
-                Fitur ini pribadi. Masukkan kode akses untuk membukanya.
-              </p>
-              <form id="chat-code-form" class="chat-code-form">
-                <input
-                  id="chat-code-input"
-                  type="password"
-                  inputmode="numeric"
-                  autocomplete="off"
-                  data-i18n-placeholder="chat_code_placeholder"
-                  placeholder="Kode akses"
-                />
-                <button type="submit" class="primary-btn" data-i18n="chat_code_submit">Buka</button>
-              </form>
-              <p id="chat-code-error" class="chat-code-error" hidden></p>
-            </div>
-
-            <div id="chat-body" class="chat-body" hidden>
-              <div id="chat-status" class="status-text" hidden></div>
-              <form id="chat-form" class="chat-form">
-                <textarea
-                  id="chat-input"
-                  rows="1"
-                  data-i18n-placeholder="chat_placeholder"
-                  placeholder="Tulis pertanyaan atau ajak diskusi…"
-                ></textarea>
-                <button type="submit" id="chat-send-btn" class="primary-btn" data-i18n="chat_send">Kirim</button>
-              </form>
-            </div>
           </section>
         </main>
+
+        <div id="chat-input-bar" class="chat-input-bar">
+          <div id="chat-status" class="status-text" hidden></div>
+
+          <div id="chat-locked-bar" class="chat-locked-bar" hidden>
+            <button type="button" id="chat-unlock-btn" class="chat-unlock-btn">
+              🔒 <span data-i18n="chat_unlock_btn">Buka Diskusi</span>
+            </button>
+          </div>
+
+          <form id="chat-form" class="chat-form" hidden>
+            <textarea id="chat-input" rows="1"></textarea>
+            <button type="submit" id="chat-send-btn" class="chat-send-btn" aria-label="Kirim" title="Kirim">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                <path d="M2 21l21-9L2 3v7l15 2-15 2z"></path>
+              </svg>
+            </button>
+          </form>
+        </div>
       </section>
+
+      <!-- Popup kode akses -->
+      <dialog id="chat-code-dialog" class="chat-code-dialog">
+        <form id="chat-code-form" class="chat-code-form-modal">
+          <h2 data-i18n="chat_code_title">Kode Akses</h2>
+          <p id="chat-locked-text" data-i18n="chat_code_prompt">
+            Fitur ini pribadi. Masukkan kode akses untuk membukanya.
+          </p>
+          <input id="chat-code-input" type="password" inputmode="numeric" autocomplete="off" />
+          <p id="chat-code-error" class="chat-code-error" hidden></p>
+          <div class="chat-code-dialog-actions">
+            <button type="button" id="chat-code-cancel" class="secondary-btn" data-i18n="chat_code_cancel">Batal</button>
+            <button type="submit" class="primary-btn" data-i18n="chat_code_submit">Buka</button>
+          </div>
+        </form>
+      </dialog>
     </div>
 
     <script type="module" src="src/main.js"></script>

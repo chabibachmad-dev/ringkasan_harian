@@ -1,6 +1,6 @@
 import { supabase } from "./supabaseClient.js";
 import { applyStaticI18n, t } from "./i18n.js";
-import { renderMiniMarkdown } from "./markdown.js";
+import { renderMiniMarkdown, renderChatMarkdown } from "./markdown.js";
 import { isIOS, isStandalone, pushSupported, registerServiceWorker, getExistingSubscription, subscribeToPush } from "./push.js";
 import {
   getStoredChatCode,
@@ -30,11 +30,13 @@ const els = {
   chatListStatus: document.getElementById("chat-list-status"),
   chatSummarySlot: document.getElementById("chat-summary-slot"),
   chatThread: document.getElementById("chat-thread"),
-  chatLocked: document.getElementById("chat-locked"),
+  chatLockedBar: document.getElementById("chat-locked-bar"),
+  chatUnlockBtn: document.getElementById("chat-unlock-btn"),
+  chatCodeDialog: document.getElementById("chat-code-dialog"),
   chatCodeForm: document.getElementById("chat-code-form"),
   chatCodeInput: document.getElementById("chat-code-input"),
   chatCodeError: document.getElementById("chat-code-error"),
-  chatBody: document.getElementById("chat-body"),
+  chatCodeCancel: document.getElementById("chat-code-cancel"),
   chatMessages: document.getElementById("chat-messages"),
   chatStatus: document.getElementById("chat-status"),
   chatForm: document.getElementById("chat-form"),
@@ -366,7 +368,7 @@ function appendChatBubble(role, content, timestamp) {
 
   const textEl = document.createElement("div");
   textEl.className = "chat-bubble-text";
-  textEl.textContent = content;
+  textEl.innerHTML = renderChatMarkdown(content);
   bubble.appendChild(textEl);
 
   const timeEl = document.createElement("span");
@@ -394,15 +396,38 @@ function renderChatMessages(messages) {
 }
 
 function showChatLocked(errorText) {
-  els.chatLocked.hidden = false;
-  els.chatBody.hidden = true;
-  els.chatCodeError.hidden = !errorText;
-  els.chatCodeError.textContent = errorText || "";
+  els.chatLockedBar.hidden = false;
+  els.chatForm.hidden = true;
+  if (errorText) {
+    els.chatCodeError.hidden = false;
+    els.chatCodeError.textContent = errorText;
+    openChatCodeDialog();
+  }
 }
 
 function showChatUnlocked() {
-  els.chatLocked.hidden = true;
-  els.chatBody.hidden = false;
+  els.chatLockedBar.hidden = true;
+  els.chatForm.hidden = false;
+}
+
+function openChatCodeDialog() {
+  els.chatCodeError.hidden = true;
+  els.chatCodeError.textContent = "";
+  els.chatCodeInput.value = "";
+  if (typeof els.chatCodeDialog.showModal === "function") {
+    els.chatCodeDialog.showModal();
+  } else {
+    els.chatCodeDialog.setAttribute("open", "");
+  }
+  els.chatCodeInput.focus();
+}
+
+function closeChatCodeDialog() {
+  if (typeof els.chatCodeDialog.close === "function") {
+    els.chatCodeDialog.close();
+  } else {
+    els.chatCodeDialog.removeAttribute("open");
+  }
 }
 
 function setChatStatus(text) {
@@ -644,6 +669,14 @@ function wireEvents() {
 
   window.addEventListener("hashchange", handleRoute);
 
+  els.chatUnlockBtn.addEventListener("click", () => {
+    openChatCodeDialog();
+  });
+
+  els.chatCodeCancel.addEventListener("click", () => {
+    closeChatCodeDialog();
+  });
+
   els.chatCodeForm.addEventListener("submit", async (e) => {
     e.preventDefault();
     const code = els.chatCodeInput.value.trim();
@@ -667,6 +700,7 @@ function wireEvents() {
     setStoredChatCode(code);
     els.chatCodeInput.value = "";
     showChatUnlocked();
+    closeChatCodeDialog();
     renderChatMessages(result.messages);
   });
 

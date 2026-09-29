@@ -30,6 +30,15 @@
   box-sizing: border-box;
 }
 
+/* Aturan penjaga: elemen ber-atribut [hidden] HARUS selalu tersembunyi,
+   apa pun aturan display lain yang menimpanya di bawah (mis. `display: flex`
+   pada .chat-form / .chat-locked-bar). Tanpa baris ini, dua bagian yang
+   seharusnya saling eksklusif (mis. form kode akses vs form chat) bisa
+   tampil bertumpuk bersamaan. */
+[hidden] {
+  display: none !important;
+}
+
 html,
 body {
   margin: 0;
@@ -52,10 +61,6 @@ body {
   display: flex;
   flex-direction: column;
   min-height: 100vh;
-}
-
-.screen[hidden] {
-  display: none;
 }
 
 .topbar {
@@ -131,12 +136,22 @@ body {
   font-size: 0.95rem;
   font-weight: 600;
   cursor: pointer;
-  align-self: flex-start;
 }
 
 .primary-btn:disabled {
   opacity: 0.6;
   cursor: default;
+}
+
+.secondary-btn {
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 10px;
+  padding: 10px 16px;
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
 }
 
 .detail-title {
@@ -189,10 +204,6 @@ body {
 
 .chat-list-item:active {
   background: var(--notify-bg);
-}
-
-.chat-list-item[hidden] {
-  display: none;
 }
 
 .chat-list-avatar {
@@ -267,68 +278,58 @@ body {
 
 .status-text {
   color: var(--text-muted);
-  font-size: 0.9rem;
+  font-size: 0.85rem;
+  text-align: center;
+  padding: 4px 0;
 }
 
 /* ---------- Layar detail: ringkasan + diskusi jadi satu obrolan ---------- */
+/* Halaman ini sengaja dibiarkan scroll normal (satu scroll-container, bukan
+   div bersarang dengan overflow sendiri) supaya scroll di iOS mulus -- input
+   di bawah cukup "sticky" mengikuti, bukan dikunci lewat overflow terpisah. */
 
 .chat-card {
   background: var(--bg-card);
   border: 1px solid var(--border);
   border-radius: 14px;
   padding: 16px;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.chat-locked {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.chat-locked p {
-  margin: 0;
-  font-size: 0.88rem;
-  color: var(--text-muted);
-}
-
-.chat-code-form {
-  display: flex;
-  gap: 8px;
-}
-
-.chat-code-form input {
-  flex: 1;
-  padding: 10px 12px;
-  border-radius: 8px;
-  border: 1px solid var(--border);
-  background: var(--bg);
-  color: var(--text);
-  font-size: 0.95rem;
-  min-width: 0;
-}
-
-.chat-code-error {
-  color: var(--danger);
-  font-size: 0.85rem;
-  margin: 0;
-}
-
-.chat-body {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
 }
 
 .chat-messages {
   display: flex;
   flex-direction: column;
   gap: 10px;
-  max-height: 65vh;
-  overflow-y: auto;
-  padding-right: 2px;
+}
+
+.chat-input-bar {
+  position: sticky;
+  bottom: 0;
+  padding: 10px 0 calc(10px + env(safe-area-inset-bottom, 0px));
+  margin-top: -8px;
+  background: var(--bg);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.chat-locked-bar {
+  display: flex;
+  justify-content: center;
+  padding: 4px 0;
+}
+
+.chat-unlock-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 10px 20px;
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--text);
+  cursor: pointer;
 }
 
 .chat-bubble {
@@ -337,14 +338,18 @@ body {
   gap: 4px;
   max-width: 85%;
   padding: 9px 13px 7px;
-  border-radius: 14px;
+  border-radius: 16px;
   font-size: 0.9rem;
   line-height: 1.55;
 }
 
 .chat-bubble-text {
-  white-space: pre-wrap;
   word-break: break-word;
+}
+
+.chat-bubble-text a {
+  color: inherit;
+  text-decoration: underline;
 }
 
 .chat-bubble-time {
@@ -491,20 +496,89 @@ body {
 .chat-form textarea {
   flex: 1;
   resize: none;
-  max-height: 140px;
-  padding: 10px 12px;
-  border-radius: 10px;
+  max-height: 120px;
+  padding: 11px 16px;
+  border-radius: 22px;
   border: 1px solid var(--border);
-  background: var(--bg);
+  background: var(--bg-card);
   color: var(--text);
   font-size: 0.92rem;
   font-family: inherit;
   line-height: 1.4;
 }
 
-.chat-form .primary-btn {
-  align-self: auto;
-  white-space: nowrap;
+.chat-send-btn {
+  flex-shrink: 0;
+  width: 42px;
+  height: 42px;
+  border-radius: 50%;
+  border: none;
+  background: var(--accent);
+  color: var(--accent-contrast);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.chat-send-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+/* ---------- Popup kode akses ---------- */
+
+.chat-code-dialog {
+  border: none;
+  border-radius: 16px;
+  padding: 0;
+  width: min(360px, calc(100vw - 48px));
+  background: var(--bg-card);
+  color: var(--text);
+}
+
+.chat-code-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.5);
+}
+
+.chat-code-form-modal {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 20px;
+}
+
+.chat-code-form-modal h2 {
+  margin: 0;
+  font-size: 1.05rem;
+}
+
+.chat-code-form-modal p {
+  margin: 0;
+  font-size: 0.88rem;
+  color: var(--text-muted);
+}
+
+.chat-code-form-modal input {
+  padding: 11px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  font-size: 0.95rem;
+}
+
+.chat-code-error {
+  color: var(--danger);
+  font-size: 0.85rem;
+  margin: 0;
+}
+
+.chat-code-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 4px;
 }
 
 .footer {
