@@ -65,3 +65,10 @@ export function fetchChatHistory(date, code) {
 export function sendChatMessage(date, code, message) {
   return callChatFunction({ code, date, action: "send", message });
 }
+
+// Ambil pesan terakhir dari beberapa tanggal sekaligus -- dipakai buat
+// cuplikan/preview di layar daftar tanggal (mirip pesan terakhir di
+// daftar chat WhatsApp).
+export function fetchLastMessages(dates, code) {
+  return callChatFunction({ code, action: "last_messages", dates });
+}

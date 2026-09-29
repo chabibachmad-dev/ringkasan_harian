@@ -2,11 +2,22 @@ import { supabase } from "./supabaseClient.js";
 import { applyStaticI18n, t } from "./i18n.js";
 import { renderMiniMarkdown } from "./markdown.js";
 import { isIOS, isStandalone, pushSupported, registerServiceWorker, getExistingSubscription, subscribeToPush } from "./push.js";
-import { getStoredChatCode, setStoredChatCode, clearStoredChatCode, fetchChatHistory, sendChatMessage } from "./chat.js";
+import {
+  getStoredChatCode,
+  setStoredChatCode,
+  clearStoredChatCode,
+  fetchChatHistory,
+  sendChatMessage,
+  fetchLastMessages
+} from "./chat.js";
 
 const VAPID_PUBLIC_KEY = import.meta.env.VITE_VAPID_PUBLIC_KEY;
 
 const els = {
+  screenList: document.getElementById("screen-list"),
+  screenDetail: document.getElementById("screen-detail"),
+  backBtn: document.getElementById("back-btn"),
+  detailDateTitle: document.getElementById("detail-date-title"),
   langToggle: document.getElementById("lang-toggle"),
   langLabel: document.getElementById("lang-label"),
   themeToggle: document.getElementById("theme-toggle"),
@@ -14,7 +25,8 @@ const els = {
   notifyCard: document.getElementById("notify-card"),
   notifyText: document.getElementById("notify-text"),
   notifyBtn: document.getElementById("notify-btn"),
-  dateSelect: document.getElementById("date-select"),
+  chatList: document.getElementById("chat-list"),
+  chatListStatus: document.getElementById("chat-list-status"),
   summaryStatus: document.getElementById("summary-status"),
   summaryContent: document.getElementById("summary-content"),
   sourcesSection: document.getElementById("sources-section"),
@@ -67,13 +79,13 @@ function formatDateLabel(dateStr) {
 async function loadDateList() {
   const { data, error } = await supabase
     .from("summaries")
-    .select("summary_date, status")
+    .select("*")
     .order("summary_date", { ascending: false })
     .limit(60);
 
   if (error) {
-    els.summaryStatus.textContent = t(state.lang, "load_error");
-    els.summaryStatus.hidden = false;
+    els.chatListStatus.hidden = false;
+    els.chatListStatus.textContent = t(state.lang, "load_error");
     console.error(error);
     return;
   }
@@ -88,17 +100,12 @@ async function loadDateList() {
     state.summaries.unshift({ summary_date: today, status: "none" });
   }
 
-  els.dateSelect.innerHTML = "";
+  // Isi cache sekalian -- baris-baris ini sudah lengkap (select *), jadi
+  // fetchSummary() tidak perlu query ulang waktu tanggalnya dibuka.
   for (const row of state.summaries) {
-    const opt = document.createElement("option");
-    opt.value = row.summary_date;
-    opt.textContent = formatDateLabel(row.summary_date) + (row.status === "failed" ? " ⚠️" : "");
-    els.dateSelect.appendChild(opt);
-  }
-
-  if (state.summaries.length > 0) {
-    state.currentDate = state.summaries[0].summary_date;
-    els.dateSelect.value = state.currentDate;
+    if (row.status !== "none") {
+      state.cache.set(row.summary_date, row);
+    }
   }
 }
 
@@ -180,6 +187,125 @@ async function renderCurrentSummary() {
     els.summaryStatus.hidden = false;
     els.summaryStatus.textContent = t(state.lang, "load_error");
   }
+}
+
+function stripMarkdownPreview(md) {
+  if (!md) return "";
+  return md
+    .replace(/^#+\s*/gm, "")
+    .replace(/[*_`>]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function truncate(text, max = 90) {
+  if (!text) return "";
+  return text.length > max ? `${text.slice(0, max).trimEnd()}…` : text;
+}
+
+async function renderChatList() {
+  els.chatListStatus.hidden = false;
+  els.chatListStatus.textContent = t(state.lang, "loading");
+  els.chatList.innerHTML = "";
+
+  const dates = state.summaries.map((row) => row.summary_date);
+  let lastMessages = {};
+  if (state.chatCode && dates.length > 0) {
+    const result = await fetchLastMessages(dates, state.chatCode);
+    if (result.ok) {
+      lastMessages = result.lastMessages || {};
+    } else if (result.unauthorized) {
+      // Kode yang tersimpan sudah tidak cocok lagi -- lepas supaya
+      // preview & chat minta kode ulang, tapi jangan ganggu daftar tanggal.
+      state.chatCode = "";
+      clearStoredChatCode();
+    }
+  }
+
+  els.chatListStatus.hidden = true;
+
+  for (const row of state.summaries) {
+    const item = document.createElement("button");
+    item.type = "button";
+    item.className = "chat-list-item";
+
+    const lastMsg = lastMessages[row.summary_date];
+
+    const avatar = document.createElement("div");
+    avatar.className = "chat-list-avatar";
+    avatar.textContent = lastMsg ? "💬" : "📰";
+
+    const main = document.createElement("div");
+    main.className = "chat-list-main";
+
+    const top = document.createElement("div");
+    top.className = "chat-list-top";
+    const dateLabel = document.createElement("span");
+    dateLabel.className = "chat-list-date";
+    dateLabel.textContent = formatDateLabel(row.summary_date);
+    top.appendChild(dateLabel);
+    if (row.status === "failed") {
+      const badge = document.createElement("span");
+      badge.className = "chat-list-badge";
+      badge.textContent = "⚠️";
+      top.appendChild(badge);
+    }
+
+    const preview = document.createElement("div");
+    preview.className = "chat-list-preview";
+    if (lastMsg) {
+      const prefix = lastMsg.role === "assistant" ? "" : `${t(state.lang, "chat_you_prefix")} `;
+      preview.textContent = truncate(`${prefix}${lastMsg.content}`);
+    } else if (row.status === "failed") {
+      preview.textContent = t(state.lang, "failed_summary");
+    } else if (row.status === "none") {
+      preview.textContent = t(state.lang, "no_summary");
+    } else {
+      const content = state.lang === "id" ? row.content_id : row.content_en || row.content_id;
+      preview.textContent = truncate(stripMarkdownPreview(content));
+    }
+
+    main.appendChild(top);
+    main.appendChild(preview);
+    item.appendChild(avatar);
+    item.appendChild(main);
+    item.addEventListener("click", () => openDetail(row.summary_date));
+    els.chatList.appendChild(item);
+  }
+}
+
+function showListScreen() {
+  els.screenDetail.hidden = true;
+  els.screenList.hidden = false;
+  renderChatList();
+}
+
+async function showDetailScreen(date) {
+  state.currentDate = date;
+  els.detailDateTitle.textContent = formatDateLabel(date);
+  els.screenList.hidden = true;
+  els.screenDetail.hidden = false;
+  await renderCurrentSummary();
+  if (state.chatCode) {
+    await loadChatForDate(date);
+  }
+}
+
+function handleRoute() {
+  const match = location.hash.match(/^#d\/(\d{4}-\d{2}-\d{2})$/);
+  if (match) {
+    showDetailScreen(match[1]);
+  } else {
+    showListScreen();
+  }
+}
+
+function openDetail(date) {
+  location.hash = `d/${date}`;
+}
+
+function openList() {
+  location.hash = "";
 }
 
 function setNotifyState(mode, extra) {
@@ -359,18 +485,13 @@ async function initChat() {
 }
 
 function wireEvents() {
-  els.langToggle.addEventListener("click", () => {
+  els.langToggle.addEventListener("click", async () => {
     state.lang = state.lang === "id" ? "en" : "id";
     localStorage.setItem("rh_lang", state.lang);
     applyLang();
-    loadDateList().then(() => {
-      if (state.currentDate) els.dateSelect.value = state.currentDate;
-      renderCurrentSummary();
-    });
+    await loadDateList();
+    handleRoute();
     initNotifyCard();
-    if (state.chatCode) {
-      loadChatForDate(state.currentDate || todayWita());
-    }
   });
 
   els.themeToggle.addEventListener("click", () => {
@@ -379,13 +500,11 @@ function wireEvents() {
     applyTheme();
   });
 
-  els.dateSelect.addEventListener("change", (e) => {
-    state.currentDate = e.target.value;
-    renderCurrentSummary();
-    if (state.chatCode) {
-      loadChatForDate(state.currentDate);
-    }
+  els.backBtn.addEventListener("click", () => {
+    openList();
   });
+
+  window.addEventListener("hashchange", handleRoute);
 
   els.chatCodeForm.addEventListener("submit", async (e) => {
     e.preventDefault();
@@ -486,7 +605,9 @@ async function main() {
   wireEvents();
   await registerServiceWorker();
   await loadDateList();
-  await Promise.all([renderCurrentSummary(), initNotifyCard(), initChat()]);
+  await initChat();
+  handleRoute();
+  initNotifyCard();
 }
 
 main();

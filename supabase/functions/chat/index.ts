@@ -12,6 +12,9 @@
 //     -> { ok: true, messages: [{ role, content, created_at }, ...] }
 //   { "code": "...", "date": "YYYY-MM-DD", "action": "send", "message": "..." }
 //     -> { ok: true, reply: "..." }
+//   { "code": "...", "action": "last_messages", "dates": ["YYYY-MM-DD", ...] }
+//     -> { ok: true, lastMessages: { "YYYY-MM-DD": { role, content, created_at }, ... } }
+//     (dipakai buat cuplikan/preview di layar daftar tanggal)
 
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { corsHeaders } from "../_shared/cors.ts";
@@ -37,7 +40,7 @@ Deno.serve(async (req) => {
     return json({ ok: false, error: "Method not allowed" }, 405);
   }
 
-  let body: { code?: string; date?: string; action?: string; message?: string };
+  let body: { code?: string; date?: string; dates?: string[]; action?: string; message?: string };
   try {
     body = await req.json();
   } catch (_err) {
@@ -52,14 +55,41 @@ Deno.serve(async (req) => {
     return json({ ok: false, error: "Kode akses salah." }, 401);
   }
 
+  const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
+  const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+  const supabaseAdmin = createClient(supabaseUrl, serviceRoleKey);
+
+  if (body.action === "last_messages") {
+    const dates = Array.isArray(body.dates) ? body.dates.filter((d) => DATE_RE.test(d)) : [];
+    if (dates.length === 0) {
+      return json({ ok: true, lastMessages: {} });
+    }
+
+    const { data, error } = await supabaseAdmin
+      .from("chat_messages")
+      .select("chat_date, role, content, created_at")
+      .in("chat_date", dates)
+      .order("chat_date", { ascending: false })
+      .order("created_at", { ascending: false })
+      .limit(dates.length * 20);
+
+    if (error) return json({ ok: false, error: error.message }, 500);
+
+    // Baris pertama yang ditemui untuk tiap chat_date sudah pasti yang
+    // terbaru, karena query di atas diurutkan created_at menurun per tanggal.
+    const lastMessages: Record<string, { role: string; content: string; created_at: string }> = {};
+    for (const row of data ?? []) {
+      if (!lastMessages[row.chat_date]) {
+        lastMessages[row.chat_date] = { role: row.role, content: row.content, created_at: row.created_at };
+      }
+    }
+    return json({ ok: true, lastMessages });
+  }
+
   if (typeof body.date !== "string" || !DATE_RE.test(body.date)) {
     return json({ ok: false, error: "Tanggal tidak valid (format YYYY-MM-DD)." }, 400);
   }
   const date = body.date;
-
-  const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
-  const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-  const supabaseAdmin = createClient(supabaseUrl, serviceRoleKey);
 
   if (body.action === "history") {
     const { data, error } = await supabaseAdmin

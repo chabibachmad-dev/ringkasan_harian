@@ -12,7 +12,6 @@ export const STRINGS = {
     notify_save_error:
       "Notifikasi aktif di perangkat ini, tapi gagal tersimpan ke server (jadi belum akan menerima kiriman). Tap tombol di bawah untuk coba simpan ulang.",
     notify_retry_btn: "Coba Simpan Ulang",
-    pick_date: "Pilih tanggal:",
     loading: "Memuat ringkasan…",
     no_summary: "Belum ada ringkasan untuk tanggal ini.",
     failed_summary: "Ringkasan pada tanggal ini gagal dibuat.",
@@ -32,7 +31,8 @@ export const STRINGS = {
     chat_empty: "Belum ada obrolan untuk tanggal ini. Mulai diskusi di bawah.",
     chat_sending: "Mengetik…",
     chat_error: "Gagal mengirim pesan. Coba lagi.",
-    chat_load_error: "Gagal memuat riwayat diskusi."
+    chat_load_error: "Gagal memuat riwayat diskusi.",
+    chat_you_prefix: "Kamu:"
   },
   en: {
     brand: "Daily Digest",
@@ -47,7 +47,6 @@ export const STRINGS = {
     notify_save_error:
       "Notifications are active on this device, but failed to sync with the server (so you won't receive anything yet). Tap the button below to retry.",
     notify_retry_btn: "Retry Saving",
-    pick_date: "Pick a date:",
     loading: "Loading digest…",
     no_summary: "No digest available for this date yet.",
     failed_summary: "The digest for this date failed to generate.",
@@ -67,7 +66,8 @@ export const STRINGS = {
     chat_empty: "No messages yet for this date. Start the discussion below.",
     chat_sending: "Typing…",
     chat_error: "Couldn't send the message. Please try again.",
-    chat_load_error: "Couldn't load the discussion history."
+    chat_load_error: "Couldn't load the discussion history.",
+    chat_you_prefix: "You:"
   }
 };
 

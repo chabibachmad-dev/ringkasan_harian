@@ -42,10 +42,18 @@ body {
   max-width: 720px;
   margin: 0 auto;
   min-height: 100vh;
-  display: flex;
-  flex-direction: column;
   padding: 0 calc(16px + env(safe-area-inset-right, 0px)) env(safe-area-inset-bottom, 0px)
     calc(16px + env(safe-area-inset-left, 0px));
+}
+
+.screen {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+.screen[hidden] {
+  display: none;
 }
 
 .topbar {
@@ -128,22 +136,110 @@ body {
   cursor: default;
 }
 
-.date-nav {
-  display: flex;
-  align-items: center;
+.detail-topbar {
   gap: 10px;
-  font-size: 0.9rem;
-  color: var(--text-muted);
 }
 
-#date-select {
+.detail-topbar .icon-btn {
+  flex-shrink: 0;
+}
+
+.detail-title {
   flex: 1;
-  padding: 8px 10px;
-  border-radius: 8px;
-  border: 1px solid var(--border);
+  min-width: 0;
+  margin: 0;
+  font-size: 1.02rem;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-list-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.chat-list {
+  display: flex;
+  flex-direction: column;
   background: var(--bg-card);
-  color: var(--text);
-  font-size: 0.9rem;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  overflow: hidden;
+}
+
+.chat-list-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 12px 14px;
+  background: none;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  cursor: pointer;
+  color: inherit;
+  font: inherit;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.chat-list-item:last-child {
+  border-bottom: none;
+}
+
+.chat-list-item:active {
+  background: var(--notify-bg);
+}
+
+.chat-list-avatar {
+  flex-shrink: 0;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background: var(--notify-bg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.3rem;
+}
+
+.chat-list-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.chat-list-top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.chat-list-date {
+  font-size: 0.92rem;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-list-badge {
+  flex-shrink: 0;
+  font-size: 0.8rem;
+}
+
+.chat-list-preview {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .summary-card,
