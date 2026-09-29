@@ -12,28 +12,25 @@ import {
 } from "./chat.js";
 
 const VAPID_PUBLIC_KEY = import.meta.env.VITE_VAPID_PUBLIC_KEY;
+const OPENED_DATES_KEY = "rh_opened_dates";
 
 const els = {
   screenList: document.getElementById("screen-list"),
   screenDetail: document.getElementById("screen-detail"),
   backBtn: document.getElementById("back-btn"),
   detailDateTitle: document.getElementById("detail-date-title"),
+  notifyToggle: document.getElementById("notify-toggle"),
+  notifyIcon: document.getElementById("notify-icon"),
   langToggle: document.getElementById("lang-toggle"),
   langLabel: document.getElementById("lang-label"),
   themeToggle: document.getElementById("theme-toggle"),
   themeIcon: document.getElementById("theme-icon"),
-  notifyCard: document.getElementById("notify-card"),
-  notifyText: document.getElementById("notify-text"),
-  notifyBtn: document.getElementById("notify-btn"),
+  chatSearchInput: document.getElementById("chat-search-input"),
   chatList: document.getElementById("chat-list"),
   chatListStatus: document.getElementById("chat-list-status"),
-  summaryStatus: document.getElementById("summary-status"),
-  summaryContent: document.getElementById("summary-content"),
-  sourcesSection: document.getElementById("sources-section"),
-  sourcesIndonesia: document.getElementById("sources-indonesia"),
-  sourcesDunia: document.getElementById("sources-dunia"),
+  chatSummarySlot: document.getElementById("chat-summary-slot"),
+  chatThread: document.getElementById("chat-thread"),
   chatLocked: document.getElementById("chat-locked"),
-  chatLockedText: document.getElementById("chat-locked-text"),
   chatCodeForm: document.getElementById("chat-code-form"),
   chatCodeInput: document.getElementById("chat-code-input"),
   chatCodeError: document.getElementById("chat-code-error"),
@@ -48,16 +45,44 @@ const els = {
 const state = {
   lang: localStorage.getItem("rh_lang") || "id",
   theme: localStorage.getItem("rh_theme") || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"),
-  summaries: [], // { summary_date, status }
+  summaries: [], // { summary_date, status, content_id, content_en, sources, created_at, ... }
   currentDate: null,
   cache: new Map(), // summary_date -> full row
-  chatCode: ""
+  chatCode: "",
+  notifyMode: "idle",
+  notifyExtra: ""
 };
 
 // Tanggal "hari ini" di zona WITA (UTC+8) -- sama persis dengan cara
 // Edge Function generate-summary/chat menghitungnya, supaya konsisten.
 function todayWita() {
   return new Date(Date.now() + 8 * 60 * 60 * 1000).toISOString().slice(0, 10);
+}
+
+function formatBubbleTime(value) {
+  const d = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(d.getTime())) return "";
+  const locale = state.lang === "id" ? "id-ID" : "en-US";
+  return d.toLocaleTimeString(locale, { hour: "2-digit", minute: "2-digit" });
+}
+
+function getOpenedDates() {
+  try {
+    return new Set(JSON.parse(localStorage.getItem(OPENED_DATES_KEY) || "[]"));
+  } catch (_err) {
+    return new Set();
+  }
+}
+
+function markDateOpened(date) {
+  try {
+    const set = getOpenedDates();
+    if (set.has(date)) return;
+    set.add(date);
+    localStorage.setItem(OPENED_DATES_KEY, JSON.stringify([...set]));
+  } catch (_err) {
+    /* noop */
+  }
 }
 
 function applyTheme() {
@@ -117,78 +142,6 @@ async function fetchSummary(date) {
   return data;
 }
 
-function renderSources(sources) {
-  const list = Array.isArray(sources) ? sources : [];
-  const indo = list.filter((s) => s.category === "indonesia");
-  const dunia = list.filter((s) => s.category === "dunia");
-
-  function fill(container, items) {
-    container.innerHTML = "";
-    if (items.length === 0) {
-      const li = document.createElement("li");
-      li.textContent = t(state.lang, "no_sources");
-      container.appendChild(li);
-      return;
-    }
-    for (const item of items) {
-      const li = document.createElement("li");
-      const a = document.createElement("a");
-      a.href = item.url;
-      a.target = "_blank";
-      a.rel = "noopener noreferrer";
-      a.textContent = item.title;
-      const small = document.createElement("span");
-      small.className = "source-name";
-      small.textContent = item.source;
-      li.appendChild(a);
-      li.appendChild(small);
-      container.appendChild(li);
-    }
-  }
-
-  fill(els.sourcesIndonesia, indo);
-  fill(els.sourcesDunia, dunia);
-  els.sourcesSection.hidden = list.length === 0;
-}
-
-async function renderCurrentSummary() {
-  if (!state.currentDate) {
-    els.summaryStatus.hidden = false;
-    els.summaryStatus.textContent = t(state.lang, "no_summary");
-    els.summaryContent.innerHTML = "";
-    els.sourcesSection.hidden = true;
-    return;
-  }
-
-  els.summaryStatus.hidden = false;
-  els.summaryStatus.textContent = t(state.lang, "loading");
-  els.summaryContent.innerHTML = "";
-
-  try {
-    const row = await fetchSummary(state.currentDate);
-    if (!row) {
-      els.summaryStatus.textContent = t(state.lang, "no_summary");
-      els.sourcesSection.hidden = true;
-      return;
-    }
-
-    if (row.status === "failed") {
-      els.summaryStatus.textContent = t(state.lang, "failed_summary");
-      els.sourcesSection.hidden = true;
-      return;
-    }
-
-    const content = state.lang === "id" ? row.content_id : row.content_en || row.content_id;
-    els.summaryStatus.hidden = true;
-    els.summaryContent.innerHTML = renderMiniMarkdown(content);
-    renderSources(row.sources);
-  } catch (err) {
-    console.error(err);
-    els.summaryStatus.hidden = false;
-    els.summaryStatus.textContent = t(state.lang, "load_error");
-  }
-}
-
 function stripMarkdownPreview(md) {
   if (!md) return "";
   return md
@@ -203,12 +156,21 @@ function truncate(text, max = 90) {
   return text.length > max ? `${text.slice(0, max).trimEnd()}…` : text;
 }
 
+function applyChatListFilter() {
+  const q = els.chatSearchInput.value.trim().toLowerCase();
+  els.chatList.querySelectorAll(".chat-list-item").forEach((item) => {
+    const haystack = item.dataset.search || "";
+    item.hidden = q.length > 0 && !haystack.includes(q);
+  });
+}
+
 async function renderChatList() {
   els.chatListStatus.hidden = false;
   els.chatListStatus.textContent = t(state.lang, "loading");
   els.chatList.innerHTML = "";
 
   const dates = state.summaries.map((row) => row.summary_date);
+  const openedDates = getOpenedDates();
   let lastMessages = {};
   if (state.chatCode && dates.length > 0) {
     const result = await fetchLastMessages(dates, state.chatCode);
@@ -230,6 +192,7 @@ async function renderChatList() {
     item.className = "chat-list-item";
 
     const lastMsg = lastMessages[row.summary_date];
+    const unread = row.status !== "none" && !lastMsg && !openedDates.has(row.summary_date);
 
     const avatar = document.createElement("div");
     avatar.className = "chat-list-avatar";
@@ -238,46 +201,255 @@ async function renderChatList() {
     const main = document.createElement("div");
     main.className = "chat-list-main";
 
+    const dateLabelText = formatDateLabel(row.summary_date);
+
     const top = document.createElement("div");
     top.className = "chat-list-top";
     const dateLabel = document.createElement("span");
     dateLabel.className = "chat-list-date";
-    dateLabel.textContent = formatDateLabel(row.summary_date);
+    dateLabel.textContent = dateLabelText;
     top.appendChild(dateLabel);
+    const timeLabel = document.createElement("span");
+    timeLabel.className = "chat-list-time";
+    const timeSource = lastMsg?.created_at || (row.status !== "none" ? row.created_at : null);
+    timeLabel.textContent = timeSource ? formatBubbleTime(timeSource) : "";
+    top.appendChild(timeLabel);
+
+    const bottom = document.createElement("div");
+    bottom.className = "chat-list-bottom";
+    const preview = document.createElement("span");
+    preview.className = "chat-list-preview";
+    let previewText;
+    if (lastMsg) {
+      const prefix = lastMsg.role === "assistant" ? "" : `${t(state.lang, "chat_you_prefix")} `;
+      previewText = truncate(`${prefix}${lastMsg.content}`);
+    } else if (row.status === "failed") {
+      previewText = t(state.lang, "failed_summary");
+    } else if (row.status === "none") {
+      previewText = t(state.lang, "no_summary");
+    } else {
+      const content = state.lang === "id" ? row.content_id : row.content_en || row.content_id;
+      previewText = truncate(stripMarkdownPreview(content));
+    }
+    preview.textContent = previewText;
+    bottom.appendChild(preview);
+
+    const badges = document.createElement("span");
+    badges.className = "chat-list-badges";
     if (row.status === "failed") {
       const badge = document.createElement("span");
       badge.className = "chat-list-badge";
       badge.textContent = "⚠️";
-      top.appendChild(badge);
+      badges.appendChild(badge);
     }
-
-    const preview = document.createElement("div");
-    preview.className = "chat-list-preview";
-    if (lastMsg) {
-      const prefix = lastMsg.role === "assistant" ? "" : `${t(state.lang, "chat_you_prefix")} `;
-      preview.textContent = truncate(`${prefix}${lastMsg.content}`);
-    } else if (row.status === "failed") {
-      preview.textContent = t(state.lang, "failed_summary");
-    } else if (row.status === "none") {
-      preview.textContent = t(state.lang, "no_summary");
-    } else {
-      const content = state.lang === "id" ? row.content_id : row.content_en || row.content_id;
-      preview.textContent = truncate(stripMarkdownPreview(content));
+    if (unread) {
+      const dot = document.createElement("span");
+      dot.className = "chat-list-unread-dot";
+      badges.appendChild(dot);
     }
+    bottom.appendChild(badges);
 
     main.appendChild(top);
-    main.appendChild(preview);
+    main.appendChild(bottom);
     item.appendChild(avatar);
     item.appendChild(main);
+    item.dataset.search = `${dateLabelText} ${previewText}`.toLowerCase();
     item.addEventListener("click", () => openDetail(row.summary_date));
     els.chatList.appendChild(item);
   }
+
+  applyChatListFilter();
 }
 
-function showListScreen() {
+function buildSourcesBlock(sources) {
+  const container = document.createElement("div");
+  container.className = "chat-summary-sources";
+
+  const groups = [
+    { key: "indonesia", label: t(state.lang, "sources_indonesia") },
+    { key: "dunia", label: t(state.lang, "sources_dunia") }
+  ];
+
+  for (const group of groups) {
+    const items = sources.filter((s) => s.category === group.key);
+    if (items.length === 0) continue;
+
+    const label = document.createElement("div");
+    label.className = "chat-summary-sources-label";
+    label.textContent = group.label;
+    container.appendChild(label);
+
+    const ul = document.createElement("ul");
+    ul.className = "sources-list";
+    for (const item of items) {
+      const li = document.createElement("li");
+      const a = document.createElement("a");
+      a.href = item.url;
+      a.target = "_blank";
+      a.rel = "noopener noreferrer";
+      a.textContent = item.title;
+      const small = document.createElement("span");
+      small.className = "source-name";
+      small.textContent = item.source;
+      li.appendChild(a);
+      li.appendChild(small);
+      ul.appendChild(li);
+    }
+    container.appendChild(ul);
+  }
+
+  return container;
+}
+
+function buildSummaryBubble(row) {
+  if (!row) {
+    const empty = document.createElement("div");
+    empty.className = "chat-bubble assistant chat-bubble--system";
+    empty.textContent = t(state.lang, "no_summary");
+    return empty;
+  }
+
+  if (row.status === "failed") {
+    const failed = document.createElement("div");
+    failed.className = "chat-bubble assistant chat-bubble--system";
+    failed.textContent = t(state.lang, "failed_summary");
+    return failed;
+  }
+
+  const bubble = document.createElement("div");
+  bubble.className = "chat-bubble assistant chat-bubble--summary";
+
+  const textEl = document.createElement("div");
+  textEl.className = "chat-summary-text";
+  const content = state.lang === "id" ? row.content_id : row.content_en || row.content_id;
+  textEl.innerHTML = renderMiniMarkdown(content);
+  bubble.appendChild(textEl);
+
+  const toggleBtn = document.createElement("button");
+  toggleBtn.type = "button";
+  toggleBtn.className = "chat-summary-toggle";
+  toggleBtn.textContent = t(state.lang, "chat_summary_more");
+  toggleBtn.hidden = true;
+  toggleBtn.addEventListener("click", () => {
+    const expanded = textEl.classList.toggle("expanded");
+    toggleBtn.textContent = t(state.lang, expanded ? "chat_summary_less" : "chat_summary_more");
+  });
+  bubble.appendChild(toggleBtn);
+
+  const sources = Array.isArray(row.sources) ? row.sources : [];
+  if (sources.length > 0) {
+    bubble.appendChild(buildSourcesBlock(sources));
+  }
+
+  const timeEl = document.createElement("span");
+  timeEl.className = "chat-bubble-time";
+  timeEl.textContent = row.created_at ? formatBubbleTime(row.created_at) : "";
+  bubble.appendChild(timeEl);
+
+  // Baru tampilkan tombol "Tampilkan selengkapnya" kalau teksnya benar-benar
+  // kepotong oleh batas tinggi (max-height) di CSS.
+  requestAnimationFrame(() => {
+    if (textEl.scrollHeight > textEl.clientHeight + 4) {
+      toggleBtn.hidden = false;
+    }
+  });
+
+  return bubble;
+}
+
+function appendChatBubble(role, content, timestamp) {
+  const emptyEl = els.chatThread.querySelector(".chat-empty-text");
+  if (emptyEl) emptyEl.remove();
+
+  const bubble = document.createElement("div");
+  bubble.className = `chat-bubble ${role === "assistant" ? "assistant" : "user"}`;
+
+  const textEl = document.createElement("div");
+  textEl.className = "chat-bubble-text";
+  textEl.textContent = content;
+  bubble.appendChild(textEl);
+
+  const timeEl = document.createElement("span");
+  timeEl.className = "chat-bubble-time";
+  timeEl.textContent = formatBubbleTime(timestamp || new Date());
+  bubble.appendChild(timeEl);
+
+  els.chatThread.appendChild(bubble);
+  els.chatMessages.scrollTop = els.chatMessages.scrollHeight;
+}
+
+function renderChatMessages(messages) {
+  els.chatThread.innerHTML = "";
+  if (!messages || messages.length === 0) {
+    const p = document.createElement("p");
+    p.className = "chat-empty-text";
+    p.textContent = t(state.lang, "chat_empty");
+    els.chatThread.appendChild(p);
+  } else {
+    for (const msg of messages) {
+      appendChatBubble(msg.role, msg.content, msg.created_at);
+    }
+  }
+  els.chatMessages.scrollTop = els.chatMessages.scrollHeight;
+}
+
+function showChatLocked(errorText) {
+  els.chatLocked.hidden = false;
+  els.chatBody.hidden = true;
+  els.chatCodeError.hidden = !errorText;
+  els.chatCodeError.textContent = errorText || "";
+}
+
+function showChatUnlocked() {
+  els.chatLocked.hidden = true;
+  els.chatBody.hidden = false;
+}
+
+function setChatStatus(text) {
+  if (!text) {
+    els.chatStatus.hidden = true;
+    els.chatStatus.textContent = "";
+    return;
+  }
+  els.chatStatus.hidden = false;
+  els.chatStatus.textContent = text;
+}
+
+async function loadChatForDate(date) {
+  if (!state.chatCode) return;
+  setChatStatus(t(state.lang, "loading"));
+  const result = await fetchChatHistory(date, state.chatCode);
+  if (!result.ok) {
+    if (result.unauthorized) {
+      // Kode yang tersimpan di browser ternyata sudah tidak cocok lagi
+      // dengan CHAT_ACCESS_CODE di server -- minta dimasukkan ulang.
+      state.chatCode = "";
+      clearStoredChatCode();
+      setChatStatus("");
+      showChatLocked(t(state.lang, "chat_code_wrong"));
+      return;
+    }
+    setChatStatus(t(state.lang, "chat_load_error"));
+    return;
+  }
+  setChatStatus("");
+  renderChatMessages(result.messages);
+}
+
+async function initChat() {
+  const stored = getStoredChatCode();
+  if (!stored) {
+    showChatLocked();
+    return;
+  }
+  state.chatCode = stored;
+  showChatUnlocked();
+}
+
+async function showListScreen() {
   els.screenDetail.hidden = true;
   els.screenList.hidden = false;
-  renderChatList();
+  await renderChatList();
 }
 
 async function showDetailScreen(date) {
@@ -285,9 +457,24 @@ async function showDetailScreen(date) {
   els.detailDateTitle.textContent = formatDateLabel(date);
   els.screenList.hidden = true;
   els.screenDetail.hidden = false;
-  await renderCurrentSummary();
+  markDateOpened(date);
+
+  els.chatSummarySlot.innerHTML = "";
+  try {
+    const row = await fetchSummary(date);
+    els.chatSummarySlot.appendChild(buildSummaryBubble(row));
+  } catch (err) {
+    console.error(err);
+    const errEl = document.createElement("div");
+    errEl.className = "chat-bubble assistant chat-bubble--system";
+    errEl.textContent = t(state.lang, "load_error");
+    els.chatSummarySlot.appendChild(errEl);
+  }
+
   if (state.chatCode) {
     await loadChatForDate(date);
+  } else {
+    els.chatThread.innerHTML = "";
   }
 }
 
@@ -308,43 +495,40 @@ function openList() {
   location.hash = "";
 }
 
+const NOTIFY_ICONS = {
+  on: "🔔",
+  need_install: "📲",
+  unsupported: "🔕",
+  denied: "🔕",
+  error: "🔔",
+  save_error: "🔔",
+  idle: "🔕"
+};
+
+const NOTIFY_ACTIONABLE = new Set(["idle", "error", "save_error"]);
+
 function setNotifyState(mode, extra) {
   // mode: "idle" | "on" | "need_install" | "unsupported" | "denied" | "error" | "save_error"
-  els.notifyBtn.disabled = false;
-  switch (mode) {
-    case "on":
-      els.notifyText.textContent = t(state.lang, "notify_on");
-      els.notifyBtn.hidden = true;
-      break;
-    case "need_install":
-      els.notifyText.textContent = t(state.lang, "notify_need_install");
-      els.notifyBtn.hidden = true;
-      break;
-    case "unsupported":
-      els.notifyText.textContent = t(state.lang, "notify_unsupported");
-      els.notifyBtn.hidden = true;
-      break;
-    case "denied":
-      els.notifyText.textContent = t(state.lang, "notify_denied");
-      els.notifyBtn.hidden = true;
-      break;
-    case "error":
-      els.notifyText.textContent = t(state.lang, "notify_error");
-      els.notifyBtn.textContent = t(state.lang, "notify_btn");
-      els.notifyBtn.hidden = false;
-      break;
-    case "save_error":
-      els.notifyText.textContent = extra
-        ? `${t(state.lang, "notify_save_error")} [${extra}]`
-        : t(state.lang, "notify_save_error");
-      els.notifyBtn.textContent = t(state.lang, "notify_retry_btn");
-      els.notifyBtn.hidden = false;
-      break;
-    default:
-      els.notifyText.textContent = t(state.lang, "notify_prompt");
-      els.notifyBtn.textContent = t(state.lang, "notify_btn");
-      els.notifyBtn.hidden = false;
-  }
+  state.notifyMode = mode;
+  state.notifyExtra = extra || "";
+  els.notifyToggle.disabled = false;
+  els.notifyIcon.textContent = NOTIFY_ICONS[mode] || NOTIFY_ICONS.idle;
+  els.notifyToggle.classList.toggle("icon-btn--attn", mode === "error" || mode === "save_error");
+
+  const key =
+    {
+      on: "notify_on",
+      need_install: "notify_need_install",
+      unsupported: "notify_unsupported",
+      denied: "notify_denied",
+      error: "notify_error",
+      save_error: "notify_save_error",
+      idle: "notify_prompt"
+    }[mode] || "notify_prompt";
+
+  const text = extra ? `${t(state.lang, key)} (${extra})` : t(state.lang, key);
+  els.notifyToggle.title = text;
+  els.notifyToggle.setAttribute("aria-label", text);
 }
 
 async function saveSubscription(subJson) {
@@ -377,7 +561,7 @@ async function saveSubscription(subJson) {
   }
 }
 
-async function initNotifyCard() {
+async function initNotify() {
   if (!pushSupported()) {
     setNotifyState("unsupported");
     return;
@@ -405,93 +589,45 @@ async function initNotifyCard() {
   setNotifyState("idle");
 }
 
-function setChatStatus(text) {
-  if (!text) {
-    els.chatStatus.hidden = true;
-    els.chatStatus.textContent = "";
+async function tryEnableNotifications() {
+  if (!VAPID_PUBLIC_KEY || VAPID_PUBLIC_KEY.includes("ganti-dengan")) {
+    alert("VITE_VAPID_PUBLIC_KEY belum diisi di file .env — lihat README bagian setup notifikasi.");
     return;
   }
-  els.chatStatus.hidden = false;
-  els.chatStatus.textContent = text;
-}
-
-function appendChatBubble(role, content) {
-  const emptyEl = els.chatMessages.querySelector(".chat-empty-text");
-  if (emptyEl) emptyEl.remove();
-
-  const bubble = document.createElement("div");
-  bubble.className = `chat-bubble ${role === "assistant" ? "assistant" : "user"}`;
-  bubble.textContent = content;
-  els.chatMessages.appendChild(bubble);
-  els.chatMessages.scrollTop = els.chatMessages.scrollHeight;
-}
-
-function renderChatMessages(messages) {
-  els.chatMessages.innerHTML = "";
-  if (!messages || messages.length === 0) {
-    const p = document.createElement("p");
-    p.className = "chat-empty-text";
-    p.textContent = t(state.lang, "chat_empty");
-    els.chatMessages.appendChild(p);
-    return;
-  }
-  for (const msg of messages) {
-    appendChatBubble(msg.role, msg.content);
-  }
-}
-
-function showChatLocked(errorText) {
-  els.chatLocked.hidden = false;
-  els.chatBody.hidden = true;
-  els.chatCodeError.hidden = !errorText;
-  els.chatCodeError.textContent = errorText || "";
-}
-
-function showChatUnlocked() {
-  els.chatLocked.hidden = true;
-  els.chatBody.hidden = false;
-}
-
-async function loadChatForDate(date) {
-  if (!state.chatCode) return;
-  setChatStatus(t(state.lang, "loading"));
-  const result = await fetchChatHistory(date, state.chatCode);
-  if (!result.ok) {
-    if (result.unauthorized) {
-      // Kode yang tersimpan di browser ternyata sudah tidak cocok lagi
-      // dengan CHAT_ACCESS_CODE di server -- minta dimasukkan ulang.
-      state.chatCode = "";
-      clearStoredChatCode();
-      setChatStatus("");
-      showChatLocked(t(state.lang, "chat_code_wrong"));
+  els.notifyToggle.disabled = true;
+  await registerServiceWorker();
+  try {
+    const result = await subscribeToPush(VAPID_PUBLIC_KEY);
+    if (!result.ok) {
+      setNotifyState(result.reason === "denied" ? "denied" : "error");
       return;
     }
-    setChatStatus(t(state.lang, "chat_load_error"));
-    return;
+    const saveResult = await saveSubscription(result.subscription);
+    setNotifyState(saveResult.ok ? "on" : "save_error", saveResult.message);
+  } catch (err) {
+    console.error(err);
+    setNotifyState("error");
+  } finally {
+    els.notifyToggle.disabled = false;
   }
-  setChatStatus("");
-  renderChatMessages(result.messages);
-}
-
-async function initChat() {
-  const stored = getStoredChatCode();
-  if (!stored) {
-    showChatLocked();
-    return;
-  }
-  state.chatCode = stored;
-  showChatUnlocked();
-  await loadChatForDate(state.currentDate || todayWita());
 }
 
 function wireEvents() {
+  els.notifyToggle.addEventListener("click", () => {
+    if (NOTIFY_ACTIONABLE.has(state.notifyMode)) {
+      tryEnableNotifications();
+    } else {
+      alert(els.notifyToggle.title);
+    }
+  });
+
   els.langToggle.addEventListener("click", async () => {
     state.lang = state.lang === "id" ? "en" : "id";
     localStorage.setItem("rh_lang", state.lang);
     applyLang();
     await loadDateList();
     handleRoute();
-    initNotifyCard();
+    initNotify();
   });
 
   els.themeToggle.addEventListener("click", () => {
@@ -503,6 +639,8 @@ function wireEvents() {
   els.backBtn.addEventListener("click", () => {
     openList();
   });
+
+  els.chatSearchInput.addEventListener("input", applyChatListFilter);
 
   window.addEventListener("hashchange", handleRoute);
 
@@ -540,7 +678,7 @@ function wireEvents() {
     els.chatInput.value = "";
     els.chatInput.style.height = "auto";
     els.chatSendBtn.disabled = true;
-    appendChatBubble("user", text);
+    appendChatBubble("user", text, new Date());
     setChatStatus(t(state.lang, "chat_sending"));
 
     const date = state.currentDate || todayWita();
@@ -560,7 +698,7 @@ function wireEvents() {
       return;
     }
 
-    appendChatBubble("assistant", result.reply);
+    appendChatBubble("assistant", result.reply, new Date());
   });
 
   // Enter buat kirim, Shift+Enter buat baris baru.
@@ -576,27 +714,6 @@ function wireEvents() {
     els.chatInput.style.height = "auto";
     els.chatInput.style.height = `${els.chatInput.scrollHeight}px`;
   });
-
-  els.notifyBtn.addEventListener("click", async () => {
-    if (!VAPID_PUBLIC_KEY || VAPID_PUBLIC_KEY.includes("ganti-dengan")) {
-      alert("VITE_VAPID_PUBLIC_KEY belum diisi di file .env — lihat README bagian setup notifikasi.");
-      return;
-    }
-    els.notifyBtn.disabled = true;
-    await registerServiceWorker();
-    try {
-      const result = await subscribeToPush(VAPID_PUBLIC_KEY);
-      if (!result.ok) {
-        setNotifyState(result.reason === "denied" ? "denied" : "error");
-        return;
-      }
-      const saveResult = await saveSubscription(result.subscription);
-      setNotifyState(saveResult.ok ? "on" : "save_error", saveResult.message);
-    } catch (err) {
-      console.error(err);
-      setNotifyState("error");
-    }
-  });
 }
 
 async function main() {
@@ -607,7 +724,7 @@ async function main() {
   await loadDateList();
   await initChat();
   handleRoute();
-  initNotifyCard();
+  initNotify();
 }
 
 main();

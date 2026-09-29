@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-    <title>Ringkasan Harian</title>
+    <title>Daily Insider</title>
     <meta name="description" content="Ringkasan berita dunia & Indonesia setiap hari jam 20:00." />
 
     <link rel="manifest" href="manifest.webmanifest" />
@@ -13,7 +13,7 @@
     <link rel="apple-touch-icon" href="icons/icon-192.png" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-    <meta name="apple-mobile-web-app-title" content="Ringkasan" />
+    <meta name="apple-mobile-web-app-title" content="Daily Insider" />
 
     <link rel="icon" href="icons/icon-192.png" />
     <link rel="stylesheet" href="src/style.css" />
@@ -23,8 +23,11 @@
       <!-- Layar 1: daftar tanggal, mirip daftar chat WhatsApp -->
       <section id="screen-list" class="screen">
         <header class="topbar">
-          <h1 class="brand">📰 <span data-i18n="brand">Ringkasan Harian</span></h1>
+          <h1 class="brand">📰 <span data-i18n="brand">Daily Insider</span></h1>
           <div class="topbar-actions">
+            <button id="notify-toggle" class="icon-btn" title="Notifikasi" aria-label="Notifikasi">
+              <span id="notify-icon">🔕</span>
+            </button>
             <button id="lang-toggle" class="icon-btn" title="Ganti bahasa / Switch language" aria-label="Ganti bahasa">
               <span id="lang-label">ID</span>
             </button>
@@ -35,12 +38,15 @@
         </header>
 
         <main class="content">
-          <section class="notify-card" id="notify-card">
-            <p id="notify-text" data-i18n="notify_prompt">
-              Aktifkan notifikasi supaya kamu tahu begitu ringkasan hari ini siap.
-            </p>
-            <button id="notify-btn" class="primary-btn" data-i18n="notify_btn">Aktifkan Notifikasi</button>
-          </section>
+          <div class="search-bar">
+            <input
+              id="chat-search-input"
+              type="search"
+              autocomplete="off"
+              data-i18n-placeholder="search_placeholder"
+              placeholder="Cari tanggal atau topik…"
+            />
+          </div>
 
           <section class="chat-list-section">
             <div id="chat-list" class="chat-list"></div>
@@ -55,7 +61,7 @@
         </footer>
       </section>
 
-      <!-- Layar 2: detail satu tanggal (ringkasan berita + diskusi) -->
+      <!-- Layar 2: detail satu tanggal -- ringkasan berita tampil sebagai pesan pertama di obrolan -->
       <section id="screen-detail" class="screen" hidden>
         <header class="topbar detail-topbar">
           <button id="back-btn" class="icon-btn" title="Kembali" aria-label="Kembali">←</button>
@@ -63,25 +69,11 @@
         </header>
 
         <main class="content">
-          <section id="summary-section" class="summary-card">
-            <div id="summary-status" class="status-text" data-i18n="loading">Memuat ringkasan…</div>
-            <article id="summary-content" class="summary-content"></article>
-          </section>
-
-          <section id="sources-section" class="sources-card" hidden>
-            <h2 data-i18n="sources_title">Sumber &amp; bacaan lebih lanjut</h2>
-            <div class="sources-group">
-              <h3 data-i18n="sources_indonesia">🇮🇩 Indonesia</h3>
-              <ul id="sources-indonesia" class="sources-list"></ul>
-            </div>
-            <div class="sources-group">
-              <h3 data-i18n="sources_dunia">🌍 Dunia</h3>
-              <ul id="sources-dunia" class="sources-list"></ul>
-            </div>
-          </section>
-
           <section id="chat-section" class="chat-card">
-            <h2 data-i18n="chat_title">Diskusi</h2>
+            <div id="chat-messages" class="chat-messages">
+              <div id="chat-summary-slot"></div>
+              <div id="chat-thread"></div>
+            </div>
 
             <div id="chat-locked" class="chat-locked" hidden>
               <p id="chat-locked-text" data-i18n="chat_code_prompt">
@@ -102,7 +94,6 @@
             </div>
 
             <div id="chat-body" class="chat-body" hidden>
-              <div id="chat-messages" class="chat-messages"></div>
               <div id="chat-status" class="status-text" hidden></div>
               <form id="chat-form" class="chat-form">
                 <textarea
