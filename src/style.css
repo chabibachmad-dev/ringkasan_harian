@@ -134,7 +134,10 @@ body {
   background: var(--bg-card);
   color: var(--text);
   font-family: inherit;
-  font-size: 0.9rem;
+  /* WAJIB >= 16px -- di bawah itu Safari iOS otomatis nge-zoom seluruh
+     halaman begitu input ini difokus (textbox tersentuh), memotong tombol
+     lain dari layar. Ukuran visualnya tetap terasa sama lewat padding. */
+  font-size: 16px;
 }
 
 .primary-btn {
@@ -545,7 +548,9 @@ body {
   border: 1px solid var(--border);
   background: var(--bg-card);
   color: var(--text);
-  font-size: 0.92rem;
+  /* WAJIB >= 16px, sama alasannya seperti .search-bar input di atas --
+     ini textbox chat yang barusan bikin halaman ke-zoom & tombol terpotong. */
+  font-size: 16px;
   font-family: inherit;
   line-height: 1.4;
 }
@@ -609,7 +614,8 @@ body {
   background: var(--bg);
   color: var(--text);
   font-family: inherit;
-  font-size: 0.95rem;
+  /* WAJIB >= 16px, sama alasannya seperti input lain di file ini. */
+  font-size: 16px;
 }
 
 .chat-code-error {
