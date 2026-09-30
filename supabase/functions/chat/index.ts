@@ -7,13 +7,15 @@
 // 0004_chat.sql) dan function ini menolak semua request yang kodenya
 // salah/tidak ada, sebelum menyentuh database atau memanggil Gemini.
 //
-// Body request (semua action):
-//   { "code": "...", "date": "YYYY-MM-DD", "action": "history" }
+// Body request (semua action) -- "date" di sini sebenarnya ID thread
+// obrolan: bisa tanggal kalender (YYYY-MM-DD, diskusi ringkasan harian)
+// ATAU "freeform-<uuid>" (obrolan bebas yang dimulai lewat tombol "+"):
+//   { "code": "...", "date": "YYYY-MM-DD atau freeform-<uuid>", "action": "history" }
 //     -> { ok: true, messages: [{ role, content, created_at }, ...] }
-//   { "code": "...", "date": "YYYY-MM-DD", "action": "send", "message": "..." }
+//   { "code": "...", "date": "...", "action": "send", "message": "..." }
 //     -> { ok: true, reply: "..." }
-//   { "code": "...", "action": "last_messages", "dates": ["YYYY-MM-DD", ...] }
-//     -> { ok: true, lastMessages: { "YYYY-MM-DD": { role, content, created_at }, ... } }
+//   { "code": "...", "action": "last_messages", "dates": ["...", ...] }
+//     -> { ok: true, lastMessages: { "<id>": { role, content, created_at }, ... } }
 //     (dipakai buat cuplikan/preview di layar daftar tanggal)
 
 import { createClient } from "jsr:@supabase/supabase-js@2";
@@ -21,6 +23,12 @@ import { corsHeaders } from "../_shared/cors.ts";
 import { generateChatReply, type ChatMessage } from "../_shared/gemini.ts";
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+// Obrolan bebas (tombol "+"): ID dibuat client-side sebagai
+// `freeform-<uuid>` (lihat main.js) -- bukan tanggal kalender.
+const FREEFORM_RE = /^freeform-[0-9a-fA-F-]{36}$/;
+function isValidThreadId(id: string): boolean {
+  return DATE_RE.test(id) || FREEFORM_RE.test(id);
+}
 const MAX_MESSAGE_LENGTH = 4000;
 const MAX_HISTORY_FOR_CONTEXT = 40;
 
@@ -60,7 +68,7 @@ Deno.serve(async (req) => {
   const supabaseAdmin = createClient(supabaseUrl, serviceRoleKey);
 
   if (body.action === "last_messages") {
-    const dates = Array.isArray(body.dates) ? body.dates.filter((d) => DATE_RE.test(d)) : [];
+    const dates = Array.isArray(body.dates) ? body.dates.filter((d) => isValidThreadId(d)) : [];
     if (dates.length === 0) {
       return json({ ok: true, lastMessages: {} });
     }
@@ -86,8 +94,8 @@ Deno.serve(async (req) => {
     return json({ ok: true, lastMessages });
   }
 
-  if (typeof body.date !== "string" || !DATE_RE.test(body.date)) {
-    return json({ ok: false, error: "Tanggal tidak valid (format YYYY-MM-DD)." }, 400);
+  if (typeof body.date !== "string" || !isValidThreadId(body.date)) {
+    return json({ ok: false, error: "ID obrolan tidak valid." }, 400);
   }
   const date = body.date;
 

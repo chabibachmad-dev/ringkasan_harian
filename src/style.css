@@ -634,13 +634,43 @@ body {
 
 .footer {
   text-align: center;
-  padding: 16px 0 28px;
+  /* Padding bawah ekstra supaya teks footer tidak ketiban tombol "+"
+     (position: fixed) waktu discroll sampai paling bawah. */
+  padding: 16px 0 96px;
   color: var(--text-muted);
   font-size: 0.78rem;
 }
 
 .footer p {
   margin: 0;
+}
+
+/* Tombol "+" ala WhatsApp buat mulai obrolan bebas dengan AI, tidak
+   terikat ke ringkasan tanggal tertentu. position: fixed (bukan absolute)
+   supaya tetap terlihat mengambang di pojok kanan-bawah walau daftar
+   discroll -- posisi kanannya dihitung relatif ke tepi kanan kartu #app
+   (max-width 720px, di-center) supaya di layar lebar tombolnya tidak
+   nempel ke ujung viewport. */
+.fab {
+  position: fixed;
+  right: max(20px, calc(50vw - 340px));
+  bottom: calc(20px + env(safe-area-inset-bottom, 0px));
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  border: 1.5px solid var(--text);
+  background: var(--accent);
+  color: var(--accent-contrast);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  box-shadow: 0 3px 12px rgba(0, 0, 0, 0.3);
+  z-index: 20;
+}
+
+.fab:active {
+  transform: scale(0.94);
 }
 
 @media (max-width: 420px) {
