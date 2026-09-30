@@ -846,10 +846,34 @@ function wireEvents() {
   });
 }
 
+// Perbaikan bug WebKit: saat keyboard on-screen muncul di iOS (khususnya mode
+// "Add to Home Screen"/standalone), header ".topbar" yang position:sticky bisa
+// "hilang" ke atas layar. Ini terjadi karena begitu textarea/input difokus,
+// iOS menggeser visual viewport (area yang benar-benar terlihat, tidak
+// termasuk area keyboard) tanpa mengubah layout viewport tempat posisi
+// sticky dihitung -- akibatnya elemen sticky yang seharusnya menempel di atas
+// malah ikut "terdorong" ke luar area yang terlihat. Kompensasinya: pakai
+// VisualViewport API buat menggeser header sejauh offset yang terjadi, supaya
+// dia tetap kelihatan menempel di tepi atas layar yang sedang terlihat.
+function fixStickyHeaderOnIOSKeyboard() {
+  if (!window.visualViewport) return;
+
+  function reposition() {
+    const offsetTop = window.visualViewport.offsetTop || 0;
+    document.querySelectorAll(".topbar").forEach((el) => {
+      el.style.transform = offsetTop > 0.5 ? `translateY(${offsetTop}px)` : "";
+    });
+  }
+
+  window.visualViewport.addEventListener("resize", reposition);
+  window.visualViewport.addEventListener("scroll", reposition);
+}
+
 async function main() {
   applyTheme();
   applyLang();
   wireEvents();
+  fixStickyHeaderOnIOSKeyboard();
   await registerServiceWorker();
   await loadDateList();
   await initChat();
