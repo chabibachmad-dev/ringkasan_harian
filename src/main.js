@@ -16,7 +16,11 @@ import {
   ICON_SEARCH,
   ICON_CHEVRON_UP,
   ICON_CHEVRON_DOWN,
-  ICON_X
+  ICON_X,
+  ICON_SETTINGS,
+  ICON_UPLOAD,
+  ICON_KEY,
+  ICON_LOGOUT
 } from "./icons.js";
 import { registerServiceWorker } from "./push.js";
 import {
@@ -28,7 +32,10 @@ import {
   fetchLastMessages,
   listChatThreads,
   setThreadMeta,
-  deleteChatThread
+  deleteChatThread,
+  listKnowledgeDocs,
+  uploadKnowledgeDoc,
+  deleteKnowledgeDoc
 } from "./chat.js";
 
 // Daftar obrolan yang pernah dimulai dari perangkat ini (tombol "+") --
@@ -105,7 +112,33 @@ const els = {
   chatSearchNext: document.getElementById("chat-search-next"),
   chatSearchNextIcon: document.getElementById("chat-search-next-icon"),
   chatSearchClose: document.getElementById("chat-search-close"),
-  chatSearchCloseIcon: document.getElementById("chat-search-close-icon")
+  chatSearchCloseIcon: document.getElementById("chat-search-close-icon"),
+  settingsToggle: document.getElementById("settings-toggle"),
+  settingsToggleIcon: document.getElementById("settings-toggle-icon"),
+  settingsDialog: document.getElementById("settings-dialog"),
+  settingsKbBtn: document.getElementById("settings-kb-btn"),
+  settingsKbIcon: document.getElementById("settings-kb-icon"),
+  settingsChangeCodeBtn: document.getElementById("settings-change-code-btn"),
+  settingsChangeCodeIcon: document.getElementById("settings-change-code-icon"),
+  settingsLogoutBtn: document.getElementById("settings-logout-btn"),
+  settingsLogoutIcon: document.getElementById("settings-logout-icon"),
+  settingsAboutBtn: document.getElementById("settings-about-btn"),
+  settingsAboutIcon: document.getElementById("settings-about-icon"),
+  settingsCancelBtn: document.getElementById("settings-cancel-btn"),
+  kbDialog: document.getElementById("kb-dialog"),
+  kbUploadForm: document.getElementById("kb-upload-form"),
+  kbTitleInput: document.getElementById("kb-title-input"),
+  kbFileInput: document.getElementById("kb-file-input"),
+  kbUploadBtn: document.getElementById("kb-upload-btn"),
+  kbUploadStatus: document.getElementById("kb-upload-status"),
+  kbDocList: document.getElementById("kb-doc-list"),
+  kbDocListEmpty: document.getElementById("kb-doc-list-empty"),
+  kbCloseBtn: document.getElementById("kb-close-btn"),
+  aboutDialog: document.getElementById("about-dialog"),
+  aboutChatsCount: document.getElementById("about-chats-count"),
+  aboutKbCount: document.getElementById("about-kb-count"),
+  aboutCodeStatus: document.getElementById("about-code-status"),
+  aboutCloseBtn: document.getElementById("about-close-btn")
 };
 
 const state = {
@@ -951,6 +984,100 @@ async function exportChatToPdf(id) {
   doc.save(`${safeTitle}.pdf`);
 }
 
+// ---------- Pengaturan (tombol gear di layar daftar) ----------
+
+function openSettingsDialog() {
+  openDialogEl(els.settingsDialog);
+}
+
+function closeSettingsDialog() {
+  closeDialogEl(els.settingsDialog);
+}
+
+// ---------- Dokumen Pengetahuan (Pengaturan > Dokumen Pengetahuan) ----------
+
+async function openKbDialog() {
+  closeSettingsDialog();
+  els.kbTitleInput.value = "";
+  els.kbFileInput.value = "";
+  els.kbUploadStatus.hidden = true;
+  openDialogEl(els.kbDialog);
+  await renderKbDocList();
+}
+
+async function renderKbDocList() {
+  els.kbDocList.innerHTML = "";
+
+  if (!state.chatCode) {
+    els.kbDocListEmpty.hidden = false;
+    els.kbDocListEmpty.textContent = t(state.lang, "kb_need_code");
+    return;
+  }
+
+  els.kbDocListEmpty.hidden = false;
+  els.kbDocListEmpty.textContent = t(state.lang, "loading");
+
+  const result = await listKnowledgeDocs(state.chatCode);
+  if (!result.ok) {
+    if (result.unauthorized) {
+      state.chatCode = "";
+      clearStoredChatCode();
+    }
+    els.kbDocListEmpty.textContent = t(state.lang, "kb_load_error");
+    return;
+  }
+
+  const docs = result.documents || [];
+  if (docs.length === 0) {
+    els.kbDocListEmpty.hidden = false;
+    els.kbDocListEmpty.textContent = t(state.lang, "kb_empty");
+    return;
+  }
+  els.kbDocListEmpty.hidden = true;
+
+  const locale = state.lang === "id" ? "id-ID" : "en-US";
+  for (const doc of docs) {
+    const row = document.createElement("div");
+    row.className = "kb-doc-row";
+
+    const main = document.createElement("div");
+    main.className = "kb-doc-main";
+    const titleEl = document.createElement("div");
+    titleEl.className = "kb-doc-title";
+    titleEl.textContent = doc.title;
+    const meta = document.createElement("div");
+    meta.className = "kb-doc-meta";
+    const charCount = typeof doc.char_count === "number" ? doc.char_count : 0;
+    meta.textContent = `${charCount.toLocaleString(locale)} ${t(state.lang, "kb_chars_unit")} • ${formatFullDateTime(doc.uploaded_at)}`;
+    main.appendChild(titleEl);
+    main.appendChild(meta);
+
+    const delBtn = document.createElement("button");
+    delBtn.type = "button";
+    delBtn.className = "icon-btn icon-btn--small";
+    delBtn.innerHTML = ICON_TRASH;
+    delBtn.title = t(state.lang, "kb_delete_btn");
+    delBtn.setAttribute("aria-label", t(state.lang, "kb_delete_btn"));
+    delBtn.addEventListener("click", async () => {
+      if (!window.confirm(t(state.lang, "kb_delete_confirm"))) return;
+      const delResult = await deleteKnowledgeDoc(state.chatCode, doc.id);
+      if (!delResult.ok) {
+        if (delResult.unauthorized) {
+          state.chatCode = "";
+          clearStoredChatCode();
+        }
+        alertWithDetail("kb_delete_error", delResult);
+        return;
+      }
+      await renderKbDocList();
+    });
+
+    row.appendChild(main);
+    row.appendChild(delBtn);
+    els.kbDocList.appendChild(row);
+  }
+}
+
 function wireEvents() {
   els.langToggle.addEventListener("click", () => {
     state.lang = state.lang === "id" ? "en" : "id";
@@ -964,6 +1091,8 @@ function wireEvents() {
     localStorage.setItem("rh_theme", state.theme);
     applyTheme();
   });
+
+  els.settingsToggle.addEventListener("click", () => openSettingsDialog());
 
   els.backBtn.addEventListener("click", () => {
     openList();
@@ -996,8 +1125,12 @@ function wireEvents() {
     submitBtn.disabled = true;
     els.chatCodeError.hidden = true;
 
-    const date = state.currentDate || state.activeOptionsId;
-    const result = await fetchChatHistory(date, code);
+    // Validasi pakai listChatThreads (bukan fetchChatHistory ke satu ID
+    // obrolan tertentu) -- supaya dialog ini generik dan bisa dipakai dari
+    // KONTEKS MANAPUN: unlock diskusi di layar detail, menu titik-3
+    // (PDF/detail/hapus), ATAU "Ubah kode chat" di Pengaturan (yang dipicu
+    // dari layar daftar, tanpa ID obrolan spesifik sama sekali).
+    const result = await listChatThreads(code);
     submitBtn.disabled = false;
 
     if (!result.ok) {
@@ -1009,9 +1142,23 @@ function wireEvents() {
     state.chatCode = code;
     setStoredChatCode(code);
     els.chatCodeInput.value = "";
-    showChatUnlocked();
     closeChatCodeDialog();
-    renderChatMessages(result.messages);
+
+    // PENTING: showChatUnlocked() dipanggil TANPA SYARAT (bukan cuma kalau
+    // layar detail lagi kebuka) -- chat-form/chat-locked-bar adalah elemen
+    // GLOBAL yang dipakai ulang di layar detail manapun, jadi begitu
+    // state.chatCode valid (termasuk lewat "Ubah kode chat" di Pengaturan,
+    // yang dipicu dari layar DAFTAR), status unlock-nya harus ikut
+    // diperbarui supaya obrolan berikutnya yang dibuka langsung terbuka,
+    // tidak kebawa status "terkunci" lama dari waktu app pertama dimuat.
+    showChatUnlocked();
+
+    if (!els.screenDetail.hidden && state.currentDate) {
+      await loadChatForDate(state.currentDate);
+    }
+    if (!els.screenList.hidden) {
+      await renderChatList();
+    }
   });
 
   els.chatForm.addEventListener("submit", async (e) => {
@@ -1131,6 +1278,14 @@ function wireEvents() {
   els.chatOptionsPdfIcon.innerHTML = ICON_DOWNLOAD;
   els.chatOptionsDetailIcon.innerHTML = ICON_INFO;
   els.chatOptionsDeleteIcon.innerHTML = ICON_TRASH;
+
+  // Sama kayak di atas: ikon tombol Pengaturan & isi menunya statis, cukup
+  // dipasang sekali.
+  els.settingsToggleIcon.innerHTML = ICON_SETTINGS;
+  els.settingsKbIcon.innerHTML = ICON_UPLOAD;
+  els.settingsChangeCodeIcon.innerHTML = ICON_KEY;
+  els.settingsLogoutIcon.innerHTML = ICON_LOGOUT;
+  els.settingsAboutIcon.innerHTML = ICON_INFO;
 
   els.chatOptionsCancel.addEventListener("click", () => closeChatOptions());
 
@@ -1284,6 +1439,141 @@ function wireEvents() {
     } else if (!els.screenList.hidden) {
       await renderChatList();
     }
+  });
+
+  // ---------- Pengaturan: dokumen pengetahuan / ubah kode / keluar chat / detail aplikasi ----------
+
+  els.settingsCancelBtn.addEventListener("click", () => closeSettingsDialog());
+
+  // Sama kayak chat-options-dialog: tap area gelap di luar kartu buat nutup.
+  els.settingsDialog.addEventListener("click", (e) => {
+    if (e.target === els.settingsDialog) closeSettingsDialog();
+  });
+
+  els.settingsKbBtn.addEventListener("click", () => openKbDialog());
+
+  els.settingsChangeCodeBtn.addEventListener("click", () => {
+    closeSettingsDialog();
+    openChatCodeDialog();
+    // Dialog kode akses sama dipakai untuk unlock diskusi & menu titik-3
+    // (lihat requireChatCodeOrPrompt) -- hint di bawah ini yang bikin
+    // pemakaiannya kelihatan beda ("masukkan kode BARU", bukan "fitur ini
+    // butuh kode").
+    els.chatCodeError.hidden = false;
+    els.chatCodeError.textContent = t(state.lang, "change_code_hint");
+  });
+
+  els.settingsLogoutBtn.addEventListener("click", async () => {
+    closeSettingsDialog();
+    if (!state.chatCode) return;
+    if (!window.confirm(t(state.lang, "logout_confirm"))) return;
+
+    state.chatCode = "";
+    clearStoredChatCode();
+
+    // Sama seperti showChatUnlocked() di chatCodeForm: chat-form/chat-locked-bar
+    // itu elemen GLOBAL dipakai ulang di layar detail manapun, jadi
+    // showChatLocked() dipanggil TANPA SYARAT supaya obrolan berikutnya yang
+    // dibuka langsung kelihatan terkunci, bukan masih kebawa status
+    // "terbuka" lama dari sebelum logout.
+    showChatLocked();
+    if (!els.screenList.hidden) {
+      await renderChatList();
+    }
+  });
+
+  els.settingsAboutBtn.addEventListener("click", () => {
+    closeSettingsDialog();
+    els.aboutChatsCount.textContent = String(getFreeformThreads().length);
+    els.aboutCodeStatus.textContent = t(state.lang, state.chatCode ? "about_code_unlocked" : "about_code_locked");
+    els.aboutKbCount.textContent = "…";
+    openDialogEl(els.aboutDialog);
+
+    if (state.chatCode) {
+      listKnowledgeDocs(state.chatCode).then((result) => {
+        els.aboutKbCount.textContent = result.ok ? String((result.documents || []).length) : "–";
+      });
+    } else {
+      els.aboutKbCount.textContent = "–";
+    }
+  });
+
+  els.aboutCloseBtn.addEventListener("click", () => closeDialogEl(els.aboutDialog));
+
+  els.kbCloseBtn.addEventListener("click", () => closeDialogEl(els.kbDialog));
+
+  els.kbDialog.addEventListener("click", (e) => {
+    if (e.target === els.kbDialog) closeDialogEl(els.kbDialog);
+  });
+
+  els.kbUploadForm.addEventListener("submit", async (e) => {
+    e.preventDefault();
+
+    if (!state.chatCode) {
+      els.kbUploadStatus.hidden = false;
+      els.kbUploadStatus.textContent = t(state.lang, "kb_need_code");
+      return;
+    }
+
+    const title = els.kbTitleInput.value.trim();
+    const file = els.kbFileInput.files && els.kbFileInput.files[0];
+
+    if (!title) {
+      els.kbUploadStatus.hidden = false;
+      els.kbUploadStatus.textContent = t(state.lang, "kb_title_required");
+      return;
+    }
+    if (!file) {
+      els.kbUploadStatus.hidden = false;
+      els.kbUploadStatus.textContent = t(state.lang, "kb_file_required");
+      return;
+    }
+
+    els.kbUploadBtn.disabled = true;
+    els.kbUploadStatus.hidden = false;
+    els.kbUploadStatus.textContent = t(state.lang, "kb_extracting");
+
+    // Ekstrak teksnya DI BROWSER (lihat pdfText.js) -- Edge Function cuma
+    // terima teks polos, tidak pernah lihat file PDF mentahnya sama sekali.
+    // Di-import DINAMIS (bukan di atas bareng import lain) supaya library
+    // pdfjs-dist yang lumayan besar itu CUMA diunduh begitu fitur ini benar-
+    // benar dipakai, tidak ikut membengkakkan bundle utama yang dimuat tiap
+    // kali app dibuka (termasuk cuma buat sekadar chat biasa).
+    let extracted;
+    try {
+      const { extractPdfText } = await import("./pdfText.js");
+      extracted = await extractPdfText(file);
+    } catch (_err) {
+      els.kbUploadBtn.disabled = false;
+      els.kbUploadStatus.textContent = t(state.lang, "kb_extract_error");
+      return;
+    }
+
+    if (!extracted.text || extracted.text.length < 20) {
+      els.kbUploadBtn.disabled = false;
+      els.kbUploadStatus.textContent = t(state.lang, "kb_extract_empty");
+      return;
+    }
+
+    els.kbUploadStatus.textContent = t(state.lang, "kb_uploading");
+    const result = await uploadKnowledgeDoc(state.chatCode, { title, content: extracted.text, filename: file.name });
+    els.kbUploadBtn.disabled = false;
+
+    if (!result.ok) {
+      if (result.unauthorized) {
+        state.chatCode = "";
+        clearStoredChatCode();
+      }
+      els.kbUploadStatus.textContent = result.message
+        ? `${t(state.lang, "kb_upload_error")} (${result.message})`
+        : t(state.lang, "kb_upload_error");
+      return;
+    }
+
+    els.kbUploadStatus.textContent = t(state.lang, "kb_upload_success");
+    els.kbTitleInput.value = "";
+    els.kbFileInput.value = "";
+    await renderKbDocList();
   });
 }
 
