@@ -109,6 +109,84 @@ body {
   transform: scale(0.95);
 }
 
+.icon-btn--small {
+  width: 32px;
+  height: 32px;
+}
+
+/* Topbar layar detail dipecah jadi 2 baris (baris tombol + baris pencarian
+   yang cuma muncul kalau diaktifkan) -- tetap satu elemen .topbar yang sama
+   (sticky), supaya search bar ikut menempel di atas waktu scroll. */
+.detail-topbar {
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-start;
+  gap: 10px;
+}
+
+.detail-topbar-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.chat-search-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.chat-search-bar input {
+  flex: 1;
+  min-width: 0;
+  padding: 9px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--bg-card);
+  color: var(--text);
+  font-family: inherit;
+  /* WAJIB >= 16px, sama alasannya seperti input lain di file ini. */
+  font-size: 16px;
+}
+
+.chat-search-count {
+  flex-shrink: 0;
+  min-width: 2.8em;
+  text-align: center;
+  font-size: 0.76rem;
+  color: var(--text-muted);
+}
+
+/* Hasil pencarian di dalam teks pesan -- dibuat lewat <mark> yang disisipkan
+   di sekitar teks yang cocok (lihat main.js), bukan warna kuning khas
+   browser supaya tetap konsisten dengan gaya monokrom app ini. Yang lagi
+   "aktif" (dituju tombol atas/bawah) dibalik solid, sama seperti pola bubble
+   .chat-bubble.user. */
+mark.chat-search-hit {
+  /* Abu-abu translucent (bukan var(--notify-bg) solid) supaya tetap kebaca
+     di bubble assistant (dasar terang) MAUPUN bubble user (dasar gelap/solid,
+     lihat .chat-bubble.user) tanpa perlu aturan terpisah per jenis bubble. */
+  background: rgba(128, 128, 128, 0.45);
+  color: inherit;
+  border-radius: 3px;
+  padding: 0 1px;
+}
+
+mark.chat-search-hit--active {
+  background: var(--text);
+  color: var(--bg);
+}
+
+/* Di dalam .chat-bubble.user dasarnya sudah solid var(--accent) (= var(--text))
+   dengan teks var(--accent-contrast) (= var(--bg)) -- kalau dibalik pakai aturan
+   di atas hasilnya sama persis dgn warna bubble itu sendiri jadi tak kelihatan.
+   Maka di sini pembalikannya dibalik lagi supaya tetap kontras. */
+.chat-bubble.user mark.chat-search-hit--active {
+  background: var(--bg);
+  color: var(--text);
+}
+
 .content {
   flex: 1;
   display: flex;

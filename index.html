@@ -76,8 +76,32 @@
       <!-- Layar 2: detail satu tanggal -- ringkasan berita tampil sebagai pesan pertama di obrolan -->
       <section id="screen-detail" class="screen" hidden>
         <header class="topbar detail-topbar">
-          <button id="back-btn" class="icon-btn" title="Kembali" aria-label="Kembali">←</button>
-          <h1 id="detail-date-title" class="detail-title"></h1>
+          <div class="detail-topbar-row">
+            <button id="back-btn" class="icon-btn" title="Kembali" aria-label="Kembali">←</button>
+            <h1 id="detail-date-title" class="detail-title"></h1>
+            <button id="chat-search-toggle" class="icon-btn" title="Cari di obrolan ini" aria-label="Cari di obrolan ini">
+              <span id="chat-search-toggle-icon"></span>
+            </button>
+          </div>
+          <div id="chat-search-bar" class="chat-search-bar" hidden>
+            <input
+              id="chat-in-search-input"
+              type="search"
+              autocomplete="off"
+              data-i18n-placeholder="in_chat_search_placeholder"
+              placeholder="Cari di obrolan ini…"
+            />
+            <span id="chat-search-count" class="chat-search-count"></span>
+            <button type="button" id="chat-search-prev" class="icon-btn icon-btn--small" title="Sebelumnya" aria-label="Sebelumnya">
+              <span id="chat-search-prev-icon"></span>
+            </button>
+            <button type="button" id="chat-search-next" class="icon-btn icon-btn--small" title="Berikutnya" aria-label="Berikutnya">
+              <span id="chat-search-next-icon"></span>
+            </button>
+            <button type="button" id="chat-search-close" class="icon-btn icon-btn--small" title="Tutup pencarian" aria-label="Tutup pencarian">
+              <span id="chat-search-close-icon"></span>
+            </button>
+          </div>
         </header>
 
         <main class="content">

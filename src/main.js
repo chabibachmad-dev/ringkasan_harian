@@ -12,7 +12,11 @@ import {
   ICON_EDIT,
   ICON_DOWNLOAD,
   ICON_INFO,
-  ICON_TRASH
+  ICON_TRASH,
+  ICON_SEARCH,
+  ICON_CHEVRON_UP,
+  ICON_CHEVRON_DOWN,
+  ICON_X
 } from "./icons.js";
 import { registerServiceWorker } from "./push.js";
 import {
@@ -89,7 +93,18 @@ const els = {
   chatDetailTotal: document.getElementById("chat-detail-total"),
   chatDetailStart: document.getElementById("chat-detail-start"),
   chatDetailLast: document.getElementById("chat-detail-last"),
-  chatDetailClose: document.getElementById("chat-detail-close")
+  chatDetailClose: document.getElementById("chat-detail-close"),
+  chatSearchToggle: document.getElementById("chat-search-toggle"),
+  chatSearchToggleIcon: document.getElementById("chat-search-toggle-icon"),
+  chatSearchBar: document.getElementById("chat-search-bar"),
+  chatInSearchInput: document.getElementById("chat-in-search-input"),
+  chatSearchCount: document.getElementById("chat-search-count"),
+  chatSearchPrev: document.getElementById("chat-search-prev"),
+  chatSearchPrevIcon: document.getElementById("chat-search-prev-icon"),
+  chatSearchNext: document.getElementById("chat-search-next"),
+  chatSearchNextIcon: document.getElementById("chat-search-next-icon"),
+  chatSearchClose: document.getElementById("chat-search-close"),
+  chatSearchCloseIcon: document.getElementById("chat-search-close-icon")
 };
 
 const state = {
@@ -101,7 +116,13 @@ const state = {
   // jalan, dipakai menu titik-3 buat tahu judul default chat yang lagi
   // diklik tanpa harus hitung ulang.
   listIndex: new Map(),
-  activeOptionsId: null
+  activeOptionsId: null,
+  // Hasil pencarian teks DI DALAM satu obrolan yang sedang dibuka (beda dari
+  // chatSearchInput di layar daftar, yang cuma menyaring judul/preview).
+  // inChatSearchMatches isinya elemen <mark> hasil highlight di DOM, jadi
+  // navigasi next/prev tinggal scrollIntoView ke elemen yang bersangkutan.
+  inChatSearchMatches: [],
+  inChatSearchActive: -1
 };
 
 function formatBubbleTime(value) {
@@ -448,6 +469,120 @@ function updateScrollBottomBtnVisibility() {
   els.scrollBottomBtn.classList.toggle("visible", distanceFromBottom > 160);
 }
 
+// ---------- Cari teks di dalam satu obrolan (topbar layar detail) ----------
+
+function escapeRegExp(str) {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// Highlight dikerjakan lewat TreeWalker di atas text node ASLI (bukan
+// regex di atas string HTML) -- supaya tag hasil renderChatMarkdown
+// (mis. <strong>, <a>) tidak ikut kesentuh/rusak oleh proses pencarian.
+function highlightTextNode(node, regex) {
+  const text = node.nodeValue;
+  regex.lastIndex = 0;
+  if (!regex.test(text)) return [];
+  regex.lastIndex = 0;
+
+  const frag = document.createDocumentFragment();
+  const marks = [];
+  let lastIndex = 0;
+  let match;
+  while ((match = regex.exec(text))) {
+    if (match.index > lastIndex) {
+      frag.appendChild(document.createTextNode(text.slice(lastIndex, match.index)));
+    }
+    const mark = document.createElement("mark");
+    mark.className = "chat-search-hit";
+    mark.textContent = match[0];
+    frag.appendChild(mark);
+    marks.push(mark);
+    lastIndex = match.index + match[0].length;
+  }
+  if (lastIndex < text.length) {
+    frag.appendChild(document.createTextNode(text.slice(lastIndex)));
+  }
+  node.parentNode.replaceChild(frag, node);
+  return marks;
+}
+
+function clearChatSearchHighlights() {
+  els.chatThread.querySelectorAll("mark.chat-search-hit").forEach((mark) => {
+    const parent = mark.parentNode;
+    if (!parent) return;
+    parent.replaceChild(document.createTextNode(mark.textContent), mark);
+    parent.normalize();
+  });
+}
+
+function updateInChatSearchCount(hasQuery) {
+  if (!hasQuery) {
+    els.chatSearchCount.textContent = "";
+    return;
+  }
+  const total = state.inChatSearchMatches.length;
+  els.chatSearchCount.textContent = total > 0 ? `${state.inChatSearchActive + 1}/${total}` : "0/0";
+}
+
+function focusInChatSearchMatch() {
+  state.inChatSearchMatches.forEach((m) => m.classList.remove("chat-search-hit--active"));
+  const active = state.inChatSearchMatches[state.inChatSearchActive];
+  if (!active) return;
+  active.classList.add("chat-search-hit--active");
+  active.scrollIntoView({ behavior: "smooth", block: "center" });
+}
+
+function applyInChatSearch(query) {
+  clearChatSearchHighlights();
+  state.inChatSearchMatches = [];
+  state.inChatSearchActive = -1;
+
+  const trimmed = (query || "").trim();
+  if (!trimmed) {
+    updateInChatSearchCount(false);
+    return;
+  }
+
+  const regex = new RegExp(escapeRegExp(trimmed), "gi");
+  const marks = [];
+  els.chatThread.querySelectorAll(".chat-bubble-text").forEach((textEl) => {
+    const walker = document.createTreeWalker(textEl, NodeFilter.SHOW_TEXT);
+    const nodes = [];
+    let n;
+    while ((n = walker.nextNode())) nodes.push(n);
+    for (const node of nodes) {
+      marks.push(...highlightTextNode(node, regex));
+    }
+  });
+
+  state.inChatSearchMatches = marks;
+  if (marks.length > 0) {
+    state.inChatSearchActive = 0;
+    focusInChatSearchMatch();
+  }
+  updateInChatSearchCount(true);
+}
+
+function goToInChatSearchMatch(direction) {
+  const total = state.inChatSearchMatches.length;
+  if (total === 0) return;
+  state.inChatSearchActive = (state.inChatSearchActive + direction + total) % total;
+  focusInChatSearchMatch();
+  updateInChatSearchCount(true);
+}
+
+// Dipanggil tiap kali layar detail dibuka/ditutup, dan tiap ganti obrolan --
+// highlight & state pencarian sebelumnya tidak relevan lagi buat obrolan
+// yang baru dibuka (bubble-bubble-nya memang dirender ulang dari nol).
+function resetInChatSearch() {
+  clearChatSearchHighlights();
+  els.chatSearchBar.hidden = true;
+  els.chatInSearchInput.value = "";
+  state.inChatSearchMatches = [];
+  state.inChatSearchActive = -1;
+  if (els.chatSearchCount) els.chatSearchCount.textContent = "";
+}
+
 function appendChatBubble(role, content, timestamp) {
   const emptyEl = els.chatThread.querySelector(".chat-empty-text");
   if (emptyEl) emptyEl.remove();
@@ -571,6 +706,7 @@ async function showDetailScreen(date) {
   state.currentDate = date;
   els.screenList.hidden = true;
   els.screenDetail.hidden = false;
+  resetInChatSearch();
 
   els.detailDateTitle.textContent = getDisplayLabel(date);
 
@@ -873,6 +1009,12 @@ function wireEvents() {
     }
 
     appendChatBubble("assistant", result.reply, new Date());
+
+    // Kalau pencarian lagi aktif waktu pesan baru masuk, ikut re-scan supaya
+    // pesan baru ini juga ketemu kalau cocok dengan kata kuncinya.
+    if (!els.chatSearchBar.hidden && els.chatInSearchInput.value.trim()) {
+      applyInChatSearch(els.chatInSearchInput.value);
+    }
   });
 
   // Enter buat kirim, Shift+Enter buat baris baru.
@@ -907,6 +1049,44 @@ function wireEvents() {
     });
     inputBarObserver.observe(els.chatInputBar);
   }
+
+  // ---------- Cari teks di dalam obrolan yang sedang dibuka ----------
+
+  els.chatSearchToggleIcon.innerHTML = ICON_SEARCH;
+  els.chatSearchPrevIcon.innerHTML = ICON_CHEVRON_UP;
+  els.chatSearchNextIcon.innerHTML = ICON_CHEVRON_DOWN;
+  els.chatSearchCloseIcon.innerHTML = ICON_X;
+
+  els.chatSearchToggle.addEventListener("click", () => {
+    const willShow = els.chatSearchBar.hidden;
+    if (willShow) {
+      els.chatSearchBar.hidden = false;
+      els.chatInSearchInput.focus();
+    } else {
+      resetInChatSearch();
+    }
+  });
+
+  els.chatSearchClose.addEventListener("click", () => resetInChatSearch());
+
+  let inChatSearchDebounce;
+  els.chatInSearchInput.addEventListener("input", () => {
+    clearTimeout(inChatSearchDebounce);
+    const value = els.chatInSearchInput.value;
+    inChatSearchDebounce = setTimeout(() => applyInChatSearch(value), 150);
+  });
+
+  els.chatInSearchInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      goToInChatSearchMatch(e.shiftKey ? -1 : 1);
+    } else if (e.key === "Escape") {
+      resetInChatSearch();
+    }
+  });
+
+  els.chatSearchPrev.addEventListener("click", () => goToInChatSearchMatch(-1));
+  els.chatSearchNext.addEventListener("click", () => goToInChatSearchMatch(1));
 
   // ---------- Menu titik-3 per-chat: sematkan / ubah judul / PDF / detail / hapus ----------
 
