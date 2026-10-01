@@ -107,13 +107,55 @@ export async function callGeminiWithRetry(
 
 type GeminiData = {
   candidates?: { content?: { parts?: { text?: string }[] } }[];
-  // Jumlah token pemakaian request ini -- dipakai buat estimasi "token
-  // terpakai hari ini" yang ditampilkan di footer aplikasi (lihat Edge
-  // Function `chat`, action "send" & "token_usage"). totalTokenCount sudah
-  // mencakup prompt + jawaban, jadi tidak perlu dijumlah manual dari dua
-  // field lain.
-  usageMetadata?: { totalTokenCount?: number };
+  // Rincian token pemakaian request ini -- dipakai buat estimasi "token
+  // terpakai hari ini" + perkiraan biaya (USD) yang ditampilkan di footer
+  // aplikasi dan di samping jam tiap bubble pesan (lihat Edge Function
+  // `chat`, action "send" & "token_usage"). promptTokenCount/
+  // candidatesTokenCount dipisah (bukan cuma totalTokenCount) karena harga
+  // input vs output BEDA JAUH (output ±5x lebih mahal) -- lihat
+  // estimateCostUsd() di bawah.
+  usageMetadata?: {
+    totalTokenCount?: number;
+    promptTokenCount?: number;
+    candidatesTokenCount?: number;
+    // gemini-3.x adalah model "thinking" (mikir dulu sebelum jawab) --
+    // token buat "mikir" ini DITAGIH DENGAN HARGA OUTPUT oleh Gemini, tapi
+    // dihitung TERPISAH dari candidatesTokenCount (bukan bagian darinya).
+    // Kalau field ini diabaikan, biaya yang dihitung bisa jauh lebih kecil
+    // dari kenyataan -- bahkan $0 kalau jawaban yang terlihat pendek tapi
+    // proses mikirnya panjang. Lihat estimateCostUsd() di bawah.
+    thoughtsTokenCount?: number;
+    // Token dari hasil pencarian Google (tool "google_search") yang
+    // dimasukkan balik ke model sebagai konteks tambahan -- ditagih harga
+    // INPUT, juga terpisah dari promptTokenCount.
+    toolUsePromptTokenCount?: number;
+  };
 };
+
+// Harga resmi Gemini API per 1 JUTA token (USD), tier berbayar -- lihat
+// https://ai.google.dev/gemini-api/docs/pricing. PENTING: harga
+// gemini-3.6-flash di bawah ini harga PROMO yang cuma berlaku sampai 31 Des
+// 2026 -- per 1 Jan 2027 naik jadi $1.50 input / $7.50 output (sudah
+// ditangani otomatis lewat pengecekan tanggal, tidak perlu ubah kode waktu
+// itu tiba). Kalau GEMINI_MODEL/GEMINI_MODEL_FALLBACK diganti ke model lain
+// yang tidak ada di tabel ini, dianggap sama harganya dengan gemini-3.6-flash
+// (supaya tetap ada angka walau kurang presisi, bukan error).
+const GEMINI_3_6_FLASH_PRICE_BUMP_AT = new Date("2027-01-01T00:00:00Z");
+function getModelPricing(model: string): { input: number; output: number } {
+  const table: Record<string, { input: number; output: number }> = {
+    "gemini-3.6-flash":
+      new Date() < GEMINI_3_6_FLASH_PRICE_BUMP_AT ? { input: 0.75, output: 3.75 } : { input: 1.5, output: 7.5 },
+    "gemini-3.5-flash": { input: 1.5, output: 9.0 }
+  };
+  return table[model] ?? table["gemini-3.6-flash"];
+}
+
+// Estimasi biaya (USD) satu request, dari jumlah token prompt & output-nya
+// MASING-MASING (bukan totalnya digabung) -- lihat komentar getModelPricing().
+function estimateCostUsd(model: string, promptTokens: number, outputTokens: number): number {
+  const price = getModelPricing(model);
+  return (promptTokens / 1_000_000) * price.input + (outputTokens / 1_000_000) * price.output;
+}
 
 function buildGenerateUrl(model: string, apiKey: string): string {
   return `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
@@ -122,16 +164,20 @@ function buildGenerateUrl(model: string, apiKey: string): string {
 // Coba beberapa kombinasi (model, jumlah percobaan) berurutan sampai salah
 // satu berhasil -- dipakai supaya kalau model utama sedang "overloaded"
 // (503) dan tetap gagal walau sudah di-retry, permintaan otomatis dialihkan
-// ke model cadangan (GEMINI_MODEL_FALLBACK) alih-alih gagal total.
+// ke model cadangan (GEMINI_MODEL_FALLBACK) alih-alih gagal total. Model
+// yang BENAR-BENAR berhasil dikembalikan juga (bukan cuma datanya) --
+// dipakai generateChatReply() buat tahu harga mana yang berlaku (lihat
+// estimateCostUsd()), karena model utama & cadangan harganya bisa beda.
 async function callGeminiWithModelFallback(
   apiKey: string,
   buildBody: () => string,
   steps: { model: string; maxAttempts: number }[]
-): Promise<GeminiData> {
+): Promise<{ data: GeminiData; model: string }> {
   let lastErr: unknown;
   for (const step of steps) {
     try {
-      return (await callGeminiWithRetry(buildGenerateUrl(step.model, apiKey), buildBody(), step.maxAttempts)) as GeminiData;
+      const data = (await callGeminiWithRetry(buildGenerateUrl(step.model, apiKey), buildBody(), step.maxAttempts)) as GeminiData;
+      return { data, model: step.model };
     } catch (err) {
       lastErr = err;
       const reason = err instanceof Error ? err.message : String(err);
@@ -161,7 +207,7 @@ export async function generateSummary(items: NewsItem[], apiKey: string): Promis
     steps.push({ model: fallbackModel, maxAttempts: MAX_ATTEMPTS });
   }
 
-  const data = await callGeminiWithModelFallback(apiKey, buildBody, steps);
+  const { data } = await callGeminiWithModelFallback(apiKey, buildBody, steps);
   const rawText: string | undefined = data?.candidates?.[0]?.content?.parts?.[0]?.text;
   if (!rawText) {
     throw new Error(`Respons Gemini tidak berisi teks yang diharapkan: ${JSON.stringify(data).slice(0, 500)}`);
@@ -222,6 +268,9 @@ export interface ChatReplyResult {
   // dianggap aman/tidak fatal, cuma estimasi di footer jadi kurang akurat
   // untuk request itu saja).
   tokensUsed: number;
+  // Estimasi biaya (USD) request ini -- lihat estimateCostUsd(). 0 kalau
+  // usageMetadata tidak ada/tidak lengkap, sama alasannya seperti tokensUsed.
+  costUsd: number;
 }
 
 export async function generateChatReply(
@@ -257,8 +306,11 @@ export async function generateChatReply(
   //    model utama sendiri yang sedang overloaded total (bukan cuma jalur
   //    tools-nya), pindah ke model lain supaya pesan tidak gagal terkirim.
   let data: GeminiData;
+  let modelUsed: string;
   try {
-    data = await callGeminiWithModelFallback(apiKey, () => buildBody(true), [{ model: primaryModel, maxAttempts: 1 }]);
+    const result = await callGeminiWithModelFallback(apiKey, () => buildBody(true), [{ model: primaryModel, maxAttempts: 1 }]);
+    data = result.data;
+    modelUsed = result.model;
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err);
     console.warn(`Percobaan chat dengan Google Search grounding gagal (${reason}), lanjut tanpa akses internet...`);
@@ -266,7 +318,9 @@ export async function generateChatReply(
     if (fallbackModel !== primaryModel) {
       steps.push({ model: fallbackModel, maxAttempts: MAX_ATTEMPTS - 1 });
     }
-    data = await callGeminiWithModelFallback(apiKey, () => buildBody(false), steps);
+    const result = await callGeminiWithModelFallback(apiKey, () => buildBody(false), steps);
+    data = result.data;
+    modelUsed = result.model;
   }
 
   const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
@@ -274,5 +328,39 @@ export async function generateChatReply(
     throw new Error(`Respons Gemini (chat) tidak berisi teks yang diharapkan: ${JSON.stringify(data).slice(0, 500)}`);
   }
 
-  return { reply: rawText.trim(), tokensUsed: data?.usageMetadata?.totalTokenCount ?? 0 };
+  const promptTokens = data?.usageMetadata?.promptTokenCount ?? 0;
+  const candidatesTokens = data?.usageMetadata?.candidatesTokenCount ?? 0;
+  const thoughtsTokens = data?.usageMetadata?.thoughtsTokenCount ?? 0;
+  const toolUseTokens = data?.usageMetadata?.toolUsePromptTokenCount ?? 0;
+  const totalTokenCount = data?.usageMetadata?.totalTokenCount;
+
+  // Harga INPUT berlaku utk promptTokenCount + toolUsePromptTokenCount
+  // (hasil pencarian Google yang disuntikkan balik ke model). Harga OUTPUT
+  // berlaku utk candidatesTokenCount (jawaban yang terlihat) +
+  // thoughtsTokenCount (proses "mikir" internal model thinking) -- lihat
+  // komentar thoughtsTokenCount di atas. Sebelumnya di sini cuma
+  // dihitung candidatesTokenCount sendirian, jadi biaya bisa terhitung jauh
+  // lebih kecil dari seharusnya (bahkan $0) utk model thinking seperti
+  // gemini-3.6-flash.
+  let billedInputTokens = promptTokens + toolUseTokens;
+  let billedOutputTokens = candidatesTokens + thoughtsTokens;
+
+  const tokensUsed = totalTokenCount ?? billedInputTokens + billedOutputTokens;
+
+  // Jaga-jaga: kalau suatu saat Gemini mengubah bentuk usageMetadata dan
+  // keempat rincian di atas semuanya kosong padahal totalTokenCount ADA dan
+  // > 0, jangan sampai biaya diam-diam selalu tercatat $0 padahal token
+  // sebenarnya sudah banyak -- pakai totalTokenCount sbg estimasi (dihitung
+  // harga output, skenario paling "aman"/mahal) drpd dibiarkan nol terus.
+  if (billedInputTokens + billedOutputTokens === 0 && tokensUsed > 0) {
+    console.warn(
+      "generateChatReply: rincian usageMetadata kosong padahal totalTokenCount ada, raw usageMetadata:",
+      JSON.stringify(data?.usageMetadata)
+    );
+    billedOutputTokens = tokensUsed;
+  }
+
+  const costUsd = estimateCostUsd(modelUsed, billedInputTokens, billedOutputTokens);
+
+  return { reply: rawText.trim(), tokensUsed, costUsd };
 }
