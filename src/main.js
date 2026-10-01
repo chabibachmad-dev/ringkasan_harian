@@ -13,7 +13,7 @@ import {
   ICON_INFO,
   ICON_TRASH
 } from "./icons.js";
-import { registerServiceWorker } from "./push.js";
+import { registerServiceWorker, isIOS, isStandalone } from "./push.js";
 import {
   getStoredChatCode,
   setStoredChatCode,
@@ -587,6 +587,16 @@ function closeDialogEl(dialogEl) {
   }
 }
 
+// Tempel pesan error asli dari server (kalau ada) di belakang teks generik --
+// supaya begitu ada kegagalan, langsung kelihatan di layar APA sebenarnya
+// yang salah (mis. "Unauthorized", "HTTP 500", "Failed to fetch") tanpa
+// harus buka DevTools/Network tab (susah dilakukan dari HP).
+function alertWithDetail(messageKey, result) {
+  const detail = result && typeof result.message === "string" ? result.message.trim() : "";
+  const base = t(state.lang, messageKey);
+  window.alert(detail ? `${base}\n\n(${detail})` : base);
+}
+
 function formatFullDateTime(value) {
   const d = value instanceof Date ? value : new Date(value);
   if (Number.isNaN(d.getTime())) return "";
@@ -638,6 +648,17 @@ async function refreshAfterChatMutation(id, { titleChanged = false } = {}) {
 }
 
 async function exportChatToPdf(id) {
+  // Keterbatasan WebKit yang sudah lama dikenal & tidak bisa diperbaiki dari
+  // sisi web app: window.print() TIDAK memunculkan apa-apa sama sekali kalau
+  // situsnya dibuka sebagai app yang di-"Add to Home Screen" (standalone),
+  // karena di mode itu tidak ada UI Safari yang bisa menampilkan dialog
+  // cetak. Harus dibuka lewat tab Safari biasa (ada address bar-nya) supaya
+  // tombol ini bisa memunculkan popup cetak/PDF.
+  if (isIOS() && isStandalone()) {
+    window.alert(t(state.lang, "pdf_ios_standalone"));
+    return;
+  }
+
   const title = getCustomTitle(id) || getDefaultLabel(id);
 
   const result = await fetchChatHistory(id, state.chatCode);
@@ -646,7 +667,7 @@ async function exportChatToPdf(id) {
       state.chatCode = "";
       clearStoredChatCode();
     }
-    window.alert(t(state.lang, "chat_load_error"));
+    alertWithDetail("chat_load_error", result);
     return;
   }
   const messages = result.messages || [];
@@ -903,7 +924,7 @@ function wireEvents() {
         clearStoredChatCode();
       }
       closeDialogEl(els.chatDetailDialog);
-      window.alert(t(state.lang, "detail_load_error"));
+      alertWithDetail("detail_load_error", result);
       return;
     }
 
@@ -934,7 +955,7 @@ function wireEvents() {
         state.chatCode = "";
         clearStoredChatCode();
       }
-      window.alert(t(state.lang, "delete_error"));
+      alertWithDetail("delete_error", result);
       return;
     }
 

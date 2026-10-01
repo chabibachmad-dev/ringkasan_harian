@@ -50,6 +50,7 @@ export const STRINGS = {
     need_code_detail: "Masukkan kode akses dulu untuk melihat detail.",
     need_code_delete: "Masukkan kode akses dulu untuk menghapus chat.",
     pdf_empty: "Belum ada isi untuk diunduh dari chat ini.",
+    pdf_ios_standalone: "Download PDF tidak bisa dipakai di mode app layar utama (keterbatasan iOS/Safari). Buka link situs ini langsung lewat browser Safari biasa (bukan dari ikon layar utama), lalu coba lagi dari sana.",
     pdf_you_prefix: "Kamu",
     pdf_ai_prefix: "AI"
   },
@@ -104,6 +105,7 @@ export const STRINGS = {
     need_code_detail: "Enter the access code first to view details.",
     need_code_delete: "Enter the access code first to delete this chat.",
     pdf_empty: "There's nothing to export from this chat yet.",
+    pdf_ios_standalone: "PDF download doesn't work in home-screen app mode (an iOS/Safari limitation). Open this site's link directly in regular Safari (not from the home screen icon), then try again from there.",
     pdf_you_prefix: "You",
     pdf_ai_prefix: "AI"
   }
