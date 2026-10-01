@@ -191,7 +191,27 @@ Jawab pertanyaan atau ajak diskusi dengan ramah, jelas, dan seringkas mungkin ta
 Gunakan Bahasa Indonesia kecuali pengguna jelas menulis/minta bahasa lain.
 Kamu PUNYA akses ke pencarian Google secara real-time -- pakai untuk mencari info/berita/link terbaru saat relevan (termasuk mencarikan link video YouTube, artikel, atau halaman web lain yang diminta pengguna), dan tuliskan link hasil pencarian yang relevan dalam format markdown [label](url) supaya bisa diklik. Kalau setelah mencari tetap tidak menemukan info yang pasti, katakan terus terang bahwa kamu tidak menemukannya, jangan mengarang.`;
 
-export async function generateChatReply(messages: ChatMessage[], apiKey: string): Promise<string> {
+// Dipakai waktu pengguna sudah upload "Dokumen Pengetahuan" (lihat Pengaturan
+// > Upload Dokumen di aplikasi) -- PDF peraturan/referensi yang teksnya mau
+// dijadikan sumber utama, supaya AI tidak perlu cari di web dulu kalau
+// jawabannya memang sudah ada di dokumen yang diupload.
+const KNOWLEDGE_CONTEXT_INTRO = `Pengguna sudah mengupload dokumen referensi berikut ke dalam aplikasi ini (mis. peraturan/perundangan keuangan). ANGGAP dokumen-dokumen ini sebagai sumber paling terpercaya dan PRIORITASKAN jawaban dari sini -- kalau pertanyaan pengguna bisa dijawab dari isi salah satu dokumen di bawah, jawab dari situ duluan dan sebutkan judul dokumennya, TANPA perlu cari di internet dulu. Cari di Google HANYA kalau jawabannya memang tidak ada di dokumen-dokumen ini, atau topiknya jelas di luar cakupan dokumen ini.`;
+
+function buildSystemText(knowledgeContext: { title: string; content: string }[]): string {
+  if (knowledgeContext.length === 0) return CHAT_SYSTEM_PROMPT;
+
+  const docsText = knowledgeContext
+    .map((doc) => `=== Dokumen: "${doc.title}" ===\n${doc.content}`)
+    .join("\n\n");
+
+  return `${CHAT_SYSTEM_PROMPT}\n\n${KNOWLEDGE_CONTEXT_INTRO}\n\n${docsText}`;
+}
+
+export async function generateChatReply(
+  messages: ChatMessage[],
+  apiKey: string,
+  knowledgeContext: { title: string; content: string }[] = []
+): Promise<string> {
   const primaryModel = Deno.env.get("GEMINI_MODEL") || DEFAULT_MODEL;
   const fallbackModel = Deno.env.get("GEMINI_MODEL_FALLBACK") || DEFAULT_FALLBACK_MODEL;
 
@@ -200,9 +220,11 @@ export async function generateChatReply(messages: ChatMessage[], apiKey: string)
     parts: [{ text: m.content }]
   }));
 
+  const systemText = buildSystemText(knowledgeContext);
+
   const buildBody = (withTools: boolean) =>
     JSON.stringify({
-      system_instruction: { parts: [{ text: CHAT_SYSTEM_PROMPT }] },
+      system_instruction: { parts: [{ text: systemText }] },
       contents,
       ...(withTools ? { tools: [{ google_search: {} }] } : {}),
       generationConfig: { temperature: 0.6 }
