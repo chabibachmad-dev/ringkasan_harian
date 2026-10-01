@@ -197,15 +197,32 @@ body {
   overflow: hidden;
 }
 
+/* .chat-list-item sekarang wrapper (bukan <button> lagi) yang isinya 2
+   tombol bertetangga: tombol utama (buka chat) dan tombol titik-3 (menu).
+   Sebelumnya seluruh baris adalah satu <button>, tapi begitu tombol menu
+   ditambah, itu jadi <button> di dalam <button> -- HTML tidak mengizinkan
+   elemen interaktif bersarang begitu, jadi dipecah jadi dua tombol
+   sejajar di dalam satu wrapper non-interaktif. */
 .chat-list-item {
+  display: flex;
+  align-items: stretch;
+  width: 100%;
+  border-bottom: 1px solid var(--border);
+}
+
+.chat-list-item:last-child {
+  border-bottom: none;
+}
+
+.chat-list-item-main {
   display: flex;
   align-items: center;
   gap: 12px;
-  width: 100%;
-  padding: 12px 14px;
+  flex: 1;
+  min-width: 0;
+  padding: 12px 6px 12px 14px;
   background: none;
   border: none;
-  border-bottom: 1px solid var(--border);
   text-align: left;
   cursor: pointer;
   color: inherit;
@@ -213,12 +230,33 @@ body {
   -webkit-tap-highlight-color: transparent;
 }
 
-.chat-list-item:last-child {
-  border-bottom: none;
+.chat-list-item-main:active {
+  background: var(--notify-bg);
 }
 
-.chat-list-item:active {
+.chat-list-menu-btn {
+  flex-shrink: 0;
+  width: 40px;
+  margin: 6px 6px 6px 0;
+  border: none;
+  border-radius: 8px;
+  background: none;
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.chat-list-menu-btn:active {
   background: var(--notify-bg);
+}
+
+.chat-list-pin-icon {
+  flex-shrink: 0;
+  display: inline-flex;
+  color: var(--text-muted);
 }
 
 .chat-list-avatar {
@@ -250,7 +288,19 @@ body {
   gap: 8px;
 }
 
+/* Bungkus ikon pin + label tanggal jadi satu supaya space-between di
+   .chat-list-top tetap mendorong hanya jam ke kanan (bukan ikut
+   merenggangkan ikon pin dari labelnya). */
+.chat-list-label-wrap {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  flex: 1;
+}
+
 .chat-list-date {
+  min-width: 0;
   font-size: 0.92rem;
   font-weight: 700;
   overflow: hidden;
@@ -630,6 +680,212 @@ body {
   justify-content: flex-end;
   gap: 8px;
   margin-top: 4px;
+}
+
+/* ---------- Popup detail chat (statistik: total/mulai/terakhir) ---------- */
+
+.chat-detail-stats {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.chat-detail-stat {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.chat-detail-stat:last-child {
+  border-bottom: none;
+  padding-bottom: 0;
+}
+
+.chat-detail-stat-label {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+.chat-detail-stat-value {
+  font-size: 0.9rem;
+  font-weight: 700;
+  text-align: right;
+}
+
+/* ---------- Menu titik-3 per-chat (bottom sheet) ---------- */
+
+/* <dialog> bawaan browser otomatis center di tengah layar (position: fixed +
+   inset otomatis via UA stylesheet) -- override jadi nempel di BAWAH layar
+   supaya terasa seperti bottom-sheet ala aplikasi mobile, bukan popup
+   tengah seperti dialog kode akses. */
+.sheet-dialog {
+  position: fixed;
+  left: 50%;
+  right: auto;
+  top: auto;
+  bottom: 0;
+  transform: translateX(-50%);
+  margin: 0;
+  width: min(480px, 100vw);
+  max-height: 85vh;
+  padding: 0;
+  border: none;
+  background: transparent;
+  overflow: visible;
+}
+
+.sheet-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.5);
+}
+
+.sheet-card {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 85vh;
+  overflow-y: auto;
+  background: var(--bg-card);
+  border: 1.5px solid var(--border);
+  border-bottom: none;
+  border-radius: 18px 18px 0 0;
+  padding: 8px 10px calc(14px + env(safe-area-inset-bottom, 0px));
+}
+
+.sheet-title {
+  margin: 0;
+  padding: 10px 10px 8px;
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sheet-action {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  width: 100%;
+  padding: 13px 10px;
+  background: none;
+  border: none;
+  border-radius: 10px;
+  text-align: left;
+  color: var(--text);
+  font: inherit;
+  font-size: 0.92rem;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.sheet-action:active {
+  background: var(--notify-bg);
+}
+
+.sheet-action-icon {
+  flex-shrink: 0;
+  width: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.sheet-action--danger {
+  margin-top: 6px;
+  border-top: 1px solid var(--border);
+  border-radius: 0;
+  color: var(--danger);
+  font-weight: 700;
+  padding-top: 16px;
+}
+
+.sheet-cancel {
+  margin-top: 6px;
+  width: 100%;
+  padding: 13px 10px;
+  background: none;
+  border: none;
+  border-top: 1px solid var(--border);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.92rem;
+  font-weight: 700;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.sheet-cancel:active {
+  background: var(--notify-bg);
+}
+
+/* ---------- Cetak PDF (window.print()) ---------- */
+
+/* #print-area cuma dipakai sesaat sebelum window.print() dipanggil (lihat
+   main.js) -- disembunyikan total dari tampilan normal, baru dimunculkan
+   lewat CSS @media print di bawah. */
+.print-area {
+  display: none;
+}
+
+@media print {
+  /* Trik standar "cetak cuma 1 elemen": sembunyikan (visibility, bukan
+     display) semua, lalu nyalakan lagi khusus #print-area dan semua
+     turunannya -- dengan visibility (bukan display) elemen lain tetap ikut
+     dihitung browser tapi tidak bertinta sama sekali, dan #print-area bisa
+     diposisikan dari pojok kiri-atas halaman cetak. */
+  body * {
+    visibility: hidden;
+  }
+  #print-area,
+  #print-area * {
+    visibility: visible;
+  }
+  #print-area {
+    display: block;
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+    font-family: "Ubuntu Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    color: #000;
+  }
+  .print-title {
+    font-size: 1.3rem;
+    font-weight: 700;
+    margin: 0 0 2px;
+  }
+  .print-meta {
+    font-size: 0.8rem;
+    color: #444;
+    margin: 0 0 18px;
+  }
+  .print-summary {
+    border: 1px solid #000;
+    border-radius: 8px;
+    padding: 12px 14px;
+    margin-bottom: 18px;
+    font-size: 0.88rem;
+    line-height: 1.5;
+  }
+  .print-message {
+    padding: 8px 0;
+    border-bottom: 1px solid #ccc;
+    font-size: 0.88rem;
+    line-height: 1.5;
+    break-inside: avoid;
+  }
+  .print-message:last-child {
+    border-bottom: none;
+  }
+  .print-message-head {
+    font-weight: 700;
+    font-size: 0.78rem;
+    margin-bottom: 3px;
+  }
 }
 
 .footer {

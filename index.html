@@ -143,6 +143,84 @@
           </div>
         </form>
       </dialog>
+
+      <!-- Menu titik-3 per-chat: sematkan / ubah judul / download PDF / detail / hapus -->
+      <dialog id="chat-options-dialog" class="sheet-dialog">
+        <div class="sheet-card">
+          <p id="chat-options-title" class="sheet-title"></p>
+
+          <button type="button" id="chat-options-pin" class="sheet-action">
+            <span id="chat-options-pin-icon" class="sheet-action-icon"></span>
+            <span id="chat-options-pin-label"></span>
+          </button>
+          <button type="button" id="chat-options-rename" class="sheet-action">
+            <span id="chat-options-rename-icon" class="sheet-action-icon"></span>
+            <span data-i18n="chat_options_rename">Ubah judul</span>
+          </button>
+          <button type="button" id="chat-options-pdf" class="sheet-action">
+            <span id="chat-options-pdf-icon" class="sheet-action-icon"></span>
+            <span data-i18n="chat_options_pdf">Download PDF</span>
+          </button>
+          <button type="button" id="chat-options-detail" class="sheet-action">
+            <span id="chat-options-detail-icon" class="sheet-action-icon"></span>
+            <span data-i18n="chat_options_detail">Detail</span>
+          </button>
+          <button type="button" id="chat-options-delete" class="sheet-action sheet-action--danger">
+            <span id="chat-options-delete-icon" class="sheet-action-icon"></span>
+            <span data-i18n="chat_options_delete">Hapus chat</span>
+          </button>
+
+          <button type="button" id="chat-options-cancel" class="sheet-cancel" data-i18n="chat_options_cancel">Batal</button>
+        </div>
+      </dialog>
+
+      <!-- Popup ubah judul chat -->
+      <dialog id="rename-dialog" class="chat-code-dialog">
+        <form id="rename-form" class="chat-code-form-modal">
+          <h2 data-i18n="rename_title">Ubah Judul</h2>
+          <input
+            id="rename-input"
+            type="text"
+            maxlength="80"
+            autocomplete="off"
+            data-i18n-placeholder="rename_placeholder"
+            placeholder="Judul chat"
+          />
+          <div class="chat-code-dialog-actions">
+            <button type="button" id="rename-cancel" class="secondary-btn" data-i18n="rename_cancel">Batal</button>
+            <button type="submit" class="primary-btn" data-i18n="rename_save">Simpan</button>
+          </div>
+        </form>
+      </dialog>
+
+      <!-- Popup detail chat: total percakapan, mulai chat, chat terakhir -->
+      <dialog id="chat-detail-dialog" class="chat-code-dialog">
+        <div class="chat-code-form-modal">
+          <h2 id="chat-detail-title"></h2>
+          <p id="chat-detail-empty" data-i18n="detail_none" hidden>Belum ada percakapan di diskusi ini.</p>
+          <div id="chat-detail-stats" class="chat-detail-stats">
+            <div class="chat-detail-stat">
+              <span class="chat-detail-stat-label" data-i18n="detail_total">Total percakapan</span>
+              <span id="chat-detail-total" class="chat-detail-stat-value"></span>
+            </div>
+            <div class="chat-detail-stat">
+              <span class="chat-detail-stat-label" data-i18n="detail_start">Mulai chat</span>
+              <span id="chat-detail-start" class="chat-detail-stat-value"></span>
+            </div>
+            <div class="chat-detail-stat">
+              <span class="chat-detail-stat-label" data-i18n="detail_last">Chat terakhir</span>
+              <span id="chat-detail-last" class="chat-detail-stat-value"></span>
+            </div>
+          </div>
+          <div class="chat-code-dialog-actions">
+            <button type="button" id="chat-detail-close" class="primary-btn" data-i18n="detail_close">Tutup</button>
+          </div>
+        </div>
+      </dialog>
+
+      <!-- Area khusus cetak PDF (disembunyikan dari tampilan normal, cuma
+           dimunculkan lewat CSS @media print waktu window.print() dipanggil) -->
+      <div id="print-area" class="print-area"></div>
     </div>
 
     <script type="module" src="src/main.js"></script>

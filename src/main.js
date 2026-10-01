@@ -9,7 +9,14 @@ import {
   ICON_SUN,
   ICON_CHAT,
   ICON_DOC,
-  ICON_SPARK
+  ICON_SPARK,
+  ICON_DOTS,
+  ICON_PIN,
+  ICON_PIN_FILLED,
+  ICON_EDIT,
+  ICON_DOWNLOAD,
+  ICON_INFO,
+  ICON_TRASH
 } from "./icons.js";
 import { isIOS, isStandalone, pushSupported, registerServiceWorker, getExistingSubscription, subscribeToPush } from "./push.js";
 import {
@@ -18,7 +25,8 @@ import {
   clearStoredChatCode,
   fetchChatHistory,
   sendChatMessage,
-  fetchLastMessages
+  fetchLastMessages,
+  deleteChatThread
 } from "./chat.js";
 
 const VAPID_PUBLIC_KEY = import.meta.env.VITE_VAPID_PUBLIC_KEY;
@@ -28,6 +36,11 @@ const OPENED_DATES_KEY = "rh_opened_dates";
 // (tidak terikat ringkasan tanggal tertentu), jadi tidak bisa didaftar dari
 // server seperti obrolan ringkasan harian.
 const FREEFORM_THREADS_KEY = "rh_freeform_threads";
+// Chat yang disematkan (pin) & judul custom (hasil "Ubah judul") -- sama-sama
+// disimpan lokal per perangkat, dikunci dengan ID thread (tanggal kalender
+// atau "freeform-<uuid>"), sama seperti FREEFORM_THREADS_KEY di atas.
+const PINNED_CHATS_KEY = "rh_pinned_chats";
+const CHAT_TITLES_KEY = "rh_chat_titles";
 
 const els = {
   screenList: document.getElementById("screen-list"),
@@ -59,7 +72,34 @@ const els = {
   chatSendBtn: document.getElementById("chat-send-btn"),
   newChatFab: document.getElementById("new-chat-fab"),
   chatInputBar: document.getElementById("chat-input-bar"),
-  scrollBottomBtn: document.getElementById("scroll-bottom-btn")
+  scrollBottomBtn: document.getElementById("scroll-bottom-btn"),
+  chatOptionsDialog: document.getElementById("chat-options-dialog"),
+  chatOptionsTitle: document.getElementById("chat-options-title"),
+  chatOptionsPinBtn: document.getElementById("chat-options-pin"),
+  chatOptionsPinIcon: document.getElementById("chat-options-pin-icon"),
+  chatOptionsPinLabel: document.getElementById("chat-options-pin-label"),
+  chatOptionsRenameBtn: document.getElementById("chat-options-rename"),
+  chatOptionsRenameIcon: document.getElementById("chat-options-rename-icon"),
+  chatOptionsPdfBtn: document.getElementById("chat-options-pdf"),
+  chatOptionsPdfIcon: document.getElementById("chat-options-pdf-icon"),
+  chatOptionsDetailBtn: document.getElementById("chat-options-detail"),
+  chatOptionsDetailIcon: document.getElementById("chat-options-detail-icon"),
+  chatOptionsDeleteBtn: document.getElementById("chat-options-delete"),
+  chatOptionsDeleteIcon: document.getElementById("chat-options-delete-icon"),
+  chatOptionsCancel: document.getElementById("chat-options-cancel"),
+  renameDialog: document.getElementById("rename-dialog"),
+  renameForm: document.getElementById("rename-form"),
+  renameInput: document.getElementById("rename-input"),
+  renameCancel: document.getElementById("rename-cancel"),
+  chatDetailDialog: document.getElementById("chat-detail-dialog"),
+  chatDetailTitle: document.getElementById("chat-detail-title"),
+  chatDetailEmpty: document.getElementById("chat-detail-empty"),
+  chatDetailStats: document.getElementById("chat-detail-stats"),
+  chatDetailTotal: document.getElementById("chat-detail-total"),
+  chatDetailStart: document.getElementById("chat-detail-start"),
+  chatDetailLast: document.getElementById("chat-detail-last"),
+  chatDetailClose: document.getElementById("chat-detail-close"),
+  printArea: document.getElementById("print-area")
 };
 
 const state = {
@@ -70,7 +110,12 @@ const state = {
   cache: new Map(), // summary_date -> full row
   chatCode: "",
   notifyMode: "idle",
-  notifyExtra: ""
+  notifyExtra: "",
+  // id thread -> { kind: "daily"|"freeform", defaultLabel } -- diisi ulang
+  // tiap kali renderChatList() jalan, dipakai menu titik-3 buat tahu jenis
+  // & judul default chat yang lagi diklik tanpa harus hitung ulang.
+  listIndex: new Map(),
+  activeOptionsId: null
 };
 
 // Tanggal "hari ini" di zona WITA (UTC+8) -- sama persis dengan cara
@@ -127,6 +172,108 @@ function addFreeformThread(id) {
     /* noop -- obrolan tetap bisa dipakai, cuma tidak muncul lagi di daftar
        setelah reload kalau localStorage gagal ditulis (mis. private mode). */
   }
+}
+
+// Dipanggil waktu obrolan bebas dihapus lewat menu titik-3 -- beda dari
+// obrolan ringkasan harian (yang "tanggal"-nya tetap ada walau diskusinya
+// dihapus), obrolan bebas memang cuma ada karena ada thread-nya, jadi
+// dihapus total dari daftar begitu isinya dihapus.
+function removeFreeformThread(id) {
+  try {
+    const list = getFreeformThreads().filter((th) => th.id !== id);
+    localStorage.setItem(FREEFORM_THREADS_KEY, JSON.stringify(list));
+  } catch (_err) {
+    /* noop */
+  }
+}
+
+function getPinnedChats() {
+  try {
+    return new Set(JSON.parse(localStorage.getItem(PINNED_CHATS_KEY) || "[]"));
+  } catch (_err) {
+    return new Set();
+  }
+}
+
+function isPinned(id) {
+  return getPinnedChats().has(id);
+}
+
+function togglePinned(id) {
+  const set = getPinnedChats();
+  if (set.has(id)) {
+    set.delete(id);
+  } else {
+    set.add(id);
+  }
+  try {
+    localStorage.setItem(PINNED_CHATS_KEY, JSON.stringify([...set]));
+  } catch (_err) {
+    /* noop */
+  }
+}
+
+function unpinChat(id) {
+  const set = getPinnedChats();
+  if (!set.has(id)) return;
+  set.delete(id);
+  try {
+    localStorage.setItem(PINNED_CHATS_KEY, JSON.stringify([...set]));
+  } catch (_err) {
+    /* noop */
+  }
+}
+
+function getChatTitles() {
+  try {
+    const obj = JSON.parse(localStorage.getItem(CHAT_TITLES_KEY) || "{}");
+    return obj && typeof obj === "object" ? obj : {};
+  } catch (_err) {
+    return {};
+  }
+}
+
+function getCustomTitle(id) {
+  return getChatTitles()[id] || "";
+}
+
+// title kosong/null berarti "reset ke judul default" -- hapus key-nya
+// supaya file localStorage-nya tidak menumpuk entri kosong selamanya.
+function setCustomTitle(id, title) {
+  const titles = getChatTitles();
+  const trimmed = (title || "").trim();
+  if (trimmed) {
+    titles[id] = trimmed;
+  } else {
+    delete titles[id];
+  }
+  try {
+    localStorage.setItem(CHAT_TITLES_KEY, JSON.stringify(titles));
+  } catch (_err) {
+    /* noop */
+  }
+}
+
+function clearChatTitle(id) {
+  const titles = getChatTitles();
+  if (!(id in titles)) return;
+  delete titles[id];
+  try {
+    localStorage.setItem(CHAT_TITLES_KEY, JSON.stringify(titles));
+  } catch (_err) {
+    /* noop */
+  }
+}
+
+// Judul default (sebelum dipengaruhi "Ubah judul") buat satu thread --
+// dipakai renderChatList, showDetailScreen, dan isi awal popup opsi/rename.
+function getDefaultLabel(id) {
+  if (isFreeformId(id)) return t(state.lang, "freeform_chat_title");
+  return formatDateLabel(id);
+}
+
+function getDisplayLabel(id) {
+  return getCustomTitle(id) || getDefaultLabel(id);
 }
 
 const META_THEME_COLOR = document.getElementById("meta-theme-color");
@@ -236,9 +383,14 @@ async function renderChatList() {
 
   els.chatListStatus.hidden = true;
 
+  const pinnedSet = getPinnedChats();
+  state.listIndex.clear();
+
   // Gabungkan obrolan ringkasan harian & obrolan bebas jadi satu daftar,
   // diurutkan berdasarkan aktivitas terbaru (mirip daftar chat WhatsApp) --
-  // bukan cuma diurutkan berdasarkan tanggal ringkasan.
+  // bukan cuma diurutkan berdasarkan tanggal ringkasan. Yang disematkan
+  // (pin) selalu naik ke atas duluan, baru di dalam masing-masing grup
+  // (disematkan / tidak) diurutkan berdasarkan waktu aktivitas terakhir.
   const items = [];
   for (const row of state.summaries) {
     const lastMsg = lastMessages[row.summary_date];
@@ -254,12 +406,21 @@ async function renderChatList() {
     const sortTime = lastMsg?.created_at ? Date.parse(lastMsg.created_at) : Date.parse(thread.createdAt);
     items.push({ kind: "freeform", id: thread.id, thread, lastMsg, sortTime });
   }
-  items.sort((a, b) => (b.sortTime || 0) - (a.sortTime || 0));
+  items.sort((a, b) => {
+    const aPinned = pinnedSet.has(a.id) ? 1 : 0;
+    const bPinned = pinnedSet.has(b.id) ? 1 : 0;
+    if (aPinned !== bPinned) return bPinned - aPinned;
+    return (b.sortTime || 0) - (a.sortTime || 0);
+  });
 
   for (const entry of items) {
-    const item = document.createElement("button");
-    item.type = "button";
-    item.className = "chat-list-item";
+    const pinned = pinnedSet.has(entry.id);
+    const item = document.createElement("div");
+    item.className = pinned ? "chat-list-item pinned" : "chat-list-item";
+
+    const mainBtn = document.createElement("button");
+    mainBtn.type = "button";
+    mainBtn.className = "chat-list-item-main";
 
     const { lastMsg } = entry;
     const avatar = document.createElement("div");
@@ -270,6 +431,8 @@ async function renderChatList() {
 
     const top = document.createElement("div");
     top.className = "chat-list-top";
+    const labelWrap = document.createElement("span");
+    labelWrap.className = "chat-list-label-wrap";
     const dateLabel = document.createElement("span");
     dateLabel.className = "chat-list-date";
     const timeLabel = document.createElement("span");
@@ -282,12 +445,12 @@ async function renderChatList() {
     const badges = document.createElement("span");
     badges.className = "chat-list-badges";
 
-    let labelText;
+    let defaultLabel;
     let previewText;
 
     if (entry.kind === "freeform") {
       avatar.innerHTML = ICON_SPARK;
-      labelText = t(state.lang, "freeform_chat_title");
+      defaultLabel = t(state.lang, "freeform_chat_title");
       const timeSource = lastMsg?.created_at || entry.thread.createdAt;
       timeLabel.textContent = timeSource ? formatBubbleTime(timeSource) : "";
       if (lastMsg) {
@@ -299,7 +462,7 @@ async function renderChatList() {
     } else {
       const row = entry.row;
       avatar.innerHTML = lastMsg ? ICON_CHAT : ICON_DOC;
-      labelText = formatDateLabel(row.summary_date);
+      defaultLabel = formatDateLabel(row.summary_date);
       const timeSource = lastMsg?.created_at || (row.status !== "none" ? row.created_at : null);
       timeLabel.textContent = timeSource ? formatBubbleTime(timeSource) : "";
       if (lastMsg) {
@@ -328,8 +491,18 @@ async function renderChatList() {
       }
     }
 
+    state.listIndex.set(entry.id, { kind: entry.kind, defaultLabel });
+    const labelText = getCustomTitle(entry.id) || defaultLabel;
+
+    if (pinned) {
+      const pinIcon = document.createElement("span");
+      pinIcon.className = "chat-list-pin-icon";
+      pinIcon.innerHTML = ICON_PIN_FILLED;
+      labelWrap.appendChild(pinIcon);
+    }
     dateLabel.textContent = labelText;
-    top.appendChild(dateLabel);
+    labelWrap.appendChild(dateLabel);
+    top.appendChild(labelWrap);
     top.appendChild(timeLabel);
     preview.textContent = previewText;
     bottom.appendChild(preview);
@@ -337,10 +510,21 @@ async function renderChatList() {
 
     main.appendChild(top);
     main.appendChild(bottom);
-    item.appendChild(avatar);
-    item.appendChild(main);
+    mainBtn.appendChild(avatar);
+    mainBtn.appendChild(main);
+    mainBtn.addEventListener("click", () => openDetail(entry.id));
+
+    const menuBtn = document.createElement("button");
+    menuBtn.type = "button";
+    menuBtn.className = "chat-list-menu-btn";
+    menuBtn.innerHTML = ICON_DOTS;
+    menuBtn.setAttribute("aria-label", t(state.lang, "chat_options_menu"));
+    menuBtn.title = t(state.lang, "chat_options_menu");
+    menuBtn.addEventListener("click", () => openChatOptions(entry.id));
+
+    item.appendChild(mainBtn);
+    item.appendChild(menuBtn);
     item.dataset.search = `${labelText} ${previewText}`.toLowerCase();
-    item.addEventListener("click", () => openDetail(entry.id));
     els.chatList.appendChild(item);
   }
 
@@ -597,12 +781,12 @@ async function showDetailScreen(date) {
 
   els.chatSummarySlot.innerHTML = "";
 
+  els.detailDateTitle.textContent = getDisplayLabel(date);
+
   if (isFreeformId(date)) {
     // Obrolan bebas: tidak ada ringkasan harian yang terkait, jadi tidak
     // perlu memuat/menampilkan bubble ringkasan -- langsung ke diskusi.
-    els.detailDateTitle.textContent = t(state.lang, "freeform_chat_title");
   } else {
-    els.detailDateTitle.textContent = formatDateLabel(date);
     markDateOpened(date);
     try {
       const row = await fetchSummary(date);
@@ -643,6 +827,155 @@ function openDetail(date) {
 
 function openList() {
   location.hash = "";
+}
+
+function openDialogEl(dialogEl) {
+  if (typeof dialogEl.showModal === "function") {
+    dialogEl.showModal();
+  } else {
+    dialogEl.setAttribute("open", "");
+  }
+}
+
+function closeDialogEl(dialogEl) {
+  if (typeof dialogEl.close === "function") {
+    dialogEl.close();
+  } else {
+    dialogEl.removeAttribute("open");
+  }
+}
+
+function formatFullDateTime(value) {
+  const d = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(d.getTime())) return "";
+  const locale = state.lang === "id" ? "id-ID" : "en-US";
+  return d.toLocaleString(locale, { day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+
+// Detail/PDF/Hapus butuh data dari server (riwayat diskusi), jadi ketiganya
+// butuh kode akses -- beda dari Sematkan/Ubah judul yang murni lokal. Kalau
+// belum ada kode tersimpan, tutup menu titik-3 dan buka ulang dialog kode
+// akses yang sudah ada (dipakai juga oleh tombol "Buka Diskusi"), dengan
+// pesan kontekstual kenapa diminta.
+function requireChatCodeOrPrompt(messageKey) {
+  if (state.chatCode) return true;
+  closeChatOptions();
+  openChatCodeDialog();
+  els.chatCodeError.hidden = false;
+  els.chatCodeError.textContent = t(state.lang, messageKey);
+  return false;
+}
+
+function openChatOptions(id) {
+  state.activeOptionsId = id;
+  const info = state.listIndex.get(id) || { kind: isFreeformId(id) ? "freeform" : "daily", defaultLabel: getDefaultLabel(id) };
+  els.chatOptionsTitle.textContent = getCustomTitle(id) || info.defaultLabel;
+
+  const pinned = isPinned(id);
+  els.chatOptionsPinIcon.innerHTML = pinned ? ICON_PIN_FILLED : ICON_PIN;
+  els.chatOptionsPinLabel.textContent = t(state.lang, pinned ? "chat_options_unpin" : "chat_options_pin");
+
+  openDialogEl(els.chatOptionsDialog);
+}
+
+function closeChatOptions() {
+  closeDialogEl(els.chatOptionsDialog);
+}
+
+// Dipakai pin/rename/hapus: beri tahu detail layar yang lagi dibuka (kalau
+// ada) supaya judulnya ikut update, dan segarkan daftar HANYA kalau layar
+// daftar yang sedang kelihatan (hindari fetch "last_messages" ke server
+// sia-sia waktu user lagi ada di layar chat).
+async function refreshAfterChatMutation(id, { titleChanged = false } = {}) {
+  if (titleChanged && !els.screenDetail.hidden && state.currentDate === id) {
+    els.detailDateTitle.textContent = getDisplayLabel(id);
+  }
+  if (!els.screenList.hidden) {
+    await renderChatList();
+  }
+}
+
+async function exportChatToPdf(id) {
+  const kind = state.listIndex.get(id)?.kind || (isFreeformId(id) ? "freeform" : "daily");
+  const title = getCustomTitle(id) || getDefaultLabel(id);
+
+  let summaryHtml = "";
+  if (kind === "daily") {
+    try {
+      const row = await fetchSummary(id);
+      if (row && row.status !== "failed") {
+        const content = state.lang === "id" ? row.content_id : row.content_en || row.content_id;
+        summaryHtml = renderMiniMarkdown(content);
+      }
+    } catch (_err) {
+      // Gagal ambil ringkasan bukan alasan buat batalkan PDF -- lanjut
+      // tanpa bagian ringkasan, tetap tampilkan diskusinya.
+      summaryHtml = "";
+    }
+  }
+
+  const result = await fetchChatHistory(id, state.chatCode);
+  if (!result.ok) {
+    if (result.unauthorized) {
+      state.chatCode = "";
+      clearStoredChatCode();
+    }
+    window.alert(t(state.lang, "chat_load_error"));
+    return;
+  }
+  const messages = result.messages || [];
+
+  if (!summaryHtml && messages.length === 0) {
+    window.alert(t(state.lang, "pdf_empty"));
+    return;
+  }
+
+  const locale = state.lang === "id" ? "id-ID" : "en-US";
+  const printedAt = new Date().toLocaleString(locale, { dateStyle: "long", timeStyle: "short" });
+
+  els.printArea.innerHTML = "";
+
+  const titleEl = document.createElement("h1");
+  titleEl.className = "print-title";
+  titleEl.textContent = title;
+  els.printArea.appendChild(titleEl);
+
+  const metaEl = document.createElement("p");
+  metaEl.className = "print-meta";
+  metaEl.textContent = `${messages.length} ${t(state.lang, "detail_messages_unit")} • ${printedAt}`;
+  els.printArea.appendChild(metaEl);
+
+  if (summaryHtml) {
+    const summaryBox = document.createElement("div");
+    summaryBox.className = "print-summary";
+    summaryBox.innerHTML = summaryHtml;
+    els.printArea.appendChild(summaryBox);
+  }
+
+  for (const msg of messages) {
+    const msgEl = document.createElement("div");
+    msgEl.className = "print-message";
+
+    const head = document.createElement("div");
+    head.className = "print-message-head";
+    const who = msg.role === "assistant" ? t(state.lang, "pdf_ai_prefix") : t(state.lang, "pdf_you_prefix");
+    head.textContent = `${who} • ${formatFullDateTime(msg.created_at)}`;
+    msgEl.appendChild(head);
+
+    const body = document.createElement("div");
+    body.innerHTML = renderChatMarkdown(msg.content);
+    msgEl.appendChild(body);
+
+    els.printArea.appendChild(msgEl);
+  }
+
+  // Baru panggil print() 2 frame kemudian -- kasih waktu DOM yang baru
+  // diisi kebentuk layout dulu sebelum browser menyiapkan halaman cetaknya.
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      window.print();
+    });
+  });
 }
 
 const NOTIFY_ICONS = {
@@ -898,6 +1231,137 @@ function wireEvents() {
     });
     inputBarObserver.observe(els.chatInputBar);
   }
+
+  // ---------- Menu titik-3 per-chat: sematkan / ubah judul / PDF / detail / hapus ----------
+
+  // Ikon-ikon ini statis (tidak tergantung status chat tertentu), cukup
+  // dipasang sekali -- cuma ikon pin yang berubah tiap kali menu dibuka
+  // (lihat openChatOptions).
+  els.chatOptionsRenameIcon.innerHTML = ICON_EDIT;
+  els.chatOptionsPdfIcon.innerHTML = ICON_DOWNLOAD;
+  els.chatOptionsDetailIcon.innerHTML = ICON_INFO;
+  els.chatOptionsDeleteIcon.innerHTML = ICON_TRASH;
+
+  els.chatOptionsCancel.addEventListener("click", () => closeChatOptions());
+
+  // Tap area gelap di luar kartu sheet-nya buat nutup -- dialog bawaan
+  // browser tidak otomatis begitu, perlu dicek manual apa targetnya persis
+  // elemen <dialog>-nya sendiri (bukan konten .sheet-card di dalamnya).
+  els.chatOptionsDialog.addEventListener("click", (e) => {
+    if (e.target === els.chatOptionsDialog) closeChatOptions();
+  });
+
+  els.chatOptionsPinBtn.addEventListener("click", async () => {
+    const id = state.activeOptionsId;
+    if (!id) return;
+    togglePinned(id);
+    closeChatOptions();
+    await refreshAfterChatMutation(id);
+  });
+
+  els.chatOptionsRenameBtn.addEventListener("click", () => {
+    const id = state.activeOptionsId;
+    if (!id) return;
+    closeChatOptions();
+    const defaultLabel = state.listIndex.get(id)?.defaultLabel || getDefaultLabel(id);
+    els.renameInput.value = getCustomTitle(id);
+    els.renameInput.placeholder = defaultLabel;
+    openDialogEl(els.renameDialog);
+    els.renameInput.focus();
+  });
+
+  els.renameCancel.addEventListener("click", () => closeDialogEl(els.renameDialog));
+
+  els.renameForm.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const id = state.activeOptionsId;
+    closeDialogEl(els.renameDialog);
+    if (!id) return;
+    setCustomTitle(id, els.renameInput.value);
+    await refreshAfterChatMutation(id, { titleChanged: true });
+  });
+
+  els.chatOptionsPdfBtn.addEventListener("click", async () => {
+    const id = state.activeOptionsId;
+    if (!id) return;
+    if (!requireChatCodeOrPrompt("need_code_pdf")) return;
+    closeChatOptions();
+    await exportChatToPdf(id);
+  });
+
+  els.chatOptionsDetailBtn.addEventListener("click", async () => {
+    const id = state.activeOptionsId;
+    if (!id) return;
+    if (!requireChatCodeOrPrompt("need_code_detail")) return;
+    closeChatOptions();
+
+    const defaultLabel = state.listIndex.get(id)?.defaultLabel || getDefaultLabel(id);
+    els.chatDetailTitle.textContent = getCustomTitle(id) || defaultLabel;
+    els.chatDetailStats.hidden = false;
+    els.chatDetailEmpty.hidden = true;
+    els.chatDetailTotal.textContent = "…";
+    els.chatDetailStart.textContent = "…";
+    els.chatDetailLast.textContent = "…";
+    openDialogEl(els.chatDetailDialog);
+
+    const result = await fetchChatHistory(id, state.chatCode);
+    if (!result.ok) {
+      if (result.unauthorized) {
+        state.chatCode = "";
+        clearStoredChatCode();
+      }
+      closeDialogEl(els.chatDetailDialog);
+      window.alert(t(state.lang, "detail_load_error"));
+      return;
+    }
+
+    const messages = result.messages || [];
+    if (messages.length === 0) {
+      els.chatDetailStats.hidden = true;
+      els.chatDetailEmpty.hidden = false;
+      return;
+    }
+    els.chatDetailTotal.textContent = `${messages.length} ${t(state.lang, "detail_messages_unit")}`;
+    els.chatDetailStart.textContent = formatFullDateTime(messages[0].created_at);
+    els.chatDetailLast.textContent = formatFullDateTime(messages[messages.length - 1].created_at);
+  });
+
+  els.chatDetailClose.addEventListener("click", () => closeDialogEl(els.chatDetailDialog));
+
+  els.chatOptionsDeleteBtn.addEventListener("click", async () => {
+    const id = state.activeOptionsId;
+    if (!id) return;
+    if (!requireChatCodeOrPrompt("need_code_delete")) return;
+    closeChatOptions();
+
+    const kind = state.listIndex.get(id)?.kind || (isFreeformId(id) ? "freeform" : "daily");
+    const confirmMsg = t(state.lang, kind === "freeform" ? "delete_confirm_freeform" : "delete_confirm_daily");
+    if (!window.confirm(confirmMsg)) return;
+
+    const result = await deleteChatThread(id, state.chatCode);
+    if (!result.ok) {
+      if (result.unauthorized) {
+        state.chatCode = "";
+        clearStoredChatCode();
+      }
+      window.alert(t(state.lang, "delete_error"));
+      return;
+    }
+
+    // Chat-nya sudah tidak ada lagi -- lepas sematan & judul custom-nya juga.
+    unpinChat(id);
+    clearChatTitle(id);
+    if (kind === "freeform") {
+      removeFreeformThread(id);
+    }
+
+    if (!els.screenDetail.hidden && state.currentDate === id) {
+      // Lagi buka chat yang baru dihapus -- keluar duluan baru balik ke daftar.
+      openList();
+    } else if (!els.screenList.hidden) {
+      await renderChatList();
+    }
+  });
 }
 
 // Perbaikan bug WebKit: saat keyboard on-screen muncul di iOS (khususnya mode
