@@ -98,3 +98,29 @@ export function setThreadMeta(id, code, { pinned, title } = {}) {
 export function deleteChatThread(date, code) {
   return callChatFunction({ code, date, action: "delete" });
 }
+
+// ================================================================
+// "Dokumen Pengetahuan" (Pengaturan > Upload Dokumen) -- PDF referensi
+// (mis. peraturan keuangan) yang teksnya sudah diekstrak DI BROWSER (lihat
+// pdfText.js), lalu teksnya disimpan di server supaya disertakan sebagai
+// konteks ke Gemini tiap kali chat (lihat action "send" di Edge Function).
+// ================================================================
+
+// Daftar dokumen yang sudah pernah diupload (metadata saja -- judul, jumlah
+// karakter, tanggal upload -- TANPA isi teksnya, supaya ringan buat
+// ditampilkan di dialog Pengaturan).
+export function listKnowledgeDocs(code) {
+  return callChatFunction({ code, action: "kb_list" });
+}
+
+// Upload satu dokumen baru -- `content` adalah teks hasil ekstrak PDF
+// (extractPdfText() di pdfText.js), BUKAN file PDF mentah, supaya Edge
+// Function tidak perlu library PDF sama sekali.
+export function uploadKnowledgeDoc(code, { title, content, filename } = {}) {
+  return callChatFunction({ code, action: "kb_upload", title, content, filename });
+}
+
+// Hapus satu dokumen pengetahuan (tombol tempat sampah di daftar dokumen).
+export function deleteKnowledgeDoc(code, id) {
+  return callChatFunction({ code, action: "kb_delete", id });
+}

@@ -40,6 +40,9 @@
             <button id="theme-toggle" class="icon-btn" title="Ganti tema" aria-label="Ganti tema">
               <span id="theme-icon"></span>
             </button>
+            <button id="settings-toggle" class="icon-btn" title="Pengaturan" aria-label="Pengaturan">
+              <span id="settings-toggle-icon"></span>
+            </button>
           </div>
         </header>
 
@@ -234,6 +237,93 @@
           </div>
           <div class="chat-code-dialog-actions">
             <button type="button" id="chat-detail-close" class="primary-btn" data-i18n="detail_close">Tutup</button>
+          </div>
+        </div>
+      </dialog>
+
+      <!-- Menu Pengaturan: dokumen pengetahuan / ubah kode / keluar chat / detail aplikasi -->
+      <dialog id="settings-dialog" class="sheet-dialog">
+        <div class="sheet-card">
+          <p class="sheet-title" data-i18n="settings_title">Pengaturan</p>
+
+          <button type="button" id="settings-kb-btn" class="sheet-action">
+            <span id="settings-kb-icon" class="sheet-action-icon"></span>
+            <span data-i18n="settings_kb">Dokumen Pengetahuan</span>
+          </button>
+          <button type="button" id="settings-change-code-btn" class="sheet-action">
+            <span id="settings-change-code-icon" class="sheet-action-icon"></span>
+            <span data-i18n="settings_change_code">Ubah kode chat</span>
+          </button>
+          <button type="button" id="settings-logout-btn" class="sheet-action">
+            <span id="settings-logout-icon" class="sheet-action-icon"></span>
+            <span data-i18n="settings_logout">Keluar chat</span>
+          </button>
+          <button type="button" id="settings-about-btn" class="sheet-action">
+            <span id="settings-about-icon" class="sheet-action-icon"></span>
+            <span data-i18n="settings_about">Detail aplikasi</span>
+          </button>
+
+          <button type="button" id="settings-cancel-btn" class="sheet-cancel" data-i18n="chat_options_cancel">Batal</button>
+        </div>
+      </dialog>
+
+      <!-- Dialog Dokumen Pengetahuan: upload PDF peraturan/referensi supaya AI
+           baca dari sini duluan, + daftar dokumen yang sudah diupload. -->
+      <dialog id="kb-dialog" class="kb-dialog">
+        <div class="kb-dialog-card">
+          <h2 data-i18n="kb_title">Dokumen Pengetahuan</h2>
+          <p class="kb-intro" data-i18n="kb_intro">
+            Upload PDF peraturan atau referensi lain supaya AI bisa menjawab dari dokumen ini duluan, tanpa perlu cari di
+            internet.
+          </p>
+
+          <form id="kb-upload-form" class="kb-upload-form">
+            <input
+              id="kb-title-input"
+              type="text"
+              maxlength="150"
+              autocomplete="off"
+              data-i18n-placeholder="kb_title_placeholder"
+              placeholder="Judul dokumen (mis. Permen Keuangan No. 1 Tahun 2024)"
+            />
+            <input id="kb-file-input" type="file" accept="application/pdf,.pdf" />
+            <button type="submit" id="kb-upload-btn" class="primary-btn" data-i18n="kb_upload_btn">Upload</button>
+          </form>
+          <p id="kb-upload-status" class="kb-upload-status" hidden></p>
+
+          <div id="kb-doc-list" class="kb-doc-list"></div>
+          <p id="kb-doc-list-empty" class="status-text" data-i18n="kb_empty" hidden>Belum ada dokumen yang diupload.</p>
+
+          <div class="chat-code-dialog-actions">
+            <button type="button" id="kb-close-btn" class="primary-btn" data-i18n="detail_close">Tutup</button>
+          </div>
+        </div>
+      </dialog>
+
+      <!-- Dialog Detail Aplikasi -->
+      <dialog id="about-dialog" class="chat-code-dialog">
+        <div class="chat-code-form-modal">
+          <h2 data-i18n="about_title">Detail Aplikasi</h2>
+          <p data-i18n="about_desc">
+            Asisten AI pribadi dengan riwayat obrolan, sinkron lintas perangkat lewat kode akses yang sama, export PDF,
+            dan Dokumen Pengetahuan (PDF referensi) sendiri.
+          </p>
+          <div class="chat-detail-stats">
+            <div class="chat-detail-stat">
+              <span class="chat-detail-stat-label" data-i18n="about_chats_label">Obrolan tersimpan (HP ini)</span>
+              <span id="about-chats-count" class="chat-detail-stat-value"></span>
+            </div>
+            <div class="chat-detail-stat">
+              <span class="chat-detail-stat-label" data-i18n="about_kb_label">Dokumen pengetahuan</span>
+              <span id="about-kb-count" class="chat-detail-stat-value"></span>
+            </div>
+            <div class="chat-detail-stat">
+              <span class="chat-detail-stat-label" data-i18n="about_code_label">Status kode akses</span>
+              <span id="about-code-status" class="chat-detail-stat-value"></span>
+            </div>
+          </div>
+          <div class="chat-code-dialog-actions">
+            <button type="button" id="about-close-btn" class="primary-btn" data-i18n="detail_close">Tutup</button>
           </div>
         </div>
       </dialog>

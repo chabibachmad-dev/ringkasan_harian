@@ -34,6 +34,21 @@
 //     tabel chat_thread_meta -- kirim cuma field yang berubah, field yang
 //     tidak dikirim tidak akan diubah. title null/kosong berarti "pakai
 //     judul default lagi".)
+//
+// --- "Dokumen Pengetahuan" (Pengaturan > Upload Dokumen) ---
+// Teks PDF-nya diekstrak DI BROWSER (lihat src/pdfText.js) sebelum dikirim
+// ke sini -- Edge Function ini cuma simpan/baca teksnya, TIDAK ada library
+// PDF di sisi server sama sekali. Isi tabel knowledge_documents disertakan
+// sebagai konteks tambahan ke Gemini tiap kali action "send" dipanggil,
+// supaya AI bisa jawab dari dokumen yang diupload pengguna duluan sebelum
+// (atau alih-alih) cari di web -- cocok buat dipakai sebagai referensi
+// peraturan/perundangan yang sering dipakai berulang.
+//   { "code": "...", "action": "kb_list" }
+//     -> { ok: true, documents: [{ id, title, char_count, original_filename, uploaded_at }, ...] }
+//   { "code": "...", "action": "kb_upload", "title": "...", "content": "...", "filename"?: "..." }
+//     -> { ok: true, document: { id, title, char_count, original_filename, uploaded_at } }
+//   { "code": "...", "action": "kb_delete", "id": "..." }
+//     -> { ok: true }
 
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { corsHeaders } from "../_shared/cors.ts";
@@ -71,6 +86,9 @@ Deno.serve(async (req) => {
     message?: string;
     pinned?: boolean;
     title?: string | null;
+    content?: string;
+    filename?: string;
+    id?: string;
   };
   try {
     body = await req.json();
@@ -193,6 +211,56 @@ Deno.serve(async (req) => {
     return json({ ok: true, pinned: nextPinned, title: nextTitle });
   }
 
+  if (body.action === "kb_list") {
+    const { data, error } = await supabaseAdmin
+      .from("knowledge_documents")
+      .select("id, title, char_count, original_filename, uploaded_at")
+      .order("uploaded_at", { ascending: false })
+      .limit(200);
+
+    if (error) return json({ ok: false, error: error.message }, 500);
+    return json({ ok: true, documents: data ?? [] });
+  }
+
+  if (body.action === "kb_upload") {
+    const title = typeof body.title === "string" ? body.title.trim().slice(0, 200) : "";
+    const content = typeof body.content === "string" ? body.content.trim() : "";
+    const originalFilename = typeof body.filename === "string" ? body.filename.slice(0, 200) : null;
+
+    if (!title) return json({ ok: false, error: "Judul dokumen tidak boleh kosong." }, 400);
+    if (!content) {
+      return json(
+        { ok: false, error: "Teks dokumen kosong -- kemungkinan PDF ini hasil scan/gambar tanpa lapisan teks." },
+        400
+      );
+    }
+
+    // Batasi per-dokumen supaya satu PDF yang sangat panjang tidak membuat
+    // konteks yang dikirim ke Gemini tiap chat membengkak tak terkendali
+    // (lihat pemotongan total gabungan semua dokumen di action "send").
+    const MAX_DOC_CHARS = 300000;
+    const trimmed =
+      content.length > MAX_DOC_CHARS ? `${content.slice(0, MAX_DOC_CHARS)}\n\n[...dipotong, dokumen terlalu panjang...]` : content;
+
+    const { data, error } = await supabaseAdmin
+      .from("knowledge_documents")
+      .insert({ title, content: trimmed, char_count: trimmed.length, original_filename: originalFilename })
+      .select("id, title, char_count, original_filename, uploaded_at")
+      .single();
+
+    if (error) return json({ ok: false, error: error.message }, 500);
+    return json({ ok: true, document: data });
+  }
+
+  if (body.action === "kb_delete") {
+    const id = typeof body.id === "string" ? body.id : "";
+    if (!id) return json({ ok: false, error: "ID dokumen tidak valid." }, 400);
+
+    const { error } = await supabaseAdmin.from("knowledge_documents").delete().eq("id", id);
+    if (error) return json({ ok: false, error: error.message }, 500);
+    return json({ ok: true });
+  }
+
   if (typeof body.date !== "string" || !isValidThreadId(body.date)) {
     return json({ ok: false, error: "ID obrolan tidak valid." }, 400);
   }
@@ -265,9 +333,36 @@ Deno.serve(async (req) => {
       .insert({ chat_date: date, role: "user", content: trimmed });
     if (insertUserErr) return json({ ok: false, error: insertUserErr.message }, 500);
 
+    // Ambil semua "Dokumen Pengetahuan" (PDF peraturan dll yang diupload
+    // lewat Pengaturan) buat disertakan sebagai konteks ke Gemini -- dibatasi
+    // total gabungannya (bukan cuma per-dokumen) supaya tidak kebablasan
+    // kalau dokumennya banyak. Diurut dari yang PALING BARU diupload supaya
+    // kalau harus ada yang dipotong karena kepanjangan, yang kepotong
+    // duluan adalah dokumen lama -- dokumen yang baru saja diupload (paling
+    // relevan buat pengguna saat ini) tetap utuh.
+    const knowledgeContext: { title: string; content: string }[] = [];
+    const { data: kbRows, error: kbErr } = await supabaseAdmin
+      .from("knowledge_documents")
+      .select("title, content")
+      .order("uploaded_at", { ascending: false })
+      .limit(50);
+    if (kbErr) {
+      console.error("chat: gagal ambil dokumen pengetahuan, lanjut tanpa itu:", kbErr.message);
+    } else {
+      const TOTAL_KB_BUDGET_CHARS = 600000;
+      let used = 0;
+      for (const row of kbRows ?? []) {
+        if (used >= TOTAL_KB_BUDGET_CHARS) break;
+        const remaining = TOTAL_KB_BUDGET_CHARS - used;
+        const content = row.content.length > remaining ? `${row.content.slice(0, remaining)}\n\n[...dipotong...]` : row.content;
+        knowledgeContext.push({ title: row.title, content });
+        used += content.length;
+      }
+    }
+
     let reply: string;
     try {
-      reply = await generateChatReply(history, geminiApiKey);
+      reply = await generateChatReply(history, geminiApiKey, knowledgeContext);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error("chat: gagal dapat balasan Gemini:", msg);
@@ -286,7 +381,7 @@ Deno.serve(async (req) => {
     {
       ok: false,
       error:
-        "action tidak dikenal (pakai 'history', 'send', 'delete', 'last_messages', 'list_threads', atau 'set_thread_meta')."
+        "action tidak dikenal (pakai 'history', 'send', 'delete', 'last_messages', 'list_threads', 'set_thread_meta', 'kb_list', 'kb_upload', atau 'kb_delete')."
     },
     400
   );
