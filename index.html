@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <title>Daily Insider</title>
-    <meta name="description" content="Ringkasan berita dunia & Indonesia setiap hari jam 20:00." />
+    <meta name="description" content="Asisten AI pribadi untuk ngobrol kapan saja." />
 
     <link rel="manifest" href="manifest.webmanifest" />
     <meta id="meta-theme-color" name="theme-color" content="#ffffff" />
@@ -34,9 +34,6 @@
         <header class="topbar">
           <h1 class="brand"><span data-i18n="brand">Daily Insider</span></h1>
           <div class="topbar-actions">
-            <button id="notify-toggle" class="icon-btn" title="Notifikasi" aria-label="Notifikasi">
-              <span id="notify-icon"></span>
-            </button>
             <button id="lang-toggle" class="icon-btn" title="Ganti bahasa / Switch language" aria-label="Ganti bahasa">
               <span id="lang-label">ID</span>
             </button>
@@ -53,7 +50,7 @@
               type="search"
               autocomplete="off"
               data-i18n-placeholder="search_placeholder"
-              placeholder="Cari tanggal atau topik…"
+              placeholder="Cari obrolan…"
             />
           </div>
 
@@ -65,7 +62,7 @@
 
         <footer class="footer">
           <p data-i18n="footer_note">
-            Dibuat otomatis tiap hari jam 20:00 WITA dari berbagai sumber berita publik.
+            Asisten AI pribadi kamu.
           </p>
         </footer>
 
@@ -86,7 +83,6 @@
         <main class="content">
           <section id="chat-section" class="chat-card">
             <div id="chat-messages" class="chat-messages">
-              <div id="chat-summary-slot"></div>
               <div id="chat-thread"></div>
             </div>
           </section>

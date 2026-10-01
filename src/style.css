@@ -109,15 +109,6 @@ body {
   transform: scale(0.95);
 }
 
-/* Status "butuh perhatian" (error notifikasi dll) ditandai dengan warna
-   terbalik (isi penuh) -- bukan warna merah -- supaya tetap murni hitam/putih
-   tapi tetap jelas beda dari tombol biasa. */
-.icon-btn--attn {
-  background: var(--text);
-  color: var(--bg);
-  border-color: var(--text);
-}
-
 .content {
   flex: 1;
   display: flex;
@@ -324,33 +315,6 @@ body {
   white-space: nowrap;
 }
 
-.chat-list-badges {
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.chat-list-badge {
-  width: 16px;
-  height: 16px;
-  border: 1.3px solid var(--text);
-  border-radius: 50%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 0.65rem;
-  font-weight: 700;
-  line-height: 1;
-}
-
-.chat-list-unread-dot {
-  width: 9px;
-  height: 9px;
-  border-radius: 50%;
-  background: var(--accent);
-}
-
 .status-text {
   color: var(--text-muted);
   font-size: 0.85rem;
@@ -473,107 +437,6 @@ body {
   font-size: 0.82rem;
   text-align: center;
   max-width: 90%;
-}
-
-.chat-bubble--summary {
-  max-width: 100%;
-  gap: 8px;
-}
-
-.chat-summary-text {
-  position: relative;
-  max-height: 260px;
-  overflow: hidden;
-  font-size: 0.88rem;
-  line-height: 1.6;
-}
-
-.chat-summary-text.expanded {
-  max-height: none;
-}
-
-.chat-summary-text:not(.expanded)::after {
-  content: "";
-  position: absolute;
-  bottom: 0;
-  left: 0;
-  right: 0;
-  height: 48px;
-  background: linear-gradient(transparent, var(--bg-card));
-  pointer-events: none;
-}
-
-.chat-summary-text h2 {
-  font-size: 0.85rem;
-  margin: 16px 0 8px;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  border-bottom: 1px solid var(--border);
-  padding-bottom: 4px;
-}
-
-.chat-summary-text h2:first-child {
-  margin-top: 0;
-}
-
-.chat-summary-text p {
-  margin: 0 0 10px;
-  text-align: left;
-}
-
-.chat-summary-toggle {
-  align-self: flex-start;
-  background: none;
-  border: none;
-  color: var(--link);
-  font-family: inherit;
-  font-size: 0.85rem;
-  font-weight: 700;
-  text-decoration: underline;
-  text-underline-offset: 2px;
-  padding: 2px 0;
-  cursor: pointer;
-}
-
-.chat-summary-sources {
-  border-top: 1px solid var(--border);
-  padding-top: 8px;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.chat-summary-sources-label {
-  font-size: 0.72rem;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.03em;
-  color: var(--text-muted);
-}
-
-.sources-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.sources-list li a {
-  color: var(--link);
-  text-decoration: underline;
-  text-underline-offset: 2px;
-  font-size: 0.88rem;
-  line-height: 1.4;
-}
-
-.sources-list .source-name {
-  color: var(--text-muted);
-  font-size: 0.76rem;
-  display: block;
-  margin-top: 2px;
 }
 
 .chat-empty-text {
@@ -862,14 +725,6 @@ body {
     font-size: 0.8rem;
     color: #444;
     margin: 0 0 18px;
-  }
-  .print-summary {
-    border: 1px solid #000;
-    border-radius: 8px;
-    padding: 12px 14px;
-    margin-bottom: 18px;
-    font-size: 0.88rem;
-    line-height: 1.5;
   }
   .print-message {
     padding: 8px 0;

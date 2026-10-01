@@ -1,14 +1,9 @@
-import { supabase } from "./supabaseClient.js";
 import { applyStaticI18n, t } from "./i18n.js";
-import { renderMiniMarkdown, renderChatMarkdown } from "./markdown.js";
+import { renderChatMarkdown } from "./markdown.js";
 import {
-  ICON_BELL_OUTLINE,
-  ICON_BELL_FILLED,
-  ICON_BELL_PLUS,
   ICON_MOON,
   ICON_SUN,
   ICON_CHAT,
-  ICON_DOC,
   ICON_SPARK,
   ICON_DOTS,
   ICON_PIN,
@@ -18,7 +13,7 @@ import {
   ICON_INFO,
   ICON_TRASH
 } from "./icons.js";
-import { isIOS, isStandalone, pushSupported, registerServiceWorker, getExistingSubscription, subscribeToPush } from "./push.js";
+import { registerServiceWorker } from "./push.js";
 import {
   getStoredChatCode,
   setStoredChatCode,
@@ -29,12 +24,9 @@ import {
   deleteChatThread
 } from "./chat.js";
 
-const VAPID_PUBLIC_KEY = import.meta.env.VITE_VAPID_PUBLIC_KEY;
-const OPENED_DATES_KEY = "rh_opened_dates";
-// Daftar obrolan bebas (tombol "+") yang pernah dimulai dari perangkat ini --
-// disimpan lokal karena thread-nya tidak berasal dari tabel `summaries`
-// (tidak terikat ringkasan tanggal tertentu), jadi tidak bisa didaftar dari
-// server seperti obrolan ringkasan harian.
+// Daftar obrolan yang pernah dimulai dari perangkat ini (tombol "+") --
+// disimpan lokal karena app ini sekarang murni asisten chat, tidak ada lagi
+// daftar "tanggal ringkasan" dari server untuk dipakai sebagai sumber daftar.
 const FREEFORM_THREADS_KEY = "rh_freeform_threads";
 // Chat yang disematkan (pin) & judul custom (hasil "Ubah judul") -- sama-sama
 // disimpan lokal per perangkat, dikunci dengan ID thread (tanggal kalender
@@ -47,8 +39,6 @@ const els = {
   screenDetail: document.getElementById("screen-detail"),
   backBtn: document.getElementById("back-btn"),
   detailDateTitle: document.getElementById("detail-date-title"),
-  notifyToggle: document.getElementById("notify-toggle"),
-  notifyIcon: document.getElementById("notify-icon"),
   langToggle: document.getElementById("lang-toggle"),
   langLabel: document.getElementById("lang-label"),
   themeToggle: document.getElementById("theme-toggle"),
@@ -56,7 +46,6 @@ const els = {
   chatSearchInput: document.getElementById("chat-search-input"),
   chatList: document.getElementById("chat-list"),
   chatListStatus: document.getElementById("chat-list-status"),
-  chatSummarySlot: document.getElementById("chat-summary-slot"),
   chatThread: document.getElementById("chat-thread"),
   chatLockedBar: document.getElementById("chat-locked-bar"),
   chatUnlockBtn: document.getElementById("chat-unlock-btn"),
@@ -105,53 +94,20 @@ const els = {
 const state = {
   lang: localStorage.getItem("rh_lang") || "id",
   theme: localStorage.getItem("rh_theme") || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"),
-  summaries: [], // { summary_date, status, content_id, content_en, sources, created_at, ... }
   currentDate: null,
-  cache: new Map(), // summary_date -> full row
   chatCode: "",
-  notifyMode: "idle",
-  notifyExtra: "",
-  // id thread -> { kind: "daily"|"freeform", defaultLabel } -- diisi ulang
-  // tiap kali renderChatList() jalan, dipakai menu titik-3 buat tahu jenis
-  // & judul default chat yang lagi diklik tanpa harus hitung ulang.
+  // id obrolan -> { defaultLabel } -- diisi ulang tiap kali renderChatList()
+  // jalan, dipakai menu titik-3 buat tahu judul default chat yang lagi
+  // diklik tanpa harus hitung ulang.
   listIndex: new Map(),
   activeOptionsId: null
 };
-
-// Tanggal "hari ini" di zona WITA (UTC+8) -- sama persis dengan cara
-// Edge Function generate-summary/chat menghitungnya, supaya konsisten.
-function todayWita() {
-  return new Date(Date.now() + 8 * 60 * 60 * 1000).toISOString().slice(0, 10);
-}
 
 function formatBubbleTime(value) {
   const d = value instanceof Date ? value : new Date(value);
   if (Number.isNaN(d.getTime())) return "";
   const locale = state.lang === "id" ? "id-ID" : "en-US";
   return d.toLocaleTimeString(locale, { hour: "2-digit", minute: "2-digit" });
-}
-
-function getOpenedDates() {
-  try {
-    return new Set(JSON.parse(localStorage.getItem(OPENED_DATES_KEY) || "[]"));
-  } catch (_err) {
-    return new Set();
-  }
-}
-
-function markDateOpened(date) {
-  try {
-    const set = getOpenedDates();
-    if (set.has(date)) return;
-    set.add(date);
-    localStorage.setItem(OPENED_DATES_KEY, JSON.stringify([...set]));
-  } catch (_err) {
-    /* noop */
-  }
-}
-
-function isFreeformId(id) {
-  return typeof id === "string" && id.startsWith("freeform-");
 }
 
 function getFreeformThreads() {
@@ -265,11 +221,10 @@ function clearChatTitle(id) {
   }
 }
 
-// Judul default (sebelum dipengaruhi "Ubah judul") buat satu thread --
+// Judul default (sebelum dipengaruhi "Ubah judul") buat satu obrolan --
 // dipakai renderChatList, showDetailScreen, dan isi awal popup opsi/rename.
-function getDefaultLabel(id) {
-  if (isFreeformId(id)) return t(state.lang, "freeform_chat_title");
-  return formatDateLabel(id);
+function getDefaultLabel(_id) {
+  return t(state.lang, "freeform_chat_title");
 }
 
 function getDisplayLabel(id) {
@@ -291,62 +246,6 @@ function applyLang() {
   els.langLabel.textContent = state.lang.toUpperCase();
 }
 
-function formatDateLabel(dateStr) {
-  const locale = state.lang === "id" ? "id-ID" : "en-US";
-  const d = new Date(`${dateStr}T00:00:00`);
-  return d.toLocaleDateString(locale, { weekday: "long", day: "numeric", month: "long", year: "numeric" });
-}
-
-async function loadDateList() {
-  const { data, error } = await supabase
-    .from("summaries")
-    .select("*")
-    .order("summary_date", { ascending: false })
-    .limit(60);
-
-  if (error) {
-    els.chatListStatus.hidden = false;
-    els.chatListStatus.textContent = t(state.lang, "load_error");
-    console.error(error);
-    return;
-  }
-
-  state.summaries = data || [];
-
-  // Pastikan tanggal hari ini (WITA) selalu ada di daftar, walau ringkasan
-  // buat hari itu belum sempat dibuat cron -- supaya diskusi/chat hari ini
-  // tetap bisa diakses dari awal, tidak harus menunggu jam 20:00.
-  const today = todayWita();
-  if (!state.summaries.some((row) => row.summary_date === today)) {
-    state.summaries.unshift({ summary_date: today, status: "none" });
-  }
-
-  // Isi cache sekalian -- baris-baris ini sudah lengkap (select *), jadi
-  // fetchSummary() tidak perlu query ulang waktu tanggalnya dibuka.
-  for (const row of state.summaries) {
-    if (row.status !== "none") {
-      state.cache.set(row.summary_date, row);
-    }
-  }
-}
-
-async function fetchSummary(date) {
-  if (state.cache.has(date)) return state.cache.get(date);
-  const { data, error } = await supabase.from("summaries").select("*").eq("summary_date", date).maybeSingle();
-  if (error) throw error;
-  if (data) state.cache.set(date, data);
-  return data;
-}
-
-function stripMarkdownPreview(md) {
-  if (!md) return "";
-  return md
-    .replace(/^#+\s*/gm, "")
-    .replace(/[*_`>]/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
 function truncate(text, max = 90) {
   if (!text) return "";
   return text.length > max ? `${text.slice(0, max).trimEnd()}…` : text;
@@ -366,8 +265,7 @@ async function renderChatList() {
   els.chatList.innerHTML = "";
 
   const freeformThreads = getFreeformThreads();
-  const allIds = [...state.summaries.map((row) => row.summary_date), ...freeformThreads.map((th) => th.id)];
-  const openedDates = getOpenedDates();
+  const allIds = freeformThreads.map((th) => th.id);
   let lastMessages = {};
   if (state.chatCode && allIds.length > 0) {
     const result = await fetchLastMessages(allIds, state.chatCode);
@@ -375,37 +273,32 @@ async function renderChatList() {
       lastMessages = result.lastMessages || {};
     } else if (result.unauthorized) {
       // Kode yang tersimpan sudah tidak cocok lagi -- lepas supaya
-      // preview & chat minta kode ulang, tapi jangan ganggu daftar tanggal.
+      // preview & chat minta kode ulang, tapi jangan ganggu daftarnya.
       state.chatCode = "";
       clearStoredChatCode();
     }
   }
 
-  els.chatListStatus.hidden = true;
-
   const pinnedSet = getPinnedChats();
   state.listIndex.clear();
 
-  // Gabungkan obrolan ringkasan harian & obrolan bebas jadi satu daftar,
-  // diurutkan berdasarkan aktivitas terbaru (mirip daftar chat WhatsApp) --
-  // bukan cuma diurutkan berdasarkan tanggal ringkasan. Yang disematkan
-  // (pin) selalu naik ke atas duluan, baru di dalam masing-masing grup
-  // (disematkan / tidak) diurutkan berdasarkan waktu aktivitas terakhir.
-  const items = [];
-  for (const row of state.summaries) {
-    const lastMsg = lastMessages[row.summary_date];
-    const sortTime = lastMsg?.created_at
-      ? Date.parse(lastMsg.created_at)
-      : row.status !== "none" && row.created_at
-        ? Date.parse(row.created_at)
-        : Date.parse(`${row.summary_date}T00:00:00`);
-    items.push({ kind: "daily", id: row.summary_date, row, lastMsg, sortTime });
+  if (freeformThreads.length === 0) {
+    els.chatListStatus.hidden = false;
+    els.chatListStatus.textContent = t(state.lang, "chat_list_empty");
+    applyChatListFilter();
+    return;
   }
-  for (const thread of freeformThreads) {
+  els.chatListStatus.hidden = true;
+
+  // Diurutkan berdasarkan aktivitas terbaru (mirip daftar chat WhatsApp).
+  // Yang disematkan (pin) selalu naik ke atas duluan, baru di dalam
+  // masing-masing grup (disematkan / tidak) diurutkan berdasarkan waktu
+  // aktivitas terakhir.
+  const items = freeformThreads.map((thread) => {
     const lastMsg = lastMessages[thread.id];
     const sortTime = lastMsg?.created_at ? Date.parse(lastMsg.created_at) : Date.parse(thread.createdAt);
-    items.push({ kind: "freeform", id: thread.id, thread, lastMsg, sortTime });
-  }
+    return { id: thread.id, thread, lastMsg, sortTime };
+  });
   items.sort((a, b) => {
     const aPinned = pinnedSet.has(a.id) ? 1 : 0;
     const bPinned = pinnedSet.has(b.id) ? 1 : 0;
@@ -425,6 +318,7 @@ async function renderChatList() {
     const { lastMsg } = entry;
     const avatar = document.createElement("div");
     avatar.className = "chat-list-avatar";
+    avatar.innerHTML = lastMsg ? ICON_CHAT : ICON_SPARK;
 
     const main = document.createElement("div");
     main.className = "chat-list-main";
@@ -442,56 +336,20 @@ async function renderChatList() {
     bottom.className = "chat-list-bottom";
     const preview = document.createElement("span");
     preview.className = "chat-list-preview";
-    const badges = document.createElement("span");
-    badges.className = "chat-list-badges";
 
-    let defaultLabel;
+    const defaultLabel = t(state.lang, "freeform_chat_title");
+    const timeSource = lastMsg?.created_at || entry.thread.createdAt;
+    timeLabel.textContent = timeSource ? formatBubbleTime(timeSource) : "";
+
     let previewText;
-
-    if (entry.kind === "freeform") {
-      avatar.innerHTML = ICON_SPARK;
-      defaultLabel = t(state.lang, "freeform_chat_title");
-      const timeSource = lastMsg?.created_at || entry.thread.createdAt;
-      timeLabel.textContent = timeSource ? formatBubbleTime(timeSource) : "";
-      if (lastMsg) {
-        const prefix = lastMsg.role === "assistant" ? "" : `${t(state.lang, "chat_you_prefix")} `;
-        previewText = truncate(`${prefix}${lastMsg.content}`);
-      } else {
-        previewText = t(state.lang, "freeform_chat_preview");
-      }
+    if (lastMsg) {
+      const prefix = lastMsg.role === "assistant" ? "" : `${t(state.lang, "chat_you_prefix")} `;
+      previewText = truncate(`${prefix}${lastMsg.content}`);
     } else {
-      const row = entry.row;
-      avatar.innerHTML = lastMsg ? ICON_CHAT : ICON_DOC;
-      defaultLabel = formatDateLabel(row.summary_date);
-      const timeSource = lastMsg?.created_at || (row.status !== "none" ? row.created_at : null);
-      timeLabel.textContent = timeSource ? formatBubbleTime(timeSource) : "";
-      if (lastMsg) {
-        const prefix = lastMsg.role === "assistant" ? "" : `${t(state.lang, "chat_you_prefix")} `;
-        previewText = truncate(`${prefix}${lastMsg.content}`);
-      } else if (row.status === "failed") {
-        previewText = t(state.lang, "failed_summary");
-      } else if (row.status === "none") {
-        previewText = t(state.lang, "no_summary");
-      } else {
-        const content = state.lang === "id" ? row.content_id : row.content_en || row.content_id;
-        previewText = truncate(stripMarkdownPreview(content));
-      }
-
-      if (row.status === "failed") {
-        const badge = document.createElement("span");
-        badge.className = "chat-list-badge";
-        badge.textContent = "!";
-        badges.appendChild(badge);
-      }
-      const unread = row.status !== "none" && !lastMsg && !openedDates.has(row.summary_date);
-      if (unread) {
-        const dot = document.createElement("span");
-        dot.className = "chat-list-unread-dot";
-        badges.appendChild(dot);
-      }
+      previewText = t(state.lang, "freeform_chat_preview");
     }
 
-    state.listIndex.set(entry.id, { kind: entry.kind, defaultLabel });
+    state.listIndex.set(entry.id, { defaultLabel });
     const labelText = getCustomTitle(entry.id) || defaultLabel;
 
     if (pinned) {
@@ -506,7 +364,6 @@ async function renderChatList() {
     top.appendChild(timeLabel);
     preview.textContent = previewText;
     bottom.appendChild(preview);
-    bottom.appendChild(badges);
 
     main.appendChild(top);
     main.appendChild(bottom);
@@ -529,102 +386,6 @@ async function renderChatList() {
   }
 
   applyChatListFilter();
-}
-
-function buildSourcesBlock(sources) {
-  const container = document.createElement("div");
-  container.className = "chat-summary-sources";
-
-  const groups = [
-    { key: "indonesia", label: t(state.lang, "sources_indonesia") },
-    { key: "dunia", label: t(state.lang, "sources_dunia") }
-  ];
-
-  for (const group of groups) {
-    const items = sources.filter((s) => s.category === group.key);
-    if (items.length === 0) continue;
-
-    const label = document.createElement("div");
-    label.className = "chat-summary-sources-label";
-    label.textContent = group.label;
-    container.appendChild(label);
-
-    const ul = document.createElement("ul");
-    ul.className = "sources-list";
-    for (const item of items) {
-      const li = document.createElement("li");
-      const a = document.createElement("a");
-      a.href = item.url;
-      a.target = "_blank";
-      a.rel = "noopener noreferrer";
-      a.textContent = item.title;
-      const small = document.createElement("span");
-      small.className = "source-name";
-      small.textContent = item.source;
-      li.appendChild(a);
-      li.appendChild(small);
-      ul.appendChild(li);
-    }
-    container.appendChild(ul);
-  }
-
-  return container;
-}
-
-function buildSummaryBubble(row) {
-  if (!row) {
-    const empty = document.createElement("div");
-    empty.className = "chat-bubble assistant chat-bubble--system";
-    empty.textContent = t(state.lang, "no_summary");
-    return empty;
-  }
-
-  if (row.status === "failed") {
-    const failed = document.createElement("div");
-    failed.className = "chat-bubble assistant chat-bubble--system";
-    failed.textContent = t(state.lang, "failed_summary");
-    return failed;
-  }
-
-  const bubble = document.createElement("div");
-  bubble.className = "chat-bubble assistant chat-bubble--summary";
-
-  const textEl = document.createElement("div");
-  textEl.className = "chat-summary-text";
-  const content = state.lang === "id" ? row.content_id : row.content_en || row.content_id;
-  textEl.innerHTML = renderMiniMarkdown(content);
-  bubble.appendChild(textEl);
-
-  const toggleBtn = document.createElement("button");
-  toggleBtn.type = "button";
-  toggleBtn.className = "chat-summary-toggle";
-  toggleBtn.textContent = t(state.lang, "chat_summary_more");
-  toggleBtn.hidden = true;
-  toggleBtn.addEventListener("click", () => {
-    const expanded = textEl.classList.toggle("expanded");
-    toggleBtn.textContent = t(state.lang, expanded ? "chat_summary_less" : "chat_summary_more");
-  });
-  bubble.appendChild(toggleBtn);
-
-  const sources = Array.isArray(row.sources) ? row.sources : [];
-  if (sources.length > 0) {
-    bubble.appendChild(buildSourcesBlock(sources));
-  }
-
-  const timeEl = document.createElement("span");
-  timeEl.className = "chat-bubble-time";
-  timeEl.textContent = row.created_at ? formatBubbleTime(row.created_at) : "";
-  bubble.appendChild(timeEl);
-
-  // Baru tampilkan tombol "Tampilkan selengkapnya" kalau teksnya benar-benar
-  // kepotong oleh batas tinggi (max-height) di CSS.
-  requestAnimationFrame(() => {
-    if (textEl.scrollHeight > textEl.clientHeight + 4) {
-      toggleBtn.hidden = false;
-    }
-  });
-
-  return bubble;
 }
 
 // Halaman ini scroll di level dokumen/window (lihat catatan arsitektur di
@@ -681,7 +442,7 @@ function renderChatMessages(messages) {
   if (!messages || messages.length === 0) {
     const p = document.createElement("p");
     p.className = "chat-empty-text";
-    p.textContent = t(state.lang, isFreeformId(state.currentDate) ? "chat_empty_freeform" : "chat_empty");
+    p.textContent = t(state.lang, "chat_empty_freeform");
     els.chatThread.appendChild(p);
   } else {
     for (const msg of messages) {
@@ -779,26 +540,7 @@ async function showDetailScreen(date) {
   els.screenList.hidden = true;
   els.screenDetail.hidden = false;
 
-  els.chatSummarySlot.innerHTML = "";
-
   els.detailDateTitle.textContent = getDisplayLabel(date);
-
-  if (isFreeformId(date)) {
-    // Obrolan bebas: tidak ada ringkasan harian yang terkait, jadi tidak
-    // perlu memuat/menampilkan bubble ringkasan -- langsung ke diskusi.
-  } else {
-    markDateOpened(date);
-    try {
-      const row = await fetchSummary(date);
-      els.chatSummarySlot.appendChild(buildSummaryBubble(row));
-    } catch (err) {
-      console.error(err);
-      const errEl = document.createElement("div");
-      errEl.className = "chat-bubble assistant chat-bubble--system";
-      errEl.textContent = t(state.lang, "load_error");
-      els.chatSummarySlot.appendChild(errEl);
-    }
-  }
 
   if (state.chatCode) {
     await loadChatForDate(date);
@@ -807,7 +549,7 @@ async function showDetailScreen(date) {
   }
 
   // Terlepas dari diskusi terkunci/terbuka -- begitu layar detail dibuka,
-  // langsung terscroll ke paling bawah (pesan/ringkasan terbaru).
+  // langsung terscroll ke paling bawah (pesan terbaru).
   scrollChatToBottom();
 }
 
@@ -868,7 +610,7 @@ function requireChatCodeOrPrompt(messageKey) {
 
 function openChatOptions(id) {
   state.activeOptionsId = id;
-  const info = state.listIndex.get(id) || { kind: isFreeformId(id) ? "freeform" : "daily", defaultLabel: getDefaultLabel(id) };
+  const info = state.listIndex.get(id) || { defaultLabel: getDefaultLabel(id) };
   els.chatOptionsTitle.textContent = getCustomTitle(id) || info.defaultLabel;
 
   const pinned = isPinned(id);
@@ -896,23 +638,7 @@ async function refreshAfterChatMutation(id, { titleChanged = false } = {}) {
 }
 
 async function exportChatToPdf(id) {
-  const kind = state.listIndex.get(id)?.kind || (isFreeformId(id) ? "freeform" : "daily");
   const title = getCustomTitle(id) || getDefaultLabel(id);
-
-  let summaryHtml = "";
-  if (kind === "daily") {
-    try {
-      const row = await fetchSummary(id);
-      if (row && row.status !== "failed") {
-        const content = state.lang === "id" ? row.content_id : row.content_en || row.content_id;
-        summaryHtml = renderMiniMarkdown(content);
-      }
-    } catch (_err) {
-      // Gagal ambil ringkasan bukan alasan buat batalkan PDF -- lanjut
-      // tanpa bagian ringkasan, tetap tampilkan diskusinya.
-      summaryHtml = "";
-    }
-  }
 
   const result = await fetchChatHistory(id, state.chatCode);
   if (!result.ok) {
@@ -925,7 +651,7 @@ async function exportChatToPdf(id) {
   }
   const messages = result.messages || [];
 
-  if (!summaryHtml && messages.length === 0) {
+  if (messages.length === 0) {
     window.alert(t(state.lang, "pdf_empty"));
     return;
   }
@@ -944,13 +670,6 @@ async function exportChatToPdf(id) {
   metaEl.className = "print-meta";
   metaEl.textContent = `${messages.length} ${t(state.lang, "detail_messages_unit")} • ${printedAt}`;
   els.printArea.appendChild(metaEl);
-
-  if (summaryHtml) {
-    const summaryBox = document.createElement("div");
-    summaryBox.className = "print-summary";
-    summaryBox.innerHTML = summaryHtml;
-    els.printArea.appendChild(summaryBox);
-  }
 
   for (const msg of messages) {
     const msgEl = document.createElement("div");
@@ -978,139 +697,12 @@ async function exportChatToPdf(id) {
   });
 }
 
-const NOTIFY_ICONS = {
-  on: ICON_BELL_FILLED,
-  need_install: ICON_BELL_PLUS,
-  unsupported: ICON_BELL_OUTLINE,
-  denied: ICON_BELL_OUTLINE,
-  error: ICON_BELL_OUTLINE,
-  save_error: ICON_BELL_OUTLINE,
-  idle: ICON_BELL_OUTLINE
-};
-
-const NOTIFY_ACTIONABLE = new Set(["idle", "error", "save_error"]);
-
-function setNotifyState(mode, extra) {
-  // mode: "idle" | "on" | "need_install" | "unsupported" | "denied" | "error" | "save_error"
-  state.notifyMode = mode;
-  state.notifyExtra = extra || "";
-  els.notifyToggle.disabled = false;
-  els.notifyIcon.innerHTML = NOTIFY_ICONS[mode] || NOTIFY_ICONS.idle;
-  els.notifyToggle.classList.toggle("icon-btn--attn", mode === "error" || mode === "save_error");
-
-  const key =
-    {
-      on: "notify_on",
-      need_install: "notify_need_install",
-      unsupported: "notify_unsupported",
-      denied: "notify_denied",
-      error: "notify_error",
-      save_error: "notify_save_error",
-      idle: "notify_prompt"
-    }[mode] || "notify_prompt";
-
-  const text = extra ? `${t(state.lang, key)} (${extra})` : t(state.lang, key);
-  els.notifyToggle.title = text;
-  els.notifyToggle.setAttribute("aria-label", text);
-}
-
-async function saveSubscription(subJson) {
-  // Disimpan lewat Edge Function `subscribe` (bukan insert langsung dari
-  // browser) -- lihat komentar di supabase/functions/subscribe/index.ts
-  // dan supabase/migrations/0003_lock_push_subscriptions.sql soal alasannya.
-  const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
-  const anonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
-
-  try {
-    const res = await fetch(`${supabaseUrl}/functions/v1/subscribe`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${anonKey}`
-      },
-      body: JSON.stringify(subJson)
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok || data.ok === false) {
-      const message = data.error || `HTTP ${res.status}`;
-      console.error("Gagal simpan subscription:", message);
-      return { ok: false, message };
-    }
-    return { ok: true };
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    console.error("Gagal simpan subscription:", err);
-    return { ok: false, message };
-  }
-}
-
-async function initNotify() {
-  if (!pushSupported()) {
-    setNotifyState("unsupported");
-    return;
-  }
-
-  if (isIOS() && !isStandalone()) {
-    setNotifyState("need_install");
-    return;
-  }
-
-  await registerServiceWorker();
-
-  const existing = await getExistingSubscription();
-  if (existing) {
-    const result = await saveSubscription(existing.toJSON());
-    setNotifyState(result.ok ? "on" : "save_error", result.message);
-    return;
-  }
-
-  if (Notification.permission === "denied") {
-    setNotifyState("denied");
-    return;
-  }
-
-  setNotifyState("idle");
-}
-
-async function tryEnableNotifications() {
-  if (!VAPID_PUBLIC_KEY || VAPID_PUBLIC_KEY.includes("ganti-dengan")) {
-    alert("VITE_VAPID_PUBLIC_KEY belum diisi di file .env — lihat README bagian setup notifikasi.");
-    return;
-  }
-  els.notifyToggle.disabled = true;
-  await registerServiceWorker();
-  try {
-    const result = await subscribeToPush(VAPID_PUBLIC_KEY);
-    if (!result.ok) {
-      setNotifyState(result.reason === "denied" ? "denied" : "error");
-      return;
-    }
-    const saveResult = await saveSubscription(result.subscription);
-    setNotifyState(saveResult.ok ? "on" : "save_error", saveResult.message);
-  } catch (err) {
-    console.error(err);
-    setNotifyState("error");
-  } finally {
-    els.notifyToggle.disabled = false;
-  }
-}
-
 function wireEvents() {
-  els.notifyToggle.addEventListener("click", () => {
-    if (NOTIFY_ACTIONABLE.has(state.notifyMode)) {
-      tryEnableNotifications();
-    } else {
-      alert(els.notifyToggle.title);
-    }
-  });
-
-  els.langToggle.addEventListener("click", async () => {
+  els.langToggle.addEventListener("click", () => {
     state.lang = state.lang === "id" ? "en" : "id";
     localStorage.setItem("rh_lang", state.lang);
     applyLang();
-    await loadDateList();
     handleRoute();
-    initNotify();
   });
 
   els.themeToggle.addEventListener("click", () => {
@@ -1150,7 +742,7 @@ function wireEvents() {
     submitBtn.disabled = true;
     els.chatCodeError.hidden = true;
 
-    const date = state.currentDate || todayWita();
+    const date = state.currentDate || state.activeOptionsId;
     const result = await fetchChatHistory(date, code);
     submitBtn.disabled = false;
 
@@ -1171,7 +763,7 @@ function wireEvents() {
   els.chatForm.addEventListener("submit", async (e) => {
     e.preventDefault();
     const text = els.chatInput.value.trim();
-    if (!text || !state.chatCode) return;
+    if (!text || !state.chatCode || !state.currentDate) return;
 
     els.chatInput.value = "";
     els.chatInput.style.height = "auto";
@@ -1179,7 +771,7 @@ function wireEvents() {
     appendChatBubble("user", text, new Date());
     setChatStatus(t(state.lang, "chat_sending"));
 
-    const date = state.currentDate || todayWita();
+    const date = state.currentDate;
     const result = await sendChatMessage(date, state.chatCode, text);
 
     els.chatSendBtn.disabled = false;
@@ -1334,9 +926,7 @@ function wireEvents() {
     if (!requireChatCodeOrPrompt("need_code_delete")) return;
     closeChatOptions();
 
-    const kind = state.listIndex.get(id)?.kind || (isFreeformId(id) ? "freeform" : "daily");
-    const confirmMsg = t(state.lang, kind === "freeform" ? "delete_confirm_freeform" : "delete_confirm_daily");
-    if (!window.confirm(confirmMsg)) return;
+    if (!window.confirm(t(state.lang, "delete_confirm"))) return;
 
     const result = await deleteChatThread(id, state.chatCode);
     if (!result.ok) {
@@ -1348,12 +938,11 @@ function wireEvents() {
       return;
     }
 
-    // Chat-nya sudah tidak ada lagi -- lepas sematan & judul custom-nya juga.
+    // Chat-nya sudah tidak ada lagi -- lepas sematan, judul custom, dan
+    // hapus dari daftar obrolan lokal.
     unpinChat(id);
     clearChatTitle(id);
-    if (kind === "freeform") {
-      removeFreeformThread(id);
-    }
+    removeFreeformThread(id);
 
     if (!els.screenDetail.hidden && state.currentDate === id) {
       // Lagi buka chat yang baru dihapus -- keluar duluan baru balik ke daftar.
@@ -1393,10 +982,8 @@ async function main() {
   wireEvents();
   fixStickyHeaderOnIOSKeyboard();
   await registerServiceWorker();
-  await loadDateList();
   await initChat();
   handleRoute();
-  initNotify();
 }
 
 main();
