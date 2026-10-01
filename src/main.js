@@ -669,7 +669,11 @@ function resetInChatSearch() {
 // -- selama belum ada id, menu titik-3 tetap bisa dibuka buat "Salin", tapi
 // "Hapus pesan" belum bisa dipakai (server butuh id). Begitu id-nya datang,
 // dipasang belakangan lewat bubble.dataset.id = ... (lihat submit handler).
-function appendChatBubble(role, content, timestamp, id) {
+// tokensUsed/costUsd opsional -- cuma ada kalau giliran kirim pesan ini
+// sudah mencatat angkanya (lihat Edge Function action "send"). Pesan LAMA
+// (sebelum fitur token/biaya ini ada) tidak punya angka ini sama sekali,
+// jadi parameternya dibiarkan undefined -- lihat setBubbleUsage().
+function appendChatBubble(role, content, timestamp, id, tokensUsed, costUsd) {
   const emptyEl = els.chatThread.querySelector(".chat-empty-text");
   if (emptyEl) emptyEl.remove();
 
@@ -688,8 +692,9 @@ function appendChatBubble(role, content, timestamp, id) {
   textEl.innerHTML = renderChatMarkdown(content);
   bubble.appendChild(textEl);
 
-  // Baris jam + tombol titik-3 (opsi: salin/hapus pesan) duduk berdampingan
-  // di pojok kanan-bawah bubble -- lihat .chat-bubble-meta di style.css.
+  // Baris jam + estimasi token/biaya + tombol titik-3 (opsi: salin/hapus
+  // pesan) duduk berdampingan di pojok kanan-bawah bubble -- lihat
+  // .chat-bubble-meta di style.css.
   const meta = document.createElement("div");
   meta.className = "chat-bubble-meta";
 
@@ -709,6 +714,10 @@ function appendChatBubble(role, content, timestamp, id) {
 
   bubble.appendChild(meta);
 
+  if (typeof tokensUsed === "number") {
+    setBubbleUsage(bubble, tokensUsed, costUsd);
+  }
+
   els.chatThread.appendChild(bubble);
   scrollChatToBottom();
   return bubble;
@@ -723,7 +732,9 @@ function renderChatMessages(messages) {
     els.chatThread.appendChild(p);
   } else {
     for (const msg of messages) {
-      appendChatBubble(msg.role, msg.content, msg.created_at, msg.id);
+      const tokensUsed = typeof msg.tokens_used === "number" ? msg.tokens_used : undefined;
+      const costUsd = typeof msg.cost_usd === "number" ? msg.cost_usd : undefined;
+      appendChatBubble(msg.role, msg.content, msg.created_at, msg.id, tokensUsed, costUsd);
     }
   }
   scrollChatToBottom();
@@ -751,7 +762,7 @@ function closeMessageOptions() {
   closeDialogEl(els.messageOptionsDialog);
 }
 
-// Perkiraan token Gemini terpakai HARI INI (zona Pasifik, sama seperti
+// Perkiraan token+biaya Gemini terpakai HARI INI (zona Pasifik, sama seperti
 // jadwal reset kuota gratis -- lihat Edge Function action "token_usage"),
 // ditampilkan sebagai baris kedua di footer layar daftar. Dipanggil tiap
 // kali layar daftar dibuka (lihat showListScreen()) -- sengaja tidak
@@ -770,14 +781,60 @@ async function renderTokenUsage() {
     return;
   }
 
-  setTokenUsageText(result.tokensUsedToday);
+  setTokenUsageText(result.tokensUsedToday, result.costUsedToday);
 }
 
-function setTokenUsageText(tokens) {
+// Format "$ x,xx" (2 desimal, pemisah desimal ikut bahasa aktif -- koma
+// untuk ID, titik untuk EN) -- dipakai footer (total harian) & bubble pesan
+// (per giliran). costUsd kosong/bukan angka dianggap $0.
+// 6 desimal -- sama persis dengan presisi yang disimpan di kolom database
+// (`numeric(12,6)`, lihat migration 0009_token_cost_tracking.sql), jadi
+// ini sudah paling detail yang bisa ditampilkan tanpa angka "halu" di
+// belakang titik desimal.
+function formatUsd(costUsd, locale) {
+  const amount = typeof costUsd === "number" ? costUsd : 0;
+  return `$ ${amount.toLocaleString(locale, { minimumFractionDigits: 6, maximumFractionDigits: 6 })}`;
+}
+
+function setTokenUsageText(tokens, costUsedToday) {
   const locale = state.lang === "id" ? "id-ID" : "en-US";
-  const formatted = tokens.toLocaleString(locale);
-  els.tokenUsageNote.textContent = `${t(state.lang, "token_usage_today_prefix")} ${formatted} ${t(state.lang, "token_usage_unit")}`;
+  const formattedTokens = tokens.toLocaleString(locale);
+  const formattedCost = formatUsd(costUsedToday, locale);
+  els.tokenUsageNote.textContent = `${t(state.lang, "token_usage_today_prefix")} ${formattedTokens} ${t(state.lang, "token_usage_unit")} (${formattedCost})`;
   els.tokenUsageNote.hidden = false;
+}
+
+// "(token xxx | $ x,xxxxxx)" -- estimasi token+biaya SATU giliran
+// percakapan (lihat komentar turnTokens/turnCostUsd di Edge Function action
+// "send"). Dibuat 6 desimal (lihat formatUsd()) karena model Gemini Flash
+// murah sekali -- pesan pendek biasanya cuma berbiaya sepersekian sen, jadi
+// kalau dibulatkan ke 2 desimal saja hampir selalu tampil "$ 0,00".
+function formatMessageUsage(tokensUsed, costUsd) {
+  const locale = state.lang === "id" ? "id-ID" : "en-US";
+  return `(token ${tokensUsed.toLocaleString(locale)} | ${formatUsd(costUsd, locale)})`;
+}
+
+// Pasang/perbarui span "(token xxx | $ x,xx)" di baris meta satu bubble --
+// dipakai appendChatBubble() (pesan dari riwayat/baru dikirim) DAN langsung
+// dipanggil lagi di chatForm submit handler begitu angkanya datang dari
+// server (bubble pengguna sudah terlanjur tampil duluan sebelum tahu
+// angkanya -- lihat komentar di appendChatBubble()).
+function setBubbleUsage(bubbleEl, tokensUsed, costUsd) {
+  if (typeof tokensUsed !== "number") return;
+  const meta = bubbleEl.querySelector(".chat-bubble-meta");
+  const timeEl = bubbleEl.querySelector(".chat-bubble-time");
+  if (!meta || !timeEl) return;
+
+  let usageEl = bubbleEl.querySelector(".chat-bubble-usage");
+  if (!usageEl) {
+    usageEl = document.createElement("span");
+    usageEl.className = "chat-bubble-usage";
+    // Selalu tepat SETELAH jam, SEBELUM tombol titik-3 -- insertBefore
+    // dengan referenceNode timeEl.nextSibling aman dipanggil berkali-kali
+    // (menu titik-3 selalu jadi anak terakhir meta).
+    meta.insertBefore(usageEl, timeEl.nextSibling);
+  }
+  usageEl.textContent = formatMessageUsage(tokensUsed, costUsd);
 }
 
 function showChatLocked(errorText) {
@@ -1285,8 +1342,15 @@ function wireEvents() {
     if (result.userMessageId) {
       userBubble.dataset.id = result.userMessageId;
     }
+    // turnTokens/turnCostUsd sama buat bubble pengguna & balasan AI dari
+    // giliran yang sama (lihat komentar di Edge Function action "send") --
+    // bubble pengguna di atas sudah terlanjur tampil SEBELUM angka ini
+    // diketahui, jadi dipasang belakangan lewat setBubbleUsage().
+    if (typeof result.turnTokens === "number") {
+      setBubbleUsage(userBubble, result.turnTokens, result.turnCostUsd);
+    }
     if (typeof result.tokensUsedToday === "number") {
-      setTokenUsageText(result.tokensUsedToday);
+      setTokenUsageText(result.tokensUsedToday, result.costUsedToday);
     }
 
     if (!result.ok) {
@@ -1300,7 +1364,7 @@ function wireEvents() {
       return;
     }
 
-    appendChatBubble("assistant", result.reply, new Date());
+    appendChatBubble("assistant", result.reply, new Date(), result.assistantMessageId, result.turnTokens, result.turnCostUsd);
 
     // Kalau pencarian lagi aktif waktu pesan baru masuk, ikut re-scan supaya
     // pesan baru ini juga ketemu kalau cocok dengan kata kuncinya.
