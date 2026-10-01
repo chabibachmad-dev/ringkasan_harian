@@ -20,6 +20,12 @@
 //     -> { ok: true, deleted: <jumlah baris> }
 //     (hapus semua chat_messages buat obrolan ini -- dipakai menu titik-3
 //     "Hapus chat".)
+//   { "code": "...", "action": "list_threads" }
+//     -> { ok: true, threads: [{ id, createdAt }, ...] }
+//     (semua ID obrolan yang PERNAH punya minimal 1 pesan, diambil dari
+//     server -- bukan dari localStorage perangkat. Dipakai supaya daftar
+//     obrolan ikut muncul walau dibuka dari perangkat lain dengan kode akses
+//     yang sama, karena kode aksesnya memang satu untuk semua perangkat.)
 
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { corsHeaders } from "../_shared/cors.ts";
@@ -93,6 +99,31 @@ Deno.serve(async (req) => {
       }
     }
     return json({ ok: true, lastMessages });
+  }
+
+  if (body.action === "list_threads") {
+    // Ambil chat_date + created_at SEMUA baris, urut dari paling lama --
+    // baris pertama yang ditemui per chat_date otomatis jadi "pesan
+    // pertama"-nya, dipakai sebagai createdAt thread itu. Dibatasi 5000 baris
+    // supaya query tidak membengkak kalau riwayatnya sudah sangat panjang
+    // (lebih dari cukup untuk pemakaian pribadi).
+    const { data, error } = await supabaseAdmin
+      .from("chat_messages")
+      .select("chat_date, created_at")
+      .order("created_at", { ascending: true })
+      .limit(5000);
+
+    if (error) return json({ ok: false, error: error.message }, 500);
+
+    const firstSeen: Record<string, string> = {};
+    for (const row of data ?? []) {
+      if (!firstSeen[row.chat_date]) firstSeen[row.chat_date] = row.created_at;
+    }
+    const threads = Object.entries(firstSeen)
+      .filter(([id]) => isValidThreadId(id))
+      .map(([id, createdAt]) => ({ id, createdAt }));
+
+    return json({ ok: true, threads });
   }
 
   if (typeof body.date !== "string" || !isValidThreadId(body.date)) {
@@ -177,5 +208,8 @@ Deno.serve(async (req) => {
     return json({ ok: true, reply });
   }
 
-  return json({ ok: false, error: "action tidak dikenal (pakai 'history', 'send', atau 'delete')." }, 400);
+  return json(
+    { ok: false, error: "action tidak dikenal (pakai 'history', 'send', 'delete', 'last_messages', atau 'list_threads')." },
+    400
+  );
 });

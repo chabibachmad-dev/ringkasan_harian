@@ -21,6 +21,7 @@ import {
   fetchChatHistory,
   sendChatMessage,
   fetchLastMessages,
+  listChatThreads,
   deleteChatThread
 } from "./chat.js";
 
@@ -130,13 +131,28 @@ function addFreeformThread(id) {
   }
 }
 
-// Dipanggil waktu obrolan bebas dihapus lewat menu titik-3 -- beda dari
-// obrolan ringkasan harian (yang "tanggal"-nya tetap ada walau diskusinya
-// dihapus), obrolan bebas memang cuma ada karena ada thread-nya, jadi
-// dihapus total dari daftar begitu isinya dihapus.
+// Dipanggil waktu satu obrolan dihapus lewat menu titik-3 "Hapus chat" --
+// obrolan cuma ada karena ada thread-nya, jadi dihapus total dari daftar
+// begitu isinya dihapus.
 function removeFreeformThread(id) {
   try {
     const list = getFreeformThreads().filter((th) => th.id !== id);
+    localStorage.setItem(FREEFORM_THREADS_KEY, JSON.stringify(list));
+  } catch (_err) {
+    /* noop */
+  }
+}
+
+// Dipanggil waktu renderChatList() menemukan obrolan yang ADA di server
+// (list_threads) tapi belum tercatat di localStorage perangkat ini --
+// biasanya karena obrolan itu dibuat/diisi dari perangkat lain dengan kode
+// akses yang sama. createdAt dari server (pesan pertamanya) dipakai, bukan
+// "sekarang", supaya urutannya tetap wajar.
+function mergeDiscoveredThread(id, createdAt) {
+  try {
+    const list = getFreeformThreads();
+    if (list.some((th) => th.id === id)) return;
+    list.push({ id, createdAt: createdAt || new Date().toISOString() });
     localStorage.setItem(FREEFORM_THREADS_KEY, JSON.stringify(list));
   } catch (_err) {
     /* noop */
@@ -263,6 +279,22 @@ async function renderChatList() {
   els.chatListStatus.hidden = false;
   els.chatListStatus.textContent = t(state.lang, "loading");
   els.chatList.innerHTML = "";
+
+  if (state.chatCode) {
+    // Tanya server obrolan apa saja yang PERNAH ada (bukan cuma yang
+    // tercatat di localStorage perangkat ini) -- supaya daftar ikut muncul
+    // walau dibuka dari perangkat lain dengan kode akses yang sama, karena
+    // kode aksesnya memang satu untuk semua perangkat, bukan per-perangkat.
+    const threadsResult = await listChatThreads(state.chatCode);
+    if (threadsResult.ok) {
+      for (const th of threadsResult.threads || []) {
+        mergeDiscoveredThread(th.id, th.createdAt);
+      }
+    } else if (threadsResult.unauthorized) {
+      state.chatCode = "";
+      clearStoredChatCode();
+    }
+  }
 
   const freeformThreads = getFreeformThreads();
   const allIds = freeformThreads.map((th) => th.id);

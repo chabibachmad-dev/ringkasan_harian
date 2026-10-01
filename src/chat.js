@@ -66,14 +66,22 @@ export function sendChatMessage(date, code, message) {
   return callChatFunction({ code, date, action: "send", message });
 }
 
-// Ambil pesan terakhir dari beberapa thread sekaligus -- dipakai buat
-// cuplikan/preview di layar daftar obrolan.
+// Ambil pesan terakhir dari beberapa obrolan sekaligus -- dipakai buat
+// cuplikan/preview di layar daftar obrolan (mirip pesan terakhir di
+// daftar chat WhatsApp).
 export function fetchLastMessages(dates, code) {
   return callChatFunction({ code, action: "last_messages", dates });
 }
 
-// Hapus semua pesan diskusi untuk satu obrolan -- dipakai oleh menu
-// titik-3 "Hapus chat".
+// Ambil semua ID obrolan yang tersimpan di SERVER (bukan cuma yang tercatat
+// di localStorage perangkat ini) -- dipakai supaya daftar obrolan ikut
+// muncul walau dibuka dari perangkat lain dengan kode akses yang sama.
+export function listChatThreads(code) {
+  return callChatFunction({ code, action: "list_threads" });
+}
+
+// Hapus semua pesan di satu obrolan -- dipakai oleh menu titik-3
+// "Hapus chat".
 export function deleteChatThread(date, code) {
   return callChatFunction({ code, date, action: "delete" });
 }
