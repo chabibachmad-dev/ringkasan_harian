@@ -34,6 +34,19 @@
 //     tabel chat_thread_meta -- kirim cuma field yang berubah, field yang
 //     tidak dikirim tidak akan diubah. title null/kosong berarti "pakai
 //     judul default lagi".)
+//   { "code": "...", "date": "...", "action": "delete_message", "id": "..." }
+//     -> { ok: true }
+//     (hapus SATU pesan -- dipakai menu titik-3 per-pesan di dalam obrolan,
+//     opsi "Hapus pesan". Sengaja dibatasi role = 'user' di query-nya: cuma
+//     pesan dari pengguna sendiri yang boleh dihapus satuan, supaya riwayat
+//     balasan AI tidak bisa "disunat" sepihak dari sisi klien.)
+//   { "code": "...", "action": "token_usage" }
+//     -> { ok: true, tokensUsedToday: <jumlah token> }
+//     (perkiraan token Gemini terpakai HARI INI, zona waktu Pasifik -- sama
+//     seperti jadwal reset kuota gratis Gemini. Sengaja TIDAK mewajibkan
+//     kode akses yang BENAR [lihat pengecekan di bawah] karena isinya cuma
+//     angka, bukan isi chat pribadi -- supaya bisa ditampilkan di footer
+//     layar daftar.)
 //
 // --- "Dokumen Pengetahuan" (Pengaturan > Upload Dokumen) ---
 // Teks PDF-nya diekstrak DI BROWSER (lihat src/pdfText.js) sebelum dikirim
@@ -61,6 +74,16 @@ function isValidThreadId(id: string): boolean {
 }
 const MAX_MESSAGE_LENGTH = 4000;
 const MAX_HISTORY_FOR_CONTEXT = 40;
+
+// Kuota harian GRATIS Gemini reset berdasarkan tengah malam waktu Pasifik
+// (Los Angeles) -- lihat https://ai.google.dev/gemini-api/docs/rate-limits --
+// jadi hitungan "token terpakai hari ini" di action "send"/"token_usage"
+// sengaja ikut zona itu juga (BUKAN WITA) supaya angkanya selaras dengan
+// kapan kuota benar-benar reset, walau cuma estimasi ditampilkan di footer.
+function getPacificDateString(): string {
+  // en-CA format tanggalnya "YYYY-MM-DD" -- pas buat kolom `date` Postgres.
+  return new Intl.DateTimeFormat("en-CA", { timeZone: "America/Los_Angeles" }).format(new Date());
+}
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -100,13 +123,29 @@ Deno.serve(async (req) => {
   if (!expectedCode) {
     return json({ ok: false, error: "CHAT_ACCESS_CODE belum di-set sebagai Supabase secret." }, 500);
   }
-  if (typeof body.code !== "string" || body.code !== expectedCode) {
-    return json({ ok: false, error: "Kode akses salah." }, 401);
-  }
 
   const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
   const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
   const supabaseAdmin = createClient(supabaseUrl, serviceRoleKey);
+
+  // "token_usage" sengaja diletakkan SEBELUM pengecekan kode akses --
+  // isinya cuma angka perkiraan pemakaian token (bukan isi chat pribadi),
+  // supaya bisa ditampilkan di footer layar daftar walau kode akses belum
+  // dimasukkan sama sekali.
+  if (body.action === "token_usage") {
+    const today = getPacificDateString();
+    const { data, error } = await supabaseAdmin
+      .from("token_usage")
+      .select("total_tokens")
+      .eq("usage_date", today)
+      .maybeSingle();
+    if (error) return json({ ok: false, error: error.message }, 500);
+    return json({ ok: true, tokensUsedToday: data?.total_tokens ?? 0 });
+  }
+
+  if (typeof body.code !== "string" || body.code !== expectedCode) {
+    return json({ ok: false, error: "Kode akses salah." }, 401);
+  }
 
   if (body.action === "last_messages") {
     const dates = Array.isArray(body.dates) ? body.dates.filter((d) => isValidThreadId(d)) : [];
@@ -269,13 +308,36 @@ Deno.serve(async (req) => {
   if (body.action === "history") {
     const { data, error } = await supabaseAdmin
       .from("chat_messages")
-      .select("role, content, created_at")
+      .select("id, role, content, created_at")
       .eq("chat_date", date)
       .order("created_at", { ascending: true })
       .limit(200);
 
     if (error) return json({ ok: false, error: error.message }, 500);
     return json({ ok: true, messages: data ?? [] });
+  }
+
+  if (body.action === "delete_message") {
+    const messageId = typeof body.id === "string" ? body.id : "";
+    if (!messageId) return json({ ok: false, error: "ID pesan tidak valid." }, 400);
+
+    // eq("chat_date", date) + eq("role", "user") sekaligus jadi jaga-jaga
+    // ganda: tidak bisa menghapus pesan dari obrolan lain walau ID-nya
+    // ketebak, dan tidak bisa menghapus balasan AI sama sekali -- bukan
+    // cuma disembunyikan di UI, tapi memang ditolak di server.
+    const { data, error } = await supabaseAdmin
+      .from("chat_messages")
+      .delete()
+      .eq("id", messageId)
+      .eq("chat_date", date)
+      .eq("role", "user")
+      .select("id");
+
+    if (error) return json({ ok: false, error: error.message }, 500);
+    if (!data || data.length === 0) {
+      return json({ ok: false, error: "Pesan tidak ditemukan, atau bukan pesan kamu." }, 404);
+    }
+    return json({ ok: true });
   }
 
   if (body.action === "delete") {
@@ -327,11 +389,17 @@ Deno.serve(async (req) => {
     history.push({ role: "user", content: trimmed });
 
     // Simpan pesan dari pengguna dulu, sebelum manggil Gemini -- supaya
-    // riwayat tetap tersimpan walau balasan AI-nya gagal/timeout.
-    const { error: insertUserErr } = await supabaseAdmin
+    // riwayat tetap tersimpan walau balasan AI-nya gagal/timeout. .select()
+    // dipakai supaya dapat ID-nya balik -- dikirim ke klien sebagai
+    // userMessageId supaya bubble yang baru dikirim langsung bisa dihapus
+    // (menu titik-3 > Hapus pesan) tanpa perlu reload riwayat dulu.
+    const { data: userRow, error: insertUserErr } = await supabaseAdmin
       .from("chat_messages")
-      .insert({ chat_date: date, role: "user", content: trimmed });
+      .insert({ chat_date: date, role: "user", content: trimmed })
+      .select("id")
+      .single();
     if (insertUserErr) return json({ ok: false, error: insertUserErr.message }, 500);
+    const userMessageId = userRow?.id as string | undefined;
 
     // Ambil semua "Dokumen Pengetahuan" (PDF peraturan dll yang diupload
     // lewat Pengaturan) buat disertakan sebagai konteks ke Gemini -- dibatasi
@@ -361,12 +429,18 @@ Deno.serve(async (req) => {
     }
 
     let reply: string;
+    let tokensUsed = 0;
     try {
-      reply = await generateChatReply(history, geminiApiKey, knowledgeContext);
+      const result = await generateChatReply(history, geminiApiKey, knowledgeContext);
+      reply = result.reply;
+      tokensUsed = result.tokensUsed;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error("chat: gagal dapat balasan Gemini:", msg);
-      return json({ ok: false, error: `Gagal dapat balasan AI: ${msg}` }, 502);
+      // Pesan pengguna SUDAH tersimpan di atas -- sertakan userMessageId
+      // juga di respons error ini, supaya bubble yang terlanjur tampil di
+      // layar tetap bisa dihapus langsung tanpa perlu reload riwayat dulu.
+      return json({ ok: false, error: `Gagal dapat balasan AI: ${msg}`, userMessageId }, 502);
     }
 
     const { error: insertAssistantErr } = await supabaseAdmin
@@ -374,14 +448,35 @@ Deno.serve(async (req) => {
       .insert({ chat_date: date, role: "assistant", content: reply });
     if (insertAssistantErr) return json({ ok: false, error: insertAssistantErr.message }, 500);
 
-    return json({ ok: true, reply });
+    // Catat pemakaian token hari ini (zona Pasifik) -- cuma buat estimasi di
+    // footer aplikasi, jadi kegagalan di sini sengaja TIDAK menggagalkan
+    // seluruh response (pesan & balasannya sendiri sudah berhasil tersimpan).
+    let tokensUsedToday: number | undefined;
+    if (tokensUsed > 0) {
+      try {
+        const today = getPacificDateString();
+        const { data: existingUsage } = await supabaseAdmin
+          .from("token_usage")
+          .select("total_tokens")
+          .eq("usage_date", today)
+          .maybeSingle();
+        tokensUsedToday = (existingUsage?.total_tokens ?? 0) + tokensUsed;
+        await supabaseAdmin
+          .from("token_usage")
+          .upsert({ usage_date: today, total_tokens: tokensUsedToday, updated_at: new Date().toISOString() });
+      } catch (err) {
+        console.error("chat: gagal catat token_usage, lanjut tanpa itu:", err instanceof Error ? err.message : String(err));
+      }
+    }
+
+    return json({ ok: true, reply, userMessageId, tokensUsedToday });
   }
 
   return json(
     {
       ok: false,
       error:
-        "action tidak dikenal (pakai 'history', 'send', 'delete', 'last_messages', 'list_threads', 'set_thread_meta', 'kb_list', 'kb_upload', atau 'kb_delete')."
+        "action tidak dikenal (pakai 'history', 'send', 'delete', 'delete_message', 'last_messages', 'list_threads', 'set_thread_meta', 'token_usage', 'kb_list', 'kb_upload', atau 'kb_delete')."
     },
     400
   );

@@ -105,7 +105,15 @@ export async function callGeminiWithRetry(
   throw lastErr ?? new Error("Gemini API gagal tanpa pesan error.");
 }
 
-type GeminiData = { candidates?: { content?: { parts?: { text?: string }[] } }[] };
+type GeminiData = {
+  candidates?: { content?: { parts?: { text?: string }[] } }[];
+  // Jumlah token pemakaian request ini -- dipakai buat estimasi "token
+  // terpakai hari ini" yang ditampilkan di footer aplikasi (lihat Edge
+  // Function `chat`, action "send" & "token_usage"). totalTokenCount sudah
+  // mencakup prompt + jawaban, jadi tidak perlu dijumlah manual dari dua
+  // field lain.
+  usageMetadata?: { totalTokenCount?: number };
+};
 
 function buildGenerateUrl(model: string, apiKey: string): string {
   return `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
@@ -207,11 +215,20 @@ function buildSystemText(knowledgeContext: { title: string; content: string }[])
   return `${CHAT_SYSTEM_PROMPT}\n\n${KNOWLEDGE_CONTEXT_INTRO}\n\n${docsText}`;
 }
 
+export interface ChatReplyResult {
+  reply: string;
+  // Estimasi token Gemini yang terpakai untuk SATU request ini (prompt +
+  // jawaban) -- 0 kalau Gemini kebetulan tidak mengirim usageMetadata (tetap
+  // dianggap aman/tidak fatal, cuma estimasi di footer jadi kurang akurat
+  // untuk request itu saja).
+  tokensUsed: number;
+}
+
 export async function generateChatReply(
   messages: ChatMessage[],
   apiKey: string,
   knowledgeContext: { title: string; content: string }[] = []
-): Promise<string> {
+): Promise<ChatReplyResult> {
   const primaryModel = Deno.env.get("GEMINI_MODEL") || DEFAULT_MODEL;
   const fallbackModel = Deno.env.get("GEMINI_MODEL_FALLBACK") || DEFAULT_FALLBACK_MODEL;
 
@@ -257,5 +274,5 @@ export async function generateChatReply(
     throw new Error(`Respons Gemini (chat) tidak berisi teks yang diharapkan: ${JSON.stringify(data).slice(0, 500)}`);
   }
 
-  return rawText.trim();
+  return { reply: rawText.trim(), tokensUsed: data?.usageMetadata?.totalTokenCount ?? 0 };
 }

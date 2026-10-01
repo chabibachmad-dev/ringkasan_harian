@@ -67,6 +67,7 @@
           <p data-i18n="footer_note">
             Asisten AI pribadi kamu.
           </p>
+          <p id="token-usage-note" class="token-usage-note" hidden></p>
         </footer>
 
         <button type="button" id="new-chat-fab" class="fab" title="Obrolan baru" aria-label="Obrolan baru">
@@ -194,6 +195,25 @@
           </button>
 
           <button type="button" id="chat-options-cancel" class="sheet-cancel" data-i18n="chat_options_cancel">Batal</button>
+        </div>
+      </dialog>
+
+      <!-- Menu titik-3 per-PESAN di dalam obrolan: salin / hapus pesan.
+           "Hapus pesan" cuma ditampilkan (lihat main.js) kalau pesannya dari
+           saya sendiri -- balasan AI cuma bisa disalin, tidak bisa dihapus
+           satuan (server juga menolak permintaan itu). -->
+      <dialog id="message-options-dialog" class="sheet-dialog">
+        <div class="sheet-card">
+          <button type="button" id="message-options-copy" class="sheet-action">
+            <span id="message-options-copy-icon" class="sheet-action-icon"></span>
+            <span data-i18n="chat_msg_options_copy">Salin pesan</span>
+          </button>
+          <button type="button" id="message-options-delete" class="sheet-action sheet-action--danger">
+            <span id="message-options-delete-icon" class="sheet-action-icon"></span>
+            <span data-i18n="chat_msg_options_delete">Hapus pesan</span>
+          </button>
+
+          <button type="button" id="message-options-cancel" class="sheet-cancel" data-i18n="chat_msg_options_cancel">Batal</button>
         </div>
       </dialog>
 

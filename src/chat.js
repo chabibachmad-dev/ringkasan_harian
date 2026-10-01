@@ -99,6 +99,23 @@ export function deleteChatThread(date, code) {
   return callChatFunction({ code, date, action: "delete" });
 }
 
+// Hapus SATU pesan -- dipakai menu titik-3 per-pesan di dalam obrolan
+// ("Hapus pesan"). Server sengaja cuma mengizinkan ini untuk pesan dengan
+// role "user" (lihat Edge Function) -- balasan AI tidak bisa dihapus
+// satuan, cuma seluruh obrolan lewat deleteChatThread() di atas.
+export function deleteChatMessage(date, code, id) {
+  return callChatFunction({ code, date, action: "delete_message", id });
+}
+
+// Perkiraan token Gemini terpakai HARI INI (zona waktu Pasifik, sama
+// seperti jadwal reset kuota gratis Gemini) -- ditampilkan di footer layar
+// daftar. Sengaja tidak butuh kode akses yang benar di sisi server (lihat
+// index.ts), tapi tetap dikirim kalau ada supaya konsisten dengan fungsi
+// lain -- kalau belum ada kode tersimpan, caller cukup lewati panggilan ini.
+export function fetchTokenUsageToday(code) {
+  return callChatFunction({ code, action: "token_usage" });
+}
+
 // ================================================================
 // "Dokumen Pengetahuan" (Pengaturan > Upload Dokumen) -- PDF referensi
 // (mis. peraturan keuangan) yang teksnya sudah diekstrak DI BROWSER (lihat

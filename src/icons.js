@@ -60,3 +60,11 @@ export const ICON_KEY = `<svg width="16" height="16" viewBox="0 0 24 24" fill="n
 
 // Ikon menu "Keluar Chat" (lepas kode akses dari perangkat ini) di sheet Pengaturan.
 export const ICON_LOGOUT = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5"/><path d="M21 12H9"/></svg>`;
+
+// Ikon menu "Salin pesan" di sheet opsi per-pesan (titik-3 di dalam bubble chat).
+export const ICON_COPY = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`;
+
+// Ikon titik-3 KECIL buat tombol opsi per-pesan di dalam bubble chat --
+// dipakai (bukan ICON_DOTS yang 18x18) karena tombolnya duduk di baris jam
+// yang kecil, jadi ukurannya disamakan supaya tidak bikin baris itu melebar.
+export const ICON_DOTS_SMALL = `<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true"><circle cx="12" cy="5" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="12" cy="19" r="1.8"/></svg>`;

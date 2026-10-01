@@ -20,7 +20,9 @@ import {
   ICON_SETTINGS,
   ICON_UPLOAD,
   ICON_KEY,
-  ICON_LOGOUT
+  ICON_LOGOUT,
+  ICON_COPY,
+  ICON_DOTS_SMALL
 } from "./icons.js";
 import { registerServiceWorker } from "./push.js";
 import {
@@ -33,6 +35,8 @@ import {
   listChatThreads,
   setThreadMeta,
   deleteChatThread,
+  deleteChatMessage,
+  fetchTokenUsageToday,
   listKnowledgeDocs,
   uploadKnowledgeDoc,
   deleteKnowledgeDoc
@@ -138,7 +142,14 @@ const els = {
   aboutChatsCount: document.getElementById("about-chats-count"),
   aboutKbCount: document.getElementById("about-kb-count"),
   aboutCodeStatus: document.getElementById("about-code-status"),
-  aboutCloseBtn: document.getElementById("about-close-btn")
+  aboutCloseBtn: document.getElementById("about-close-btn"),
+  tokenUsageNote: document.getElementById("token-usage-note"),
+  messageOptionsDialog: document.getElementById("message-options-dialog"),
+  messageOptionsCopyBtn: document.getElementById("message-options-copy"),
+  messageOptionsCopyIcon: document.getElementById("message-options-copy-icon"),
+  messageOptionsDeleteBtn: document.getElementById("message-options-delete"),
+  messageOptionsDeleteIcon: document.getElementById("message-options-delete-icon"),
+  messageOptionsCancel: document.getElementById("message-options-cancel")
 };
 
 const state = {
@@ -156,7 +167,14 @@ const state = {
   // inChatSearchMatches isinya elemen <mark> hasil highlight di DOM, jadi
   // navigasi next/prev tinggal scrollIntoView ke elemen yang bersangkutan.
   inChatSearchMatches: [],
-  inChatSearchActive: -1
+  inChatSearchActive: -1,
+  // Pesan (bubble) yang lagi dibuka menu titik-3-nya -- diisi waktu
+  // openMessageOptions() dipanggil, dipakai sama tombol Salin/Hapus di
+  // dalam sheet-nya supaya tahu pesan mana yang dimaksud.
+  activeMessageEl: null,
+  activeMessageId: null,
+  activeMessageRole: null,
+  activeMessageContent: null
 };
 
 function formatBubbleTime(value) {
@@ -646,25 +664,54 @@ function resetInChatSearch() {
   if (els.chatSearchCount) els.chatSearchCount.textContent = "";
 }
 
-function appendChatBubble(role, content, timestamp) {
+// id boleh kosong/undefined (mis. bubble user yang baru saja dikirim, SEBELUM
+// server sempat balas dengan userMessageId -- lihat chatForm submit handler)
+// -- selama belum ada id, menu titik-3 tetap bisa dibuka buat "Salin", tapi
+// "Hapus pesan" belum bisa dipakai (server butuh id). Begitu id-nya datang,
+// dipasang belakangan lewat bubble.dataset.id = ... (lihat submit handler).
+function appendChatBubble(role, content, timestamp, id) {
   const emptyEl = els.chatThread.querySelector(".chat-empty-text");
   if (emptyEl) emptyEl.remove();
 
   const bubble = document.createElement("div");
   bubble.className = `chat-bubble ${role === "assistant" ? "assistant" : "user"}`;
+  bubble.dataset.role = role === "assistant" ? "assistant" : "user";
+  if (id) bubble.dataset.id = id;
+  // Konten ASLI (markdown mentah, sebelum dirender jadi HTML) disimpan di
+  // properti elemen -- dipakai tombol "Salin pesan" supaya yang disalin ke
+  // clipboard teks aslinya (bisa ada **bold**/link dll), bukan innerHTML
+  // hasil renderChatMarkdown() yang sudah jadi tag HTML.
+  bubble.rawContent = content;
 
   const textEl = document.createElement("div");
   textEl.className = "chat-bubble-text";
   textEl.innerHTML = renderChatMarkdown(content);
   bubble.appendChild(textEl);
 
+  // Baris jam + tombol titik-3 (opsi: salin/hapus pesan) duduk berdampingan
+  // di pojok kanan-bawah bubble -- lihat .chat-bubble-meta di style.css.
+  const meta = document.createElement("div");
+  meta.className = "chat-bubble-meta";
+
   const timeEl = document.createElement("span");
   timeEl.className = "chat-bubble-time";
   timeEl.textContent = formatBubbleTime(timestamp || new Date());
-  bubble.appendChild(timeEl);
+  meta.appendChild(timeEl);
+
+  const menuBtn = document.createElement("button");
+  menuBtn.type = "button";
+  menuBtn.className = "chat-bubble-menu-btn";
+  menuBtn.innerHTML = ICON_DOTS_SMALL;
+  menuBtn.setAttribute("aria-label", t(state.lang, "chat_msg_options_menu"));
+  menuBtn.title = t(state.lang, "chat_msg_options_menu");
+  menuBtn.addEventListener("click", () => openMessageOptions(bubble));
+  meta.appendChild(menuBtn);
+
+  bubble.appendChild(meta);
 
   els.chatThread.appendChild(bubble);
   scrollChatToBottom();
+  return bubble;
 }
 
 function renderChatMessages(messages) {
@@ -676,10 +723,61 @@ function renderChatMessages(messages) {
     els.chatThread.appendChild(p);
   } else {
     for (const msg of messages) {
-      appendChatBubble(msg.role, msg.content, msg.created_at);
+      appendChatBubble(msg.role, msg.content, msg.created_at, msg.id);
     }
   }
   scrollChatToBottom();
+}
+
+// ---------- Menu titik-3 PER-PESAN (di dalam satu obrolan): salin/hapus ----------
+// Beda dari openChatOptions() di atas (itu menu titik-3 per-CHAT di layar
+// daftar) -- ini untuk satu BUBBLE pesan di dalam obrolan yang sedang dibuka.
+
+function openMessageOptions(bubbleEl) {
+  state.activeMessageEl = bubbleEl;
+  state.activeMessageId = bubbleEl.dataset.id || null;
+  state.activeMessageRole = bubbleEl.dataset.role || "assistant";
+  state.activeMessageContent = bubbleEl.rawContent || "";
+
+  // "Hapus pesan" cuma relevan buat pesan dari pengguna sendiri -- balasan
+  // AI cuma bisa disalin (server juga menolak hapus satuan untuk role
+  // "assistant", lihat Edge Function action "delete_message").
+  els.messageOptionsDeleteBtn.hidden = state.activeMessageRole !== "user";
+
+  openDialogEl(els.messageOptionsDialog);
+}
+
+function closeMessageOptions() {
+  closeDialogEl(els.messageOptionsDialog);
+}
+
+// Perkiraan token Gemini terpakai HARI INI (zona Pasifik, sama seperti
+// jadwal reset kuota gratis -- lihat Edge Function action "token_usage"),
+// ditampilkan sebagai baris kedua di footer layar daftar. Dipanggil tiap
+// kali layar daftar dibuka (lihat showListScreen()) -- sengaja tidak
+// menghalangi render daftar chat-nya sendiri (dipanggil tanpa await di
+// sana), jadi kalau lambat/gagal, daftar chat tetap tampil normal.
+async function renderTokenUsage() {
+  if (!els.tokenUsageNote) return;
+  if (!state.chatCode) {
+    els.tokenUsageNote.hidden = true;
+    return;
+  }
+
+  const result = await fetchTokenUsageToday(state.chatCode);
+  if (!result.ok || typeof result.tokensUsedToday !== "number") {
+    els.tokenUsageNote.hidden = true;
+    return;
+  }
+
+  setTokenUsageText(result.tokensUsedToday);
+}
+
+function setTokenUsageText(tokens) {
+  const locale = state.lang === "id" ? "id-ID" : "en-US";
+  const formatted = tokens.toLocaleString(locale);
+  els.tokenUsageNote.textContent = `${t(state.lang, "token_usage_today_prefix")} ${formatted} ${t(state.lang, "token_usage_unit")}`;
+  els.tokenUsageNote.hidden = false;
 }
 
 function showChatLocked(errorText) {
@@ -762,6 +860,9 @@ async function showListScreen() {
   els.screenDetail.hidden = true;
   els.screenList.hidden = false;
   updateScrollBottomBtnVisibility();
+  // Sengaja tanpa await -- ini cuma info tambahan di footer, tidak boleh
+  // bikin daftar chat telat tampil kalau lambat/gagal.
+  renderTokenUsage();
   await renderChatList();
 }
 
@@ -1169,7 +1270,10 @@ function wireEvents() {
     els.chatInput.value = "";
     els.chatInput.style.height = "auto";
     els.chatSendBtn.disabled = true;
-    appendChatBubble("user", text, new Date());
+    // Bubble ditampilkan dulu (optimistic) SEBELUM id-nya diketahui -- id
+    // asli baru datang lewat result.userMessageId di bawah, dipasang
+    // belakangan supaya "Hapus pesan" langsung bisa dipakai tanpa reload.
+    const userBubble = appendChatBubble("user", text, new Date());
     setChatStatus(t(state.lang, "chat_sending"));
 
     const date = state.currentDate;
@@ -1177,6 +1281,13 @@ function wireEvents() {
 
     els.chatSendBtn.disabled = false;
     setChatStatus("");
+
+    if (result.userMessageId) {
+      userBubble.dataset.id = result.userMessageId;
+    }
+    if (typeof result.tokensUsedToday === "number") {
+      setTokenUsageText(result.tokensUsedToday);
+    }
 
     if (!result.ok) {
       if (result.unauthorized) {
@@ -1286,6 +1397,60 @@ function wireEvents() {
   els.settingsChangeCodeIcon.innerHTML = ICON_KEY;
   els.settingsLogoutIcon.innerHTML = ICON_LOGOUT;
   els.settingsAboutIcon.innerHTML = ICON_INFO;
+
+  // ---------- Menu titik-3 PER-PESAN (di dalam obrolan): salin / hapus ----------
+
+  els.messageOptionsCopyIcon.innerHTML = ICON_COPY;
+  els.messageOptionsDeleteIcon.innerHTML = ICON_TRASH;
+
+  els.messageOptionsCancel.addEventListener("click", () => closeMessageOptions());
+  els.messageOptionsDialog.addEventListener("click", (e) => {
+    if (e.target === els.messageOptionsDialog) closeMessageOptions();
+  });
+
+  els.messageOptionsCopyBtn.addEventListener("click", async () => {
+    const text = state.activeMessageContent || "";
+    closeMessageOptions();
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch (_err) {
+      // Fallback langka (mis. Clipboard API diblokir) -- biar teksnya tetap
+      // bisa disalin manual lewat dialog prompt bawaan browser.
+      window.prompt(t(state.lang, "chat_msg_options_copy"), text);
+      return;
+    }
+    setChatStatus(t(state.lang, "chat_msg_copied"));
+    setTimeout(() => setChatStatus(""), 1500);
+  });
+
+  els.messageOptionsDeleteBtn.addEventListener("click", async () => {
+    const id = state.activeMessageId;
+    const bubbleEl = state.activeMessageEl;
+    const date = state.currentDate;
+    closeMessageOptions();
+    if (!id || !date) return;
+    if (!window.confirm(t(state.lang, "chat_msg_delete_confirm"))) return;
+
+    const result = await deleteChatMessage(date, state.chatCode, id);
+    if (!result.ok) {
+      if (result.unauthorized) {
+        state.chatCode = "";
+        clearStoredChatCode();
+        showChatLocked(t(state.lang, "chat_code_wrong"));
+        return;
+      }
+      alertWithDetail("chat_msg_delete_error", result);
+      return;
+    }
+
+    bubbleEl?.remove();
+    if (!els.chatThread.querySelector(".chat-bubble")) {
+      const p = document.createElement("p");
+      p.className = "chat-empty-text";
+      p.textContent = t(state.lang, "chat_empty_freeform");
+      els.chatThread.appendChild(p);
+    }
+  });
 
   els.chatOptionsCancel.addEventListener("click", () => closeChatOptions());
 
