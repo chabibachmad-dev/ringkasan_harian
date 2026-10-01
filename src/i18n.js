@@ -54,6 +54,8 @@ export const STRINGS = {
     need_code_pdf: "Masukkan kode akses dulu untuk download PDF.",
     need_code_detail: "Masukkan kode akses dulu untuk melihat detail.",
     need_code_delete: "Masukkan kode akses dulu untuk menghapus chat.",
+    pin_sync_error: "Sematan tersimpan di HP ini, tapi gagal dikirim ke server -- belum tentu muncul di perangkat lain.",
+    rename_sync_error: "Judul tersimpan di HP ini, tapi gagal dikirim ke server -- belum tentu muncul di perangkat lain.",
     pdf_empty: "Belum ada isi untuk diunduh dari chat ini.",
     pdf_you_prefix: "Kamu",
     pdf_ai_prefix: "AI"
@@ -113,6 +115,8 @@ export const STRINGS = {
     need_code_pdf: "Enter the access code first to download a PDF.",
     need_code_detail: "Enter the access code first to view details.",
     need_code_delete: "Enter the access code first to delete this chat.",
+    pin_sync_error: "Saved on this device, but couldn't sync to the server -- it may not show up on your other devices.",
+    rename_sync_error: "Saved on this device, but couldn't sync to the server -- it may not show up on your other devices.",
     pdf_empty: "There's nothing to export from this chat yet.",
     pdf_you_prefix: "You",
     pdf_ai_prefix: "AI"

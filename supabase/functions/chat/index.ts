@@ -21,11 +21,19 @@
 //     (hapus semua chat_messages buat obrolan ini -- dipakai menu titik-3
 //     "Hapus chat".)
 //   { "code": "...", "action": "list_threads" }
-//     -> { ok: true, threads: [{ id, createdAt }, ...] }
+//     -> { ok: true, threads: [{ id, createdAt, pinned, title }, ...] }
 //     (semua ID obrolan yang PERNAH punya minimal 1 pesan, diambil dari
 //     server -- bukan dari localStorage perangkat. Dipakai supaya daftar
 //     obrolan ikut muncul walau dibuka dari perangkat lain dengan kode akses
-//     yang sama, karena kode aksesnya memang satu untuk semua perangkat.)
+//     yang sama, karena kode aksesnya memang satu untuk semua perangkat.
+//     pinned/title diambil dari tabel chat_thread_meta supaya status
+//     sematan & judul custom ikut sinkron ke semua perangkat juga.)
+//   { "code": "...", "date": "...", "action": "set_thread_meta", "pinned"?: bool, "title"?: string|null }
+//     -> { ok: true, pinned: bool, title: string|null }
+//     (simpan status sematan (pin) dan/atau judul custom satu obrolan ke
+//     tabel chat_thread_meta -- kirim cuma field yang berubah, field yang
+//     tidak dikirim tidak akan diubah. title null/kosong berarti "pakai
+//     judul default lagi".)
 
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { corsHeaders } from "../_shared/cors.ts";
@@ -55,7 +63,15 @@ Deno.serve(async (req) => {
     return json({ ok: false, error: "Method not allowed" }, 405);
   }
 
-  let body: { code?: string; date?: string; dates?: string[]; action?: string; message?: string };
+  let body: {
+    code?: string;
+    date?: string;
+    dates?: string[];
+    action?: string;
+    message?: string;
+    pinned?: boolean;
+    title?: string | null;
+  };
   try {
     body = await req.json();
   } catch (_err) {
@@ -119,11 +135,62 @@ Deno.serve(async (req) => {
     for (const row of data ?? []) {
       if (!firstSeen[row.chat_date]) firstSeen[row.chat_date] = row.created_at;
     }
-    const threads = Object.entries(firstSeen)
-      .filter(([id]) => isValidThreadId(id))
-      .map(([id, createdAt]) => ({ id, createdAt }));
+    const ids = Object.keys(firstSeen).filter((id) => isValidThreadId(id));
+
+    // Ambil status sematan (pin) & judul custom semua thread ini sekaligus --
+    // supaya pin/rename yang dilakukan dari PERANGKAT LAIN ikut kebawa ke
+    // sini juga (sebelumnya cuma tersimpan di localStorage per perangkat).
+    const metaById: Record<string, { pinned: boolean; title: string | null }> = {};
+    if (ids.length > 0) {
+      const { data: metaRows, error: metaErr } = await supabaseAdmin
+        .from("chat_thread_meta")
+        .select("id, pinned, title")
+        .in("id", ids);
+      if (metaErr) return json({ ok: false, error: metaErr.message }, 500);
+      for (const row of metaRows ?? []) {
+        metaById[row.id] = { pinned: !!row.pinned, title: row.title ?? null };
+      }
+    }
+
+    const threads = ids.map((id) => ({
+      id,
+      createdAt: firstSeen[id],
+      pinned: metaById[id]?.pinned ?? false,
+      title: metaById[id]?.title ?? null
+    }));
 
     return json({ ok: true, threads });
+  }
+
+  if (body.action === "set_thread_meta") {
+    const date0 = typeof body.date === "string" ? body.date : "";
+    if (!isValidThreadId(date0)) {
+      return json({ ok: false, error: "ID obrolan tidak valid." }, 400);
+    }
+
+    const pinnedProvided = typeof body.pinned === "boolean";
+    const titleProvided = body.title !== undefined;
+    if (!pinnedProvided && !titleProvided) {
+      return json({ ok: false, error: "Tidak ada perubahan (pinned/title) yang dikirim." }, 400);
+    }
+
+    const { data: existing, error: fetchErr } = await supabaseAdmin
+      .from("chat_thread_meta")
+      .select("pinned, title")
+      .eq("id", date0)
+      .maybeSingle();
+    if (fetchErr) return json({ ok: false, error: fetchErr.message }, 500);
+
+    const nextPinned = pinnedProvided ? !!body.pinned : existing?.pinned ?? false;
+    const rawTitle = titleProvided ? body.title : existing?.title ?? null;
+    const nextTitle = typeof rawTitle === "string" && rawTitle.trim() ? rawTitle.trim() : null;
+
+    const { error: upsertErr } = await supabaseAdmin
+      .from("chat_thread_meta")
+      .upsert({ id: date0, pinned: nextPinned, title: nextTitle, updated_at: new Date().toISOString() });
+    if (upsertErr) return json({ ok: false, error: upsertErr.message }, 500);
+
+    return json({ ok: true, pinned: nextPinned, title: nextTitle });
   }
 
   if (typeof body.date !== "string" || !isValidThreadId(body.date)) {
@@ -153,6 +220,13 @@ Deno.serve(async (req) => {
       .select("id");
 
     if (error) return json({ ok: false, error: error.message }, 500);
+
+    // Obrolannya sudah tidak ada lagi -- ikut buang baris metadata (pin/judul
+    // custom)-nya juga supaya tidak jadi sampah tak terpakai selamanya di
+    // chat_thread_meta. Gagal di sini tidak fatal (chat-nya sendiri sudah
+    // terhapus), jadi cukup dicoba saja tanpa menggagalkan seluruh request.
+    await supabaseAdmin.from("chat_thread_meta").delete().eq("id", date);
+
     return json({ ok: true, deleted: data?.length ?? 0 });
   }
 
@@ -209,7 +283,11 @@ Deno.serve(async (req) => {
   }
 
   return json(
-    { ok: false, error: "action tidak dikenal (pakai 'history', 'send', 'delete', 'last_messages', atau 'list_threads')." },
+    {
+      ok: false,
+      error:
+        "action tidak dikenal (pakai 'history', 'send', 'delete', 'last_messages', 'list_threads', atau 'set_thread_meta')."
+    },
     400
   );
 });

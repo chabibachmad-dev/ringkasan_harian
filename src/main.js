@@ -27,6 +27,7 @@ import {
   sendChatMessage,
   fetchLastMessages,
   listChatThreads,
+  setThreadMeta,
   deleteChatThread
 } from "./chat.js";
 
@@ -258,6 +259,34 @@ function clearChatTitle(id) {
   }
 }
 
+// Dipanggil waktu renderChatList() dapat data pin/judul dari SERVER (hasil
+// listChatThreads -- lihat action "list_threads"/"set_thread_meta" di
+// chat.js & Edge Function-nya). Server sekarang jadi sumber kebenaran untuk
+// pin & judul custom begitu ada kode akses, supaya perubahan yang dilakukan
+// dari PERANGKAT LAIN (pin/unpin, ubah judul) ikut kebawa ke sini juga --
+// sebelumnya dua-duanya cuma tersimpan di localStorage per perangkat jadi
+// tidak pernah sinkron sama sekali.
+function applyThreadMetaFromServer(id, pinned, title) {
+  if (isPinned(id) !== !!pinned) {
+    const set = getPinnedChats();
+    if (pinned) {
+      set.add(id);
+    } else {
+      set.delete(id);
+    }
+    try {
+      localStorage.setItem(PINNED_CHATS_KEY, JSON.stringify([...set]));
+    } catch (_err) {
+      /* noop */
+    }
+  }
+
+  const nextTitle = title || "";
+  if (getCustomTitle(id) !== nextTitle) {
+    setCustomTitle(id, nextTitle);
+  }
+}
+
 // Judul default (sebelum dipengaruhi "Ubah judul") buat satu obrolan --
 // dipakai renderChatList, showDetailScreen, dan isi awal popup opsi/rename.
 function getDefaultLabel(_id) {
@@ -310,6 +339,7 @@ async function renderChatList() {
     if (threadsResult.ok) {
       for (const th of threadsResult.threads || []) {
         mergeDiscoveredThread(th.id, th.createdAt);
+        applyThreadMetaFromServer(th.id, th.pinned, th.title);
       }
     } else if (threadsResult.unauthorized) {
       state.chatCode = "";
@@ -773,10 +803,14 @@ function formatFullDateTime(value) {
 }
 
 // Detail/PDF/Hapus butuh data dari server (riwayat diskusi), jadi ketiganya
-// butuh kode akses -- beda dari Sematkan/Ubah judul yang murni lokal. Kalau
-// belum ada kode tersimpan, tutup menu titik-3 dan buka ulang dialog kode
-// akses yang sudah ada (dipakai juga oleh tombol "Buka Diskusi"), dengan
-// pesan kontekstual kenapa diminta.
+// WAJIB ada kode akses -- kalau belum ada kode tersimpan, tutup menu titik-3
+// dan buka ulang dialog kode akses yang sudah ada (dipakai juga oleh tombol
+// "Buka Diskusi"), dengan pesan kontekstual kenapa diminta.
+//
+// Sematkan/Ubah judul BEDA: tetap langsung jalan di perangkat ini walau
+// belum ada kode (supaya tetap bisa dipakai cuma buat rapi-rapi daftar
+// lokal), tapi kalau kode-nya ADA, keduanya juga dikirim ke server (lihat
+// setThreadMeta di chat.js) supaya ikut sinkron ke semua perangkat.
 function requireChatCodeOrPrompt(messageKey) {
   if (state.chatCode) return true;
   closeChatOptions();
@@ -1110,8 +1144,27 @@ function wireEvents() {
   els.chatOptionsPinBtn.addEventListener("click", async () => {
     const id = state.activeOptionsId;
     if (!id) return;
-    togglePinned(id);
     closeChatOptions();
+    togglePinned(id);
+    const nowPinned = isPinned(id);
+
+    // PENTING: kirim ke server DULU, baru refresh daftar. Kalau urutannya
+    // dibalik, refreshAfterChatMutation() di bawah bakal manggil
+    // listChatThreads() yang ngambil status pin LAMA dari server (soalnya
+    // belum sempat ditulis), terus applyThreadMetaFromServer() nimpa balik
+    // perubahan lokal yang baru saja dibikin -- pin yang baru ditekan jadi
+    // kebalik lagi ke kondisi semula sebelum sempat ke-kirim.
+    if (state.chatCode) {
+      const result = await setThreadMeta(id, state.chatCode, { pinned: nowPinned });
+      if (!result.ok) {
+        if (result.unauthorized) {
+          state.chatCode = "";
+          clearStoredChatCode();
+        }
+        alertWithDetail("pin_sync_error", result);
+      }
+    }
+
     await refreshAfterChatMutation(id);
   });
 
@@ -1134,6 +1187,23 @@ function wireEvents() {
     closeDialogEl(els.renameDialog);
     if (!id) return;
     setCustomTitle(id, els.renameInput.value);
+    const nowTitle = getCustomTitle(id) || null;
+
+    // PENTING: sama seperti pin, kirim ke server DULU baru refresh daftar --
+    // kalau dibalik, refreshAfterChatMutation() di bawah bisa narik judul
+    // LAMA dari server (belum sempat ditulis) dan nimpa balik judul baru
+    // yang baru saja disimpan secara lokal.
+    if (state.chatCode) {
+      const result = await setThreadMeta(id, state.chatCode, { title: nowTitle });
+      if (!result.ok) {
+        if (result.unauthorized) {
+          state.chatCode = "";
+          clearStoredChatCode();
+        }
+        alertWithDetail("rename_sync_error", result);
+      }
+    }
+
     await refreshAfterChatMutation(id, { titleChanged: true });
   });
 

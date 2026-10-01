@@ -74,10 +74,23 @@ export function fetchLastMessages(dates, code) {
 }
 
 // Ambil semua ID obrolan yang tersimpan di SERVER (bukan cuma yang tercatat
-// di localStorage perangkat ini) -- dipakai supaya daftar obrolan ikut
-// muncul walau dibuka dari perangkat lain dengan kode akses yang sama.
+// di localStorage perangkat ini), lengkap dengan status pin & judul
+// custom-nya -- dipakai supaya daftar obrolan, sematan, dan judul custom
+// ikut muncul walau dibuka dari perangkat lain dengan kode akses yang sama.
 export function listChatThreads(code) {
   return callChatFunction({ code, action: "list_threads" });
+}
+
+// Simpan status sematan (pin) dan/atau judul custom satu obrolan ke SERVER
+// -- supaya "Sematkan" dan "Ubah judul" ikut sinkron ke semua perangkat
+// dengan kode akses yang sama (sebelumnya cuma localStorage per perangkat).
+// Cuma kirim field yang berubah: field yang tidak disertakan tidak akan
+// diubah di server. title: null/"" berarti "pakai judul default lagi".
+export function setThreadMeta(id, code, { pinned, title } = {}) {
+  const payload = { code, date: id, action: "set_thread_meta" };
+  if (typeof pinned === "boolean") payload.pinned = pinned;
+  if (title !== undefined) payload.title = title;
+  return callChatFunction(payload);
 }
 
 // Hapus semua pesan di satu obrolan -- dipakai oleh menu titik-3
