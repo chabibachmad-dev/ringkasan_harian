@@ -1,181 +1,79 @@
-// Edge Function untuk fitur chat pribadi dengan asisten AI.
-//
-// Kenapa ada "kode akses" (CHAT_ACCESS_CODE)? Karena situs ini publik --
-// siapa saja yang tahu link GitHub Pages-nya bisa membukanya. Isi
-// obrolannya pribadi, jadi tabelnya dikunci total dari anon (lihat
-// migrations/0004_chat.sql) dan function ini menolak semua request yang
-// kodenya salah/tidak ada, sebelum menyentuh database atau memanggil Gemini.
-//
-// Body request (semua action) -- "date" di sini sebenarnya ID obrolan,
-// dibuat otomatis client-side tiap kali user menekan tombol "+" (lihat
-// main.js), formatnya selalu "freeform-<uuid>":
-//   { "code": "...", "date": "freeform-<uuid>", "action": "history" }
-//     -> { ok: true, messages: [{ role, content, created_at }, ...] }
-//   { "code": "...", "date": "...", "action": "send", "message": "..." }
-//     -> { ok: true, reply: "..." }
-//   { "code": "...", "action": "last_messages", "dates": ["...", ...] }
-//     -> { ok: true, lastMessages: { "<id>": { role, content, created_at }, ... } }
-//     (dipakai buat cuplikan/preview di layar daftar obrolan)
-//   { "code": "...", "date": "...", "action": "delete" }
-//     -> { ok: true, deleted: <jumlah baris> }
-//     (hapus semua chat_messages buat obrolan ini -- dipakai menu titik-3
-//     "Hapus chat".)
+// Klien buat fitur diskusi/chat pribadi -- semua request lewat Edge
+// Function `chat` (lihat supabase/functions/chat/index.ts), karena
+// tabel chat_messages dikunci total dari anon key.
 
-import { createClient } from "jsr:@supabase/supabase-js@2";
-import { corsHeaders } from "../_shared/cors.ts";
-import { generateChatReply, type ChatMessage } from "../_shared/gemini.ts";
+const CODE_STORAGE_KEY = "rh_chat_code";
 
-// ID obrolan dibuat client-side sebagai `freeform-<uuid>` (lihat main.js).
-const FREEFORM_RE = /^freeform-[0-9a-fA-F-]{36}$/;
-function isValidThreadId(id: string): boolean {
-  return FREEFORM_RE.test(id);
-}
-const MAX_MESSAGE_LENGTH = 4000;
-const MAX_HISTORY_FOR_CONTEXT = 40;
-
-function json(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { ...corsHeaders, "Content-Type": "application/json" }
-  });
-}
-
-Deno.serve(async (req) => {
-  if (req.method === "OPTIONS") {
-    return new Response("ok", { headers: corsHeaders });
-  }
-
-  if (req.method !== "POST") {
-    return json({ ok: false, error: "Method not allowed" }, 405);
-  }
-
-  let body: { code?: string; date?: string; dates?: string[]; action?: string; message?: string };
+export function getStoredChatCode() {
   try {
-    body = await req.json();
+    return localStorage.getItem(CODE_STORAGE_KEY) || "";
   } catch (_err) {
-    return json({ ok: false, error: "Body harus JSON valid" }, 400);
+    return "";
   }
+}
 
-  const expectedCode = Deno.env.get("CHAT_ACCESS_CODE");
-  if (!expectedCode) {
-    return json({ ok: false, error: "CHAT_ACCESS_CODE belum di-set sebagai Supabase secret." }, 500);
+export function setStoredChatCode(code) {
+  try {
+    localStorage.setItem(CODE_STORAGE_KEY, code);
+  } catch (_err) {
+    // Abaikan (mis. private browsing yang blokir localStorage) --
+    // kode cuma tidak akan diingat lintas sesi, fitur tetap jalan.
   }
-  if (typeof body.code !== "string" || body.code !== expectedCode) {
-    return json({ ok: false, error: "Kode akses salah." }, 401);
+}
+
+export function clearStoredChatCode() {
+  try {
+    localStorage.removeItem(CODE_STORAGE_KEY);
+  } catch (_err) {
+    /* noop */
   }
+}
 
-  const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
-  const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-  const supabaseAdmin = createClient(supabaseUrl, serviceRoleKey);
+async function callChatFunction(payload) {
+  const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
+  const anonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
 
-  if (body.action === "last_messages") {
-    const dates = Array.isArray(body.dates) ? body.dates.filter((d) => isValidThreadId(d)) : [];
-    if (dates.length === 0) {
-      return json({ ok: true, lastMessages: {} });
+  try {
+    const res = await fetch(`${supabaseUrl}/functions/v1/chat`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${anonKey}`
+      },
+      body: JSON.stringify(payload)
+    });
+    const data = await res.json().catch(() => ({}));
+
+    if (!res.ok || data.ok === false) {
+      return {
+        ok: false,
+        unauthorized: res.status === 401,
+        message: data.error || `HTTP ${res.status}`
+      };
     }
-
-    const { data, error } = await supabaseAdmin
-      .from("chat_messages")
-      .select("chat_date, role, content, created_at")
-      .in("chat_date", dates)
-      .order("chat_date", { ascending: false })
-      .order("created_at", { ascending: false })
-      .limit(dates.length * 20);
-
-    if (error) return json({ ok: false, error: error.message }, 500);
-
-    // Baris pertama yang ditemui untuk tiap chat_date sudah pasti yang
-    // terbaru, karena query di atas diurutkan created_at menurun per tanggal.
-    const lastMessages: Record<string, { role: string; content: string; created_at: string }> = {};
-    for (const row of data ?? []) {
-      if (!lastMessages[row.chat_date]) {
-        lastMessages[row.chat_date] = { role: row.role, content: row.content, created_at: row.created_at };
-      }
-    }
-    return json({ ok: true, lastMessages });
+    return { ok: true, ...data };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return { ok: false, unauthorized: false, message };
   }
+}
 
-  if (typeof body.date !== "string" || !isValidThreadId(body.date)) {
-    return json({ ok: false, error: "ID obrolan tidak valid." }, 400);
-  }
-  const date = body.date;
+export function fetchChatHistory(date, code) {
+  return callChatFunction({ code, date, action: "history" });
+}
 
-  if (body.action === "history") {
-    const { data, error } = await supabaseAdmin
-      .from("chat_messages")
-      .select("role, content, created_at")
-      .eq("chat_date", date)
-      .order("created_at", { ascending: true })
-      .limit(200);
+export function sendChatMessage(date, code, message) {
+  return callChatFunction({ code, date, action: "send", message });
+}
 
-    if (error) return json({ ok: false, error: error.message }, 500);
-    return json({ ok: true, messages: data ?? [] });
-  }
+// Ambil pesan terakhir dari beberapa thread sekaligus -- dipakai buat
+// cuplikan/preview di layar daftar obrolan.
+export function fetchLastMessages(dates, code) {
+  return callChatFunction({ code, action: "last_messages", dates });
+}
 
-  if (body.action === "delete") {
-    // Pakai select buat tahu berapa baris yang kehapus (delete() biasa tidak
-    // mengembalikan count kecuali diminta lewat .select()).
-    const { data, error } = await supabaseAdmin
-      .from("chat_messages")
-      .delete()
-      .eq("chat_date", date)
-      .select("id");
-
-    if (error) return json({ ok: false, error: error.message }, 500);
-    return json({ ok: true, deleted: data?.length ?? 0 });
-  }
-
-  if (body.action === "send") {
-    const message = typeof body.message === "string" ? body.message.trim() : "";
-    if (!message) {
-      return json({ ok: false, error: "Pesan tidak boleh kosong." }, 400);
-    }
-    const trimmed = message.slice(0, MAX_MESSAGE_LENGTH);
-
-    const geminiApiKey = Deno.env.get("GEMINI_API_KEY");
-    if (!geminiApiKey) {
-      return json({ ok: false, error: "GEMINI_API_KEY belum di-set sebagai Supabase secret." }, 500);
-    }
-
-    // Ambil riwayat hari ini dulu buat konteks percakapan.
-    const { data: historyRows, error: historyErr } = await supabaseAdmin
-      .from("chat_messages")
-      .select("role, content")
-      .eq("chat_date", date)
-      .order("created_at", { ascending: true })
-      .limit(MAX_HISTORY_FOR_CONTEXT);
-
-    if (historyErr) return json({ ok: false, error: historyErr.message }, 500);
-
-    const history: ChatMessage[] = (historyRows ?? []).map((r) => ({
-      role: r.role as "user" | "assistant",
-      content: r.content as string
-    }));
-    history.push({ role: "user", content: trimmed });
-
-    // Simpan pesan dari pengguna dulu, sebelum manggil Gemini -- supaya
-    // riwayat tetap tersimpan walau balasan AI-nya gagal/timeout.
-    const { error: insertUserErr } = await supabaseAdmin
-      .from("chat_messages")
-      .insert({ chat_date: date, role: "user", content: trimmed });
-    if (insertUserErr) return json({ ok: false, error: insertUserErr.message }, 500);
-
-    let reply: string;
-    try {
-      reply = await generateChatReply(history, geminiApiKey);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error("chat: gagal dapat balasan Gemini:", msg);
-      return json({ ok: false, error: `Gagal dapat balasan AI: ${msg}` }, 502);
-    }
-
-    const { error: insertAssistantErr } = await supabaseAdmin
-      .from("chat_messages")
-      .insert({ chat_date: date, role: "assistant", content: reply });
-    if (insertAssistantErr) return json({ ok: false, error: insertAssistantErr.message }, 500);
-
-    return json({ ok: true, reply });
-  }
-
-  return json({ ok: false, error: "action tidak dikenal (pakai 'history', 'send', atau 'delete')." }, 400);
-});
+// Hapus semua pesan diskusi untuk satu obrolan -- dipakai oleh menu
+// titik-3 "Hapus chat".
+export function deleteChatThread(date, code) {
+  return callChatFunction({ code, date, action: "delete" });
+}
