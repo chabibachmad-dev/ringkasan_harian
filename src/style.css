@@ -497,6 +497,16 @@ mark.chat-search-hit--active {
   opacity: 0.65;
 }
 
+/* "(token xxx | $ x,xx)" -- estimasi token+biaya SATU giliran percakapan,
+   ditampilkan di samping jam (lihat setBubbleUsage() di main.js). Pesan
+   lama (sebelum fitur ini ada) tidak punya ini sama sekali -- elemennya
+   cuma dibuat kalau datanya ada, bukan ditampilkan kosong/"-". */
+.chat-bubble-usage {
+  font-size: 0.68rem;
+  opacity: 0.65;
+  white-space: nowrap;
+}
+
 .chat-bubble-menu-btn {
   flex-shrink: 0;
   width: 18px;
@@ -915,6 +925,14 @@ mark.chat-search-hit--active {
   margin-top: 4px !important;
   font-size: 0.7rem;
   opacity: 0.75;
+  /* Dibuat satu baris & tidak pernah wrap, supaya tidak pernah jadi 2 baris
+     yang bisa ketiban tombol "+" (.fab) -- lihat juga padding-bottom
+     .footer di atas. */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+  padding: 0 24px;
 }
 
 /* Tombol "+" ala WhatsApp buat mulai obrolan bebas dengan AI, tidak

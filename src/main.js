@@ -796,11 +796,16 @@ function formatUsd(costUsd, locale) {
   return `$ ${amount.toLocaleString(locale, { minimumFractionDigits: 6, maximumFractionDigits: 6 })}`;
 }
 
+// Dibuat SEPENDEK mungkin ("Token xxxx | $ x,xxxxxx", tanpa kalimat
+// pembuka) -- versi sebelumnya yang lebih panjang suka kebungkus 2 baris di
+// layar sempit dan ketiban tombol "+" (position: fixed) yang mengambang di
+// pojok kanan-bawah. Baris pendek begini jauh lebih kecil kemungkinan
+// wrap jadi 2 baris.
 function setTokenUsageText(tokens, costUsedToday) {
   const locale = state.lang === "id" ? "id-ID" : "en-US";
   const formattedTokens = tokens.toLocaleString(locale);
   const formattedCost = formatUsd(costUsedToday, locale);
-  els.tokenUsageNote.textContent = `${t(state.lang, "token_usage_today_prefix")} ${formattedTokens} ${t(state.lang, "token_usage_unit")} (${formattedCost})`;
+  els.tokenUsageNote.textContent = `${t(state.lang, "token_usage_today_prefix")} ${formattedTokens} | ${formattedCost}`;
   els.tokenUsageNote.hidden = false;
 }
 
