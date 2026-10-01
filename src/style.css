@@ -673,6 +673,45 @@ body {
   transform: scale(0.94);
 }
 
+/* Tombol bulat "ke bawah" yang muncul di layar detail/obrolan begitu
+   pengguna scroll ke atas menjauhi pesan terbaru. Posisinya mengambang
+   persis di atas #chat-input-bar (bukan ditumpuk di belakangnya) --
+   --chat-input-bar-h di-update dari JS (ResizeObserver) supaya tetap pas
+   walau tinggi bar berubah (textarea multi-baris, status terkirim, dsb).
+   Horizontal pakai trik yang sama seperti .fab supaya sejajar di tengah
+   kolom #app, bukan nempel ke tepi viewport di layar lebar. */
+.scroll-bottom-btn {
+  position: fixed;
+  right: max(20px, calc(50vw - 340px));
+  bottom: calc(var(--chat-input-bar-h, 76px) + 14px);
+  width: 42px;
+  height: 42px;
+  border-radius: 50%;
+  border: 1.5px solid var(--text);
+  background: var(--bg-card);
+  color: var(--text);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  box-shadow: 0 3px 12px rgba(0, 0, 0, 0.25);
+  z-index: 15;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(6px);
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+
+.scroll-bottom-btn.visible {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0);
+}
+
+.scroll-bottom-btn:active {
+  transform: scale(0.94);
+}
+
 @media (max-width: 420px) {
   .brand {
     font-size: 1.05rem;

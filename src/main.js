@@ -57,7 +57,9 @@ const els = {
   chatForm: document.getElementById("chat-form"),
   chatInput: document.getElementById("chat-input"),
   chatSendBtn: document.getElementById("chat-send-btn"),
-  newChatFab: document.getElementById("new-chat-fab")
+  newChatFab: document.getElementById("new-chat-fab"),
+  chatInputBar: document.getElementById("chat-input-bar"),
+  scrollBottomBtn: document.getElementById("scroll-bottom-btn")
 };
 
 const state = {
@@ -441,6 +443,34 @@ function buildSummaryBubble(row) {
   return bubble;
 }
 
+// Halaman ini scroll di level dokumen/window (lihat catatan arsitektur di
+// style.css), jadi "scroll ke bawah" berarti scroll window-nya, bukan
+// #chat-messages -- elemen itu tidak overflow:auto/tinggi tetap sendiri jadi
+// scrollTop di dirinya sendiri tidak ngaruh apa-apa.
+function scrollChatToBottom(behavior = "auto") {
+  requestAnimationFrame(() => {
+    window.scrollTo({ top: document.documentElement.scrollHeight, left: 0, behavior });
+    // Dobel di frame berikutnya -- kadang tinggi konten masih menyesuaikan
+    // (gambar/markdown/font baru selesai layout) sesaat setelah frame pertama.
+    requestAnimationFrame(() => {
+      window.scrollTo({ top: document.documentElement.scrollHeight, left: 0, behavior });
+      updateScrollBottomBtnVisibility();
+    });
+  });
+}
+
+// Tombol bulat "ke bawah" cuma relevan di layar detail, dan cuma kelihatan
+// kalau posisi scroll sekarang sudah lumayan jauh dari pesan paling bawah.
+function updateScrollBottomBtnVisibility() {
+  if (!els.scrollBottomBtn) return;
+  if (els.screenDetail.hidden) {
+    els.scrollBottomBtn.classList.remove("visible");
+    return;
+  }
+  const distanceFromBottom = document.documentElement.scrollHeight - window.scrollY - window.innerHeight;
+  els.scrollBottomBtn.classList.toggle("visible", distanceFromBottom > 160);
+}
+
 function appendChatBubble(role, content, timestamp) {
   const emptyEl = els.chatThread.querySelector(".chat-empty-text");
   if (emptyEl) emptyEl.remove();
@@ -459,7 +489,7 @@ function appendChatBubble(role, content, timestamp) {
   bubble.appendChild(timeEl);
 
   els.chatThread.appendChild(bubble);
-  els.chatMessages.scrollTop = els.chatMessages.scrollHeight;
+  scrollChatToBottom();
 }
 
 function renderChatMessages(messages) {
@@ -474,7 +504,7 @@ function renderChatMessages(messages) {
       appendChatBubble(msg.role, msg.content, msg.created_at);
     }
   }
-  els.chatMessages.scrollTop = els.chatMessages.scrollHeight;
+  scrollChatToBottom();
 }
 
 function showChatLocked(errorText) {
@@ -556,6 +586,7 @@ async function initChat() {
 async function showListScreen() {
   els.screenDetail.hidden = true;
   els.screenList.hidden = false;
+  updateScrollBottomBtnVisibility();
   await renderChatList();
 }
 
@@ -590,6 +621,10 @@ async function showDetailScreen(date) {
   } else {
     els.chatThread.innerHTML = "";
   }
+
+  // Terlepas dari diskusi terkunci/terbuka -- begitu layar detail dibuka,
+  // langsung terscroll ke paling bawah (pesan/ringkasan terbaru).
+  scrollChatToBottom();
 }
 
 function handleRoute() {
@@ -844,6 +879,25 @@ function wireEvents() {
     els.chatInput.style.height = "auto";
     els.chatInput.style.height = `${els.chatInput.scrollHeight}px`;
   });
+
+  // Tombol "ke bawah": muncul kalau user scroll ke atas, klik buat balik ke
+  // pesan terbaru secara halus (smooth).
+  window.addEventListener("scroll", updateScrollBottomBtnVisibility, { passive: true });
+  els.scrollBottomBtn.addEventListener("click", () => scrollChatToBottom("smooth"));
+
+  // #chat-input-bar tingginya bisa berubah-ubah (textarea multi-baris,
+  // status "mengirim...", dsb) -- lacak lewat ResizeObserver supaya tombol
+  // "ke bawah" selalu pas nangkring persis di atasnya, tidak ketumpuk.
+  if (window.ResizeObserver && els.chatInputBar) {
+    // Sengaja baca offsetHeight (border-box, termasuk padding) dari elemennya
+    // langsung, BUKAN entry.contentRect dari ResizeObserver -- contentRect
+    // itu content-box saja (padding atas/bawah #chat-input-bar tidak
+    // terhitung), jadi kalau dipakai tombolnya bakal ketumpuk ~20px.
+    const inputBarObserver = new ResizeObserver(() => {
+      document.documentElement.style.setProperty("--chat-input-bar-h", `${els.chatInputBar.offsetHeight}px`);
+    });
+    inputBarObserver.observe(els.chatInputBar);
+  }
 }
 
 // Perbaikan bug WebKit: saat keyboard on-screen muncul di iOS (khususnya mode
