@@ -1,3 +1,4 @@
+import { jsPDF } from "jspdf";
 import { applyStaticI18n, t } from "./i18n.js";
 import { renderChatMarkdown } from "./markdown.js";
 import {
@@ -13,7 +14,7 @@ import {
   ICON_INFO,
   ICON_TRASH
 } from "./icons.js";
-import { registerServiceWorker, isIOS, isStandalone } from "./push.js";
+import { registerServiceWorker } from "./push.js";
 import {
   getStoredChatCode,
   setStoredChatCode,
@@ -88,8 +89,7 @@ const els = {
   chatDetailTotal: document.getElementById("chat-detail-total"),
   chatDetailStart: document.getElementById("chat-detail-start"),
   chatDetailLast: document.getElementById("chat-detail-last"),
-  chatDetailClose: document.getElementById("chat-detail-close"),
-  printArea: document.getElementById("print-area")
+  chatDetailClose: document.getElementById("chat-detail-close")
 };
 
 const state = {
@@ -679,18 +679,32 @@ async function refreshAfterChatMutation(id, { titleChanged = false } = {}) {
   }
 }
 
-async function exportChatToPdf(id) {
-  // Keterbatasan WebKit yang sudah lama dikenal & tidak bisa diperbaiki dari
-  // sisi web app: window.print() TIDAK memunculkan apa-apa sama sekali kalau
-  // situsnya dibuka sebagai app yang di-"Add to Home Screen" (standalone),
-  // karena di mode itu tidak ada UI Safari yang bisa menampilkan dialog
-  // cetak. Harus dibuka lewat tab Safari biasa (ada address bar-nya) supaya
-  // tombol ini bisa memunculkan popup cetak/PDF.
-  if (isIOS() && isStandalone()) {
-    window.alert(t(state.lang, "pdf_ios_standalone"));
-    return;
-  }
+// Hapus semua syntax markdown yang jadi "kotor" kalau ditulis apa adanya
+// sebagai teks biasa di PDF (bold/italic/heading/kode/kutipan/link) --
+// baris baru TETAP dipertahankan (beda dari versi preview satu-baris),
+// supaya paragraf & daftar poin di PDF tidak nempel jadi satu blok teks.
+function stripMarkdownForPdf(md) {
+  if (!md) return "";
+  return md
+    .replace(/```([\s\S]*?)```/g, (_m, code) => code.trim())
+    .replace(/^#{1,6}\s*/gm, "")
+    .replace(/\*\*(.*?)\*\*/g, "$1")
+    .replace(/\*(.*?)\*/g, "$1")
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/^>\s?/gm, "")
+    .replace(/\[(.*?)\]\((.*?)\)/g, "$1 ($2)")
+    .replace(/^[-*]\s+/gm, "• ")
+    .trim();
+}
 
+// Export PDF langsung jadi FILE (bukan lewat dialog cetak browser) --
+// dirender sendiri pakai jsPDF, jadi hasilnya sama persis di semua
+// perangkat/browser dan langsung ke-download tanpa popup apapun. Ini juga
+// sekalian menghindari keterbatasan iOS lama: window.print() tidak bisa
+// dipakai sama sekali kalau situsnya dibuka sebagai app yang di-"Add to
+// Home Screen" (standalone) -- dengan generate PDF sendiri, batasan itu
+// jadi tidak relevan lagi.
+async function exportChatToPdf(id) {
   const title = getCustomTitle(id) || getDefaultLabel(id);
 
   const result = await fetchChatHistory(id, state.chatCode);
@@ -712,42 +726,59 @@ async function exportChatToPdf(id) {
   const locale = state.lang === "id" ? "id-ID" : "en-US";
   const printedAt = new Date().toLocaleString(locale, { dateStyle: "long", timeStyle: "short" });
 
-  els.printArea.innerHTML = "";
+  const doc = new jsPDF({ unit: "pt", format: "a4" });
+  const pageWidth = doc.internal.pageSize.getWidth();
+  const pageHeight = doc.internal.pageSize.getHeight();
+  const margin = 48;
+  const maxWidth = pageWidth - margin * 2;
+  let y = margin;
 
-  const titleEl = document.createElement("h1");
-  titleEl.className = "print-title";
-  titleEl.textContent = title;
-  els.printArea.appendChild(titleEl);
-
-  const metaEl = document.createElement("p");
-  metaEl.className = "print-meta";
-  metaEl.textContent = `${messages.length} ${t(state.lang, "detail_messages_unit")} • ${printedAt}`;
-  els.printArea.appendChild(metaEl);
-
-  for (const msg of messages) {
-    const msgEl = document.createElement("div");
-    msgEl.className = "print-message";
-
-    const head = document.createElement("div");
-    head.className = "print-message-head";
-    const who = msg.role === "assistant" ? t(state.lang, "pdf_ai_prefix") : t(state.lang, "pdf_you_prefix");
-    head.textContent = `${who} • ${formatFullDateTime(msg.created_at)}`;
-    msgEl.appendChild(head);
-
-    const body = document.createElement("div");
-    body.innerHTML = renderChatMarkdown(msg.content);
-    msgEl.appendChild(body);
-
-    els.printArea.appendChild(msgEl);
+  function ensureSpace(lineHeight) {
+    if (y + lineHeight > pageHeight - margin) {
+      doc.addPage();
+      y = margin;
+    }
   }
 
-  // Baru panggil print() 2 frame kemudian -- kasih waktu DOM yang baru
-  // diisi kebentuk layout dulu sebelum browser menyiapkan halaman cetaknya.
-  requestAnimationFrame(() => {
-    requestAnimationFrame(() => {
-      window.print();
-    });
-  });
+  function writeLines(lines, lineHeight) {
+    for (const line of lines) {
+      ensureSpace(lineHeight);
+      doc.text(line, margin, y);
+      y += lineHeight;
+    }
+  }
+
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(16);
+  writeLines(doc.splitTextToSize(title, maxWidth), 20);
+
+  y += 4;
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(9);
+  doc.setTextColor(110);
+  writeLines(doc.splitTextToSize(`${messages.length} ${t(state.lang, "detail_messages_unit")} • ${printedAt}`, maxWidth), 13);
+  doc.setTextColor(0);
+  y += 10;
+
+  for (const msg of messages) {
+    const who = msg.role === "assistant" ? t(state.lang, "pdf_ai_prefix") : t(state.lang, "pdf_you_prefix");
+
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(9);
+    writeLines(doc.splitTextToSize(`${who} • ${formatFullDateTime(msg.created_at)}`, maxWidth), 13);
+
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(11);
+    const plain = stripMarkdownForPdf(msg.content);
+    for (const paragraph of plain.split(/\n+/)) {
+      if (!paragraph.trim()) continue;
+      writeLines(doc.splitTextToSize(paragraph, maxWidth), 15);
+    }
+    y += 10;
+  }
+
+  const safeTitle = title.replace(/[^\p{L}\p{N}]+/gu, "_").replace(/^_+|_+$/g, "").slice(0, 60) || "chat";
+  doc.save(`${safeTitle}.pdf`);
 }
 
 function wireEvents() {

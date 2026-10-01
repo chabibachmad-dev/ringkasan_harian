@@ -685,64 +685,6 @@ body {
   background: var(--notify-bg);
 }
 
-/* ---------- Cetak PDF (window.print()) ---------- */
-
-/* #print-area cuma dipakai sesaat sebelum window.print() dipanggil (lihat
-   main.js) -- disembunyikan total dari tampilan normal, baru dimunculkan
-   lewat CSS @media print di bawah. */
-.print-area {
-  display: none;
-}
-
-@media print {
-  /* Trik standar "cetak cuma 1 elemen": sembunyikan (visibility, bukan
-     display) semua, lalu nyalakan lagi khusus #print-area dan semua
-     turunannya -- dengan visibility (bukan display) elemen lain tetap ikut
-     dihitung browser tapi tidak bertinta sama sekali, dan #print-area bisa
-     diposisikan dari pojok kiri-atas halaman cetak. */
-  body * {
-    visibility: hidden;
-  }
-  #print-area,
-  #print-area * {
-    visibility: visible;
-  }
-  #print-area {
-    display: block;
-    position: absolute;
-    left: 0;
-    top: 0;
-    width: 100%;
-    font-family: "Ubuntu Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
-    color: #000;
-  }
-  .print-title {
-    font-size: 1.3rem;
-    font-weight: 700;
-    margin: 0 0 2px;
-  }
-  .print-meta {
-    font-size: 0.8rem;
-    color: #444;
-    margin: 0 0 18px;
-  }
-  .print-message {
-    padding: 8px 0;
-    border-bottom: 1px solid #ccc;
-    font-size: 0.88rem;
-    line-height: 1.5;
-    break-inside: avoid;
-  }
-  .print-message:last-child {
-    border-bottom: none;
-  }
-  .print-message-head {
-    font-weight: 700;
-    font-size: 0.78rem;
-    margin-bottom: 3px;
-  }
-}
-
 .footer {
   text-align: center;
   /* Padding bawah ekstra supaya teks footer tidak ketiban tombol "+"
