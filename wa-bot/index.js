@@ -86,21 +86,63 @@ if (WA_AUTO_REPLY_ENABLED && !GEMINI_API_KEY) {
 }
 console.log(`🤖 Auto-reply AI: ${WA_AUTO_REPLY_ENABLED && GEMINI_API_KEY ? "AKTIF" : "mati"}`);
 
-// Prompt ini menentukan gaya & batasan balasan otomatis -- dibuat SENGAJA
-// hati-hati karena ini mengatasnamakan pemilik nomor WA asli ke kontak
-// SUNGGUHAN, tanpa sempat dibaca/disetujui dulu (beda dari Obrolan AI biasa
-// di aplikasi yang cuma pemiliknya sendiri yang baca). Lihat juga diskusi
-// risiko soal ini di percakapan sebelumnya.
-const WA_AUTOREPLY_SYSTEM_PROMPT = `Kamu adalah asisten AI yang membalas pesan WhatsApp ATAS NAMA pemilik nomor ini secara OTOMATIS, tanpa pemilik nomor sempat membaca/menyetujui dulu.
+// Prompt ini menentukan gaya & batasan balasan otomatis. Dibuat SELENGKAP
+// Obrolan AI di aplikasi (boleh diskusi bebas, bantu coding, akses
+// pencarian Google) per permintaan user -- TAPI tetap pakai 1 rem pengaman
+// yang sengaja TIDAK dihilangkan: tidak boleh bikin janji/komitmen atas
+// nama pemilik nomor, karena ini mengatasnamakan pemilik nomor WA ASLI ke
+// kontak SUNGGUHAN secara otomatis, tanpa sempat dibaca/disetujui dulu
+// (beda dari Obrolan AI biasa yang cuma pemiliknya sendiri yang baca).
+// Lihat juga diskusi risiko soal ini di percakapan sebelumnya.
+const WA_BASE_SYSTEM_PROMPT = `Kamu adalah asisten AI yang membalas pesan WhatsApp ATAS NAMA pemilik nomor ini secara OTOMATIS, tanpa pemilik nomor sempat membaca/menyetujui dulu.
 
-Aturan penting:
-1. Balas SINGKAT & natural seperti orang mengetik WhatsApp biasa (beberapa kalimat saja), bukan esai panjang.
-2. JANGAN membuat janji, komitmen, keputusan, harga, jadwal pasti, atau kesepakatan apa pun atas nama pemilik nomor -- untuk hal semacam itu, balas sopan bahwa pesannya diterima dan pemiliknya akan membalas langsung.
-3. JANGAN membagikan informasi pribadi/sensitif (keuangan, kesehatan, jadwal detail, data pribadi) tentang pemilik nomor.
-4. Kalau pesan masuk jelas butuh keputusan manusia (negosiasi, hal mendesak, masalah pribadi/emosional, komplain serius), jangan improvisasi -- cukup akui pesannya diterima dan akan ditindaklanjuti langsung oleh pemiliknya.
-5. JANGAN pakai format markdown (heading, tabel, tanda # atau **) karena WhatsApp menampilkannya apa adanya -- kalau perlu penekanan, pakai *tebal* atau _miring_ ala WhatsApp secukupnya saja.
-6. Gunakan Bahasa Indonesia, kecuali lawan bicara jelas menulis dalam bahasa lain -- kalau begitu, balas di bahasa yang sama.
-7. Kalau konteks percakapan kurang jelas buat jawab dengan yakin, lebih baik jawab netral & minta klarifikasi singkat drpd menebak-nebak.`;
+Jawab pertanyaan, bantu coding/debugging, atau ajak diskusi dengan ramah, jelas, dan seringkas mungkin tanpa kehilangan inti jawaban -- sama seperti asisten AI biasa. Kamu PUNYA akses ke pencarian Google secara real-time -- pakai untuk mencari info/berita/link terbaru saat relevan, dan tuliskan link hasil pencarian yang relevan. Kalau diminta bantuan kode, tulis kodenya di dalam blok \`\`\`seperti ini\`\`\` (WhatsApp menampilkannya sebagai monospace) lalu jelaskan secukupnya.
+
+Gunakan Bahasa Indonesia, kecuali lawan bicara jelas menulis/minta bahasa lain -- kalau begitu, balas di bahasa itu. WhatsApp CUMA mendukung *tebal*, _miring_, ~coret~, dan blok kode \`\`\`...\`\`\` -- JANGAN pakai format markdown lain (heading #, tabel, bullet list dengan -, dll) karena tidak akan tampil rapi.
+
+ATURAN PENGAMAN (berlaku terus walau topiknya bebas):
+1. JANGAN membuat janji, komitmen, keputusan, harga, jadwal pasti, atau kesepakatan apa pun atas nama pemilik nomor -- untuk hal semacam itu, balas sopan bahwa pesannya diterima dan pemiliknya akan membalas langsung.
+2. JANGAN membagikan informasi pribadi/sensitif (keuangan, kesehatan, jadwal detail, data pribadi) tentang pemilik nomor.
+3. Kalau pesan masuk jelas butuh keputusan manusia (negosiasi, hal mendesak, masalah pribadi/emosional, komplain serius), jangan improvisasi -- cukup akui pesannya diterima dan akan ditindaklanjuti langsung oleh pemiliknya.`;
+
+// Sama persis konsepnya dengan KNOWLEDGE_CONTEXT_INTRO di
+// supabase/functions/_shared/gemini.ts (lihat catatan sinkronisasi di atas).
+const WA_KNOWLEDGE_CONTEXT_INTRO = `Pemilik nomor ini sudah mengupload dokumen referensi berikut ke aplikasinya (mis. peraturan/perundangan). ANGGAP dokumen-dokumen ini sebagai sumber paling terpercaya dan PRIORITASKAN jawaban dari sini -- kalau pertanyaan bisa dijawab dari isi salah satu dokumen di bawah, jawab dari situ duluan dan sebutkan judul dokumennya, TANPA perlu cari di internet dulu. Cari di Google HANYA kalau jawabannya memang tidak ada di dokumen-dokumen ini, atau topiknya jelas di luar cakupan dokumen ini.`;
+
+function buildWaSystemText(knowledgeContext) {
+  if (!knowledgeContext || knowledgeContext.length === 0) return WA_BASE_SYSTEM_PROMPT;
+  const docsText = knowledgeContext.map((doc) => `=== Dokumen: "${doc.title}" ===\n${doc.content}`).join("\n\n");
+  return `${WA_BASE_SYSTEM_PROMPT}\n\n${WA_KNOWLEDGE_CONTEXT_INTRO}\n\n${docsText}`;
+}
+
+// Ambil Dokumen Pengetahuan yang sama dipakai Obrolan AI (tabel
+// knowledge_documents) -- SAMA PERSIS query & budget karakternya dengan
+// Edge Function `chat` (action "send"), lihat catatan sinkronisasi di atas.
+// Beda dari Obrolan AI (yang ini opt-in PER OBROLAN lewat toggle "Pakai
+// Dokumen Pengetahuan"), auto-reply WA SELALU ikutkan semua dokumen yang ada
+// -- tidak ada toggle per-kontak di v1 ini.
+const KB_TOTAL_BUDGET_CHARS = 600000;
+async function fetchKnowledgeContext() {
+  const { data: kbRows, error } = await supabase
+    .from("knowledge_documents")
+    .select("title, content")
+    .order("uploaded_at", { ascending: false })
+    .limit(50);
+  if (error) {
+    console.error("Gagal ambil dokumen pengetahuan (auto-reply WA), lanjut tanpa itu:", error.message);
+    return [];
+  }
+  const knowledgeContext = [];
+  let used = 0;
+  for (const row of kbRows ?? []) {
+    if (used >= KB_TOTAL_BUDGET_CHARS) break;
+    const remaining = KB_TOTAL_BUDGET_CHARS - used;
+    const content = row.content.length > remaining ? `${row.content.slice(0, remaining)}\n\n[...dipotong...]` : row.content;
+    knowledgeContext.push({ title: row.title, content });
+    used += content.length;
+  }
+  return knowledgeContext;
+}
 
 // Tabel harga & logika estimasi biaya -- SALINAN dari
 // supabase/functions/_shared/gemini.ts, lihat catatan sinkronisasi di atas.
@@ -117,10 +159,48 @@ function estimateCostUsd(model, promptTokens, outputTokens) {
   return (promptTokens / 1_000_000) * price.input + (outputTokens / 1_000_000) * price.output;
 }
 
+// Satu kali panggilan mentah ke Gemini API. withTools=true nyalakan akses
+// pencarian Google (lihat WA_BASE_SYSTEM_PROMPT). Melempar Error (dengan
+// properti .status) kalau gagal, ditangani pemanggil (callGeminiWithRetry).
+async function callGeminiOnce(systemText, contents, withTools) {
+  const body = JSON.stringify({
+    system_instruction: { parts: [{ text: systemText }] },
+    contents,
+    ...(withTools ? { tools: [{ google_search: {} }] } : {}),
+    generationConfig: { temperature: 0.6 }
+  });
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
+  const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body });
+  if (res.ok) return res.json();
+  const errText = await res.text();
+  const err = new Error(`Gemini API error ${res.status}: ${errText}`);
+  err.status = res.status;
+  throw err;
+}
+
+// Retry ringan buat status sementara (429/503) -- beda dari versi lengkap di
+// Edge Function `chat` yang juga punya fallback ke MODEL cadangan segala,
+// di sini cukup retry model yang sama supaya kodenya tetap ringkas.
+async function callGeminiWithRetry(systemText, contents, withTools, maxAttempts) {
+  let lastErr;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await callGeminiOnce(systemText, contents, withTools);
+    } catch (err) {
+      lastErr = err;
+      const retryable = err.status === 429 || err.status === 503;
+      if (!retryable || attempt === maxAttempts) throw err;
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+    }
+  }
+  throw lastErr;
+}
+
 // Minta Gemini bikinkan satu balasan buat obrolan WA tertentu, pakai
-// AUTO_REPLY_HISTORY_LIMIT pesan terakhir di obrolan itu sebagai konteks.
-// Return null kalau memang tidak ada apa-apa buat dibalas (riwayat kosong) --
-// selain itu throw error (ditangani oleh pemanggil) kalau Gemini gagal.
+// AUTO_REPLY_HISTORY_LIMIT pesan terakhir di obrolan itu + Dokumen
+// Pengetahuan sebagai konteks. Return null kalau memang tidak ada apa-apa
+// buat dibalas (riwayat kosong) -- selain itu throw error (ditangani
+// pemanggil) kalau Gemini gagal total.
 async function generateAutoReply(jid) {
   const { data: historyRows, error: historyErr } = await supabase
     .from("whatsapp_messages")
@@ -138,30 +218,19 @@ async function generateAutoReply(jid) {
     }));
   if (contents.length === 0) return null;
 
-  const body = JSON.stringify({
-    system_instruction: { parts: [{ text: WA_AUTOREPLY_SYSTEM_PROMPT }] },
-    contents,
-    generationConfig: { temperature: 0.6 }
-  });
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
+  const knowledgeContext = await fetchKnowledgeContext();
+  const systemText = buildWaSystemText(knowledgeContext);
 
-  // Retry ringan (beda dari versi lengkap di Edge Function `chat` yang punya
-  // fallback model segala) -- cukup 2x percobaan buat kondisi sementara
-  // (429/503), supaya auto-reply tidak gagal total cuma gara-gara Gemini
-  // sempat sibuk sepersekian detik.
+  // Urutan percobaan sama seperti generateChatReply() di Edge Function
+  // `chat`: coba dulu DENGAN akses internet (1x saja, jangan buang waktu
+  // retry di jalur ini kalau lagi padat), baru kalau gagal lanjut TANPA
+  // internet dengan sisa jatah retry.
   let data;
-  let lastErrText = "";
-  for (let attempt = 1; attempt <= 2; attempt++) {
-    const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body });
-    if (res.ok) {
-      data = await res.json();
-      break;
-    }
-    lastErrText = await res.text();
-    if (attempt === 2 || ![429, 503].includes(res.status)) {
-      throw new Error(`Gemini API error ${res.status}: ${lastErrText}`);
-    }
-    await new Promise((resolve) => setTimeout(resolve, 3000));
+  try {
+    data = await callGeminiWithRetry(systemText, contents, true, 1);
+  } catch (err) {
+    console.warn(`Auto-reply WA: percobaan dgn Google Search gagal (${err.message}), lanjut tanpa akses internet...`);
+    data = await callGeminiWithRetry(systemText, contents, false, 2);
   }
 
   const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
