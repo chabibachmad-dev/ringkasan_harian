@@ -418,12 +418,14 @@ mark.chat-search-hit--active {
   gap: 14px;
 }
 
-/* #chat-thread adalah wadah pesan-pesan chat (di dalam .chat-messages).
-   HARUS flex column juga -- kalau tidak, align-self: flex-end/flex-start
-   di .chat-bubble.user/.assistant tidak berlaku sama sekali (align-self
-   hanya berfungsi untuk direct child dari flex/grid container), sehingga
-   semua bubble melebar penuh & menempel tanpa jarak satu sama lain. */
-#chat-thread {
+/* #chat-thread (obrolan AI) & #wa-thread (obrolan WhatsApp, lihat wa.js/
+   main.js) adalah wadah pesan-pesan chat (di dalam .chat-messages). HARUS
+   flex column juga -- kalau tidak, align-self: flex-end/flex-start di
+   .chat-bubble.user/.assistant tidak berlaku sama sekali (align-self hanya
+   berfungsi untuk direct child dari flex/grid container), sehingga semua
+   bubble melebar penuh & menempel tanpa jarak satu sama lain. */
+#chat-thread,
+#wa-thread {
   display: flex;
   flex-direction: column;
   gap: 12px;
