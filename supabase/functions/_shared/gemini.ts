@@ -328,39 +328,29 @@ export async function generateChatReply(
     throw new Error(`Respons Gemini (chat) tidak berisi teks yang diharapkan: ${JSON.stringify(data).slice(0, 500)}`);
   }
 
-  const promptTokens = data?.usageMetadata?.promptTokenCount ?? 0;
-  const candidatesTokens = data?.usageMetadata?.candidatesTokenCount ?? 0;
-  const thoughtsTokens = data?.usageMetadata?.thoughtsTokenCount ?? 0;
-  const toolUseTokens = data?.usageMetadata?.toolUsePromptTokenCount ?? 0;
-  const totalTokenCount = data?.usageMetadata?.totalTokenCount;
-
-  // Harga INPUT berlaku utk promptTokenCount + toolUsePromptTokenCount
-  // (hasil pencarian Google yang disuntikkan balik ke model). Harga OUTPUT
-  // berlaku utk candidatesTokenCount (jawaban yang terlihat) +
-  // thoughtsTokenCount (proses "mikir" internal model thinking) -- lihat
-  // komentar thoughtsTokenCount di atas. Sebelumnya di sini cuma
-  // dihitung candidatesTokenCount sendirian, jadi biaya bisa terhitung jauh
-  // lebih kecil dari seharusnya (bahkan $0) utk model thinking seperti
-  // gemini-3.6-flash.
-  let billedInputTokens = promptTokens + toolUseTokens;
-  let billedOutputTokens = candidatesTokens + thoughtsTokens;
-
-  const tokensUsed = totalTokenCount ?? billedInputTokens + billedOutputTokens;
-
-  // Jaga-jaga: kalau suatu saat Gemini mengubah bentuk usageMetadata dan
-  // keempat rincian di atas semuanya kosong padahal totalTokenCount ADA dan
-  // > 0, jangan sampai biaya diam-diam selalu tercatat $0 padahal token
-  // sebenarnya sudah banyak -- pakai totalTokenCount sbg estimasi (dihitung
-  // harga output, skenario paling "aman"/mahal) drpd dibiarkan nol terus.
-  if (billedInputTokens + billedOutputTokens === 0 && tokensUsed > 0) {
-    console.warn(
-      "generateChatReply: rincian usageMetadata kosong padahal totalTokenCount ada, raw usageMetadata:",
-      JSON.stringify(data?.usageMetadata)
-    );
-    billedOutputTokens = tokensUsed;
-  }
-
-  const costUsd = estimateCostUsd(modelUsed, billedInputTokens, billedOutputTokens);
+  // CATATAN PENTING (setelah beberapa kali percobaan): Gemini TIDAK PERNAH
+  // mengirim angka dolar -- dari awal biaya di aplikasi ini selalu hasil
+  // hitungan kita sendiri (token x tarif resmi Gemini), bukan ditarik
+  // langsung dari API. Sebelumnya biaya dihitung dari RINCIAN usageMetadata
+  // (promptTokenCount/candidatesTokenCount/thoughtsTokenCount/
+  // toolUsePromptTokenCount) satu-satu, tapi di lapangan field2 rincian itu
+  // ternyata TIDAK BISA DIANDALKAN selalu muncul/terisi benar dari Gemini --
+  // hasilnya biaya kehitung $0 terus walau token (usageMetadata.
+  // totalTokenCount) sendiri SELALU muncul & SELALU akurat (cocok persis
+  // dengan jumlah yang tercatat kumulatif di tabel token_usage).
+  //
+  // Jadi sekarang biaya dihitung LANGSUNG dari total token saja (bukan
+  // dipecah-pecah lagi per kategori), pakai perkiraan proporsi input:output
+  // yang wajar utk obrolan singkat (riwayat+prompt yang dikirim biasanya
+  // jauh lebih panjang drpd jawaban yang dihasilkan). Ini ESTIMASI kasar,
+  // bukan angka presisi -- tapi jauh lebih baik drpd $0 terus karena field
+  // rincian yang nggak reliable.
+  const tokensUsed = data?.usageMetadata?.totalTokenCount ?? 0;
+  const ESTIMATED_INPUT_SHARE = 0.7; // 70% input, 30% output -- perkiraan kasar
+  const costUsd =
+    tokensUsed > 0
+      ? estimateCostUsd(modelUsed, tokensUsed * ESTIMATED_INPUT_SHARE, tokensUsed * (1 - ESTIMATED_INPUT_SHARE))
+      : 0;
 
   return { reply: rawText.trim(), tokensUsed, costUsd };
 }
