@@ -75,7 +75,13 @@ async function handleIncoming(msg) {
   const jid = msg.key.remoteJid;
   // v1 cuma dukung chat PERSONAL (bukan grup/status/broadcast) -- biar
   // scope-nya jelas dulu, grup bisa menyusul kalau memang dibutuhkan nanti.
-  if (!jid || !jid.endsWith("@s.whatsapp.net")) return;
+  // Terima jid format lama (@s.whatsapp.net, berbasis nomor HP) MAUPUN
+  // format baru (@lid -- "Local ID", sistem identitas privasi yang belakangan
+  // dipakai WhatsApp buat sebagian chat personal, menggantikan nomor HP
+  // mentah). Tanpa ini, pesan dari kontak yang jid-nya sudah migrasi ke @lid
+  // bakal kebuang diam-diam di sini (ketauan waktu debugging: event-nya
+  // beneran nyampe & kebaca teksnya, tapi filter ini yang mendrop duluan).
+  if (!jid || !(jid.endsWith("@s.whatsapp.net") || jid.endsWith("@lid"))) return;
 
   const text = extractText(msg);
   if (!text) return;
