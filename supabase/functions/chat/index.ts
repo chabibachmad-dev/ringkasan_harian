@@ -136,11 +136,13 @@ Deno.serve(async (req) => {
     const today = getPacificDateString();
     const { data, error } = await supabaseAdmin
       .from("token_usage")
-      .select("total_tokens")
+      .select("total_tokens, total_cost_usd")
       .eq("usage_date", today)
       .maybeSingle();
     if (error) return json({ ok: false, error: error.message }, 500);
-    return json({ ok: true, tokensUsedToday: data?.total_tokens ?? 0 });
+    // total_cost_usd kolom `numeric` -- PostgREST mengembalikannya sebagai
+    // STRING (bukan number JS), jadi WAJIB di-Number()-kan dulu di sini.
+    return json({ ok: true, tokensUsedToday: data?.total_tokens ?? 0, costUsedToday: Number(data?.total_cost_usd ?? 0) });
   }
 
   if (typeof body.code !== "string" || body.code !== expectedCode) {
@@ -308,13 +310,22 @@ Deno.serve(async (req) => {
   if (body.action === "history") {
     const { data, error } = await supabaseAdmin
       .from("chat_messages")
-      .select("id, role, content, created_at")
+      .select("id, role, content, created_at, tokens_used, cost_usd")
       .eq("chat_date", date)
       .order("created_at", { ascending: true })
       .limit(200);
 
     if (error) return json({ ok: false, error: error.message }, 500);
-    return json({ ok: true, messages: data ?? [] });
+    // cost_usd kolom `numeric` -- PostgREST mengembalikannya sebagai STRING,
+    // jadi di-Number()-kan dulu di sini supaya klien selalu terima angka.
+    // Pesan lama (sebelum kolom ini ada) cost_usd/tokens_used-nya NULL --
+    // dibiarkan null, klien cukup tidak menampilkan "(token.. | $..)" untuk
+    // pesan itu.
+    const messages = (data ?? []).map((row) => ({
+      ...row,
+      cost_usd: row.cost_usd != null ? Number(row.cost_usd) : null
+    }));
+    return json({ ok: true, messages });
   }
 
   if (body.action === "delete_message") {
@@ -430,10 +441,12 @@ Deno.serve(async (req) => {
 
     let reply: string;
     let tokensUsed = 0;
+    let costUsd = 0;
     try {
       const result = await generateChatReply(history, geminiApiKey, knowledgeContext);
       reply = result.reply;
       tokensUsed = result.tokensUsed;
+      costUsd = result.costUsd;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error("chat: gagal dapat balasan Gemini:", msg);
@@ -443,33 +456,87 @@ Deno.serve(async (req) => {
       return json({ ok: false, error: `Gagal dapat balasan AI: ${msg}`, userMessageId }, 502);
     }
 
-    const { error: insertAssistantErr } = await supabaseAdmin
+    // SATU giliran kirim (satu panggilan Gemini) mencakup prompt (riwayat +
+    // dokumen pengetahuan + pesan baru) DAN jawabannya sekaligus -- jadi
+    // tokens_used/cost_usd yang sama dicatat di KEDUA baris (pesan pengguna
+    // & balasan AI) untuk giliran ini, supaya "(token xxx | $ x,xx)" muncul
+    // di kedua bubble-nya di UI, bukan cuma salah satu.
+    // Log diagnostik: angka PERSIS yang mau disimpan ke chat_messages utk
+    // giliran ini -- supaya kalau nanti masih ada yang aneh (mis. ternyata
+    // tokensUsed 0 padahal seharusnya tidak), ketahuan dari log tanpa perlu
+    // nebak-nebak lagi.
+    console.log(`chat: giliran ini tokensUsed=${tokensUsed}, costUsd=${costUsd}`);
+
+    const { data: assistantRow, error: insertAssistantErr } = await supabaseAdmin
       .from("chat_messages")
-      .insert({ chat_date: date, role: "assistant", content: reply });
+      .insert({
+        chat_date: date,
+        role: "assistant",
+        content: reply,
+        tokens_used: tokensUsed || null,
+        cost_usd: costUsd || null
+      })
+      .select("id")
+      .single();
     if (insertAssistantErr) return json({ ok: false, error: insertAssistantErr.message }, 500);
 
-    // Catat pemakaian token hari ini (zona Pasifik) -- cuma buat estimasi di
-    // footer aplikasi, jadi kegagalan di sini sengaja TIDAK menggagalkan
-    // seluruh response (pesan & balasannya sendiri sudah berhasil tersimpan).
+    if (userMessageId && (tokensUsed || costUsd)) {
+      // PENTING: error di update ini SEBELUMNYA tidak pernah dicek/dicatat
+      // sama sekali -- kalau gagal (mis. RLS/constraint), tidak akan pernah
+      // ketahuan dari log. Sekarang dicatat (tidak menggagalkan response,
+      // karena balasan utamanya sendiri sudah berhasil tersimpan).
+      const { error: updateUserMsgErr } = await supabaseAdmin
+        .from("chat_messages")
+        .update({ tokens_used: tokensUsed || null, cost_usd: costUsd || null })
+        .eq("id", userMessageId);
+      if (updateUserMsgErr) {
+        console.error("chat: gagal update tokens_used/cost_usd pesan pengguna:", updateUserMsgErr.message);
+      }
+    }
+
+    // Catat pemakaian token + biaya hari ini (zona Pasifik) -- cuma buat
+    // estimasi di footer aplikasi, jadi kegagalan di sini sengaja TIDAK
+    // menggagalkan seluruh response (pesan & balasannya sendiri sudah
+    // berhasil tersimpan).
     let tokensUsedToday: number | undefined;
+    let costUsedToday: number | undefined;
     if (tokensUsed > 0) {
       try {
         const today = getPacificDateString();
         const { data: existingUsage } = await supabaseAdmin
           .from("token_usage")
-          .select("total_tokens")
+          .select("total_tokens, total_cost_usd")
           .eq("usage_date", today)
           .maybeSingle();
         tokensUsedToday = (existingUsage?.total_tokens ?? 0) + tokensUsed;
-        await supabaseAdmin
-          .from("token_usage")
-          .upsert({ usage_date: today, total_tokens: tokensUsedToday, updated_at: new Date().toISOString() });
+        // total_cost_usd kolom `numeric` -- balik sebagai STRING, Number()-kan
+        // dulu sebelum dijumlah supaya tidak jadi concat string.
+        costUsedToday = Number(existingUsage?.total_cost_usd ?? 0) + costUsd;
+        await supabaseAdmin.from("token_usage").upsert({
+          usage_date: today,
+          total_tokens: tokensUsedToday,
+          total_cost_usd: costUsedToday,
+          updated_at: new Date().toISOString()
+        });
       } catch (err) {
         console.error("chat: gagal catat token_usage, lanjut tanpa itu:", err instanceof Error ? err.message : String(err));
       }
     }
 
-    return json({ ok: true, reply, userMessageId, tokensUsedToday });
+    return json({
+      ok: true,
+      reply,
+      userMessageId,
+      assistantMessageId: assistantRow?.id,
+      // Angka giliran INI SAJA -- dipakai klien buat langsung menampilkan
+      // "(token xxx | $ x,xx)" di dua bubble yang baru saja tampil, tanpa
+      // perlu reload riwayat dulu.
+      turnTokens: tokensUsed,
+      turnCostUsd: costUsd,
+      // Angka AKUMULASI hari ini -- dipakai klien buat update footer.
+      tokensUsedToday,
+      costUsedToday
+    });
   }
 
   return json(
