@@ -152,6 +152,54 @@
         </button>
       </section>
 
+      <!-- Layar WhatsApp 1: daftar obrolan WA -- lihat wa-bot/README.md &
+           Edge Function `whatsapp`. Dibuka dari menu Pengaturan > WhatsApp. -->
+      <section id="screen-wa-list" class="screen" hidden>
+        <header class="topbar detail-topbar">
+          <div class="detail-topbar-row">
+            <button id="wa-list-back-btn" class="icon-btn" title="Kembali" aria-label="Kembali">←</button>
+            <h1 class="detail-title" data-i18n="wa_list_title">WhatsApp</h1>
+          </div>
+        </header>
+
+        <main class="content">
+          <section class="chat-list-section">
+            <div id="wa-list" class="chat-list"></div>
+            <div id="wa-list-status" class="status-text" hidden></div>
+          </section>
+        </main>
+      </section>
+
+      <!-- Layar WhatsApp 2: isi satu obrolan WA + balas -->
+      <section id="screen-wa-detail" class="screen" hidden>
+        <header class="topbar detail-topbar">
+          <div class="detail-topbar-row">
+            <button id="wa-detail-back-btn" class="icon-btn" title="Kembali" aria-label="Kembali">←</button>
+            <h1 id="wa-detail-title" class="detail-title"></h1>
+          </div>
+        </header>
+
+        <main class="content">
+          <section class="chat-card">
+            <div class="chat-messages">
+              <div id="wa-thread"></div>
+            </div>
+          </section>
+        </main>
+
+        <div class="chat-input-bar">
+          <div id="wa-status" class="status-text" hidden></div>
+          <form id="wa-form" class="chat-form">
+            <textarea id="wa-input" rows="1"></textarea>
+            <button type="submit" id="wa-send-btn" class="chat-send-btn" aria-label="Kirim" title="Kirim">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                <path d="M2 21l21-9L2 3v7l15 2-15 2z"></path>
+              </svg>
+            </button>
+          </form>
+        </div>
+      </section>
+
       <!-- Popup kode akses -->
       <dialog id="chat-code-dialog" class="chat-code-dialog">
         <form id="chat-code-form" class="chat-code-form-modal">
@@ -273,6 +321,10 @@
           <button type="button" id="settings-kb-btn" class="sheet-action">
             <span id="settings-kb-icon" class="sheet-action-icon"></span>
             <span data-i18n="settings_kb">Dokumen Pengetahuan</span>
+          </button>
+          <button type="button" id="settings-whatsapp-btn" class="sheet-action">
+            <span id="settings-whatsapp-icon" class="sheet-action-icon"></span>
+            <span data-i18n="settings_whatsapp">WhatsApp</span>
           </button>
           <button type="button" id="settings-change-code-btn" class="sheet-action">
             <span id="settings-change-code-icon" class="sheet-action-icon"></span>

@@ -1,0 +1,9 @@
+node_modules/
+.env
+
+# Sesi login WhatsApp (hasil scan QR) -- SANGAT RAHASIA, setara dengan
+# "menyerahkan HP yang sudah login WA" kalau sampai bocor/ke-commit ke git.
+# Jangan pernah dihapus manual kecuali memang mau logout & scan ulang.
+auth_session/
+
+*.log

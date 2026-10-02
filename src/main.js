@@ -42,6 +42,7 @@ import {
   uploadKnowledgeDoc,
   deleteKnowledgeDoc
 } from "./chat.js";
+import { listWaChats, fetchWaHistory, sendWaMessage } from "./wa.js";
 
 // Daftar obrolan yang pernah dimulai dari perangkat ini (tombol "+") --
 // disimpan lokal karena app ini sekarang murni asisten chat, tidak ada lagi
@@ -58,6 +59,21 @@ const els = {
   screenDetail: document.getElementById("screen-detail"),
   backBtn: document.getElementById("back-btn"),
   detailDateTitle: document.getElementById("detail-date-title"),
+  // Layar fitur "WhatsApp di dalam aplikasi" -- lihat wa.js & wa-bot/.
+  screenWaList: document.getElementById("screen-wa-list"),
+  screenWaDetail: document.getElementById("screen-wa-detail"),
+  waListBackBtn: document.getElementById("wa-list-back-btn"),
+  waList: document.getElementById("wa-list"),
+  waListStatus: document.getElementById("wa-list-status"),
+  waDetailBackBtn: document.getElementById("wa-detail-back-btn"),
+  waDetailTitle: document.getElementById("wa-detail-title"),
+  waThread: document.getElementById("wa-thread"),
+  waForm: document.getElementById("wa-form"),
+  waInput: document.getElementById("wa-input"),
+  waSendBtn: document.getElementById("wa-send-btn"),
+  waStatus: document.getElementById("wa-status"),
+  settingsWhatsappBtn: document.getElementById("settings-whatsapp-btn"),
+  settingsWhatsappIcon: document.getElementById("settings-whatsapp-icon"),
   langToggle: document.getElementById("lang-toggle"),
   langLabel: document.getElementById("lang-label"),
   themeToggle: document.getElementById("theme-toggle"),
@@ -170,6 +186,21 @@ const state = {
   // jalan, dipakai menu titik-3 (lihat openChatOptions). Default (belum ada
   // entry) dianggap false/OFF -- sengaja opt-in, lihat migrations/0010.
   threadUseKb: new Map(),
+  // Fitur WhatsApp (lihat wa.js, wa-bot/) -- jid obrolan WA yang lagi
+  // dibuka di screen-wa-detail, & timer polling buat masing-masing layar
+  // (null kalau layarnya lagi tidak kebuka, supaya tidak polling sia-sia
+  // waktu user ada di layar lain).
+  waCurrentJid: null,
+  waListTimer: null,
+  waDetailTimer: null,
+  // jid -> nama kontak WA (diisi ulang tiap renderWaList() jalan, dipakai
+  // formatWaJidLabel() buat judul layar detail). "Signature" di bawah ini
+  // cuma dipakai buat DETEKSI PERUBAHAN waktu polling -- bukan ditampilkan,
+  // supaya daftar/bubble tidak dirender ulang (dan bikin scroll "lompat")
+  // kalau isinya memang belum berubah sejak tick sebelumnya.
+  waNames: new Map(),
+  waListSignature: null,
+  waThreadSignature: null,
   activeOptionsId: null,
   // Hasil pencarian teks DI DALAM satu obrolan yang sedang dibuka (beda dari
   // chatSearchInput di layar daftar, yang cuma menyaring judul/preview).
@@ -930,7 +961,8 @@ async function initChat() {
 }
 
 async function showListScreen() {
-  els.screenDetail.hidden = true;
+  stopWaPolling();
+  hideAllScreens();
   els.screenList.hidden = false;
   updateScrollBottomBtnVisibility();
   // Sengaja tanpa await -- ini cuma info tambahan di footer, tidak boleh
@@ -940,8 +972,9 @@ async function showListScreen() {
 }
 
 async function showDetailScreen(date) {
+  stopWaPolling();
   state.currentDate = date;
-  els.screenList.hidden = true;
+  hideAllScreens();
   els.screenDetail.hidden = false;
   resetInChatSearch();
 
@@ -959,10 +992,18 @@ async function showDetailScreen(date) {
 }
 
 function handleRoute() {
-  // Terima ID tanggal (YYYY-MM-DD) maupun ID obrolan bebas (freeform-<uuid>).
+  // Terima ID tanggal (YYYY-MM-DD) maupun ID obrolan bebas (freeform-<uuid>),
+  // atau rute WhatsApp (#wa, #wa/<jid yang di-encode>).
   const match = location.hash.match(/^#d\/([0-9a-zA-Z_-]{1,60})$/);
+  const waMatch = location.hash.match(/^#wa(?:\/(.+))?$/);
   if (match) {
     showDetailScreen(match[1]);
+  } else if (waMatch) {
+    if (waMatch[1]) {
+      showWaDetailScreen(decodeURIComponent(waMatch[1]));
+    } else {
+      showWaListScreen();
+    }
   } else {
     showListScreen();
   }
@@ -974,6 +1015,293 @@ function openDetail(date) {
 
 function openList() {
   location.hash = "";
+}
+
+// ---------- Fitur WhatsApp (daftar obrolan WA & satu obrolan WA) ----------
+// Lihat wa.js buat klien Edge Function-nya & wa-bot/README.md buat cara
+// jalanin bot-nya. Pola layar/polling di sini SENGAJA dibikin mirip layar
+// Obrolan AI biasa (showListScreen/showDetailScreen) supaya konsisten, tapi
+// dipisah fungsinya sendiri-sendiri karena sumber datanya beda total (tabel
+// whatsapp_messages, bukan chat_messages) dan TIDAK ada konsep "terkunci di
+// localStorage" -- WA selalu butuh kode akses buat baca apapun.
+
+function openWaList() {
+  location.hash = "wa";
+}
+
+function openWaDetail(jid) {
+  location.hash = `wa/${encodeURIComponent(jid)}`;
+}
+
+// Dipanggil tiap kali SALAH SATU layar WA ditinggalkan (pindah ke layar
+// lain) -- biar tidak ada 2 timer polling nyala bersamaan sia-sia di
+// belakang layar yang sudah tidak kelihatan.
+function stopWaPolling() {
+  if (state.waListTimer) {
+    clearInterval(state.waListTimer);
+    state.waListTimer = null;
+  }
+  if (state.waDetailTimer) {
+    clearInterval(state.waDetailTimer);
+    state.waDetailTimer = null;
+  }
+}
+
+function hideAllScreens() {
+  els.screenList.hidden = true;
+  els.screenDetail.hidden = true;
+  els.screenWaList.hidden = true;
+  els.screenWaDetail.hidden = true;
+}
+
+async function showWaListScreen() {
+  stopWaPolling();
+  hideAllScreens();
+  els.screenWaList.hidden = false;
+  state.waCurrentJid = null;
+  state.waListSignature = null;
+
+  await renderWaList();
+  // Poll tiap beberapa detik supaya daftar ikut kebaruan (ada pesan masuk
+  // baru/berubah urutan) tanpa user harus manual refresh -- interval sama
+  // dengan punya bot (lihat POLL_INTERVAL_MS di wa-bot/index.js) supaya
+  // kira-kira selaras.
+  state.waListTimer = setInterval(() => {
+    renderWaList();
+  }, 4000);
+}
+
+async function showWaDetailScreen(jid) {
+  stopWaPolling();
+  hideAllScreens();
+  els.screenWaDetail.hidden = false;
+  state.waCurrentJid = jid;
+  state.waThreadSignature = null;
+  els.waDetailTitle.textContent = formatWaJidLabel(jid);
+
+  await loadWaThread(jid);
+  state.waDetailTimer = setInterval(() => {
+    loadWaThread(jid, { silent: true });
+  }, 4000);
+}
+
+// "6281234567890@s.whatsapp.net" -> nama kontak (kalau sempat kebawa dari
+// renderWaList(), lihat state.waNames) atau "+6281234567890" kalau belum ada
+// nama -- v1 cuma dukung chat personal, jadi cukup pakai nomornya saja.
+function formatWaJidLabel(jid) {
+  if (!jid) return "";
+  const known = state.waNames.get(jid);
+  if (known) return known;
+  const numberPart = jid.split("@")[0];
+  return numberPart ? `+${numberPart}` : jid;
+}
+
+function setWaListStatus(text) {
+  if (!text) {
+    els.waListStatus.hidden = true;
+    els.waListStatus.textContent = "";
+    return;
+  }
+  els.waListStatus.hidden = false;
+  els.waListStatus.textContent = text;
+}
+
+async function renderWaList() {
+  if (!state.chatCode) {
+    els.waList.innerHTML = "";
+    setWaListStatus(t(state.lang, "wa_need_code"));
+    return;
+  }
+
+  // Sama kayak loadWaThread(): kalau daftarnya sudah pernah tampil (dari
+  // panggilan sebelumnya, mis. tiap tick polling), jangan tutupi dengan teks
+  // "Memuat..." -- biar tidak kedip-kedip tiap 4 detik.
+  const hasExisting = els.waList.children.length > 0;
+  if (!hasExisting) setWaListStatus(t(state.lang, "loading"));
+
+  const result = await listWaChats(state.chatCode);
+  if (!result.ok) {
+    if (result.unauthorized) {
+      state.chatCode = "";
+      clearStoredChatCode();
+      els.waList.innerHTML = "";
+      setWaListStatus(t(state.lang, "chat_code_wrong"));
+      return;
+    }
+    if (!hasExisting) setWaListStatus(t(state.lang, "wa_load_error"));
+    return;
+  }
+
+  const chats = result.chats || [];
+  state.waNames.clear();
+  for (const chat of chats) {
+    if (chat.name) state.waNames.set(chat.jid, chat.name);
+  }
+
+  if (chats.length === 0) {
+    els.waList.innerHTML = "";
+    setWaListStatus(t(state.lang, "wa_list_empty"));
+    return;
+  }
+
+  // Diurut aktivitas terbaru -- lihat komentar di Edge Function `whatsapp`
+  // action "list_chats" (sengaja TIDAK diurut di server, jadi diurut di sini).
+  chats.sort((a, b) => (Date.parse(b.lastAt || 0) || 0) - (Date.parse(a.lastAt || 0) || 0));
+
+  const signature = chats.map((c) => `${c.jid}:${c.lastContent}:${c.lastStatus}:${c.lastAt}`).join("|");
+  if (signature === state.waListSignature) return;
+  state.waListSignature = signature;
+
+  setWaListStatus("");
+  els.waList.innerHTML = "";
+
+  for (const chat of chats) {
+    const item = document.createElement("div");
+    item.className = "chat-list-item";
+
+    const mainBtn = document.createElement("button");
+    mainBtn.type = "button";
+    mainBtn.className = "chat-list-item-main";
+
+    const avatar = document.createElement("div");
+    avatar.className = "chat-list-avatar";
+    avatar.innerHTML = ICON_CHAT;
+
+    const main = document.createElement("div");
+    main.className = "chat-list-main";
+
+    const top = document.createElement("div");
+    top.className = "chat-list-top";
+    const dateLabel = document.createElement("span");
+    dateLabel.className = "chat-list-date";
+    dateLabel.textContent = chat.name || formatWaJidLabel(chat.jid);
+    const timeLabel = document.createElement("span");
+    timeLabel.className = "chat-list-time";
+    timeLabel.textContent = chat.lastAt ? formatBubbleTime(chat.lastAt) : "";
+
+    const bottom = document.createElement("div");
+    bottom.className = "chat-list-bottom";
+    const preview = document.createElement("span");
+    preview.className = "chat-list-preview";
+    const prefix = chat.lastDirection === "out" ? `${t(state.lang, "chat_you_prefix")} ` : "";
+    preview.textContent = chat.lastContent ? truncate(`${prefix}${chat.lastContent}`) : "";
+
+    top.appendChild(dateLabel);
+    top.appendChild(timeLabel);
+    bottom.appendChild(preview);
+    main.appendChild(top);
+    main.appendChild(bottom);
+    mainBtn.appendChild(avatar);
+    mainBtn.appendChild(main);
+    mainBtn.addEventListener("click", () => openWaDetail(chat.jid));
+
+    item.appendChild(mainBtn);
+    els.waList.appendChild(item);
+  }
+}
+
+function setWaStatus(text) {
+  if (!text) {
+    els.waStatus.hidden = true;
+    els.waStatus.textContent = "";
+    return;
+  }
+  els.waStatus.hidden = false;
+  els.waStatus.textContent = text;
+}
+
+// direction "out" (dikirim dari aplikasi ini, lewat wa-bot/) ditampilkan
+// seperti bubble "user" (kanan) -- "in" (pesan masuk dari lawan bicara)
+// seperti bubble "assistant" (kiri). Reuse gaya bubble obrolan AI yang sudah
+// ada, cuma beda makna arahnya.
+function appendWaBubble(direction, content, timestamp, status) {
+  const emptyEl = els.waThread.querySelector(".chat-empty-text");
+  if (emptyEl) emptyEl.remove();
+
+  const bubble = document.createElement("div");
+  bubble.className = `chat-bubble ${direction === "out" ? "user" : "assistant"}`;
+
+  const textEl = document.createElement("div");
+  textEl.className = "chat-bubble-text";
+  // Pesan WA ditampilkan APA ADANYA (textContent, bukan renderChatMarkdown)
+  // -- isinya pesan WhatsApp biasa, bukan markdown dari AI.
+  textEl.textContent = content;
+  bubble.appendChild(textEl);
+
+  const meta = document.createElement("div");
+  meta.className = "chat-bubble-meta";
+
+  const timeEl = document.createElement("span");
+  timeEl.className = "chat-bubble-time";
+  timeEl.textContent = formatBubbleTime(timestamp || new Date());
+  meta.appendChild(timeEl);
+
+  // Status pending/failed cuma relevan buat pesan KELUAR (yang kita kirim
+  // dari sini) -- pesan masuk statusnya selalu "received", tidak perlu
+  // ditampilkan.
+  if (direction === "out" && status && status !== "sent") {
+    const statusEl = document.createElement("span");
+    statusEl.className = "chat-bubble-usage";
+    statusEl.textContent = t(state.lang, status === "failed" ? "wa_status_failed" : "wa_status_pending");
+    meta.appendChild(statusEl);
+  }
+
+  bubble.appendChild(meta);
+  els.waThread.appendChild(bubble);
+  scrollChatToBottom();
+  return bubble;
+}
+
+function renderWaMessages(messages) {
+  els.waThread.innerHTML = "";
+  if (!messages || messages.length === 0) {
+    const p = document.createElement("p");
+    p.className = "chat-empty-text";
+    p.textContent = t(state.lang, "wa_empty_thread");
+    els.waThread.appendChild(p);
+  } else {
+    for (const msg of messages) {
+      appendWaBubble(msg.direction, msg.content, msg.created_at, msg.status);
+    }
+  }
+  scrollChatToBottom();
+}
+
+async function loadWaThread(jid, opts = {}) {
+  const silent = opts.silent || false;
+  if (!state.chatCode) {
+    if (!silent) {
+      els.waThread.innerHTML = "";
+      setWaStatus(t(state.lang, "wa_need_code"));
+    }
+    return;
+  }
+
+  if (!silent) setWaStatus(t(state.lang, "loading"));
+  const result = await fetchWaHistory(jid, state.chatCode);
+  if (!silent) setWaStatus("");
+
+  if (!result.ok) {
+    if (result.unauthorized) {
+      state.chatCode = "";
+      clearStoredChatCode();
+      setWaStatus(t(state.lang, "chat_code_wrong"));
+      return;
+    }
+    if (!silent) setWaStatus(t(state.lang, "wa_load_error"));
+    return;
+  }
+
+  const messages = result.messages || [];
+  // Sama seperti renderWaList(): kalau tidak ada perubahan sama sekali sejak
+  // render terakhir, jangan render ulang -- hindari bubble "berkedip"/scroll
+  // ke bawah paksa tiap tick polling padahal user mungkin lagi scroll baca
+  // pesan lama.
+  const signature = messages.map((m) => `${m.id}:${m.status}`).join("|");
+  if (signature === state.waThreadSignature) return;
+  state.waThreadSignature = signature;
+
+  renderWaMessages(messages);
 }
 
 function openDialogEl(dialogEl) {
@@ -1277,6 +1605,65 @@ function wireEvents() {
     openList();
   });
 
+  els.waListBackBtn.addEventListener("click", () => {
+    openList();
+  });
+
+  els.waDetailBackBtn.addEventListener("click", () => {
+    openWaList();
+  });
+
+  els.waForm.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const text = els.waInput.value.trim();
+    const jid = state.waCurrentJid;
+    if (!text || !jid) return;
+    if (!state.chatCode) {
+      setWaStatus(t(state.lang, "wa_need_code"));
+      openChatCodeDialog();
+      return;
+    }
+
+    els.waInput.value = "";
+    els.waInput.style.height = "auto";
+    els.waSendBtn.disabled = true;
+    // Bubble ditampilkan dulu (optimistic) dengan status "pending" -- baru
+    // beneran terkirim setelah bot wa-bot/ polling & proses (lihat komentar
+    // panjang di wa-bot/index.js). Status finalnya ('sent'/'failed') baru
+    // kelihatan di tick polling berikutnya (loadWaThread), begitu
+    // state.waThreadSignature berubah.
+    appendWaBubble("out", text, new Date(), "pending");
+    state.waThreadSignature = null;
+
+    const result = await sendWaMessage(jid, text, state.chatCode);
+    els.waSendBtn.disabled = false;
+
+    if (!result.ok) {
+      if (result.unauthorized) {
+        state.chatCode = "";
+        clearStoredChatCode();
+        setWaStatus(t(state.lang, "chat_code_wrong"));
+        return;
+      }
+      setWaStatus(t(state.lang, "wa_send_error"));
+      return;
+    }
+    setWaStatus("");
+  });
+
+  // Enter buat kirim, Shift+Enter buat baris baru -- sama seperti chatInput.
+  els.waInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      els.waForm.requestSubmit();
+    }
+  });
+
+  els.waInput.addEventListener("input", () => {
+    els.waInput.style.height = "auto";
+    els.waInput.style.height = `${els.waInput.scrollHeight}px`;
+  });
+
   els.chatSearchInput.addEventListener("input", applyChatListFilter);
 
   els.newChatFab.addEventListener("click", () => {
@@ -1337,6 +1724,17 @@ function wireEvents() {
     }
     if (!els.screenList.hidden) {
       await renderChatList();
+    }
+    // Sama seperti 2 cabang di atas, tapi buat layar WhatsApp -- dialog kode
+    // akses ini generik dan bisa saja dibuka waktu user lagi di salah satu
+    // layar WA (lihat waForm submit handler & renderWaList()/loadWaThread()).
+    if (!els.screenWaList.hidden) {
+      state.waListSignature = null;
+      await renderWaList();
+    }
+    if (!els.screenWaDetail.hidden && state.waCurrentJid) {
+      state.waThreadSignature = null;
+      await loadWaThread(state.waCurrentJid);
     }
   });
 
@@ -1479,6 +1877,7 @@ function wireEvents() {
   // dipasang sekali.
   els.settingsToggleIcon.innerHTML = ICON_SETTINGS;
   els.settingsKbIcon.innerHTML = ICON_UPLOAD;
+  els.settingsWhatsappIcon.innerHTML = ICON_CHAT;
   els.settingsChangeCodeIcon.innerHTML = ICON_KEY;
   els.settingsLogoutIcon.innerHTML = ICON_LOGOUT;
   els.settingsAboutIcon.innerHTML = ICON_INFO;
@@ -1734,6 +2133,11 @@ function wireEvents() {
   });
 
   els.settingsKbBtn.addEventListener("click", () => openKbDialog());
+
+  els.settingsWhatsappBtn.addEventListener("click", () => {
+    closeSettingsDialog();
+    openWaList();
+  });
 
   els.settingsChangeCodeBtn.addEventListener("click", () => {
     closeSettingsDialog();
