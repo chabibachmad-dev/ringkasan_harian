@@ -45,6 +45,202 @@ if (!SUPABASE_URL || !SERVICE_ROLE_KEY) {
 
 const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY);
 
+// ================================================================
+// Auto-reply pakai AI (Gemini) -- OPSIONAL, DEFAULT MATI.
+//
+// Nyala HANYA kalau WA_AUTO_REPLY_ENABLED=true DAN GEMINI_API_KEY diisi di
+// .env (pakai API key Google AI Studio yang SAMA dengan yang dipasang
+// sebagai secret GEMINI_API_KEY di Supabase buat fitur "Obrolan AI" --
+// lihat https://aistudio.google.com/apikey).
+//
+// KENAPA GEMINI DIPANGGIL LANGSUNG DARI SINI (bukan lewat Edge Function
+// `whatsapp`)? Beda dari frontend (browser, tidak dipercaya, makanya harus
+// lewat Edge Function + CHAT_ACCESS_CODE), skrip bot ini SUDAH pegang
+// service_role key (akses penuh ke database, lebih tinggi derajat
+// kepercayaannya drpd anon key) dan memang didesain bicara LANGSUNG ke
+// Supabase tanpa lewat Edge Function (lihat handleIncoming/
+// processPendingOutgoing di atas) -- jadi manggil Gemini langsung dari sini
+// juga konsisten dengan pola itu, drpd nambah satu lompatan jaringan lagi
+// via Edge Function.
+//
+// CATATAN: logika hitung biaya (estimateCostUsd/getModelPricing) di bawah
+// ini SENGAJA DIDUPLIKASI dari supabase/functions/_shared/gemini.ts (bukan
+// di-share) karena yang satu jalan di Deno/TypeScript (Edge Function) dan
+// yang ini di Node.js biasa -- kalau suatu saat tarif resmi Gemini berubah,
+// PASTIKAN update KEDUA tempat ini supaya catatan "token terpakai hari ini"
+// di footer aplikasi tetap akurat.
+const WA_AUTO_REPLY_ENABLED = (process.env.WA_AUTO_REPLY_ENABLED || "").toLowerCase() === "true";
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
+const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-3.6-flash";
+// Berapa pesan terakhir (masuk+keluar) di satu obrolan yang dikasihkan ke
+// Gemini sebagai konteks -- sengaja lebih pendek drpd riwayat Obrolan AI
+// (yang 40) karena chat WA biasanya lebih singkat/kasual, dan tiap pesan WA
+// baru memicu 1 panggilan Gemini (beda dari Obrolan AI yang cuma kepanggil
+// waktu user benar-benar kirim) -- riwayat lebih pendek = lebih hemat token.
+const AUTO_REPLY_HISTORY_LIMIT = 20;
+
+if (WA_AUTO_REPLY_ENABLED && !GEMINI_API_KEY) {
+  console.warn(
+    "⚠️  WA_AUTO_REPLY_ENABLED=true tapi GEMINI_API_KEY belum diisi di .env -- auto-reply TIDAK akan jalan sampai diisi."
+  );
+}
+console.log(`🤖 Auto-reply AI: ${WA_AUTO_REPLY_ENABLED && GEMINI_API_KEY ? "AKTIF" : "mati"}`);
+
+// Prompt ini menentukan gaya & batasan balasan otomatis -- dibuat SENGAJA
+// hati-hati karena ini mengatasnamakan pemilik nomor WA asli ke kontak
+// SUNGGUHAN, tanpa sempat dibaca/disetujui dulu (beda dari Obrolan AI biasa
+// di aplikasi yang cuma pemiliknya sendiri yang baca). Lihat juga diskusi
+// risiko soal ini di percakapan sebelumnya.
+const WA_AUTOREPLY_SYSTEM_PROMPT = `Kamu adalah asisten AI yang membalas pesan WhatsApp ATAS NAMA pemilik nomor ini secara OTOMATIS, tanpa pemilik nomor sempat membaca/menyetujui dulu.
+
+Aturan penting:
+1. Balas SINGKAT & natural seperti orang mengetik WhatsApp biasa (beberapa kalimat saja), bukan esai panjang.
+2. JANGAN membuat janji, komitmen, keputusan, harga, jadwal pasti, atau kesepakatan apa pun atas nama pemilik nomor -- untuk hal semacam itu, balas sopan bahwa pesannya diterima dan pemiliknya akan membalas langsung.
+3. JANGAN membagikan informasi pribadi/sensitif (keuangan, kesehatan, jadwal detail, data pribadi) tentang pemilik nomor.
+4. Kalau pesan masuk jelas butuh keputusan manusia (negosiasi, hal mendesak, masalah pribadi/emosional, komplain serius), jangan improvisasi -- cukup akui pesannya diterima dan akan ditindaklanjuti langsung oleh pemiliknya.
+5. JANGAN pakai format markdown (heading, tabel, tanda # atau **) karena WhatsApp menampilkannya apa adanya -- kalau perlu penekanan, pakai *tebal* atau _miring_ ala WhatsApp secukupnya saja.
+6. Gunakan Bahasa Indonesia, kecuali lawan bicara jelas menulis dalam bahasa lain -- kalau begitu, balas di bahasa yang sama.
+7. Kalau konteks percakapan kurang jelas buat jawab dengan yakin, lebih baik jawab netral & minta klarifikasi singkat drpd menebak-nebak.`;
+
+// Tabel harga & logika estimasi biaya -- SALINAN dari
+// supabase/functions/_shared/gemini.ts, lihat catatan sinkronisasi di atas.
+const GEMINI_3_6_FLASH_PRICE_BUMP_AT = new Date("2027-01-01T00:00:00Z");
+function getModelPricing(model) {
+  const table = {
+    "gemini-3.6-flash": new Date() < GEMINI_3_6_FLASH_PRICE_BUMP_AT ? { input: 0.75, output: 3.75 } : { input: 1.5, output: 7.5 },
+    "gemini-3.5-flash": { input: 1.5, output: 9.0 }
+  };
+  return table[model] ?? table["gemini-3.6-flash"];
+}
+function estimateCostUsd(model, promptTokens, outputTokens) {
+  const price = getModelPricing(model);
+  return (promptTokens / 1_000_000) * price.input + (outputTokens / 1_000_000) * price.output;
+}
+
+// Minta Gemini bikinkan satu balasan buat obrolan WA tertentu, pakai
+// AUTO_REPLY_HISTORY_LIMIT pesan terakhir di obrolan itu sebagai konteks.
+// Return null kalau memang tidak ada apa-apa buat dibalas (riwayat kosong) --
+// selain itu throw error (ditangani oleh pemanggil) kalau Gemini gagal.
+async function generateAutoReply(jid) {
+  const { data: historyRows, error: historyErr } = await supabase
+    .from("whatsapp_messages")
+    .select("direction, content")
+    .eq("wa_jid", jid)
+    .order("created_at", { ascending: true })
+    .limit(AUTO_REPLY_HISTORY_LIMIT);
+  if (historyErr) throw new Error(`Gagal ambil riwayat: ${historyErr.message}`);
+
+  const contents = (historyRows ?? [])
+    .filter((row) => row.content)
+    .map((row) => ({
+      role: row.direction === "in" ? "user" : "model",
+      parts: [{ text: row.content }]
+    }));
+  if (contents.length === 0) return null;
+
+  const body = JSON.stringify({
+    system_instruction: { parts: [{ text: WA_AUTOREPLY_SYSTEM_PROMPT }] },
+    contents,
+    generationConfig: { temperature: 0.6 }
+  });
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
+
+  // Retry ringan (beda dari versi lengkap di Edge Function `chat` yang punya
+  // fallback model segala) -- cukup 2x percobaan buat kondisi sementara
+  // (429/503), supaya auto-reply tidak gagal total cuma gara-gara Gemini
+  // sempat sibuk sepersekian detik.
+  let data;
+  let lastErrText = "";
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body });
+    if (res.ok) {
+      data = await res.json();
+      break;
+    }
+    lastErrText = await res.text();
+    if (attempt === 2 || ![429, 503].includes(res.status)) {
+      throw new Error(`Gemini API error ${res.status}: ${lastErrText}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 3000));
+  }
+
+  const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+  if (!rawText) throw new Error(`Respons Gemini tidak berisi teks: ${JSON.stringify(data).slice(0, 300)}`);
+
+  const tokensUsed = data?.usageMetadata?.totalTokenCount ?? 0;
+  const ESTIMATED_INPUT_SHARE = 0.7;
+  const costUsd = tokensUsed > 0 ? estimateCostUsd(GEMINI_MODEL, tokensUsed * ESTIMATED_INPUT_SHARE, tokensUsed * (1 - ESTIMATED_INPUT_SHARE)) : 0;
+
+  return { reply: rawText.trim(), tokensUsed, costUsd };
+}
+
+// Catat token+biaya auto-reply ke tabel token_usage YANG SAMA dipakai fitur
+// Obrolan AI (lihat action "send"/"token_usage" di Edge Function `chat`) --
+// supaya angka "token terpakai hari ini" di footer aplikasi mencerminkan
+// SEMUA pemakaian Gemini (Obrolan AI + auto-reply WA), bukan cuma salah
+// satu. Kegagalan di sini sengaja tidak menggagalkan apa pun yang lain
+// (pesannya sendiri sudah terlanjur terkirim duluan).
+async function recordTokenUsage(tokensUsed, costUsd) {
+  if (!tokensUsed || tokensUsed <= 0) return;
+  try {
+    const today = new Intl.DateTimeFormat("en-CA", { timeZone: "America/Los_Angeles" }).format(new Date());
+    const { data: existing } = await supabase
+      .from("token_usage")
+      .select("total_tokens, total_cost_usd")
+      .eq("usage_date", today)
+      .maybeSingle();
+    const totalTokens = (existing?.total_tokens ?? 0) + tokensUsed;
+    const totalCost = Number(existing?.total_cost_usd ?? 0) + costUsd;
+    await supabase.from("token_usage").upsert({
+      usage_date: today,
+      total_tokens: totalTokens,
+      total_cost_usd: totalCost,
+      updated_at: new Date().toISOString()
+    });
+  } catch (err) {
+    console.error("Gagal catat token_usage dari auto-reply:", err instanceof Error ? err.message : String(err));
+  }
+}
+
+// Generate balasan AI buat jid ini & langsung kirim lewat WhatsApp (beda
+// dari processPendingOutgoing: itu buat balasan MANUAL dari aplikasi yang
+// antre dulu di status 'pending', ini langsung sinkron di tempat karena
+// socket-nya (sock) sudah ada di tangan & tidak ada yang perlu diantre).
+async function sendAutoReply(sock, jid) {
+  let result;
+  try {
+    result = await generateAutoReply(jid);
+  } catch (err) {
+    console.error(`Gagal generate auto-reply utk ${jid}:`, err instanceof Error ? err.message : String(err));
+    return;
+  }
+  if (!result || !result.reply) return;
+
+  try {
+    const sent = await sock.sendMessage(jid, { text: result.reply });
+    await supabase.from("whatsapp_messages").insert({
+      wa_jid: jid,
+      direction: "out",
+      content: result.reply,
+      status: "sent",
+      wa_message_id: sent?.key?.id ?? null
+    });
+    console.log(`🤖 Auto-reply ke ${jid}: ${result.reply.slice(0, 60)}`);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`Gagal kirim auto-reply ke ${jid}:`, msg);
+    await supabase.from("whatsapp_messages").insert({
+      wa_jid: jid,
+      direction: "out",
+      content: result.reply,
+      status: "failed",
+      error: msg
+    });
+  }
+
+  await recordTokenUsage(result.tokensUsed, result.costUsd);
+}
+
 // Dipakai loop pengirim (setInterval di bawah) -- selalu nunjuk ke socket
 // WhatsApp yang LAGI AKTIF, diupdate ulang tiap kali connect()/reconnect
 // bikin socket baru (lihat connection.update di bawah).
@@ -66,7 +262,7 @@ function extractText(msg) {
   return null;
 }
 
-async function handleIncoming(msg) {
+async function handleIncoming(msg, sock) {
   // Pesan yang KITA kirim sendiri (fromMe) juga muncul lewat event ini --
   // sudah dicatat duluan waktu diproses dari antrian "pending" (lihat
   // processPendingOutgoing), jadi di sini cukup dilewati supaya tidak dobel.
@@ -97,13 +293,19 @@ async function handleIncoming(msg) {
   if (error) {
     // Kode 23505 = unique violation (wa_message_id sudah ada) -- ini AMAN
     // diabaikan, biasa terjadi kalau bot sempat reconnect dan WhatsApp
-    // mengirim ulang event pesan yang sama.
+    // mengirim ulang event pesan yang sama. PENTING: di sini juga return
+    // lebih awal (jangan lanjut ke auto-reply) -- kalau tidak, pesan yang
+    // sama bisa kepicu auto-reply DUA KALI waktu event-nya terkirim ulang.
     if (error.code !== "23505") {
       console.error("Gagal simpan pesan masuk:", error.message);
     }
     return;
   }
   console.log(`📩 Pesan masuk dari ${jid}${msg.pushName ? ` (${msg.pushName})` : ""}: ${text.slice(0, 60)}`);
+
+  if (WA_AUTO_REPLY_ENABLED && GEMINI_API_KEY) {
+    await sendAutoReply(sock, jid);
+  }
 }
 
 async function processPendingOutgoing(sock) {
@@ -185,7 +387,7 @@ async function connect() {
     if (type !== "notify") return;
     for (const msg of messages) {
       try {
-        await handleIncoming(msg);
+        await handleIncoming(msg, sock);
       } catch (err) {
         console.error("Gagal proses satu pesan masuk:", err instanceof Error ? err.message : String(err));
       }
