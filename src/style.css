@@ -784,6 +784,16 @@ mark.chat-search-hit--active {
   padding-top: 16px;
 }
 
+/* Penanda visual kalau toggle (mis. "Pakai Dokumen Pengetahuan") lagi
+   AKTIF -- dipakai chat-options-kb, lihat openChatOptions() di main.js. */
+.sheet-action--active {
+  color: var(--text);
+  font-weight: 700;
+}
+.sheet-action--active .sheet-action-icon {
+  color: var(--accent, var(--text));
+}
+
 .sheet-cancel {
   margin-top: 6px;
   width: 100%;

@@ -21,19 +21,24 @@
 //     (hapus semua chat_messages buat obrolan ini -- dipakai menu titik-3
 //     "Hapus chat".)
 //   { "code": "...", "action": "list_threads" }
-//     -> { ok: true, threads: [{ id, createdAt, pinned, title }, ...] }
+//     -> { ok: true, threads: [{ id, createdAt, pinned, title, useKb }, ...] }
 //     (semua ID obrolan yang PERNAH punya minimal 1 pesan, diambil dari
 //     server -- bukan dari localStorage perangkat. Dipakai supaya daftar
 //     obrolan ikut muncul walau dibuka dari perangkat lain dengan kode akses
 //     yang sama, karena kode aksesnya memang satu untuk semua perangkat.
-//     pinned/title diambil dari tabel chat_thread_meta supaya status
-//     sematan & judul custom ikut sinkron ke semua perangkat juga.)
-//   { "code": "...", "date": "...", "action": "set_thread_meta", "pinned"?: bool, "title"?: string|null }
-//     -> { ok: true, pinned: bool, title: string|null }
-//     (simpan status sematan (pin) dan/atau judul custom satu obrolan ke
-//     tabel chat_thread_meta -- kirim cuma field yang berubah, field yang
-//     tidak dikirim tidak akan diubah. title null/kosong berarti "pakai
-//     judul default lagi".)
+//     pinned/title/useKb diambil dari tabel chat_thread_meta supaya status
+//     sematan, judul custom, & toggle Dokumen Pengetahuan ikut sinkron ke
+//     semua perangkat juga.)
+//   { "code": "...", "date": "...", "action": "set_thread_meta", "pinned"?: bool, "title"?: string|null, "useKb"?: bool }
+//     -> { ok: true, pinned: bool, title: string|null, useKb: bool }
+//     (simpan status sematan (pin), judul custom, dan/atau toggle "pakai
+//     Dokumen Pengetahuan" satu obrolan ke tabel chat_thread_meta -- kirim
+//     cuma field yang berubah, field yang tidak dikirim tidak akan diubah.
+//     title null/kosong berarti "pakai judul default lagi". useKb default
+//     false (lihat migrations/0010) -- SENGAJA opt-in per obrolan, supaya
+//     Dokumen Pengetahuan [TOTAL bisa sampai 600rb karakter/±150rb token]
+//     tidak otomatis disisipkan ke SEMUA obrolan di SETIAP pesan, yang
+//     sebelumnya jadi penyebab utama token/biaya Gemini membengkak drastis.)
 //   { "code": "...", "date": "...", "action": "delete_message", "id": "..." }
 //     -> { ok: true }
 //     (hapus SATU pesan -- dipakai menu titik-3 per-pesan di dalam obrolan,
@@ -109,6 +114,7 @@ Deno.serve(async (req) => {
     message?: string;
     pinned?: boolean;
     title?: string | null;
+    useKb?: boolean;
     content?: string;
     filename?: string;
     id?: string;
@@ -196,18 +202,19 @@ Deno.serve(async (req) => {
     }
     const ids = Object.keys(firstSeen).filter((id) => isValidThreadId(id));
 
-    // Ambil status sematan (pin) & judul custom semua thread ini sekaligus --
-    // supaya pin/rename yang dilakukan dari PERANGKAT LAIN ikut kebawa ke
-    // sini juga (sebelumnya cuma tersimpan di localStorage per perangkat).
-    const metaById: Record<string, { pinned: boolean; title: string | null }> = {};
+    // Ambil status sematan (pin), judul custom, & toggle Dokumen Pengetahuan
+    // semua thread ini sekaligus -- supaya pin/rename/toggle yang dilakukan
+    // dari PERANGKAT LAIN ikut kebawa ke sini juga (sebelumnya cuma
+    // tersimpan di localStorage per perangkat).
+    const metaById: Record<string, { pinned: boolean; title: string | null; useKb: boolean }> = {};
     if (ids.length > 0) {
       const { data: metaRows, error: metaErr } = await supabaseAdmin
         .from("chat_thread_meta")
-        .select("id, pinned, title")
+        .select("id, pinned, title, use_kb")
         .in("id", ids);
       if (metaErr) return json({ ok: false, error: metaErr.message }, 500);
       for (const row of metaRows ?? []) {
-        metaById[row.id] = { pinned: !!row.pinned, title: row.title ?? null };
+        metaById[row.id] = { pinned: !!row.pinned, title: row.title ?? null, useKb: !!row.use_kb };
       }
     }
 
@@ -215,7 +222,8 @@ Deno.serve(async (req) => {
       id,
       createdAt: firstSeen[id],
       pinned: metaById[id]?.pinned ?? false,
-      title: metaById[id]?.title ?? null
+      title: metaById[id]?.title ?? null,
+      useKb: metaById[id]?.useKb ?? false
     }));
 
     return json({ ok: true, threads });
@@ -229,13 +237,14 @@ Deno.serve(async (req) => {
 
     const pinnedProvided = typeof body.pinned === "boolean";
     const titleProvided = body.title !== undefined;
-    if (!pinnedProvided && !titleProvided) {
-      return json({ ok: false, error: "Tidak ada perubahan (pinned/title) yang dikirim." }, 400);
+    const useKbProvided = typeof body.useKb === "boolean";
+    if (!pinnedProvided && !titleProvided && !useKbProvided) {
+      return json({ ok: false, error: "Tidak ada perubahan (pinned/title/useKb) yang dikirim." }, 400);
     }
 
     const { data: existing, error: fetchErr } = await supabaseAdmin
       .from("chat_thread_meta")
-      .select("pinned, title")
+      .select("pinned, title, use_kb")
       .eq("id", date0)
       .maybeSingle();
     if (fetchErr) return json({ ok: false, error: fetchErr.message }, 500);
@@ -243,13 +252,14 @@ Deno.serve(async (req) => {
     const nextPinned = pinnedProvided ? !!body.pinned : existing?.pinned ?? false;
     const rawTitle = titleProvided ? body.title : existing?.title ?? null;
     const nextTitle = typeof rawTitle === "string" && rawTitle.trim() ? rawTitle.trim() : null;
+    const nextUseKb = useKbProvided ? !!body.useKb : existing?.use_kb ?? false;
 
     const { error: upsertErr } = await supabaseAdmin
       .from("chat_thread_meta")
-      .upsert({ id: date0, pinned: nextPinned, title: nextTitle, updated_at: new Date().toISOString() });
+      .upsert({ id: date0, pinned: nextPinned, title: nextTitle, use_kb: nextUseKb, updated_at: new Date().toISOString() });
     if (upsertErr) return json({ ok: false, error: upsertErr.message }, 500);
 
-    return json({ ok: true, pinned: nextPinned, title: nextTitle });
+    return json({ ok: true, pinned: nextPinned, title: nextTitle, useKb: nextUseKb });
   }
 
   if (body.action === "kb_list") {
@@ -412,30 +422,48 @@ Deno.serve(async (req) => {
     if (insertUserErr) return json({ ok: false, error: insertUserErr.message }, 500);
     const userMessageId = userRow?.id as string | undefined;
 
-    // Ambil semua "Dokumen Pengetahuan" (PDF peraturan dll yang diupload
-    // lewat Pengaturan) buat disertakan sebagai konteks ke Gemini -- dibatasi
-    // total gabungannya (bukan cuma per-dokumen) supaya tidak kebablasan
-    // kalau dokumennya banyak. Diurut dari yang PALING BARU diupload supaya
-    // kalau harus ada yang dipotong karena kepanjangan, yang kepotong
-    // duluan adalah dokumen lama -- dokumen yang baru saja diupload (paling
-    // relevan buat pengguna saat ini) tetap utuh.
+    // Ambil "Dokumen Pengetahuan" (PDF peraturan dll yang diupload lewat
+    // Pengaturan) buat disertakan sebagai konteks ke Gemini -- TAPI cuma
+    // kalau obrolan ini AKTIFKAN toggle "Pakai Dokumen Pengetahuan" (menu
+    // titik-3 > di bawah Sematkan). Defaultnya OFF (lihat migrations/0010):
+    // sebelumnya SEMUA dokumen otomatis disisipkan ke SETIAP pesan di SEMUA
+    // obrolan (bisa sampai 600rb karakter/±150rb token tiap request!),
+    // bahkan obrolan yang tidak ada hubungannya sama dokumen sama sekali --
+    // itu penyebab utama token/biaya Gemini membengkak drastis.
+    const { data: threadMetaRow } = await supabaseAdmin
+      .from("chat_thread_meta")
+      .select("use_kb")
+      .eq("id", date)
+      .maybeSingle();
+    const useKbForThisThread = !!threadMetaRow?.use_kb;
+
     const knowledgeContext: { title: string; content: string }[] = [];
-    const { data: kbRows, error: kbErr } = await supabaseAdmin
-      .from("knowledge_documents")
-      .select("title, content")
-      .order("uploaded_at", { ascending: false })
-      .limit(50);
-    if (kbErr) {
-      console.error("chat: gagal ambil dokumen pengetahuan, lanjut tanpa itu:", kbErr.message);
+    if (!useKbForThisThread) {
+      // Obrolan ini tidak mengaktifkan Dokumen Pengetahuan -- lewati query
+      // kb sepenuhnya, knowledgeContext tetap kosong.
     } else {
-      const TOTAL_KB_BUDGET_CHARS = 600000;
-      let used = 0;
-      for (const row of kbRows ?? []) {
-        if (used >= TOTAL_KB_BUDGET_CHARS) break;
-        const remaining = TOTAL_KB_BUDGET_CHARS - used;
-        const content = row.content.length > remaining ? `${row.content.slice(0, remaining)}\n\n[...dipotong...]` : row.content;
-        knowledgeContext.push({ title: row.title, content });
-        used += content.length;
+      // Dibatasi total gabungannya (bukan cuma per-dokumen) supaya tidak
+      // kebablasan kalau dokumennya banyak. Diurut dari yang PALING BARU
+      // diupload supaya kalau harus ada yang dipotong karena kepanjangan,
+      // yang kepotong duluan adalah dokumen lama -- dokumen yang baru saja
+      // diupload (paling relevan buat pengguna saat ini) tetap utuh.
+      const { data: kbRows, error: kbErr } = await supabaseAdmin
+        .from("knowledge_documents")
+        .select("title, content")
+        .order("uploaded_at", { ascending: false })
+        .limit(50);
+      if (kbErr) {
+        console.error("chat: gagal ambil dokumen pengetahuan, lanjut tanpa itu:", kbErr.message);
+      } else {
+        const TOTAL_KB_BUDGET_CHARS = 600000;
+        let used = 0;
+        for (const row of kbRows ?? []) {
+          if (used >= TOTAL_KB_BUDGET_CHARS) break;
+          const remaining = TOTAL_KB_BUDGET_CHARS - used;
+          const content = row.content.length > remaining ? `${row.content.slice(0, remaining)}\n\n[...dipotong...]` : row.content;
+          knowledgeContext.push({ title: row.title, content });
+          used += content.length;
+        }
       }
     }
 

@@ -22,7 +22,8 @@ import {
   ICON_KEY,
   ICON_LOGOUT,
   ICON_COPY,
-  ICON_DOTS_SMALL
+  ICON_DOTS_SMALL,
+  ICON_DOC
 } from "./icons.js";
 import { registerServiceWorker } from "./push.js";
 import {
@@ -85,6 +86,9 @@ const els = {
   chatOptionsPinBtn: document.getElementById("chat-options-pin"),
   chatOptionsPinIcon: document.getElementById("chat-options-pin-icon"),
   chatOptionsPinLabel: document.getElementById("chat-options-pin-label"),
+  chatOptionsKbBtn: document.getElementById("chat-options-kb"),
+  chatOptionsKbIcon: document.getElementById("chat-options-kb-icon"),
+  chatOptionsKbLabel: document.getElementById("chat-options-kb-label"),
   chatOptionsRenameBtn: document.getElementById("chat-options-rename"),
   chatOptionsRenameIcon: document.getElementById("chat-options-rename-icon"),
   chatOptionsPdfBtn: document.getElementById("chat-options-pdf"),
@@ -161,6 +165,11 @@ const state = {
   // jalan, dipakai menu titik-3 buat tahu judul default chat yang lagi
   // diklik tanpa harus hitung ulang.
   listIndex: new Map(),
+  // id obrolan -> boolean, status toggle "Pakai Dokumen Pengetahuan" --
+  // diisi dari server (chat_thread_meta.use_kb) tiap kali renderChatList()
+  // jalan, dipakai menu titik-3 (lihat openChatOptions). Default (belum ada
+  // entry) dianggap false/OFF -- sengaja opt-in, lihat migrations/0010.
+  threadUseKb: new Map(),
   activeOptionsId: null,
   // Hasil pencarian teks DI DALAM satu obrolan yang sedang dibuka (beda dari
   // chatSearchInput di layar daftar, yang cuma menyaring judul/preview).
@@ -317,7 +326,9 @@ function clearChatTitle(id) {
 // dari PERANGKAT LAIN (pin/unpin, ubah judul) ikut kebawa ke sini juga --
 // sebelumnya dua-duanya cuma tersimpan di localStorage per perangkat jadi
 // tidak pernah sinkron sama sekali.
-function applyThreadMetaFromServer(id, pinned, title) {
+function applyThreadMetaFromServer(id, pinned, title, useKb) {
+  state.threadUseKb.set(id, !!useKb);
+
   if (isPinned(id) !== !!pinned) {
     const set = getPinnedChats();
     if (pinned) {
@@ -390,7 +401,7 @@ async function renderChatList() {
     if (threadsResult.ok) {
       for (const th of threadsResult.threads || []) {
         mergeDiscoveredThread(th.id, th.createdAt);
-        applyThreadMetaFromServer(th.id, th.pinned, th.title);
+        applyThreadMetaFromServer(th.id, th.pinned, th.title, th.useKb);
       }
     } else if (threadsResult.unauthorized) {
       state.chatCode = "";
@@ -1025,6 +1036,11 @@ function openChatOptions(id) {
   els.chatOptionsPinIcon.innerHTML = pinned ? ICON_PIN_FILLED : ICON_PIN;
   els.chatOptionsPinLabel.textContent = t(state.lang, pinned ? "chat_options_unpin" : "chat_options_pin");
 
+  const useKb = state.threadUseKb.get(id) || false;
+  els.chatOptionsKbIcon.innerHTML = ICON_DOC;
+  els.chatOptionsKbLabel.textContent = t(state.lang, useKb ? "chat_options_kb_off" : "chat_options_kb_on");
+  els.chatOptionsKbBtn.classList.toggle("sheet-action--active", useKb);
+
   openDialogEl(els.chatOptionsDialog);
 }
 
@@ -1555,6 +1571,39 @@ function wireEvents() {
     }
 
     await refreshAfterChatMutation(id);
+  });
+
+  // Toggle "Pakai Dokumen Pengetahuan" -- beda dari Sematkan/Ubah Judul,
+  // status ini WAJIB tersimpan di server (bukan cuma localStorage) karena
+  // langsung menentukan apa yang dikirim ke Gemini di Edge Function (lihat
+  // chat/index.ts action "send"), jadi kalau belum ada kode akses, toggle
+  // ini tidak bisa dipakai (beda dari pin/rename yang tetap jalan lokal
+  // dulu tanpa kode).
+  els.chatOptionsKbBtn.addEventListener("click", async () => {
+    const id = state.activeOptionsId;
+    if (!id) return;
+    if (!requireChatCodeOrPrompt("need_code_kb_toggle")) return;
+    closeChatOptions();
+
+    const nextUseKb = !(state.threadUseKb.get(id) || false);
+    // Optimistis dulu di lokal (konsisten sama pola pin), nanti ditimpa lagi
+    // kalau ternyata gagal di server.
+    state.threadUseKb.set(id, nextUseKb);
+
+    const result = await setThreadMeta(id, state.chatCode, { useKb: nextUseKb });
+    if (!result.ok) {
+      state.threadUseKb.set(id, !nextUseKb);
+      if (result.unauthorized) {
+        state.chatCode = "";
+        clearStoredChatCode();
+      }
+      alertWithDetail("kb_toggle_sync_error", result);
+      return;
+    }
+
+    if (!els.screenList.hidden) {
+      await renderChatList();
+    }
   });
 
   els.chatOptionsRenameBtn.addEventListener("click", () => {

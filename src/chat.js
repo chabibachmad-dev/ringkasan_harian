@@ -81,15 +81,18 @@ export function listChatThreads(code) {
   return callChatFunction({ code, action: "list_threads" });
 }
 
-// Simpan status sematan (pin) dan/atau judul custom satu obrolan ke SERVER
-// -- supaya "Sematkan" dan "Ubah judul" ikut sinkron ke semua perangkat
-// dengan kode akses yang sama (sebelumnya cuma localStorage per perangkat).
-// Cuma kirim field yang berubah: field yang tidak disertakan tidak akan
-// diubah di server. title: null/"" berarti "pakai judul default lagi".
-export function setThreadMeta(id, code, { pinned, title } = {}) {
+// Simpan status sematan (pin), judul custom, dan/atau toggle "Pakai Dokumen
+// Pengetahuan" satu obrolan ke SERVER -- supaya semuanya ikut sinkron ke
+// semua perangkat dengan kode akses yang sama (sebelumnya cuma localStorage
+// per perangkat). Cuma kirim field yang berubah: field yang tidak
+// disertakan tidak akan diubah di server. title: null/"" berarti "pakai
+// judul default lagi". useKb default false (opt-in) -- lihat komentar di
+// Edge Function chat/index.ts migrations/0010 kenapa ini sengaja opt-in.
+export function setThreadMeta(id, code, { pinned, title, useKb } = {}) {
   const payload = { code, date: id, action: "set_thread_meta" };
   if (typeof pinned === "boolean") payload.pinned = pinned;
   if (title !== undefined) payload.title = title;
+  if (typeof useKb === "boolean") payload.useKb = useKb;
   return callChatFunction(payload);
 }
 
