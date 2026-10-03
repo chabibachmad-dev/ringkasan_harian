@@ -18,16 +18,21 @@
 //
 // Body request (semua action):
 //   { "code": "...", "action": "list_chats" }
-//     -> { ok: true, chats: [{ jid, name, lastContent, lastDirection, lastStatus, lastAt }, ...] }
+//     -> { ok: true, chats: [{ jid, name, lastContent, lastDirection, lastStatus, lastAt, autoReplyEnabled }, ...] }
 //     (satu entri per nomor/grup WA yang PERNAH ada pesannya, diurut dari
 //     aktivitas terbaru oleh klien -- lihat main.js.)
 //   { "code": "...", "action": "history", "jid": "..." }
-//     -> { ok: true, messages: [{ id, direction, content, status, created_at }, ...] }
+//     -> { ok: true, messages: [{ id, direction, content, status, created_at }, ...], autoReplyEnabled }
 //   { "code": "...", "action": "send", "jid": "...", "message": "..." }
 //     -> { ok: true, id: "..." }
 //     (insert baris baru status='pending' -- BELUM benar-benar terkirim,
 //     nunggu bot polling & proses. Klien bisa cek status via "history"
 //     lagi kalau mau tahu sudah 'sent'/'failed'.)
+//   { "code": "...", "action": "set_auto_reply", "jid": "...", "enabled": true|false }
+//     -> { ok: true }
+//     (atur toggle auto-reply AI KHUSUS nomor ini -- lihat tabel
+//     whatsapp_contacts & cara wa-bot/index.js membacanya sebelum generate
+//     balasan. Tidak ada baris = dianggap enabled=true/default ON.)
 
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { corsHeaders } from "../_shared/cors.ts";
@@ -54,6 +59,7 @@ Deno.serve(async (req) => {
     action?: string;
     jid?: string;
     message?: string;
+    enabled?: boolean;
   };
   try {
     body = await req.json();
@@ -104,7 +110,18 @@ Deno.serve(async (req) => {
       }
       if (row.wa_name && !nameByJid[row.wa_jid]) nameByJid[row.wa_jid] = row.wa_name;
     }
-    const list = Object.values(chats).map((c) => ({ ...c, name: c.name ?? nameByJid[c.jid] ?? null }));
+
+    // Toggle auto-reply per kontak (lihat 0012_whatsapp_contacts.sql) --
+    // tidak ada baris = dianggap enabled=true/default ON.
+    const { data: contactRows } = await supabaseAdmin.from("whatsapp_contacts").select("wa_jid, auto_reply_enabled");
+    const autoReplyByJid: Record<string, boolean> = {};
+    for (const row of contactRows ?? []) autoReplyByJid[row.wa_jid] = row.auto_reply_enabled;
+
+    const list = Object.values(chats).map((c) => ({
+      ...c,
+      name: c.name ?? nameByJid[c.jid] ?? null,
+      autoReplyEnabled: autoReplyByJid[c.jid] ?? true
+    }));
     return json({ ok: true, chats: list });
   }
 
@@ -120,7 +137,27 @@ Deno.serve(async (req) => {
       .limit(500);
     if (error) return json({ ok: false, error: error.message }, 500);
 
-    return json({ ok: true, messages: data ?? [] });
+    const { data: contactRow } = await supabaseAdmin
+      .from("whatsapp_contacts")
+      .select("auto_reply_enabled")
+      .eq("wa_jid", jid)
+      .maybeSingle();
+
+    return json({ ok: true, messages: data ?? [], autoReplyEnabled: contactRow?.auto_reply_enabled ?? true });
+  }
+
+  if (body.action === "set_auto_reply") {
+    const jid = typeof body.jid === "string" ? body.jid : "";
+    const enabled = body.enabled;
+    if (!jid) return json({ ok: false, error: "jid wajib diisi." }, 400);
+    if (typeof enabled !== "boolean") return json({ ok: false, error: "enabled wajib true/false." }, 400);
+
+    const { error } = await supabaseAdmin
+      .from("whatsapp_contacts")
+      .upsert({ wa_jid: jid, auto_reply_enabled: enabled, updated_at: new Date().toISOString() });
+    if (error) return json({ ok: false, error: error.message }, 500);
+
+    return json({ ok: true });
   }
 
   if (body.action === "send") {
@@ -140,5 +177,8 @@ Deno.serve(async (req) => {
     return json({ ok: true, id: data?.id });
   }
 
-  return json({ ok: false, error: "action tidak dikenal (pakai 'list_chats', 'history', atau 'send')." }, 400);
+  return json(
+    { ok: false, error: "action tidak dikenal (pakai 'list_chats', 'history', 'send', atau 'set_auto_reply')." },
+    400
+  );
 });

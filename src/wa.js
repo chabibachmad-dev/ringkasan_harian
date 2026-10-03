@@ -55,3 +55,10 @@ export function fetchWaHistory(jid, code) {
 export function sendWaMessage(jid, message, code) {
   return callWhatsappFunction({ code, action: "send", jid, message });
 }
+
+// Nyala/matikan auto-reply AI KHUSUS satu kontak (tabel whatsapp_contacts di
+// server) -- beda dari WA_AUTO_REPLY_ENABLED di wa-bot/.env yang berlaku
+// buat SEMUA kontak sekaligus, ini per-nomor.
+export function setWaAutoReply(jid, enabled, code) {
+  return callWhatsappFunction({ code, action: "set_auto_reply", jid, enabled });
+}
