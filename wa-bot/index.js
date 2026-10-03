@@ -504,6 +504,17 @@ async function connect() {
   });
 
   sock.ev.on("messages.upsert", async ({ messages, type }) => {
+    // [debug sementara] Lacak kenapa pesan "chat ke diri sendiri" dari HP
+    // kadang tidak nyampe ke aplikasi -- cetak SEMUA event yang masuk ke
+    // sini, SEBELUM filter type/fromMe/jid apa pun, supaya ketahuan persis
+    // di titik mana pesannya kebuang (type bukan "notify"? fromMe tapi
+    // bukan self-chat? ownJid tidak cocok?). Boleh dihapus lagi kalau akar
+    // masalahnya sudah ketemu & beres.
+    for (const m of messages) {
+      console.log(
+        `[debug] upsert type=${type} jid=${m.key?.remoteJid} fromMe=${m.key?.fromMe} ownJid=${getOwnJid(sock)}`
+      );
+    }
     // type "notify" = pesan baru beneran masuk (bukan hasil sinkronisasi
     // riwayat lama waktu pertama kali login).
     if (type !== "notify") return;
