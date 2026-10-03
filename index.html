@@ -168,6 +168,12 @@
             <div id="wa-list-status" class="status-text" hidden></div>
           </section>
         </main>
+
+        <button type="button" id="wa-new-chat-fab" class="fab" title="Mulai obrolan baru" aria-label="Mulai obrolan baru">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M12 5v14M5 12h14"></path>
+          </svg>
+        </button>
       </section>
 
       <!-- Layar WhatsApp 2: isi satu obrolan WA + balas -->
@@ -176,6 +182,9 @@
           <div class="detail-topbar-row">
             <button id="wa-detail-back-btn" class="icon-btn" title="Kembali" aria-label="Kembali">←</button>
             <h1 id="wa-detail-title" class="detail-title"></h1>
+            <button id="wa-auto-reply-toggle" class="icon-btn" title="Auto-reply" aria-label="Auto-reply">
+              <span id="wa-auto-reply-toggle-icon"></span>
+            </button>
           </div>
         </header>
 
@@ -212,6 +221,39 @@
           <div class="chat-code-dialog-actions">
             <button type="button" id="chat-code-cancel" class="secondary-btn" data-i18n="chat_code_cancel">Batal</button>
             <button type="submit" class="primary-btn" data-i18n="chat_code_submit">Buka</button>
+          </div>
+        </form>
+      </dialog>
+
+      <!-- Popup mulai obrolan WA baru dari aplikasi (bukan nunggu pesan masuk
+           duluan) -- lihat wa-new-chat-fab & handler-nya di main.js. Nomornya
+           dinormalisasi jadi JID (mis. "6281234567890@s.whatsapp.net") lalu
+           pesan pertamanya dikirim lewat action "send" yang sama dengan
+           balasan biasa -- Edge Function-nya memang sudah generik (terima
+           jid apa saja), jadi tidak perlu endpoint baru. -->
+      <dialog id="wa-new-chat-dialog" class="chat-code-dialog">
+        <form id="wa-new-chat-form" class="chat-code-form-modal">
+          <h2 data-i18n="wa_new_chat_title">Obrolan WhatsApp Baru</h2>
+          <p data-i18n="wa_new_chat_phone_label">Nomor WhatsApp</p>
+          <input
+            id="wa-new-chat-phone"
+            type="tel"
+            inputmode="tel"
+            autocomplete="off"
+            data-i18n-placeholder="wa_new_chat_phone_placeholder"
+            placeholder="08561234567 / +6285612345xx"
+          />
+          <p data-i18n="wa_new_chat_message_label">Pesan pertama</p>
+          <textarea
+            id="wa-new-chat-message"
+            rows="3"
+            data-i18n-placeholder="wa_new_chat_message_placeholder"
+            placeholder="Tulis pesan pertama…"
+          ></textarea>
+          <p id="wa-new-chat-error" class="chat-code-error" hidden></p>
+          <div class="chat-code-dialog-actions">
+            <button type="button" id="wa-new-chat-cancel" class="secondary-btn" data-i18n="chat_code_cancel">Batal</button>
+            <button type="submit" class="primary-btn" data-i18n="wa_new_chat_submit">Mulai & Kirim</button>
           </div>
         </form>
       </dialog>

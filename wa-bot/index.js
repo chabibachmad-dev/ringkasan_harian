@@ -105,50 +105,12 @@ ATURAN PENGAMAN (berlaku terus walau topiknya bebas):
 2. JANGAN membagikan informasi pribadi/sensitif (keuangan, kesehatan, jadwal detail, data pribadi) tentang pemilik nomor.
 3. Kalau pesan masuk jelas butuh keputusan manusia (negosiasi, hal mendesak, masalah pribadi/emosional, komplain serius), jangan improvisasi -- cukup akui pesannya diterima dan akan ditindaklanjuti langsung oleh pemiliknya.`;
 
-// Sama persis konsepnya dengan KNOWLEDGE_CONTEXT_INTRO di
-// supabase/functions/_shared/gemini.ts (lihat catatan sinkronisasi di atas).
-const WA_KNOWLEDGE_CONTEXT_INTRO = `Pemilik nomor ini sudah mengupload dokumen referensi berikut ke aplikasinya (mis. peraturan/perundangan). ANGGAP dokumen-dokumen ini sebagai sumber paling terpercaya dan PRIORITASKAN jawaban dari sini -- kalau pertanyaan bisa dijawab dari isi salah satu dokumen di bawah, jawab dari situ duluan dan sebutkan judul dokumennya, TANPA perlu cari di internet dulu. Cari di Google HANYA kalau jawabannya memang tidak ada di dokumen-dokumen ini, atau topiknya jelas di luar cakupan dokumen ini.`;
-
-function buildWaSystemText(knowledgeContext) {
-  if (!knowledgeContext || knowledgeContext.length === 0) return WA_BASE_SYSTEM_PROMPT;
-  const docsText = knowledgeContext.map((doc) => `=== Dokumen: "${doc.title}" ===\n${doc.content}`).join("\n\n");
-  return `${WA_BASE_SYSTEM_PROMPT}\n\n${WA_KNOWLEDGE_CONTEXT_INTRO}\n\n${docsText}`;
-}
-
-// Ambil Dokumen Pengetahuan yang sama dipakai Obrolan AI (tabel
-// knowledge_documents) -- SAMA PERSIS query & budget karakternya dengan
-// Edge Function `chat` (action "send"), lihat catatan sinkronisasi di atas.
-// Beda dari Obrolan AI (yang ini opt-in PER OBROLAN lewat toggle "Pakai
-// Dokumen Pengetahuan"), auto-reply WA SELALU ikutkan semua dokumen yang ada
-// -- tidak ada toggle per-kontak di v1 ini.
-//
-// BUDGET SENGAJA JAUH LEBIH KECIL drpd punya `chat` Edge Function
-// (600.000): di sana user baru kena biaya/beban ini kalau SENGAJA nyalain
-// toggle KB per obrolan, tapi di sini kekirim di SETIAP pesan WA yang masuk
-// otomatis -- budget sebesar itu bikin tiap request jadi berat & gampang
-// kena rate-limit (429) kalau lagi banyak pesan masuk beruntun.
-const KB_TOTAL_BUDGET_CHARS = 80000;
-async function fetchKnowledgeContext() {
-  const { data: kbRows, error } = await supabase
-    .from("knowledge_documents")
-    .select("title, content")
-    .order("uploaded_at", { ascending: false })
-    .limit(50);
-  if (error) {
-    console.error("Gagal ambil dokumen pengetahuan (auto-reply WA), lanjut tanpa itu:", error.message);
-    return [];
-  }
-  const knowledgeContext = [];
-  let used = 0;
-  for (const row of kbRows ?? []) {
-    if (used >= KB_TOTAL_BUDGET_CHARS) break;
-    const remaining = KB_TOTAL_BUDGET_CHARS - used;
-    const content = row.content.length > remaining ? `${row.content.slice(0, remaining)}\n\n[...dipotong...]` : row.content;
-    knowledgeContext.push({ title: row.title, content });
-    used += content.length;
-  }
-  return knowledgeContext;
-}
+// CATATAN: auto-reply WA SENGAJA TIDAK ikut membaca Dokumen Pengetahuan
+// (tabel knowledge_documents) -- sempat dicoba (lihat riwayat git), tapi
+// per keputusan user, Dokumen Pengetahuan difokuskan buat Obrolan AI di
+// aplikasi saja. Auto-reply WA cukup mengandalkan pencarian Google
+// (lihat tools: google_search di callGeminiOnce) buat jawaban yang butuh
+// info di luar pengetahuan dasar model.
 
 // Tabel harga & logika estimasi biaya -- SALINAN dari
 // supabase/functions/_shared/gemini.ts, lihat catatan sinkronisasi di atas.
@@ -203,10 +165,10 @@ async function callGeminiWithRetry(systemText, contents, withTools, maxAttempts)
 }
 
 // Minta Gemini bikinkan satu balasan buat obrolan WA tertentu, pakai
-// AUTO_REPLY_HISTORY_LIMIT pesan terakhir di obrolan itu + Dokumen
-// Pengetahuan sebagai konteks. Return null kalau memang tidak ada apa-apa
-// buat dibalas (riwayat kosong) -- selain itu throw error (ditangani
-// pemanggil) kalau Gemini gagal total.
+// AUTO_REPLY_HISTORY_LIMIT pesan terakhir di obrolan itu sebagai konteks
+// (TANPA Dokumen Pengetahuan -- lihat catatan di atas). Return null kalau
+// memang tidak ada apa-apa buat dibalas (riwayat kosong) -- selain itu throw
+// error (ditangani pemanggil) kalau Gemini gagal total.
 async function generateAutoReply(jid) {
   // PENTING: ascending + limit tanpa descending dulu bakal ambil N pesan
   // PALING LAMA (bukan paling baru!) begitu percakapan sudah lebih panjang
@@ -242,8 +204,7 @@ async function generateAutoReply(jid) {
   }
   if (contents.length === 0) return null;
 
-  const knowledgeContext = await fetchKnowledgeContext();
-  const systemText = buildWaSystemText(knowledgeContext);
+  const systemText = WA_BASE_SYSTEM_PROMPT;
 
   // Urutan percobaan sama seperti generateChatReply() di Edge Function
   // `chat`: coba dulu DENGAN akses internet (1x saja, jangan buang waktu
@@ -374,13 +335,54 @@ function extractText(msg) {
   return null;
 }
 
-async function handleIncoming(msg, sock) {
-  // Pesan yang KITA kirim sendiri (fromMe) juga muncul lewat event ini --
-  // sudah dicatat duluan waktu diproses dari antrian "pending" (lihat
-  // processPendingOutgoing), jadi di sini cukup dilewati supaya tidak dobel.
-  if (msg.key.fromMe) return;
+// JID nomor kita SENDIRI (pemilik bot), dari sock.user.id -- bentuknya ada
+// akhiran ":N" buat device id (mis. "6285xxxx:6@s.whatsapp.net"), dibuang
+// dulu supaya bisa dibandingkan APA ADANYA dengan msg.key.remoteJid di
+// "chat ke diri sendiri" (catatan pribadi di WhatsApp, lihat handleIncoming).
+function getOwnJid(sock) {
+  const raw = sock.user?.id;
+  if (!raw) return null;
+  const [userPart, domainPart] = raw.split("@");
+  if (!domainPart) return null;
+  return `${userPart.split(":")[0]}@${domainPart}`;
+}
 
+// Cek toggle auto-reply KHUSUS kontak ini (tabel whatsapp_contacts, diatur
+// dari tombol di layar obrolan WA kontak itu di aplikasi) -- tidak ada baris
+// = dianggap enabled=true/default ON (sama seperti sebelum fitur toggle per-
+// kontak ini ada).
+async function isAutoReplyEnabledForContact(jid) {
+  const { data, error } = await supabase
+    .from("whatsapp_contacts")
+    .select("auto_reply_enabled")
+    .eq("wa_jid", jid)
+    .maybeSingle();
+  if (error) {
+    console.error(`Gagal cek toggle auto-reply utk ${jid}, anggap ON:`, error.message);
+    return true;
+  }
+  return data?.auto_reply_enabled ?? true;
+}
+
+async function handleIncoming(msg, sock) {
   const jid = msg.key.remoteJid;
+  const ownJid = getOwnJid(sock);
+  // "Chat ke diri sendiri" (catatan pribadi) di WhatsApp -- remoteJid-nya
+  // nomor KITA SENDIRI. Baileys selalu menandai ini fromMe=true (kita
+  // "pengirim"-nya, tidak ada lawan bicara lain), BEDA dari balasan yang kita
+  // kirim ke KONTAK LAIN (yang juga fromMe=true tapi sudah dicatat duluan
+  // waktu diproses dari antrian "pending", lihat processPendingOutgoing) --
+  // makanya guard di bawah ini KECUALIKAN kasus chat-ke-diri-sendiri secara
+  // eksplisit, supaya catatan pribadi ini ikut tersimpan & tampil di
+  // aplikasi juga (TANPA memicu auto-reply -- lihat bagian bawah fungsi ini).
+  const isSelfChat = Boolean(ownJid) && jid === ownJid;
+
+  // Pesan yang KITA kirim sendiri (fromMe) KE KONTAK LAIN juga muncul lewat
+  // event ini -- sudah dicatat duluan waktu diproses dari antrian "pending"
+  // (lihat processPendingOutgoing), jadi di sini cukup dilewati supaya tidak
+  // dobel. Chat-ke-diri-sendiri DIKECUALIKAN (lihat komentar isSelfChat).
+  if (msg.key.fromMe && !isSelfChat) return;
+
   // v1 cuma dukung chat PERSONAL (bukan grup/status/broadcast) -- biar
   // scope-nya jelas dulu, grup bisa menyusul kalau memang dibutuhkan nanti.
   // Terima jid format lama (@s.whatsapp.net, berbasis nomor HP) MAUPUN
@@ -415,8 +417,16 @@ async function handleIncoming(msg, sock) {
   }
   console.log(`📩 Pesan masuk dari ${jid}${msg.pushName ? ` (${msg.pushName})` : ""}: ${text.slice(0, 60)}`);
 
-  if (WA_AUTO_REPLY_ENABLED && GEMINI_API_KEY) {
-    await sendAutoReply(sock, jid);
+  // Chat-ke-diri-sendiri TIDAK PERNAH memicu auto-reply (tidak masuk akal
+  // bot membalas catatan kita sendiri) -- baru lanjut cek toggle AKTIF/MATI
+  // global & per-kontak kalau ini beneran pesan dari kontak lain.
+  if (!isSelfChat && WA_AUTO_REPLY_ENABLED && GEMINI_API_KEY) {
+    const contactEnabled = await isAutoReplyEnabledForContact(jid);
+    if (contactEnabled) {
+      await sendAutoReply(sock, jid);
+    } else {
+      console.log(`🔕 Auto-reply dimatikan khusus utk ${jid}, dilewati.`);
+    }
   }
 }
 

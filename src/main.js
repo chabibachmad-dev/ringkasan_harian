@@ -23,7 +23,9 @@ import {
   ICON_LOGOUT,
   ICON_COPY,
   ICON_DOTS_SMALL,
-  ICON_DOC
+  ICON_DOC,
+  ICON_BELL_FILLED,
+  ICON_BELL_OUTLINE
 } from "./icons.js";
 import { registerServiceWorker } from "./push.js";
 import {
@@ -42,7 +44,7 @@ import {
   uploadKnowledgeDoc,
   deleteKnowledgeDoc
 } from "./chat.js";
-import { listWaChats, fetchWaHistory, sendWaMessage } from "./wa.js";
+import { listWaChats, fetchWaHistory, sendWaMessage, setWaAutoReply } from "./wa.js";
 
 // Daftar obrolan yang pernah dimulai dari perangkat ini (tombol "+") --
 // disimpan lokal karena app ini sekarang murni asisten chat, tidak ada lagi
@@ -67,11 +69,20 @@ const els = {
   waListStatus: document.getElementById("wa-list-status"),
   waDetailBackBtn: document.getElementById("wa-detail-back-btn"),
   waDetailTitle: document.getElementById("wa-detail-title"),
+  waAutoReplyToggle: document.getElementById("wa-auto-reply-toggle"),
+  waAutoReplyToggleIcon: document.getElementById("wa-auto-reply-toggle-icon"),
   waThread: document.getElementById("wa-thread"),
   waForm: document.getElementById("wa-form"),
   waInput: document.getElementById("wa-input"),
   waSendBtn: document.getElementById("wa-send-btn"),
   waStatus: document.getElementById("wa-status"),
+  waNewChatFab: document.getElementById("wa-new-chat-fab"),
+  waNewChatDialog: document.getElementById("wa-new-chat-dialog"),
+  waNewChatForm: document.getElementById("wa-new-chat-form"),
+  waNewChatPhone: document.getElementById("wa-new-chat-phone"),
+  waNewChatMessage: document.getElementById("wa-new-chat-message"),
+  waNewChatError: document.getElementById("wa-new-chat-error"),
+  waNewChatCancel: document.getElementById("wa-new-chat-cancel"),
   settingsWhatsappBtn: document.getElementById("settings-whatsapp-btn"),
   settingsWhatsappIcon: document.getElementById("settings-whatsapp-icon"),
   langToggle: document.getElementById("lang-toggle"),
@@ -201,6 +212,10 @@ const state = {
   waNames: new Map(),
   waListSignature: null,
   waThreadSignature: null,
+  // Status toggle auto-reply AI (tabel whatsapp_contacts) utk waCurrentJid
+  // yang lagi dibuka -- null = belum diketahui/belum dimuat, dipakai
+  // updateWaAutoReplyToggleUi() buat gambar ikon lonceng di header.
+  waCurrentAutoReplyEnabled: null,
   activeOptionsId: null,
   // Hasil pencarian teks DI DALAM satu obrolan yang sedang dibuka (beda dari
   // chatSearchInput di layar daftar, yang cuma menyaring judul/preview).
@@ -1077,6 +1092,7 @@ async function showWaDetailScreen(jid) {
   els.screenWaDetail.hidden = false;
   state.waCurrentJid = jid;
   state.waThreadSignature = null;
+  state.waCurrentAutoReplyEnabled = null;
   els.waDetailTitle.textContent = formatWaJidLabel(jid);
 
   await loadWaThread(jid);
@@ -1094,6 +1110,27 @@ function formatWaJidLabel(jid) {
   if (known) return known;
   const numberPart = jid.split("@")[0];
   return numberPart ? `+${numberPart}` : jid;
+}
+
+// Ubah nomor HP yang diketik user (mis. "0856...", "+62856...", "62856...",
+// ada spasi/strip) jadi JID WhatsApp format nomor ("62856...@s.whatsapp.net")
+// -- cukup buat MULAI obrolan baru dari aplikasi (lihat wa-new-chat-fab).
+// CATATAN: ini cuma format "berbasis nomor HP" (@s.whatsapp.net) -- JID
+// format "@lid" (lihat komentar di wa-bot/index.js) cuma pernah dikasih tau
+// WhatsApp sendiri waktu KITA menerima pesan dari kontak itu, tidak bisa
+// ditebak dari nomor HP-nya, jadi tidak relevan buat MEMULAI obrolan baru.
+function normalizeWaPhoneToJid(raw) {
+  const digits = (raw || "").replace(/[^\d]/g, "");
+  if (!digits) return null;
+  let national = digits;
+  if (national.startsWith("0")) {
+    national = `62${national.slice(1)}`;
+  } else if (!national.startsWith("62")) {
+    national = `62${national}`;
+  }
+  // Nomor HP Indonesia wajar: kira-kira 10-13 digit SETELAH kode negara 62.
+  if (national.length < 10 || national.length > 15) return null;
+  return `${national}@s.whatsapp.net`;
 }
 
 function setWaListStatus(text) {
@@ -1292,6 +1329,11 @@ async function loadWaThread(jid, opts = {}) {
     return;
   }
 
+  // Diupdate TERLEPAS dari signature pesan di bawah (toggle-nya bisa saja
+  // berubah tanpa ada pesan baru, mis. abis di-klik sendiri, atau diubah
+  // dari perangkat/tab lain).
+  updateWaAutoReplyToggleUi(result.autoReplyEnabled ?? true);
+
   const messages = result.messages || [];
   // Sama seperti renderWaList(): kalau tidak ada perubahan sama sekali sejak
   // render terakhir, jangan render ulang -- hindari bubble "berkedip"/scroll
@@ -1302,6 +1344,15 @@ async function loadWaThread(jid, opts = {}) {
   state.waThreadSignature = signature;
 
   renderWaMessages(messages);
+}
+
+// Gambar ikon lonceng di header layar WA detail sesuai status toggle
+// auto-reply (tabel whatsapp_contacts) -- lihat loadWaThread() (diisi dari
+// hasil "history") & handler klik tombolnya di bagian event listener.
+function updateWaAutoReplyToggleUi(enabled) {
+  state.waCurrentAutoReplyEnabled = enabled;
+  els.waAutoReplyToggleIcon.innerHTML = enabled ? ICON_BELL_FILLED : ICON_BELL_OUTLINE;
+  els.waAutoReplyToggle.title = t(state.lang, enabled ? "wa_auto_reply_on_title" : "wa_auto_reply_off_title");
 }
 
 function openDialogEl(dialogEl) {
@@ -1613,6 +1664,29 @@ function wireEvents() {
     openWaList();
   });
 
+  // Toggle auto-reply AI khusus kontak yang lagi dibuka (lihat
+  // updateWaAutoReplyToggleUi() & tabel whatsapp_contacts) -- optimistic:
+  // ikon diganti duluan, baru dikembalikan kalau request-nya gagal.
+  els.waAutoReplyToggle.addEventListener("click", async () => {
+    const jid = state.waCurrentJid;
+    if (!jid || !state.chatCode || state.waCurrentAutoReplyEnabled === null) return;
+
+    const next = !state.waCurrentAutoReplyEnabled;
+    updateWaAutoReplyToggleUi(next);
+
+    const result = await setWaAutoReply(jid, next, state.chatCode);
+    if (!result.ok) {
+      updateWaAutoReplyToggleUi(!next);
+      if (result.unauthorized) {
+        state.chatCode = "";
+        clearStoredChatCode();
+        setWaStatus(t(state.lang, "chat_code_wrong"));
+        return;
+      }
+      setWaStatus(t(state.lang, "wa_auto_reply_toggle_error"));
+    }
+  });
+
   els.waForm.addEventListener("submit", async (e) => {
     e.preventDefault();
     const text = els.waInput.value.trim();
@@ -1662,6 +1736,65 @@ function wireEvents() {
   els.waInput.addEventListener("input", () => {
     els.waInput.style.height = "auto";
     els.waInput.style.height = `${els.waInput.scrollHeight}px`;
+  });
+
+  // Mulai obrolan WA baru dari aplikasi (bukan nunggu kontak chat duluan) --
+  // lihat normalizeWaPhoneToJid() & komentar di wa-new-chat-dialog (index.html).
+  els.waNewChatFab.addEventListener("click", () => {
+    if (!state.chatCode) {
+      openChatCodeDialog();
+      return;
+    }
+    els.waNewChatPhone.value = "";
+    els.waNewChatMessage.value = "";
+    els.waNewChatError.hidden = true;
+    openDialogEl(els.waNewChatDialog);
+    els.waNewChatPhone.focus();
+  });
+
+  els.waNewChatCancel.addEventListener("click", () => {
+    closeDialogEl(els.waNewChatDialog);
+  });
+
+  els.waNewChatForm.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const jid = normalizeWaPhoneToJid(els.waNewChatPhone.value);
+    const message = els.waNewChatMessage.value.trim();
+
+    if (!jid) {
+      els.waNewChatError.hidden = false;
+      els.waNewChatError.textContent = t(state.lang, "wa_new_chat_invalid_phone");
+      return;
+    }
+    if (!message) return;
+
+    const submitBtn = els.waNewChatForm.querySelector("button[type=submit]");
+    submitBtn.disabled = true;
+    els.waNewChatError.hidden = true;
+
+    // Reuse action "send" yang sama dengan balas chat biasa -- Edge Function
+    // `whatsapp` memang sudah generik (terima jid apa saja, tidak perlu ada
+    // riwayat dulu), jadi "mulai obrolan baru" di sini cukup berarti "kirim
+    // pesan pertama ke jid yang belum pernah ada baris-nya sama sekali".
+    const result = await sendWaMessage(jid, message, state.chatCode);
+    submitBtn.disabled = false;
+
+    if (!result.ok) {
+      if (result.unauthorized) {
+        state.chatCode = "";
+        clearStoredChatCode();
+        closeDialogEl(els.waNewChatDialog);
+        openChatCodeDialog();
+        return;
+      }
+      els.waNewChatError.hidden = false;
+      els.waNewChatError.textContent = result.message || t(state.lang, "wa_send_error");
+      return;
+    }
+
+    closeDialogEl(els.waNewChatDialog);
+    state.waListSignature = null;
+    openWaDetail(jid);
   });
 
   els.chatSearchInput.addEventListener("input", applyChatListFilter);

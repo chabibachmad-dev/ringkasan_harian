@@ -640,7 +640,8 @@ mark.chat-search-hit--active {
   color: var(--text-muted);
 }
 
-.chat-code-form-modal input {
+.chat-code-form-modal input,
+.chat-code-form-modal textarea {
   padding: 11px 12px;
   border-radius: 8px;
   border: 1px solid var(--border);
@@ -649,6 +650,11 @@ mark.chat-search-hit--active {
   font-family: inherit;
   /* WAJIB >= 16px, sama alasannya seperti input lain di file ini. */
   font-size: 16px;
+}
+
+.chat-code-form-modal textarea {
+  resize: vertical;
+  min-height: 60px;
 }
 
 .chat-code-error {
