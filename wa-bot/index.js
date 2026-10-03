@@ -121,7 +121,13 @@ function buildWaSystemText(knowledgeContext) {
 // Beda dari Obrolan AI (yang ini opt-in PER OBROLAN lewat toggle "Pakai
 // Dokumen Pengetahuan"), auto-reply WA SELALU ikutkan semua dokumen yang ada
 // -- tidak ada toggle per-kontak di v1 ini.
-const KB_TOTAL_BUDGET_CHARS = 600000;
+//
+// BUDGET SENGAJA JAUH LEBIH KECIL drpd punya `chat` Edge Function
+// (600.000): di sana user baru kena biaya/beban ini kalau SENGAJA nyalain
+// toggle KB per obrolan, tapi di sini kekirim di SETIAP pesan WA yang masuk
+// otomatis -- budget sebesar itu bikin tiap request jadi berat & gampang
+// kena rate-limit (429) kalau lagi banyak pesan masuk beruntun.
+const KB_TOTAL_BUDGET_CHARS = 80000;
 async function fetchKnowledgeContext() {
   const { data: kbRows, error } = await supabase
     .from("knowledge_documents")
@@ -202,20 +208,38 @@ async function callGeminiWithRetry(systemText, contents, withTools, maxAttempts)
 // buat dibalas (riwayat kosong) -- selain itu throw error (ditangani
 // pemanggil) kalau Gemini gagal total.
 async function generateAutoReply(jid) {
-  const { data: historyRows, error: historyErr } = await supabase
+  // PENTING: ascending + limit tanpa descending dulu bakal ambil N pesan
+  // PALING LAMA (bukan paling baru!) begitu percakapan sudah lebih panjang
+  // dari AUTO_REPLY_HISTORY_LIMIT -- jendela riwayatnya jadi "beku" di awal
+  // percakapan & pesan yang baru masuk barusan malah tidak ikut terkirim ke
+  // Gemini. Makanya di sini ambil TERBARU dulu (descending), baru dibalik
+  // lagi jadi urutan kronologis (lama -> baru) buat dikirim ke Gemini.
+  const { data: historyRowsDesc, error: historyErr } = await supabase
     .from("whatsapp_messages")
     .select("direction, content")
     .eq("wa_jid", jid)
-    .order("created_at", { ascending: true })
+    .order("created_at", { ascending: false })
     .limit(AUTO_REPLY_HISTORY_LIMIT);
   if (historyErr) throw new Error(`Gagal ambil riwayat: ${historyErr.message}`);
 
-  const contents = (historyRows ?? [])
+  const historyRows = (historyRowsDesc ?? []).slice().reverse();
+
+  const contents = historyRows
     .filter((row) => row.content)
     .map((row) => ({
       role: row.direction === "in" ? "user" : "model",
       parts: [{ text: row.content }]
     }));
+
+  // Pengaman tambahan: API Gemini menolak request yang giliran TERAKHIRnya
+  // "model" (balasan AI) -- harus diakhiri giliran "user". Normalnya tidak
+  // kejadian lagi setelah fix di atas (pesan yang baru masuk barusan sudah
+  // pasti paling baru = di posisi terakhir = role "user"), tapi dibuang saja
+  // kalau ada sisa giliran "model" nyangkut di ujung, drpd request ditolak
+  // total & bot diam saja.
+  while (contents.length > 0 && contents[contents.length - 1].role === "model") {
+    contents.pop();
+  }
   if (contents.length === 0) return null;
 
   const knowledgeContext = await fetchKnowledgeContext();
@@ -275,12 +299,31 @@ async function recordTokenUsage(tokensUsed, costUsd) {
 // dari processPendingOutgoing: itu buat balasan MANUAL dari aplikasi yang
 // antre dulu di status 'pending', ini langsung sinkron di tempat karena
 // socket-nya (sock) sudah ada di tangan & tidak ada yang perlu diantre).
+// Dipakai kalau generateAutoReply gagal total (mis. Gemini lagi kena
+// rate-limit/429 di kedua percobaan) -- drpd bot DIAM SAJA (kelihatan kayak
+// error/mati dari sisi kontak yang chat), minimal kasih tau pesannya
+// kebaca & bakal ditindaklanjuti manual.
+const AUTO_REPLY_FALLBACK_TEXT =
+  "Maaf, sistem balasan otomatisnya lagi ada kendala teknis. Pesannya sudah diterima kok, nanti dibalas langsung ya 🙏";
+
 async function sendAutoReply(sock, jid) {
   let result;
   try {
     result = await generateAutoReply(jid);
   } catch (err) {
     console.error(`Gagal generate auto-reply utk ${jid}:`, err instanceof Error ? err.message : String(err));
+    try {
+      const sent = await sock.sendMessage(jid, { text: AUTO_REPLY_FALLBACK_TEXT });
+      await supabase.from("whatsapp_messages").insert({
+        wa_jid: jid,
+        direction: "out",
+        content: AUTO_REPLY_FALLBACK_TEXT,
+        status: "sent",
+        wa_message_id: sent?.key?.id ?? null
+      });
+    } catch (sendErr) {
+      console.error(`Gagal kirim balasan cadangan ke ${jid}:`, sendErr instanceof Error ? sendErr.message : String(sendErr));
+    }
     return;
   }
   if (!result || !result.reply) return;
