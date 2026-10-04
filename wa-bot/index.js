@@ -335,16 +335,30 @@ function extractText(msg) {
   return null;
 }
 
-// JID nomor kita SENDIRI (pemilik bot), dari sock.user.id -- bentuknya ada
-// akhiran ":N" buat device id (mis. "6285xxxx:6@s.whatsapp.net"), dibuang
-// dulu supaya bisa dibandingkan APA ADANYA dengan msg.key.remoteJid di
-// "chat ke diri sendiri" (catatan pribadi di WhatsApp, lihat handleIncoming).
-function getOwnJid(sock) {
-  const raw = sock.user?.id;
+// Normalisasi 1 JID mentah: buang akhiran ":N" (device id, mis.
+// "6285xxxx:6@s.whatsapp.net" -> "6285xxxx@s.whatsapp.net") supaya bisa
+// dibandingkan APA ADANYA dengan msg.key.remoteJid.
+function normalizeJidSuffix(raw) {
   if (!raw) return null;
   const [userPart, domainPart] = raw.split("@");
   if (!domainPart) return null;
   return `${userPart.split(":")[0]}@${domainPart}`;
+}
+
+// Semua JID yang mewakili KITA SENDIRI (pemilik bot) -- ternyata BUKAN cuma
+// satu. Baileys/WhatsApp kasih 2 identitas: sock.user.id (format nomor HP,
+// "@s.whatsapp.net") DAN sock.user.lid (format "Local ID" privasi,
+// "@lid") -- "chat ke diri sendiri" (catatan pribadi) ternyata muncul
+// pakai jid ber-AKHIRAN @lid ini, BUKAN format nomor HP seperti dugaan
+// awal (ketauan dari log debug: jid="<angka>@lid" sementara sock.user.id
+// cuma kasih tau versi "@s.whatsapp.net"-nya) -- makanya HARUS dicek
+// terhadap keduanya, persis pola yang sama dengan kenapa kontak lain juga
+// bisa muncul dengan jid @lid (lihat komentar panjang di handleIncoming
+// soal itu).
+function getOwnJids(sock) {
+  const me = sock.user;
+  if (!me) return [];
+  return [normalizeJidSuffix(me.id), normalizeJidSuffix(me.lid)].filter(Boolean);
 }
 
 // Cek toggle auto-reply KHUSUS kontak ini (tabel whatsapp_contacts, diatur
@@ -366,16 +380,18 @@ async function isAutoReplyEnabledForContact(jid) {
 
 async function handleIncoming(msg, sock) {
   const jid = msg.key.remoteJid;
-  const ownJid = getOwnJid(sock);
   // "Chat ke diri sendiri" (catatan pribadi) di WhatsApp -- remoteJid-nya
-  // nomor KITA SENDIRI. Baileys selalu menandai ini fromMe=true (kita
-  // "pengirim"-nya, tidak ada lawan bicara lain), BEDA dari balasan yang kita
-  // kirim ke KONTAK LAIN (yang juga fromMe=true tapi sudah dicatat duluan
-  // waktu diproses dari antrian "pending", lihat processPendingOutgoing) --
-  // makanya guard di bawah ini KECUALIKAN kasus chat-ke-diri-sendiri secara
-  // eksplisit, supaya catatan pribadi ini ikut tersimpan & tampil di
-  // aplikasi juga (TANPA memicu auto-reply -- lihat bagian bawah fungsi ini).
-  const isSelfChat = Boolean(ownJid) && jid === ownJid;
+  // salah satu dari JID KITA SENDIRI (lihat getOwnJids -- BISA jid format
+  // nomor HP ATAU format @lid, sudah ketauan dari debugging kalau WhatsApp
+  // ternyata pakai yang @lid buat ini). Baileys selalu menandai ini
+  // fromMe=true (kita "pengirim"-nya, tidak ada lawan bicara lain), BEDA
+  // dari balasan yang kita kirim ke KONTAK LAIN (yang juga fromMe=true tapi
+  // sudah dicatat duluan waktu diproses dari antrian "pending", lihat
+  // processPendingOutgoing) -- makanya guard di bawah ini KECUALIKAN kasus
+  // chat-ke-diri-sendiri secara eksplisit, supaya catatan pribadi ini ikut
+  // tersimpan & tampil di aplikasi juga (TANPA memicu auto-reply -- lihat
+  // bagian bawah fungsi ini).
+  const isSelfChat = getOwnJids(sock).includes(jid);
 
   // Pesan yang KITA kirim sendiri (fromMe) KE KONTAK LAIN juga muncul lewat
   // event ini -- sudah dicatat duluan waktu diproses dari antrian "pending"
@@ -504,17 +520,6 @@ async function connect() {
   });
 
   sock.ev.on("messages.upsert", async ({ messages, type }) => {
-    // [debug sementara] Lacak kenapa pesan "chat ke diri sendiri" dari HP
-    // kadang tidak nyampe ke aplikasi -- cetak SEMUA event yang masuk ke
-    // sini, SEBELUM filter type/fromMe/jid apa pun, supaya ketahuan persis
-    // di titik mana pesannya kebuang (type bukan "notify"? fromMe tapi
-    // bukan self-chat? ownJid tidak cocok?). Boleh dihapus lagi kalau akar
-    // masalahnya sudah ketemu & beres.
-    for (const m of messages) {
-      console.log(
-        `[debug] upsert type=${type} jid=${m.key?.remoteJid} fromMe=${m.key?.fromMe} ownJid=${getOwnJid(sock)}`
-      );
-    }
     // type "notify" = pesan baru beneran masuk (bukan hasil sinkronisasi
     // riwayat lama waktu pertama kali login).
     if (type !== "notify") return;
