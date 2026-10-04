@@ -391,6 +391,27 @@ ATURAN PENGAMAN (berlaku terus walau topiknya bebas):
 2. JANGAN membagikan informasi pribadi/sensitif (keuangan, kesehatan, jadwal detail, data pribadi) tentang pemilik nomor.
 3. Kalau pesan masuk jelas butuh keputusan manusia (negosiasi, hal mendesak, masalah pribadi/emosional, komplain serius), jangan improvisasi -- cukup akui pesannya diterima dan akan ditindaklanjuti langsung oleh pemiliknya.`;
 
+// ANTRIAN GLOBAL buat panggilan Ollama -- CPU laptop ini cuma 2 core/4
+// thread & TERBUKTI lambat (~4.5 token/detik, lihat hasil tes user). Kalau
+// 2 pertanyaan masuk berdekatan (misal kontak yang sama kirim 2 pesan
+// cepat, atau 2 kontak beda kirim bareng) dan DUA-duanya langsung coba
+// generate BARENGAN, mereka rebutan CPU yang sama & JUSTRU membuat
+// dua-duanya lebih lambat/lebih gampang kena timeout drpd diproses satu-
+// satu bergiliran -- ini KEBUKTI kejadian di tes user (kirim ulang
+// pertanyaan yg sama 2x sementara percobaan pertama belum selesai, hasilnya
+// 2 gagal, baru yang ketiga -- diproses sendirian -- berhasil). Antrian ini
+// memaksa cuma ADA 1 panggilan Ollama yang benar2 jalan dalam satu waktu;
+// panggilan lain nunggu giliran drpd jalan bareng & saling memperlambat.
+let ollamaQueueTail = Promise.resolve();
+function enqueueOllamaCall(fn) {
+  const run = ollamaQueueTail.then(fn, fn);
+  // .catch(()=>{}) di sini CUMA buat jaga rantai antrian tetap jalan walau
+  // panggilan sebelumnya gagal -- error aslinya tetap dilempar balik ke
+  // pemanggil `run` (promise yang di-return), bukan ditelan di sini.
+  ollamaQueueTail = run.catch(() => {});
+  return run;
+}
+
 // Satu kali panggilan ke Ollama (server lokal, default port 11434 -- lihat
 // OLLAMA_BASE_URL) pakai endpoint /api/chat (format "messages" kayak
 // OpenAI/Gemini chat API, BUKAN /api/generate yang formatnya 1 prompt
@@ -474,7 +495,13 @@ async function generateAutoReplyWithOllama(jid) {
     content: buildGroundedUserMessage(question, docChunks, webResults)
   };
 
-  const replyText = await callOllamaChat([{ role: "system", content: WA_OLLAMA_SYSTEM_PROMPT }, ...messages]);
+  // Lewat antrian (enqueueOllamaCall) -- lihat catatan di atasnya kenapa:
+  // timer timeout (OLLAMA_TIMEOUT_MS) baru mulai jalan begitu giliran
+  // permintaan ini BENERAN dieksekusi (bukan dari saat masuk antrian), jadi
+  // nunggu antrian TIDAK ikut makan jatah waktu timeout-nya.
+  const replyText = await enqueueOllamaCall(() =>
+    callOllamaChat([{ role: "system", content: WA_OLLAMA_SYSTEM_PROMPT }, ...messages])
+  );
 
   return { reply: replyText.trim(), tokensUsed: 0, costUsd: 0 };
 }
