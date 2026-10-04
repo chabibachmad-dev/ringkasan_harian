@@ -71,7 +71,15 @@ const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY);
 // PASTIKAN update KEDUA tempat ini supaya catatan "token terpakai hari ini"
 // di footer aplikasi tetap akurat.
 const WA_AUTO_REPLY_ENABLED = (process.env.WA_AUTO_REPLY_ENABLED || "").toLowerCase() === "true";
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
+// Boleh isi BEBERAPA API key Gemini dipisah koma (GEMINI_API_KEYS=key1,key2,key3)
+// -- tiap key biasanya dari akun Google BEDA (masing2 py jatah gratis 20
+// request/hari sendiri2, lihat GEMINI_KEY_COOLDOWN_MS di bawah). Tetap
+// terima GEMINI_API_KEY (tunggal, nama lama) sbg fallback kalau
+// GEMINI_API_KEYS tidak diisi, biar .env lama tidak rusak.
+const GEMINI_API_KEYS = (process.env.GEMINI_API_KEYS || process.env.GEMINI_API_KEY || "")
+  .split(",")
+  .map((k) => k.trim())
+  .filter(Boolean);
 const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-3.6-flash";
 // Berapa pesan terakhir (masuk+keluar) di satu obrolan yang dikasihkan ke
 // AI sebagai konteks -- sengaja lebih pendek drpd riwayat Obrolan AI (yang
@@ -121,16 +129,18 @@ const OLLAMA_TIMEOUT_MS = Number(process.env.OLLAMA_TIMEOUT_MS) || 240000;
 // numpuk ke total waktu tunggu di CPU lambat begini.
 const OLLAMA_HISTORY_LIMIT = Number(process.env.OLLAMA_HISTORY_LIMIT) || 10;
 
-if (WA_AUTO_REPLY_ENABLED && WA_AI_ENGINE === "gemini" && !GEMINI_API_KEY) {
+if (WA_AUTO_REPLY_ENABLED && WA_AI_ENGINE === "gemini" && GEMINI_API_KEYS.length === 0) {
   console.warn(
-    "⚠️  WA_AUTO_REPLY_ENABLED=true + WA_AI_ENGINE=gemini tapi GEMINI_API_KEY belum diisi di .env -- auto-reply TIDAK akan jalan sampai diisi."
+    "⚠️  WA_AUTO_REPLY_ENABLED=true + WA_AI_ENGINE=gemini tapi GEMINI_API_KEY(S) belum diisi di .env -- auto-reply TIDAK akan jalan sampai diisi."
   );
 }
 // Auto-reply dianggap "siap jalan" kalau: enabled DAN (pakai ollama -- tidak
 // butuh API key apa pun, cukup Ollama-nya jalan di laptop -- ATAU pakai
-// gemini DAN API key-nya sudah diisi).
-const AUTO_REPLY_ACTIVE = WA_AUTO_REPLY_ENABLED && (WA_AI_ENGINE === "ollama" || Boolean(GEMINI_API_KEY));
-console.log(`🤖 Auto-reply AI: ${AUTO_REPLY_ACTIVE ? `AKTIF (mesin: ${WA_AI_ENGINE})` : "mati"}`);
+// gemini DAN minimal 1 API key sudah diisi).
+const AUTO_REPLY_ACTIVE = WA_AUTO_REPLY_ENABLED && (WA_AI_ENGINE === "ollama" || GEMINI_API_KEYS.length > 0);
+console.log(
+  `🤖 Auto-reply AI: ${AUTO_REPLY_ACTIVE ? `AKTIF (mesin: ${WA_AI_ENGINE}${WA_AI_ENGINE === "gemini" ? `, ${GEMINI_API_KEYS.length} API key` : ""})` : "mati"}`
+);
 
 // Prompt ini menentukan gaya & batasan balasan otomatis. Dibuat SELENGKAP
 // Obrolan AI di aplikasi (boleh diskusi bebas, bantu coding, akses
@@ -490,6 +500,17 @@ async function generateAutoReplyWithOllama(jid) {
   const topScore = docChunks[0]?.score ?? 0;
   const webResults = topScore >= RAG_STRONG_MATCH_SCORE ? [] : await webSearchBing(question, WEB_SEARCH_MAX_RESULTS);
 
+  // Log diagnostik ringan (BUKAN isi lengkap dokumen/pertanyaan, cuma
+  // judul+skor) -- biar kalau jawabannya aneh/salah sasaran lagi, langsung
+  // ketahuan dari `pm2 logs` apakah sebabnya RAG salah nyangkut ke dokumen
+  // yang gak relevan (lihat judulnya), pencarian Bing yang di-skip/gagal,
+  // atau murni modelnya sendiri yang salah paham walau konteksnya benar.
+  const docTitlesPreview = docChunks.map((c) => `"${c.title}"(skor ${c.score})`).join(", ") || "-";
+  console.log(
+    `🔍 [RAG+web] jid=${jid} skorTertinggi=${topScore} dokumenDipakai=[${docTitlesPreview}] ` +
+      `webDi-skip=${topScore >= RAG_STRONG_MATCH_SCORE ? "ya (skor kuat)" : "tidak"} hasilWeb=${webResults.length}`
+  );
+
   messages[messages.length - 1] = {
     role: "user",
     content: buildGroundedUserMessage(question, docChunks, webResults)
@@ -521,17 +542,64 @@ function estimateCostUsd(model, promptTokens, outputTokens) {
   return (promptTokens / 1_000_000) * price.input + (outputTokens / 1_000_000) * price.output;
 }
 
+// ================================================================
+// ROTASI BEBERAPA API KEY GEMINI -- lihat GEMINI_API_KEYS di atas. Dipakai
+// kalau user py lebih dari 1 akun Google, tiap akun bikin API key sendiri2
+// di AI Studio, masing2 dapat jatah gratis 20 request/hari SENDIRI2 --
+// begitu key yang lagi dipakai kena 429 (RESOURCE_EXHAUSTED, lihat error
+// "GenerateRequestsPerDayPerProjectPerModel-FreeTier" yg kejadian di
+// riwayat percakapan), otomatis pindah ke key berikutnya yg belum habis,
+// drpd auto-reply diam/fallback padahal masih ada jatah di key lain.
+//
+// Kapan sebuah key dianggap "boleh dicoba lagi": quota gratis Gemini
+// kebiasaannya reset tiap tengah malam Pacific Time (konsisten dgn
+// timezone yg sudah dipakai utk token_usage harian di recordTokenUsage di
+// bawah) -- jadi begitu 1 key kena 429, ditandai "jangan dipakai lagi
+// sampai tengah malam Pacific berikutnya" drpd dicoba berulang2 sia2.
+const geminiKeyExhaustedUntil = new Map(); // apiKey -> timestamp ms boleh dicoba lagi
+let geminiKeyCursor = 0; // index key yg jadi titik mulai pencarian berikutnya
+
+function nextMidnightPacificMs() {
+  const pacificNowStr = new Date().toLocaleString("en-US", { timeZone: "America/Los_Angeles" });
+  const pacificNow = new Date(pacificNowStr);
+  const nextMidnight = new Date(pacificNow);
+  nextMidnight.setHours(24, 0, 5, 0); // +5 detik jaga2 drpd pas-pasan
+  return Date.now() + (nextMidnight.getTime() - pacificNow.getTime());
+}
+
+// Cari API key yg belum ditandai habis, mulai dari geminiKeyCursor (biar
+// gilirannya muter rata, bukan selalu balik ke key #0 duluan). Return null
+// kalau SEMUA key lagi dalam masa "habis".
+function pickAvailableGeminiKey() {
+  const now = Date.now();
+  for (let i = 0; i < GEMINI_API_KEYS.length; i++) {
+    const idx = (geminiKeyCursor + i) % GEMINI_API_KEYS.length;
+    const key = GEMINI_API_KEYS[idx];
+    if (now >= (geminiKeyExhaustedUntil.get(key) || 0)) return key;
+  }
+  return null;
+}
+
+function markGeminiKeyExhausted(key) {
+  geminiKeyExhaustedUntil.set(key, nextMidnightPacificMs());
+  const idx = GEMINI_API_KEYS.indexOf(key);
+  geminiKeyCursor = (idx + 1) % GEMINI_API_KEYS.length; // mulai dr key berikutnya lain kali
+  console.warn(
+    `⚠️  API key Gemini #${idx + 1}/${GEMINI_API_KEYS.length} kena kuota harian, pindah ke key lain sampai tengah malam (Pacific Time).`
+  );
+}
+
 // Satu kali panggilan mentah ke Gemini API. withTools=true nyalakan akses
 // pencarian Google (lihat WA_BASE_SYSTEM_PROMPT). Melempar Error (dengan
 // properti .status) kalau gagal, ditangani pemanggil (callGeminiWithRetry).
-async function callGeminiOnce(systemText, contents, withTools) {
+async function callGeminiOnce(systemText, contents, withTools, apiKey) {
   const body = JSON.stringify({
     system_instruction: { parts: [{ text: systemText }] },
     contents,
     ...(withTools ? { tools: [{ google_search: {} }] } : {}),
     generationConfig: { temperature: 0.6 }
   });
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${apiKey}`;
   const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body });
   if (res.ok) return res.json();
   const errText = await res.text();
@@ -542,12 +610,17 @@ async function callGeminiOnce(systemText, contents, withTools) {
 
 // Retry ringan buat status sementara (429/503) -- beda dari versi lengkap di
 // Edge Function `chat` yang juga punya fallback ke MODEL cadangan segala,
-// di sini cukup retry model yang sama supaya kodenya tetap ringkas.
-async function callGeminiWithRetry(systemText, contents, withTools, maxAttempts) {
+// di sini cukup retry model yang sama supaya kodenya tetap ringkas. CATATAN:
+// 429 di sini sengaja TETAP dianggap "retryable" (nunggu 3 detik lalu coba
+// lagi pakai key yg SAMA) -- 429 kadang cuma rate-limit PER MENIT yg
+// sembuh sendiri, bukan jatah harian yg abis total. Keputusan "key ini
+// beneran habis, pindah ke key lain" ada di generateAutoReplyWithGemini,
+// SETELAH semua jatah retry di key ini benar2 habis.
+async function callGeminiWithRetry(systemText, contents, withTools, maxAttempts, apiKey) {
   let lastErr;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
-      return await callGeminiOnce(systemText, contents, withTools);
+      return await callGeminiOnce(systemText, contents, withTools, apiKey);
     } catch (err) {
       lastErr = err;
       const retryable = err.status === 429 || err.status === 503;
@@ -612,13 +685,36 @@ async function generateAutoReplyWithGemini(jid) {
   // Urutan percobaan sama seperti generateChatReply() di Edge Function
   // `chat`: coba dulu DENGAN akses internet (1x saja, jangan buang waktu
   // retry di jalur ini kalau lagi padat), baru kalau gagal lanjut TANPA
-  // internet dengan sisa jatah retry.
+  // internet dengan sisa jatah retry. Dibungkus loop rotasi key: kalau
+  // key yang lagi dipakai ternyata kena kuota HARIAN (429 yang masih
+  // bertahan setelah retry di callGeminiWithRetry), tandai habis & coba
+  // lagi dari awal pakai key berikutnya -- maksimal sebanyak jumlah key
+  // yang ada, biar tidak muter selamanya kalau semua key memang habis.
   let data;
-  try {
-    data = await callGeminiWithRetry(systemText, contents, true, 1);
-  } catch (err) {
-    console.warn(`Auto-reply WA: percobaan dgn Google Search gagal (${err.message}), lanjut tanpa akses internet...`);
-    data = await callGeminiWithRetry(systemText, contents, false, 2);
+  let attemptsLeft = Math.max(GEMINI_API_KEYS.length, 1);
+  for (;;) {
+    const apiKey = pickAvailableGeminiKey();
+    if (!apiKey) {
+      throw new Error(
+        `Semua API key Gemini (${GEMINI_API_KEYS.length}) kena kuota harian, coba lagi setelah tengah malam (Pacific Time).`
+      );
+    }
+    try {
+      try {
+        data = await callGeminiWithRetry(systemText, contents, true, 1, apiKey);
+      } catch (err) {
+        console.warn(`Auto-reply WA: percobaan dgn Google Search gagal (${err.message}), lanjut tanpa akses internet...`);
+        data = await callGeminiWithRetry(systemText, contents, false, 2, apiKey);
+      }
+      break; // sukses, keluar dari loop rotasi key
+    } catch (err) {
+      attemptsLeft -= 1;
+      if (err.status === 429 && attemptsLeft > 0) {
+        markGeminiKeyExhausted(apiKey);
+        continue; // coba lagi dari awal (dengan Google Search) pakai key berikutnya
+      }
+      throw err; // bukan soal kuota (atau key sudah habis semua) -- lempar ke pemanggil spt biasa
+    }
   }
 
   const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
