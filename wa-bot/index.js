@@ -33,6 +33,7 @@ import { createClient } from "@supabase/supabase-js";
 import makeWASocket, { useMultiFileAuthState, fetchLatestBaileysVersion, DisconnectReason } from "@whiskeysockets/baileys";
 import pino from "pino";
 import qrcode from "qrcode-terminal";
+import * as cheerio from "cheerio";
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -73,18 +74,63 @@ const WA_AUTO_REPLY_ENABLED = (process.env.WA_AUTO_REPLY_ENABLED || "").toLowerC
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
 const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-3.6-flash";
 // Berapa pesan terakhir (masuk+keluar) di satu obrolan yang dikasihkan ke
-// Gemini sebagai konteks -- sengaja lebih pendek drpd riwayat Obrolan AI
-// (yang 40) karena chat WA biasanya lebih singkat/kasual, dan tiap pesan WA
-// baru memicu 1 panggilan Gemini (beda dari Obrolan AI yang cuma kepanggil
-// waktu user benar-benar kirim) -- riwayat lebih pendek = lebih hemat token.
+// AI sebagai konteks -- sengaja lebih pendek drpd riwayat Obrolan AI (yang
+// 40) karena chat WA biasanya lebih singkat/kasual, dan tiap pesan WA baru
+// memicu 1 panggilan AI (beda dari Obrolan AI yang cuma kepanggil waktu
+// user benar-benar kirim) -- riwayat lebih pendek = lebih hemat token/waktu.
 const AUTO_REPLY_HISTORY_LIMIT = 20;
 
-if (WA_AUTO_REPLY_ENABLED && !GEMINI_API_KEY) {
+// ----------------------------------------------------------------
+// Pilihan "mesin" AI buat auto-reply WA: "ollama" (default, model lokal
+// jalan di laptop sendiri -- gratis & privasi penuh, lihat blok RAG + web
+// search di bawah) atau "gemini" (cara lama, lihat callGeminiOnce dkk).
+// Kode Gemini SENGAJA TETAP DIPERTAHANKAN (bukan dihapus) biar gampang
+// pindah balik tinggal ganti WA_AI_ENGINE di .env, tanpa perlu
+// install-ulang/tulis ulang apa pun -- walau praktiknya auto-reply WA
+// sekarang jalan pakai "ollama" per keputusan user (hasil tes pembuktian
+// konsep RAG: qwen2.5:3b + potongan dokumen relevan = akurat, lihat
+// riwayat percakapan).
+const WA_AI_ENGINE = (process.env.WA_AI_ENGINE || "ollama").toLowerCase();
+const OLLAMA_BASE_URL = process.env.OLLAMA_BASE_URL || "http://127.0.0.1:11434";
+const OLLAMA_MODEL = process.env.OLLAMA_MODEL || "qwen2.5:3b";
+// num_ctx = ukuran jendela konteks (dalam token) yang diminta ke Ollama --
+// default bawaan Ollama cuma 2048, kekecilan begitu riwayat obrolan +
+// konteks dokumen + hasil pencarian web digabung. 4096 aman buat RAM 7.5GB
+// dgn model 3B di laptop spek pas-pasan (lihat spek yang di-share user).
+const OLLAMA_NUM_CTX = Number(process.env.OLLAMA_NUM_CTX) || 4096;
+// Batas maksimal PANJANG JAWABAN (dalam token, lihat options.num_predict di
+// callOllamaChat) -- bukan cuma hemat waktu generate, tapi juga wajar buat
+// chat WA (balasan sependek2nya tetap lebih natural drpd esai panjang di WA).
+// Diukur dari tes --verbose user langsung di server: eval rate CUMA ~4.5
+// token/detik (CPU i5-4200M, 2014, tanpa akselerasi khusus) -- 300 token
+// output = sekitar 65 detik generate SAJA, belum prompt eval & load model.
+const OLLAMA_MAX_OUTPUT_TOKENS = Number(process.env.OLLAMA_MAX_OUTPUT_TOKENS) || 300;
+// Inferensi CPU-only di laptop tua bisa LAMBAT -- dari tes nyata di server
+// user (376 token prompt + 356 token jawaban = total ~104 detik, lihat
+// riwayat percakapan), 120 detik awal TERBUKTI sering kurang begitu
+// prompt/jawabannya dikit lebih besar. Dinaikkan jadi 4 menit, kasih ruang
+// lebih drpd auto-reply dianggap "gagal" padahal cuma masih mikir --
+// dikombinasikan dgn OLLAMA_MAX_OUTPUT_TOKENS & pemangkasan konteks (lihat
+// RAG_CONTEXT_BUDGET_CHARS, WEB_SEARCH_MAX_RESULTS, OLLAMA_HISTORY_LIMIT)
+// biar kejadian "mepet/lewat batas" ini lebih jarang, bukan cuma ditutupi
+// dgn nunggu lebih lama.
+const OLLAMA_TIMEOUT_MS = Number(process.env.OLLAMA_TIMEOUT_MS) || 240000;
+// Riwayat obrolan yang dikirim ke Ollama SENGAJA lebih pendek drpd punya
+// Gemini (AUTO_REPLY_HISTORY_LIMIT=20) -- tiap pesan riwayat nambah token
+// prompt yang harus "dibaca" dulu (prompt eval, lihat hasil tes), & itu ikut
+// numpuk ke total waktu tunggu di CPU lambat begini.
+const OLLAMA_HISTORY_LIMIT = Number(process.env.OLLAMA_HISTORY_LIMIT) || 10;
+
+if (WA_AUTO_REPLY_ENABLED && WA_AI_ENGINE === "gemini" && !GEMINI_API_KEY) {
   console.warn(
-    "⚠️  WA_AUTO_REPLY_ENABLED=true tapi GEMINI_API_KEY belum diisi di .env -- auto-reply TIDAK akan jalan sampai diisi."
+    "⚠️  WA_AUTO_REPLY_ENABLED=true + WA_AI_ENGINE=gemini tapi GEMINI_API_KEY belum diisi di .env -- auto-reply TIDAK akan jalan sampai diisi."
   );
 }
-console.log(`🤖 Auto-reply AI: ${WA_AUTO_REPLY_ENABLED && GEMINI_API_KEY ? "AKTIF" : "mati"}`);
+// Auto-reply dianggap "siap jalan" kalau: enabled DAN (pakai ollama -- tidak
+// butuh API key apa pun, cukup Ollama-nya jalan di laptop -- ATAU pakai
+// gemini DAN API key-nya sudah diisi).
+const AUTO_REPLY_ACTIVE = WA_AUTO_REPLY_ENABLED && (WA_AI_ENGINE === "ollama" || Boolean(GEMINI_API_KEY));
+console.log(`🤖 Auto-reply AI: ${AUTO_REPLY_ACTIVE ? `AKTIF (mesin: ${WA_AI_ENGINE})` : "mati"}`);
 
 // Prompt ini menentukan gaya & batasan balasan otomatis. Dibuat SELENGKAP
 // Obrolan AI di aplikasi (boleh diskusi bebas, bantu coding, akses
@@ -105,12 +151,333 @@ ATURAN PENGAMAN (berlaku terus walau topiknya bebas):
 2. JANGAN membagikan informasi pribadi/sensitif (keuangan, kesehatan, jadwal detail, data pribadi) tentang pemilik nomor.
 3. Kalau pesan masuk jelas butuh keputusan manusia (negosiasi, hal mendesak, masalah pribadi/emosional, komplain serius), jangan improvisasi -- cukup akui pesannya diterima dan akan ditindaklanjuti langsung oleh pemiliknya.`;
 
-// CATATAN: auto-reply WA SENGAJA TIDAK ikut membaca Dokumen Pengetahuan
-// (tabel knowledge_documents) -- sempat dicoba (lihat riwayat git), tapi
-// per keputusan user, Dokumen Pengetahuan difokuskan buat Obrolan AI di
-// aplikasi saja. Auto-reply WA cukup mengandalkan pencarian Google
-// (lihat tools: google_search di callGeminiOnce) buat jawaban yang butuh
-// info di luar pengetahuan dasar model.
+// CATATAN SOAL Dokumen Pengetahuan (tabel knowledge_documents) & web search:
+// sempat diputuskan auto-reply WA TIDAK ikut baca Dokumen Pengetahuan sama
+// sekali (lihat riwayat git) -- itu berlaku SELAMA mesinnya Gemini (yang
+// Gemini-nya sendiri sudah py akses Google Search bawaan lewat tools:
+// google_search di callGeminiOnce, jadi dokumen dirasa tidak perlu).
+//
+// Begitu pindah ke mesin "ollama" (model LOKAL, TIDAK punya akses internet
+// bawaan sama sekali), ceritanya beda: tanpa dikasih konteks, model kecil
+// (3B parameter) kebukti ASAL NGARANG kalau ditanya istilah/aturan resmi
+// yang spesifik (lihat hasil tes qwen2.5:3b soal "LPH" & "bendahara
+// pengeluaran" di riwayat percakapan -- jawabannya ngawur total tanpa
+// konteks, tapi akurat begitu dikasih potongan teks aslinya). Makanya
+// KHUSUS jalur "ollama", auto-reply WA ikut baca Dokumen Pengetahuan LAGI
+// (RAG sederhana, lihat fetchRelevantKnowledgeChunks) DAN dilengkapi
+// pencarian web manual (lihat webSearchBing, scraping Bing HTML -- gratis,
+// tanpa API key, krn model lokal tidak bisa googling sendiri; awalnya
+// coba DuckDuckGo tapi ternyata diblokir ISP user, lihat catatan di
+// webSearchBing).
+//
+// Ringkasnya:
+//   - WA_AI_ENGINE=gemini -> TIDAK pakai Dokumen Pengetahuan (asli), googling
+//     lewat tools bawaan Gemini.
+//   - WA_AI_ENGINE=ollama (default sekarang) -> PAKAI Dokumen Pengetahuan
+//     (RAG) + googling manual (Bing) sebagai "mata" buat model lokal.
+
+// ================================================================
+// RAG (Retrieval-Augmented Generation) SEDERHANA buat mesin "ollama" --
+// nyari potongan Dokumen Pengetahuan yang relevan tanpa butuh vector
+// database/embedding model (terlalu berat buat laptop spek pas-pasan ini,
+// lihat spek CPU/RAM yang di-share user) -- cukup skor "berapa banyak kata
+// penting yang sama" antara pertanyaan & tiap potongan dokumen. Kasar, tapi
+// cukup buat kasus pakai "dokumen resmi berbahasa Indonesia yang istilahnya
+// spesifik" (lihat hasil tes LPH/bendahara pengeluaran) -- dan JAUH lebih
+// ringan drpd embedding.
+// ================================================================
+const RAG_CHUNK_SIZE_CHARS = 700;
+// Diperkecil dari 3000 -> 1500 char (~375 token) setelah tes kecepatan nyata
+// di server user (eval rate ~4.5 token/detik, lihat OLLAMA_TIMEOUT_MS) --
+// prompt yang lebih kecil = prompt eval lebih cepat = lebih jarang kebentur
+// timeout, dgn tetap nyisa cukup ruang buat 1-2 potongan dokumen relevan.
+const RAG_CONTEXT_BUDGET_CHARS = 1500;
+// Kalau potongan dokumen dgn skor tertinggi >= angka ini, pertanyaannya
+// dianggap "jelas soal dokumen kita" -> SKIP pencarian web (lebih cepat &
+// lebih privat, tidak perlu kirim apa pun ke Bing -- DAN lebih penting lagi
+// di CPU lambat begini: skip 1 sumber konteks = prompt lebih kecil = lebih
+// cepat).
+const RAG_STRONG_MATCH_SCORE = 4;
+
+// Daftar kata umum Bahasa Indonesia yang DIBUANG waktu scoring (supaya kata
+// kayak "yang", "untuk", "dengan" tidak dianggap "match" ke semua potongan
+// dokumen secara percuma).
+const ID_STOPWORDS = new Set([
+  "yang", "untuk", "dengan", "pada", "dari", "dan", "atau", "ini", "itu",
+  "ke", "di", "adalah", "akan", "juga", "saja", "bisa", "ada", "tidak",
+  "apa", "apakah", "bagaimana", "kalau", "jika", "karena", "sebagai",
+  "oleh", "dalam", "para", "sudah", "belum", "lebih", "kurang", "agar",
+  "supaya", "hal", "nya", "mu", "ku", "saya", "kamu", "anda", "kita",
+  "mereka", "dia", "tersebut", "begitu", "maka", "namun", "tetapi", "serta",
+  "antara", "tiap", "setiap", "banyak", "sedikit", "satu", "dua", "tiga",
+  "tolong", "mohon", "coba", "gimana", "kenapa", "siapa", "dimana", "kapan"
+]);
+
+function tokenizeForScoring(text) {
+  return (text || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .split(/\s+/)
+    .filter((w) => w.length > 2 && !ID_STOPWORDS.has(w));
+}
+
+// Pecah teks dokumen jadi potongan ~RAG_CHUNK_SIZE_CHARS karakter, usahakan
+// tidak motong di tengah paragraf (gabung paragraf pendek sampai mendekati
+// batas ukuran).
+function chunkDocumentText(text, chunkSize) {
+  const paragraphs = (text || "").split(/\n{2,}/).map((p) => p.trim()).filter(Boolean);
+  const chunks = [];
+  let buffer = "";
+  for (const p of paragraphs) {
+    if (buffer && (buffer.length + p.length + 2) > chunkSize) {
+      chunks.push(buffer);
+      buffer = p;
+    } else {
+      buffer = buffer ? `${buffer}\n\n${p}` : p;
+    }
+  }
+  if (buffer) chunks.push(buffer);
+  return chunks;
+}
+
+// Cari potongan Dokumen Pengetahuan paling relevan dgn `question`, dibatasi
+// total `budgetChars` karakter (biar prompt ke Ollama tidak kegedean --
+// inget num_ctx cuma 4096 token & inferensinya CPU-only). Return array
+// kosong kalau tabel kosong/error (BUKAN exception -- kegagalan RAG tidak
+// boleh bikin seluruh auto-reply gagal, cukup lanjut tanpa konteks dokumen).
+async function fetchRelevantKnowledgeChunks(question, budgetChars) {
+  const qWords = new Set(tokenizeForScoring(question));
+  if (qWords.size === 0) return [];
+
+  const { data, error } = await supabase.from("knowledge_documents").select("title, content");
+  if (error) {
+    console.error("RAG: gagal ambil Dokumen Pengetahuan, lanjut tanpa konteks dokumen:", error.message);
+    return [];
+  }
+  if (!data || data.length === 0) return [];
+
+  const scored = [];
+  for (const doc of data) {
+    for (const chunk of chunkDocumentText(doc.content, RAG_CHUNK_SIZE_CHARS)) {
+      const chunkWords = tokenizeForScoring(chunk);
+      if (chunkWords.length === 0) continue;
+      let score = 0;
+      for (const w of chunkWords) {
+        if (qWords.has(w)) score++;
+      }
+      if (score > 0) scored.push({ score, title: doc.title, text: chunk });
+    }
+  }
+  scored.sort((a, b) => b.score - a.score);
+
+  const picked = [];
+  let used = 0;
+  for (const item of scored) {
+    if (used >= budgetChars) break;
+    picked.push(item);
+    used += item.text.length;
+  }
+  return picked;
+}
+
+// ================================================================
+// Pencarian web "manual" buat model lokal (yang TIDAK punya akses internet
+// bawaan seperti Gemini) -- scraping halaman hasil BING (bing.com/search),
+// BUKAN API resmi berbayar, tanpa API key, cocok buat pemakaian personal
+// skala kecil begini.
+//
+// KENAPA BING, BUKAN DuckDuckGo? Sempat dicoba DuckDuckGo duluan, tapi
+// kebukti (lihat tes di server user, error ERR_TLS_CERT_ALTNAME_INVALID
+// dgn sertifikat milik domain ISP "ioh.co.id") provider internet user
+// MEMBLOKIR/meng-intersepsi koneksi ke html.duckduckgo.com di level
+// jaringan -- bukan soal kode. Bing & Google dites BISA diakses normal
+// (status 200) dari jaringan yang sama, jadi dipindah ke Bing (scraping
+// Google lebih berisiko kena CAPTCHA/block krn lebih agresif deteksi bot).
+//
+// Kalau suatu saat strukturnya berubah atau diblokir juga & parsing ini
+// berhenti nemu apa-apa, paling auto-reply jalan TANPA hasil web (fallback
+// aman, lihat pemanggil), bukan bikin bot crash -- tapi jalankan
+// test-ollama-websearch.mjs buat ketahuan dari awal kalau ini kejadian.
+// ================================================================
+async function webSearchBing(query, maxResults) {
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10000);
+    const url = `https://www.bing.com/search?q=${encodeURIComponent(query)}`;
+    let res;
+    try {
+      res = await fetch(url, {
+        headers: {
+          "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+          "Accept-Language": "id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7"
+        },
+        signal: controller.signal
+      });
+    } finally {
+      clearTimeout(timeout);
+    }
+    if (!res.ok) return [];
+    const html = await res.text();
+    const $ = cheerio.load(html);
+    const results = [];
+    // Struktur umum halaman hasil Bing: tiap hasil ada di <li class="b_algo">,
+    // judul di dalam <h2>, ringkasan di ".b_caption p" (kadang berubah jadi
+    // class ".b_lineclampN" tergantung versi) -- dicoba beberapa fallback
+    // selector ringkasan biar tidak gampang nemu 0 hasil cuma gara2 Bing
+    // ganti nama class.
+    // Snippet dipotong max 220 karakter -- Bing kadang ngasih cuplikan cukup
+    // panjang, dan tiap karakter ekstra di sini ikut numpuk ke ukuran prompt
+    // yang harus "dibaca" Ollama (lihat catatan kecepatan di
+    // RAG_CONTEXT_BUDGET_CHARS).
+    const SNIPPET_MAX_CHARS = 220;
+    $("li.b_algo").each((_, el) => {
+      if (results.length >= maxResults) return;
+      const title = $(el).find("h2").text().trim();
+      let snippet = $(el).find(".b_caption p").first().text().trim();
+      if (!snippet) snippet = $(el).find("[class^='b_lineclamp']").first().text().trim();
+      if (!snippet) snippet = $(el).find("p").first().text().trim();
+      if (snippet.length > SNIPPET_MAX_CHARS) snippet = `${snippet.slice(0, SNIPPET_MAX_CHARS)}...`;
+      if (title || snippet) results.push({ title, snippet });
+    });
+    return results;
+  } catch (err) {
+    console.error("Web search (Bing) gagal, lanjut tanpa hasil web:", err instanceof Error ? err.message : String(err));
+    return [];
+  }
+}
+// Diperkecil dari 4 -> 3 hasil (alasan sama: makin sedikit teks yang
+// disodorkan ke Ollama, makin cepat prompt eval-nya -- lihat catatan
+// kecepatan di RAG_CONTEXT_BUDGET_CHARS).
+const WEB_SEARCH_MAX_RESULTS = 3;
+
+// Gabung potongan dokumen + hasil web (kalau ada) jadi 1 blok teks yang
+// ditaruh SEBELUM pertanyaan asli di giliran "user" terakhir -- pola ini
+// (konteks + pertanyaan dalam 1 pesan yang sama) PERSIS yang terbukti
+// jalan di tes manual qwen2.5:3b (lihat riwayat percakapan: model jadi
+// akurat & tidak ngarang begitu konteksnya ditaruh jadi satu kesatuan
+// dengan pertanyaan, drpd dipisah jadi system message terpisah yang kadang
+// diabaikan model kecil).
+function buildGroundedUserMessage(originalText, docChunks, webResults) {
+  const parts = [];
+  if (docChunks.length > 0) {
+    const docBlock = docChunks.map((c) => `[Dari dokumen: ${c.title}]\n${c.text}`).join("\n\n");
+    parts.push(`KONTEKS DOKUMEN (dari Dokumen Pengetahuan, dicarikan otomatis, mungkin relevan -- kalau tidak relevan, abaikan):\n${docBlock}`);
+  }
+  if (webResults.length > 0) {
+    const webBlock = webResults.map((r, i) => `${i + 1}. ${r.title} -- ${r.snippet}`).join("\n");
+    parts.push(`HASIL PENCARIAN WEB (dicarikan otomatis, mungkin relevan -- kalau tidak relevan, abaikan):\n${webBlock}`);
+  }
+  if (parts.length === 0) return originalText;
+  return `${parts.join("\n\n")}\n\nPertanyaan dari kontak: ${originalText}`;
+}
+
+// Prompt sistem KHUSUS mesin "ollama" -- isinya sama persis dgn
+// WA_BASE_SYSTEM_PROMPT (rem pengaman TIDAK berubah) tapi paragraf
+// "akses pencarian Google" diganti penjelasan soal blok KONTEKS
+// DOKUMEN/HASIL PENCARIAN WEB yang disisipkan manual (lihat
+// buildGroundedUserMessage) -- model lokal tidak punya tools bawaan
+// seperti Gemini, jadi perlu dikasih tau eksplisit gimana cara pakai
+// konteks itu & kapan HARUS mengaku tidak tahu drpd mengarang.
+const WA_OLLAMA_SYSTEM_PROMPT = `Kamu adalah asisten AI yang membalas pesan WhatsApp ATAS NAMA pemilik nomor ini secara OTOMATIS, tanpa pemilik nomor sempat membaca/menyetujui dulu. Kamu jalan sebagai model AI LOKAL di laptop pemilik nomor (BUKAN di internet) -- kamu TIDAK py akses pencarian sendiri, tapi kadang sebelum pertanyaan dari kontak akan ada blok "KONTEKS DOKUMEN" dan/atau "HASIL PENCARIAN WEB" yang DICARIKAN OTOMATIS oleh sistem (bukan kamu yang mencari).
+
+PENTING soal konteks itu: pakai isinya KALAU relevan buat menjawab. Kalau ternyata tidak nyambung ke pertanyaan (atau tidak ada blok konteksnya sama sekali), jawab pakai pengetahuan umum kamu seperlunya, TAPI kalau pertanyaannya soal istilah/aturan/lembaga resmi yang SPESIFIK (nama lembaga, nomor peraturan, kepanjangan singkatan resmi, dll) dan kamu TIDAK yakin atau TIDAK ada di konteks yang dikasih -- JANGAN MENGARANG. Akui terus terang tidak tahu pastinya & sarankan cek sumber resmi, drpd kasih jawaban yang kedengaran meyakinkan tapi salah.
+
+Jawab pertanyaan, bantu coding/debugging, atau ajak diskusi dengan ramah, jelas, dan SERINGKAS MUNGKIN tanpa kehilangan inti jawaban -- kamu jalan di hardware yang lumayan lambat & ada batas keras panjang jawaban, jadi USAHAKAN selesai dalam sekitar 120-150 kata (poin-poin singkat lebih baik drpd paragraf panjang bertele-tele), kecuali pertanyaannya benar-benar butuh penjelasan/kode yang lebih panjang. Kalau diminta bantuan kode, tulis kodenya di dalam blok \`\`\`seperti ini\`\`\` (WhatsApp menampilkannya sebagai monospace) lalu jelaskan secukupnya.
+
+Gunakan Bahasa Indonesia, kecuali lawan bicara jelas menulis/minta bahasa lain -- kalau begitu, balas di bahasa itu. WhatsApp CUMA mendukung *tebal*, _miring_, ~coret~, dan blok kode \`\`\`...\`\`\` -- JANGAN pakai format markdown lain (heading #, tabel, bullet list dengan -, dll) karena tidak akan tampil rapi.
+
+ATURAN PENGAMAN (berlaku terus walau topiknya bebas):
+1. JANGAN membuat janji, komitmen, keputusan, harga, jadwal pasti, atau kesepakatan apa pun atas nama pemilik nomor -- untuk hal semacam itu, balas sopan bahwa pesannya diterima dan pemiliknya akan membalas langsung.
+2. JANGAN membagikan informasi pribadi/sensitif (keuangan, kesehatan, jadwal detail, data pribadi) tentang pemilik nomor.
+3. Kalau pesan masuk jelas butuh keputusan manusia (negosiasi, hal mendesak, masalah pribadi/emosional, komplain serius), jangan improvisasi -- cukup akui pesannya diterima dan akan ditindaklanjuti langsung oleh pemiliknya.`;
+
+// Satu kali panggilan ke Ollama (server lokal, default port 11434 -- lihat
+// OLLAMA_BASE_URL) pakai endpoint /api/chat (format "messages" kayak
+// OpenAI/Gemini chat API, BUKAN /api/generate yang formatnya 1 prompt
+// mentah). stream:false biar responsnya 1 JSON utuh sekali balik, bukan
+// potongan-potongan (lebih gampang ditangani drpd streaming, auto-reply WA
+// toh baru dikirim setelah teksnya LENGKAP).
+async function callOllamaChat(messages) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), OLLAMA_TIMEOUT_MS);
+  let res;
+  try {
+    res = await fetch(`${OLLAMA_BASE_URL}/api/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: OLLAMA_MODEL,
+        messages,
+        stream: false,
+        // keep_alive "10m" -- minta Ollama tetap nyimpen model ini DIMUAT di
+        // RAM selama 10 menit sejak pemakaian terakhir (default Ollama cuma
+        // 5 menit), supaya pesan WA berikutnya yang masih berdekatan waktu
+        // tidak kena ongkos "load_duration" lagi (~5-8 detik dari hasil tes
+        // user -- lumayan kalau CPU-nya memang sudah pas-pasan).
+        keep_alive: "10m",
+        options: { num_ctx: OLLAMA_NUM_CTX, num_predict: OLLAMA_MAX_OUTPUT_TOKENS, temperature: 0.4 }
+      }),
+      signal: controller.signal
+    });
+  } catch (err) {
+    if (err?.name === "AbortError") {
+      throw new Error(`Ollama tidak merespons dalam ${OLLAMA_TIMEOUT_MS}ms (timeout).`);
+    }
+    throw new Error(`Gagal hubungi Ollama di ${OLLAMA_BASE_URL} -- apakah "ollama serve" jalan? (${err instanceof Error ? err.message : String(err)})`);
+  } finally {
+    clearTimeout(timeout);
+  }
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(`Ollama API error ${res.status}: ${errText.slice(0, 300)}`);
+  }
+  const data = await res.json();
+  const text = data?.message?.content;
+  if (!text) throw new Error(`Respons Ollama tidak berisi teks: ${JSON.stringify(data).slice(0, 300)}`);
+  return text;
+}
+
+// Versi generateAutoReply KHUSUS mesin "ollama": ambil riwayat (sama persis
+// query & urutan dgn versi Gemini di bawah -- lihat catatan descending+
+// reverse di sana soal kenapa), lalu SISIPKAN konteks RAG + web search ke
+// pertanyaan TERAKHIR sebelum dikirim ke Ollama. tokensUsed/costUsd selalu
+// 0 (model lokal, tidak ada biaya/kuota token API) -- recordTokenUsage
+// sudah otomatis skip kalau tokensUsed 0, jadi tidak mencemari angka
+// pemakaian Gemini di footer aplikasi.
+async function generateAutoReplyWithOllama(jid) {
+  const { data: historyRowsDesc, error: historyErr } = await supabase
+    .from("whatsapp_messages")
+    .select("direction, content")
+    .eq("wa_jid", jid)
+    .order("created_at", { ascending: false })
+    .limit(OLLAMA_HISTORY_LIMIT);
+  if (historyErr) throw new Error(`Gagal ambil riwayat: ${historyErr.message}`);
+
+  const historyRows = (historyRowsDesc ?? []).slice().reverse();
+  const messages = historyRows
+    .filter((row) => row.content)
+    .map((row) => ({ role: row.direction === "in" ? "user" : "assistant", content: row.content }));
+
+  while (messages.length > 0 && messages[messages.length - 1].role === "assistant") {
+    messages.pop();
+  }
+  if (messages.length === 0) return null;
+
+  const question = messages[messages.length - 1].content;
+
+  const docChunks = await fetchRelevantKnowledgeChunks(question, RAG_CONTEXT_BUDGET_CHARS);
+  const topScore = docChunks[0]?.score ?? 0;
+  const webResults = topScore >= RAG_STRONG_MATCH_SCORE ? [] : await webSearchBing(question, WEB_SEARCH_MAX_RESULTS);
+
+  messages[messages.length - 1] = {
+    role: "user",
+    content: buildGroundedUserMessage(question, docChunks, webResults)
+  };
+
+  const replyText = await callOllamaChat([{ role: "system", content: WA_OLLAMA_SYSTEM_PROMPT }, ...messages]);
+
+  return { reply: replyText.trim(), tokensUsed: 0, costUsd: 0 };
+}
 
 // Tabel harga & logika estimasi biaya -- SALINAN dari
 // supabase/functions/_shared/gemini.ts, lihat catatan sinkronisasi di atas.
@@ -164,12 +531,21 @@ async function callGeminiWithRetry(systemText, contents, withTools, maxAttempts)
   throw lastErr;
 }
 
+// Dispatcher: generateAutoReply dipanggil pemanggil (sendAutoReply) TANPA
+// peduli mesin apa yang lagi aktif -- tinggal arahkan ke implementasi yang
+// sesuai WA_AI_ENGINE. Ini satu-satunya tempat percabangannya, biar gampang
+// nambah mesin lain nanti kalau perlu.
+async function generateAutoReply(jid) {
+  if (WA_AI_ENGINE === "ollama") return generateAutoReplyWithOllama(jid);
+  return generateAutoReplyWithGemini(jid);
+}
+
 // Minta Gemini bikinkan satu balasan buat obrolan WA tertentu, pakai
 // AUTO_REPLY_HISTORY_LIMIT pesan terakhir di obrolan itu sebagai konteks
 // (TANPA Dokumen Pengetahuan -- lihat catatan di atas). Return null kalau
 // memang tidak ada apa-apa buat dibalas (riwayat kosong) -- selain itu throw
 // error (ditangani pemanggil) kalau Gemini gagal total.
-async function generateAutoReply(jid) {
+async function generateAutoReplyWithGemini(jid) {
   // PENTING: ascending + limit tanpa descending dulu bakal ambil N pesan
   // PALING LAMA (bukan paling baru!) begitu percakapan sudah lebih panjang
   // dari AUTO_REPLY_HISTORY_LIMIT -- jendela riwayatnya jadi "beku" di awal
@@ -268,11 +644,20 @@ const AUTO_REPLY_FALLBACK_TEXT =
   "Maaf, sistem balasan otomatisnya lagi ada kendala teknis. Pesannya sudah diterima kok, nanti dibalas langsung ya 🙏";
 
 async function sendAutoReply(sock, jid) {
+  // Indikator "mengetik..." di WA -- murni kosmetik, tapi berguna terutama
+  // buat mesin "ollama": inferensi CPU-only di laptop tua bisa makan waktu
+  // puluhan detik (apalagi dgn konteks RAG+web search), drpd kontak nunggu
+  // diam tanpa tanda apa-apa. Dibungkus try/catch & SENGAJA tidak menunggu
+  // (tidak di-await secara blocking lewat Promise.all) -- gagal kirim
+  // presence bukan alasan buat gagalkan auto-reply itu sendiri.
+  sock.sendPresenceUpdate("composing", jid).catch(() => {});
+
   let result;
   try {
     result = await generateAutoReply(jid);
   } catch (err) {
     console.error(`Gagal generate auto-reply utk ${jid}:`, err instanceof Error ? err.message : String(err));
+    sock.sendPresenceUpdate("paused", jid).catch(() => {});
     try {
       const sent = await sock.sendMessage(jid, { text: AUTO_REPLY_FALLBACK_TEXT });
       await supabase.from("whatsapp_messages").insert({
@@ -287,6 +672,7 @@ async function sendAutoReply(sock, jid) {
     }
     return;
   }
+  sock.sendPresenceUpdate("paused", jid).catch(() => {});
   if (!result || !result.reply) return;
 
   try {
@@ -436,7 +822,7 @@ async function handleIncoming(msg, sock) {
   // Chat-ke-diri-sendiri TIDAK PERNAH memicu auto-reply (tidak masuk akal
   // bot membalas catatan kita sendiri) -- baru lanjut cek toggle AKTIF/MATI
   // global & per-kontak kalau ini beneran pesan dari kontak lain.
-  if (!isSelfChat && WA_AUTO_REPLY_ENABLED && GEMINI_API_KEY) {
+  if (!isSelfChat && AUTO_REPLY_ACTIVE) {
     const contactEnabled = await isAutoReplyEnabledForContact(jid);
     if (contactEnabled) {
       await sendAutoReply(sock, jid);
