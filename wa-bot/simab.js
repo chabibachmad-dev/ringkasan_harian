@@ -105,6 +105,21 @@ function monthFromText(s) {
   return i >= 0 ? i + 1 : null;
 }
 
+// Buang kata pengisi dari kalimat bebas ("apa saja", "dong", "pak") agar pencarian tidak
+// gagal gara-gara kata yang tidak ada di data. Kode/akun dan kueri pendek (<3 kata) dibiarkan.
+const FILLER = new Set([
+  "apa", "saja", "aja", "yang", "mana", "dong", "ya", "sih", "nih", "tolong", "mohon", "tampilkan", "lihat", "lihatkan",
+  "bisa", "minta", "info", "tentang", "berapa", "gimana", "bagaimana", "pak", "bapak", "bu", "ibu", "mas", "mbak", "sdr", "kak"
+]);
+function cleanArg(arg) {
+  const a = String(arg ?? "").trim();
+  if (KODE_RE.test(a) || AKUN_RE.test(a)) return a;
+  const words = a.split(/\s+/).filter(Boolean);
+  if (words.length < 3) return a;
+  const kept = words.filter((w) => !FILLER.has(w.toLowerCase().replace(/[^\p{L}\p{N}]/gu, "")));
+  return kept.length > 0 ? kept.join(" ") : a;
+}
+
 function chunks(arr, size) {
   const out = [];
   for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
@@ -415,7 +430,7 @@ export function createSimab({
 
   // ---------- RPD ----------
   async function cmdRpd(arg, tahun) {
-    const onlyMonth = monthFromText(arg);
+    const onlyMonth = String(arg ?? "").split(/\s+/).map((w) => monthFromText(w.replace(/[^\p{L}\p{N}]/gu, ""))).find(Boolean) ?? null;
     const rpdRows = await fetchAll(() => scope(getClient().from("rpd").select("bulan_ke,nilai"), tahun));
     const kg = await fetchAll(() => scope(getClient().from("kegiatan").select("jumlah,tgl_sp2d"), tahun).not("tgl_sp2d", "is", null));
     const rpdBy = Array(13).fill(0);
@@ -446,8 +461,9 @@ export function createSimab({
     return lines.join("\n");
   }
 
-  async function dispatch(aksi, arg, tahunOverride) {
+  async function dispatch(aksi, rawArg, tahunOverride) {
     if (aksi === "bantuan") return SIMAB_HELP;
+    const arg = aksi === "rpd" ? rawArg : cleanArg(rawArg);
     if (aksi === "sbm") return cmdSbm(arg);
     const tahun = await currentTahun(tahunOverride);
     if (aksi === "pagu") return cmdPagu(arg, tahun);
@@ -463,8 +479,15 @@ export function createSimab({
     if (cmd.aksi) return dispatch(cmd.aksi, cmd.arg, cmd.tahun);
 
     // Kalimat bebas -> bantuan model lokal untuk MENEBAK aksi (bukan angka).
+    // Jalan pintas tanpa model (instan): kode berpemisah titik, angka akun 6 digit, atau kata "rpd".
     const kodeInText = cmd.arg.match(KODE_IN_TEXT_RE)?.[0];
     if (kodeInText) return dispatch("pagu", kodeInText, cmd.tahun);
+    const akunInText = cmd.arg.match(/(?:^|\s)(\d{6})(?=\s|$|[?.,!])/)?.[1];
+    if (akunInText) return dispatch("pagu", akunInText, cmd.tahun);
+    if (/\brpd\b/i.test(cmd.arg)) {
+      const bln = cmd.arg.split(/\s+/).map((w) => monthFromText(w.replace(/[^\p{L}\p{N}]/gu, ""))).find((m) => m);
+      return dispatch("rpd", bln ? String(bln) : "", cmd.tahun);
+    }
     if (!ollamaParse) return SIMAB_HELP;
     if (notify) await notify("⏳ Memahami pertanyaan (model lokal, bisa sampai ±1 menit)…");
     let parsed = null;
@@ -484,20 +507,11 @@ export function createSimab({
   return { enabled, run };
 }
 
-// Prompt penafsir untuk Ollama (kalimat bebas -> {aksi, kueri}).
-export const SIMAB_OLLAMA_SYSTEM = `Kamu penerjemah perintah untuk sistem monitoring anggaran. Pilih SATU aksi lalu ambil kata kunci intinya.
-Aksi yang tersedia:
-- pagu: pagu/sisa/realisasi/blokir sebuah kode POK, akun (6 angka), atau jenis belanja (kata di uraian)
-- cek: cari kegiatan dari uraian, nomor ST, nama pelaksana, kode MAK, atau nomor SPM
-- perjadin: daftar perjalanan dinas (akun 524111/524113) milik seorang pelaksana (butuh nama)
-- sbm: tarif standar biaya masukan sebuah kabupaten/kota
-- rpd: rencana penarikan dana per bulan (kueri boleh nama bulan atau kosong)
-- bantuan: kalau tidak ada yang cocok
-Balas HANYA JSON satu baris: {"aksi":"...","kueri":"..."}. "kueri" hanya kata kunci inti (kode, akun, nama, kota, nomor ST, bulan) tanpa kata sambung atau tanda tanya.
-Contoh:
-"berapa sisa anggaran akun 521111" -> {"aksi":"pagu","kueri":"521111"}
-"sisa pagu belanja perjalanan dinas biasa" -> {"aksi":"pagu","kueri":"perjalanan dinas biasa"}
-"kegiatan bimtek halal yang mana saja" -> {"aksi":"cek","kueri":"bimtek halal"}
-"perjalanan dinas pak budi tahun ini" -> {"aksi":"perjadin","kueri":"budi"}
-"uang harian ke surabaya berapa" -> {"aksi":"sbm","kueri":"surabaya"}
-"rpd bulan oktober gimana" -> {"aksi":"rpd","kueri":"oktober"}`;
+// Prompt penafsir untuk Ollama (kalimat bebas -> {aksi, kueri}). SENGAJA singkat:
+// di CPU 2 core, tiap token prompt makan ±60 ms, jadi prompt panjang = lambat.
+export const SIMAB_OLLAMA_SYSTEM = `Pilih satu aksi dan kata kunci intinya. Balas HANYA JSON: {"aksi":"...","kueri":"..."}
+Aksi: pagu (pagu/sisa/realisasi kode, akun 6 angka, atau jenis belanja), cek (cari kegiatan: uraian, nomor ST, nama, MAK), perjadin (perjalanan dinas seseorang), sbm (tarif kota), rpd (bulan), bantuan.
+"sisa anggaran belanja perjalanan dinas biasa" -> {"aksi":"pagu","kueri":"perjalanan dinas biasa"}
+"kegiatan bimtek halal apa saja" -> {"aksi":"cek","kueri":"bimtek halal"}
+"perjalanan dinas pak budi" -> {"aksi":"perjadin","kueri":"budi"}
+"uang harian surabaya" -> {"aksi":"sbm","kueri":"surabaya"}`;
