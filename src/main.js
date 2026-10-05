@@ -25,7 +25,9 @@ import {
   ICON_DOTS_SMALL,
   ICON_DOC,
   ICON_BELL_FILLED,
-  ICON_BELL_OUTLINE
+  ICON_BELL_OUTLINE,
+  ICON_ZAP,
+  ICON_GAUGE
 } from "./icons.js";
 import { registerServiceWorker } from "./push.js";
 import {
@@ -42,9 +44,18 @@ import {
   fetchTokenUsageToday,
   listKnowledgeDocs,
   uploadKnowledgeDoc,
-  deleteKnowledgeDoc
+  deleteKnowledgeDoc,
+  fetchKeyStatus
 } from "./chat.js";
-import { listWaChats, fetchWaHistory, sendWaMessage, setWaAutoReply } from "./wa.js";
+import {
+  listWaChats,
+  fetchWaHistory,
+  sendWaMessage,
+  setWaAutoReply,
+  listWaQuickReplies,
+  saveWaQuickReply,
+  deleteWaQuickReply
+} from "./wa.js";
 
 // Daftar obrolan yang pernah dimulai dari perangkat ini (tombol "+") --
 // disimpan lokal karena app ini sekarang murni asisten chat, tidak ada lagi
@@ -169,6 +180,27 @@ const els = {
   kbDocList: document.getElementById("kb-doc-list"),
   kbDocListEmpty: document.getElementById("kb-doc-list-empty"),
   kbCloseBtn: document.getElementById("kb-close-btn"),
+  settingsQrBtn: document.getElementById("settings-qr-btn"),
+  settingsQrIcon: document.getElementById("settings-qr-icon"),
+  settingsKeysBtn: document.getElementById("settings-keys-btn"),
+  settingsKeysIcon: document.getElementById("settings-keys-icon"),
+  qrDialog: document.getElementById("qr-dialog"),
+  qrForm: document.getElementById("qr-form"),
+  qrTitleInput: document.getElementById("qr-title-input"),
+  qrKeywordsInput: document.getElementById("qr-keywords-input"),
+  qrReplyInput: document.getElementById("qr-reply-input"),
+  qrSaveBtn: document.getElementById("qr-save-btn"),
+  qrCancelEditBtn: document.getElementById("qr-cancel-edit-btn"),
+  qrStatus: document.getElementById("qr-status"),
+  qrList: document.getElementById("qr-list"),
+  qrListEmpty: document.getElementById("qr-list-empty"),
+  qrCloseBtn: document.getElementById("qr-close-btn"),
+  keysDialog: document.getElementById("keys-dialog"),
+  keysList: document.getElementById("keys-list"),
+  keysStatus: document.getElementById("keys-status"),
+  keysResetNote: document.getElementById("keys-reset-note"),
+  keysRefreshBtn: document.getElementById("keys-refresh-btn"),
+  keysCloseBtn: document.getElementById("keys-close-btn"),
   aboutDialog: document.getElementById("about-dialog"),
   aboutChatsCount: document.getElementById("about-chats-count"),
   aboutKbCount: document.getElementById("about-kb-count"),
@@ -1636,6 +1668,252 @@ async function renderKbDocList() {
   }
 }
 
+// ---------- Template Jawaban WA (Pengaturan > Template Jawaban WA) ----------
+// Pesan WA masuk yang cocok dgn kata kunci sebuah template dijawab langsung
+// oleh bot dari template itu, tanpa memanggil AI (lihat wa-bot/index.js,
+// findQuickReply & tabel wa_quick_replies).
+
+// id template yang lagi diubah lewat form (null = form lagi mode "tambah baru").
+let qrEditingId = null;
+
+// Kalau server menolak kode akses, lupakan kode tersimpan -- pola yang sama
+// dipakai di seluruh dialog Pengaturan lain.
+function dropChatCodeIfUnauthorized(result) {
+  if (result && result.unauthorized) {
+    state.chatCode = "";
+    clearStoredChatCode();
+  }
+}
+
+function setQrStatus(text) {
+  els.qrStatus.hidden = !text;
+  els.qrStatus.textContent = text || "";
+}
+
+function resetQrForm() {
+  qrEditingId = null;
+  els.qrTitleInput.value = "";
+  els.qrKeywordsInput.value = "";
+  els.qrReplyInput.value = "";
+  els.qrCancelEditBtn.hidden = true;
+}
+
+async function openQrDialog() {
+  closeSettingsDialog();
+  resetQrForm();
+  setQrStatus("");
+  openDialogEl(els.qrDialog);
+  await renderQrList();
+}
+
+async function renderQrList() {
+  els.qrList.innerHTML = "";
+
+  if (!state.chatCode) {
+    els.qrListEmpty.hidden = false;
+    els.qrListEmpty.textContent = t(state.lang, "qr_need_code");
+    return;
+  }
+
+  els.qrListEmpty.hidden = false;
+  els.qrListEmpty.textContent = t(state.lang, "loading");
+
+  const result = await listWaQuickReplies(state.chatCode);
+  if (!result.ok) {
+    dropChatCodeIfUnauthorized(result);
+    els.qrListEmpty.textContent = t(state.lang, "qr_load_error");
+    return;
+  }
+
+  const replies = result.replies || [];
+  if (replies.length === 0) {
+    els.qrListEmpty.textContent = t(state.lang, "qr_empty");
+    return;
+  }
+  els.qrListEmpty.hidden = true;
+
+  for (const item of replies) {
+    const row = document.createElement("div");
+    row.className = "kb-doc-row qr-row";
+    if (!item.enabled) row.classList.add("qr-row--disabled");
+
+    const toggle = document.createElement("input");
+    toggle.type = "checkbox";
+    toggle.className = "qr-toggle";
+    toggle.checked = !!item.enabled;
+    const toggleLabel = t(state.lang, item.enabled ? "qr_toggle_off" : "qr_toggle_on");
+    toggle.title = toggleLabel;
+    toggle.setAttribute("aria-label", toggleLabel);
+    toggle.addEventListener("change", async () => {
+      const nextEnabled = toggle.checked;
+      toggle.disabled = true;
+      const saveResult = await saveWaQuickReply(state.chatCode, {
+        id: item.id,
+        title: item.title,
+        keywords: item.keywords,
+        reply: item.reply,
+        enabled: nextEnabled
+      });
+      if (!saveResult.ok) {
+        dropChatCodeIfUnauthorized(saveResult);
+        alertWithDetail("qr_toggle_error", saveResult);
+      }
+      await renderQrList();
+    });
+
+    const main = document.createElement("div");
+    main.className = "kb-doc-main";
+    const titleEl = document.createElement("div");
+    titleEl.className = "kb-doc-title";
+    titleEl.textContent = item.enabled ? item.title : `${item.title} (${t(state.lang, "qr_disabled_label")})`;
+    const kwEl = document.createElement("div");
+    kwEl.className = "kb-doc-meta";
+    kwEl.textContent = `${t(state.lang, "qr_keywords_label")}: ${(item.keywords || []).join(", ")}`;
+    const replyEl = document.createElement("div");
+    replyEl.className = "qr-reply-preview";
+    replyEl.textContent = truncate(item.reply || "", 90);
+    const usedEl = document.createElement("div");
+    usedEl.className = "kb-doc-meta";
+    usedEl.textContent = `${item.use_count || 0} ${t(state.lang, "qr_used_unit")}`;
+    main.appendChild(titleEl);
+    main.appendChild(kwEl);
+    main.appendChild(replyEl);
+    main.appendChild(usedEl);
+
+    const editBtn = document.createElement("button");
+    editBtn.type = "button";
+    editBtn.className = "icon-btn icon-btn--small";
+    editBtn.innerHTML = ICON_EDIT;
+    editBtn.title = t(state.lang, "qr_edit_btn");
+    editBtn.setAttribute("aria-label", t(state.lang, "qr_edit_btn"));
+    editBtn.addEventListener("click", () => {
+      qrEditingId = item.id;
+      els.qrTitleInput.value = item.title || "";
+      els.qrKeywordsInput.value = (item.keywords || []).join(", ");
+      els.qrReplyInput.value = item.reply || "";
+      els.qrCancelEditBtn.hidden = false;
+      setQrStatus("");
+      els.qrTitleInput.focus();
+    });
+
+    const delBtn = document.createElement("button");
+    delBtn.type = "button";
+    delBtn.className = "icon-btn icon-btn--small";
+    delBtn.innerHTML = ICON_TRASH;
+    delBtn.title = t(state.lang, "qr_delete_btn");
+    delBtn.setAttribute("aria-label", t(state.lang, "qr_delete_btn"));
+    delBtn.addEventListener("click", async () => {
+      if (!window.confirm(t(state.lang, "qr_delete_confirm"))) return;
+      const delResult = await deleteWaQuickReply(state.chatCode, item.id);
+      if (!delResult.ok) {
+        dropChatCodeIfUnauthorized(delResult);
+        alertWithDetail("qr_delete_error", delResult);
+        return;
+      }
+      if (qrEditingId === item.id) resetQrForm();
+      await renderQrList();
+    });
+
+    row.appendChild(toggle);
+    row.appendChild(main);
+    row.appendChild(editBtn);
+    row.appendChild(delBtn);
+    els.qrList.appendChild(row);
+  }
+}
+
+// ---------- Status API Gemini (Pengaturan > Status API Gemini) ----------
+// Data dari action "key_status" di Edge Function chat (tabel gemini_key_usage,
+// ditulis bot wa-bot/ & Edge Function chat). Key aslinya TIDAK PERNAH sampai
+// ke sini -- cuma 4 karakter terakhir (hint) buat membedakan satu key dari
+// yang lain.
+
+async function openKeysDialog() {
+  closeSettingsDialog();
+  openDialogEl(els.keysDialog);
+  await renderKeysList();
+}
+
+async function renderKeysList() {
+  els.keysList.innerHTML = "";
+  els.keysResetNote.textContent = "";
+
+  if (!state.chatCode) {
+    els.keysStatus.hidden = false;
+    els.keysStatus.textContent = t(state.lang, "keys_need_code");
+    return;
+  }
+
+  els.keysStatus.hidden = false;
+  els.keysStatus.textContent = t(state.lang, "loading");
+
+  const result = await fetchKeyStatus(state.chatCode);
+  if (!result.ok) {
+    dropChatCodeIfUnauthorized(result);
+    els.keysStatus.textContent = t(state.lang, "keys_load_error");
+    return;
+  }
+
+  const keys = result.keys || [];
+  if (keys.length === 0) {
+    els.keysStatus.textContent = t(state.lang, "keys_empty");
+    return;
+  }
+  els.keysStatus.hidden = true;
+
+  const limit = Number(result.dailyLimit) > 0 ? Number(result.dailyLimit) : 20;
+
+  for (const k of keys) {
+    const row = document.createElement("div");
+    row.className = "kb-doc-row keys-row";
+
+    const main = document.createElement("div");
+    main.className = "kb-doc-main";
+
+    const head = document.createElement("div");
+    head.className = "keys-head";
+    const nameEl = document.createElement("span");
+    nameEl.className = "kb-doc-title";
+    nameEl.textContent = `${t(state.lang, "keys_key_label")} …${k.hint}`;
+    const chip = document.createElement("span");
+    chip.className = `keys-chip ${k.exhausted ? "keys-chip--exhausted" : "keys-chip--active"}`;
+    chip.textContent = t(state.lang, k.exhausted ? "keys_exhausted" : "keys_active");
+    head.appendChild(nameEl);
+    head.appendChild(chip);
+
+    const bar = document.createElement("div");
+    bar.className = "keys-bar";
+    const fill = document.createElement("div");
+    const pct = k.exhausted ? 100 : Math.min(100, Math.round((k.requests / limit) * 100));
+    fill.className = "keys-bar-fill";
+    if (k.exhausted) fill.classList.add("keys-bar-fill--exhausted");
+    else if (pct >= 80) fill.classList.add("keys-bar-fill--warn");
+    fill.style.width = `${pct}%`;
+    bar.appendChild(fill);
+
+    const meta = document.createElement("div");
+    meta.className = "kb-doc-meta";
+    meta.textContent = `${k.requests} / ${limit} ${t(state.lang, "keys_requests_unit")}`;
+
+    main.appendChild(head);
+    main.appendChild(bar);
+    main.appendChild(meta);
+    if (k.exhausted && k.exhaustedUntilMs) {
+      const until = document.createElement("div");
+      until.className = "kb-doc-meta";
+      until.textContent = `${t(state.lang, "keys_exhausted_until")} ${formatFullDateTime(k.exhaustedUntilMs)}`;
+      main.appendChild(until);
+    }
+
+    row.appendChild(main);
+    els.keysList.appendChild(row);
+  }
+
+  if (result.resetAtMs) {
+    els.keysResetNote.textContent = `${t(state.lang, "keys_reset_note")} ${formatFullDateTime(result.resetAtMs)}`;
+  }
+}
+
 function wireEvents() {
   els.langToggle.addEventListener("click", () => {
     state.lang = state.lang === "id" ? "en" : "id";
@@ -2011,6 +2289,8 @@ function wireEvents() {
   els.settingsToggleIcon.innerHTML = ICON_SETTINGS;
   els.settingsKbIcon.innerHTML = ICON_UPLOAD;
   els.settingsWhatsappIcon.innerHTML = ICON_CHAT;
+  els.settingsQrIcon.innerHTML = ICON_ZAP;
+  els.settingsKeysIcon.innerHTML = ICON_GAUGE;
   els.settingsChangeCodeIcon.innerHTML = ICON_KEY;
   els.settingsLogoutIcon.innerHTML = ICON_LOGOUT;
   els.settingsAboutIcon.innerHTML = ICON_INFO;
@@ -2317,6 +2597,63 @@ function wireEvents() {
       els.aboutKbCount.textContent = "–";
     }
   });
+
+  els.settingsQrBtn.addEventListener("click", () => openQrDialog());
+  els.settingsKeysBtn.addEventListener("click", () => openKeysDialog());
+
+  els.qrCloseBtn.addEventListener("click", () => closeDialogEl(els.qrDialog));
+  els.qrDialog.addEventListener("click", (e) => {
+    if (e.target === els.qrDialog) closeDialogEl(els.qrDialog);
+  });
+  els.qrCancelEditBtn.addEventListener("click", () => {
+    resetQrForm();
+    setQrStatus("");
+  });
+  els.qrForm.addEventListener("submit", async (e) => {
+    e.preventDefault();
+
+    if (!state.chatCode) {
+      setQrStatus(t(state.lang, "qr_need_code"));
+      return;
+    }
+    const title = els.qrTitleInput.value.trim();
+    const keywords = els.qrKeywordsInput.value
+      .split(/[,\n]/)
+      .map((k) => k.trim())
+      .filter(Boolean);
+    const reply = els.qrReplyInput.value.trim();
+    if (!title) {
+      setQrStatus(t(state.lang, "qr_title_required"));
+      return;
+    }
+    if (keywords.length === 0) {
+      setQrStatus(t(state.lang, "qr_keywords_required"));
+      return;
+    }
+    if (!reply) {
+      setQrStatus(t(state.lang, "qr_reply_required"));
+      return;
+    }
+
+    els.qrSaveBtn.disabled = true;
+    setQrStatus(t(state.lang, "qr_saving"));
+    const result = await saveWaQuickReply(state.chatCode, { id: qrEditingId || undefined, title, keywords, reply });
+    els.qrSaveBtn.disabled = false;
+    if (!result.ok) {
+      dropChatCodeIfUnauthorized(result);
+      setQrStatus(result.message ? `${t(state.lang, "qr_save_error")} (${result.message})` : t(state.lang, "qr_save_error"));
+      return;
+    }
+    resetQrForm();
+    setQrStatus(t(state.lang, "qr_save_success"));
+    await renderQrList();
+  });
+
+  els.keysCloseBtn.addEventListener("click", () => closeDialogEl(els.keysDialog));
+  els.keysDialog.addEventListener("click", (e) => {
+    if (e.target === els.keysDialog) closeDialogEl(els.keysDialog);
+  });
+  els.keysRefreshBtn.addEventListener("click", () => renderKeysList());
 
   els.aboutCloseBtn.addEventListener("click", () => closeDialogEl(els.aboutDialog));
 

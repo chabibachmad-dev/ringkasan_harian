@@ -68,3 +68,9 @@ export const ICON_COPY = `<svg width="16" height="16" viewBox="0 0 24 24" fill="
 // dipakai (bukan ICON_DOTS yang 18x18) karena tombolnya duduk di baris jam
 // yang kecil, jadi ukurannya disamakan supaya tidak bikin baris itu melebar.
 export const ICON_DOTS_SMALL = `<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true"><circle cx="12" cy="5" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="12" cy="19" r="1.8"/></svg>`;
+
+// Ikon menu "Template Jawaban WA" di sheet Pengaturan (petir = jawaban cepat tanpa AI).
+export const ICON_ZAP = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13 2 4 14h7l-1 8 9-12h-7z"/></svg>`;
+
+// Ikon menu "Status API Gemini" di sheet Pengaturan (indikator pemakaian/kuota).
+export const ICON_GAUGE = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 17a9 9 0 0 1 18 0"/><path d="M12 17l4-5"/><path d="M12 17h.01"/></svg>`;

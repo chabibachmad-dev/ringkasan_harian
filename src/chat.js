@@ -144,3 +144,11 @@ export function uploadKnowledgeDoc(code, { title, content, filename } = {}) {
 export function deleteKnowledgeDoc(code, id) {
   return callChatFunction({ code, action: "kb_delete", id });
 }
+
+// Status tiap API key Gemini hari ini (jumlah request tercatat, habis/aktif,
+// kapan reset) -- dipakai dialog Pengaturan > Status API Gemini. Server cuma
+// mengirim 4 karakter TERAKHIR tiap key (hint), key aslinya tidak pernah
+// sampai ke browser.
+export function fetchKeyStatus(code) {
+  return callChatFunction({ code, action: "key_status" });
+}

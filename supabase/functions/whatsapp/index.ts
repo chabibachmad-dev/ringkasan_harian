@@ -33,11 +33,25 @@
 //     (atur toggle auto-reply AI KHUSUS nomor ini -- lihat tabel
 //     whatsapp_contacts & cara wa-bot/index.js membacanya sebelum generate
 //     balasan. Tidak ada baris = dianggap enabled=true/default ON.)
+//   { "code": "...", "action": "qr_list" }
+//     -> { ok: true, replies: [{ id, title, keywords, reply, enabled, use_count, last_used_at }, ...] }
+//     (template jawaban otomatis -- tabel wa_quick_replies, lihat
+//     migrations/0013. Pesan WA masuk yang cocok dgn kata kunci template
+//     dijawab LANGSUNG dari template, AI tidak dipanggil.)
+//   { "code": "...", "action": "qr_save", "id"?: "...", "title": "...", "keywords": ["...", ...], "reply": "...", "enabled"?: bool }
+//     -> { ok: true, id: "..." }
+//     (tanpa "id" = buat baru; dgn "id" = ubah template yang ada.)
+//   { "code": "...", "action": "qr_delete", "id": "..." }
+//     -> { ok: true }
 
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { corsHeaders } from "../_shared/cors.ts";
 
 const MAX_MESSAGE_LENGTH = 4000;
+const MAX_QR_TITLE_LENGTH = 100;
+const MAX_QR_KEYWORDS = 20;
+const MAX_QR_KEYWORD_LENGTH = 60;
+const MAX_QR_REPLY_LENGTH = 3000;
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -60,6 +74,10 @@ Deno.serve(async (req) => {
     jid?: string;
     message?: string;
     enabled?: boolean;
+    id?: string;
+    title?: string;
+    keywords?: string[] | string;
+    reply?: string;
   };
   try {
     body = await req.json();
@@ -177,8 +195,65 @@ Deno.serve(async (req) => {
     return json({ ok: true, id: data?.id });
   }
 
+  if (body.action === "qr_list") {
+    const { data, error } = await supabaseAdmin
+      .from("wa_quick_replies")
+      .select("id, title, keywords, reply, enabled, use_count, last_used_at")
+      .order("created_at", { ascending: true });
+    if (error) return json({ ok: false, error: error.message }, 500);
+    return json({ ok: true, replies: data ?? [] });
+  }
+
+  if (body.action === "qr_save") {
+    const title = typeof body.title === "string" ? body.title.trim() : "";
+    const reply = typeof body.reply === "string" ? body.reply.trim() : "";
+    // Kata kunci boleh dikirim sbg array ATAU string dipisah koma/baris baru.
+    const rawKeywords = Array.isArray(body.keywords)
+      ? body.keywords
+      : typeof body.keywords === "string"
+        ? body.keywords.split(/[,\n]/)
+        : [];
+    const keywords = [...new Set(rawKeywords.map((k) => (typeof k === "string" ? k.trim() : "")).filter(Boolean))];
+
+    if (!title) return json({ ok: false, error: "Judul template wajib diisi." }, 400);
+    if (title.length > MAX_QR_TITLE_LENGTH) return json({ ok: false, error: `Judul maksimal ${MAX_QR_TITLE_LENGTH} karakter.` }, 400);
+    if (keywords.length === 0) return json({ ok: false, error: "Isi minimal satu kata kunci." }, 400);
+    if (keywords.length > MAX_QR_KEYWORDS) return json({ ok: false, error: `Maksimal ${MAX_QR_KEYWORDS} kata kunci.` }, 400);
+    if (keywords.some((k) => k.length > MAX_QR_KEYWORD_LENGTH)) {
+      return json({ ok: false, error: `Tiap kata kunci maksimal ${MAX_QR_KEYWORD_LENGTH} karakter.` }, 400);
+    }
+    if (!reply) return json({ ok: false, error: "Isi jawaban template wajib diisi." }, 400);
+    if (reply.length > MAX_QR_REPLY_LENGTH) return json({ ok: false, error: `Jawaban maksimal ${MAX_QR_REPLY_LENGTH} karakter.` }, 400);
+
+    const fields: Record<string, unknown> = { title, keywords, reply, updated_at: new Date().toISOString() };
+    if (typeof body.enabled === "boolean") fields.enabled = body.enabled;
+
+    if (typeof body.id === "string" && body.id) {
+      const { data, error } = await supabaseAdmin.from("wa_quick_replies").update(fields).eq("id", body.id).select("id").maybeSingle();
+      if (error) return json({ ok: false, error: error.message }, 500);
+      if (!data) return json({ ok: false, error: "Template tidak ditemukan." }, 404);
+      return json({ ok: true, id: data.id });
+    }
+
+    const { data, error } = await supabaseAdmin.from("wa_quick_replies").insert(fields).select("id").single();
+    if (error) return json({ ok: false, error: error.message }, 500);
+    return json({ ok: true, id: data?.id });
+  }
+
+  if (body.action === "qr_delete") {
+    const id = typeof body.id === "string" ? body.id : "";
+    if (!id) return json({ ok: false, error: "id wajib diisi." }, 400);
+    const { error } = await supabaseAdmin.from("wa_quick_replies").delete().eq("id", id);
+    if (error) return json({ ok: false, error: error.message }, 500);
+    return json({ ok: true });
+  }
+
   return json(
-    { ok: false, error: "action tidak dikenal (pakai 'list_chats', 'history', 'send', atau 'set_auto_reply')." },
+    {
+      ok: false,
+      error:
+        "action tidak dikenal (pakai 'list_chats', 'history', 'send', 'set_auto_reply', 'qr_list', 'qr_save', atau 'qr_delete')."
+    },
     400
   );
 });

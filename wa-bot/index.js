@@ -129,6 +129,40 @@ const OLLAMA_TIMEOUT_MS = Number(process.env.OLLAMA_TIMEOUT_MS) || 240000;
 // numpuk ke total waktu tunggu di CPU lambat begini.
 const OLLAMA_HISTORY_LIMIT = Number(process.env.OLLAMA_HISTORY_LIMIT) || 10;
 
+// ----------------------------------------------------------------
+// Nomor PEMILIK (nomor WA utama kamu, BUKAN nomor bot ini) -- tujuan
+// peringatan "semua API key habis" & ringkasan percakapan harian. Cukup
+// isi angka nomornya di .env (WA_OWNER_NUMBER=085719965097 atau
+// 6285719965097 -- "0" di depan otomatis jadi "62"). Sengaja lewat .env,
+// BUKAN ditulis di kode, supaya nomor pribadi tidak ikut ke-commit ke GitHub.
+function normalizeOwnerNumber(raw) {
+  let digits = String(raw || "").replace(/\D/g, "");
+  if (!digits) return null;
+  if (digits.startsWith("0")) digits = `62${digits.slice(1)}`;
+  else if (digits.startsWith("8")) digits = `62${digits}`;
+  return digits;
+}
+const OWNER_NUMBER = normalizeOwnerNumber(process.env.WA_OWNER_NUMBER);
+const OWNER_JID = OWNER_NUMBER ? `${OWNER_NUMBER}@s.whatsapp.net` : null;
+// Zona waktu buat "tengah malam"/jam ringkasan harian & label jam di pesan.
+// Default WITA (sama dgn jam ringkasan berita di aplikasi) -- ganti ke
+// Asia/Jakarta + label WIB kalau mau waktu Jawa.
+const WA_TIMEZONE = process.env.WA_TIMEZONE || "Asia/Makassar";
+const WA_TIMEZONE_LABEL = process.env.WA_TIMEZONE_LABEL || "WITA";
+// Ringkasan percakapan harian ke nomor pemilik: nyala otomatis kalau
+// WA_OWNER_NUMBER diisi (matikan lewat WA_DAILY_SUMMARY_ENABLED=false).
+const WA_DAILY_SUMMARY_ENABLED = OWNER_JID !== null && (process.env.WA_DAILY_SUMMARY_ENABLED || "true").toLowerCase() !== "false";
+const WA_DAILY_SUMMARY_HOUR = Math.min(23, Math.max(0, Number(process.env.WA_DAILY_SUMMARY_HOUR ?? 20) || 20));
+// Template jawaban (tabel wa_quick_replies) cuma dicoba kalau pesannya
+// PENDEK -- pesan panjang hampir pasti pertanyaan rumit yang butuh AI,
+// jangan sampai kata kunci nyasar di tengah kalimat panjang memicu template.
+const QUICK_REPLY_MAX_WORDS = 12;
+// Retry pesan yang gagal dibalas AI (tabel wa_retry_queue): dicek tiap menit,
+// maksimal beberapa percobaan, kadaluarsa setelah RETRY_EXPIRE_HOURS jam.
+const RETRY_CHECK_INTERVAL_MS = 60_000;
+const RETRY_MAX_ATTEMPTS = 6;
+const RETRY_EXPIRE_HOURS = 24;
+
 if (WA_AUTO_REPLY_ENABLED && WA_AI_ENGINE === "gemini" && GEMINI_API_KEYS.length === 0) {
   console.warn(
     "⚠️  WA_AUTO_REPLY_ENABLED=true + WA_AI_ENGINE=gemini tapi GEMINI_API_KEY(S) belum diisi di .env -- auto-reply TIDAK akan jalan sampai diisi."
@@ -580,16 +614,123 @@ function pickAvailableGeminiKey() {
   return null;
 }
 
+// Tanggal "hari ini" zona Pasifik (YYYY-MM-DD) -- sama dgn kunci harian
+// token_usage & reset kuota Gemini.
+function pacificDateString() {
+  return new Intl.DateTimeFormat("en-CA", { timeZone: "America/Los_Angeles" }).format(new Date());
+}
+
+// Pengenal key yang AMAN disimpan/ditampilkan: 4 karakter terakhir saja.
+function geminiKeyHint(key) {
+  return key.slice(-4);
+}
+
+// Catat kejadian key ke tabel gemini_key_usage (buat layar "Status API
+// Gemini" di aplikasi). Best-effort: gagal catat TIDAK boleh mengganggu
+// auto-reply (mis. migration 0013 belum dijalankan).
+let keyReportWarned = false;
+function reportKeyEvent(key, { requestsInc = 0, exhaustedUntilMs = null, error = null } = {}) {
+  supabase
+    .rpc("report_gemini_key_event", {
+      p_usage_date: pacificDateString(),
+      p_key_hint: geminiKeyHint(key),
+      p_source: "wa-bot",
+      p_requests_inc: requestsInc,
+      p_exhausted_until: exhaustedUntilMs ? new Date(exhaustedUntilMs).toISOString() : null,
+      p_error: error ? String(error).slice(0, 300) : null
+    })
+    .then(({ error: rpcErr }) => {
+      if (rpcErr && !keyReportWarned) {
+        keyReportWarned = true;
+        console.warn(`Gagal catat status key Gemini ke database (sudah jalankan migration 0013?): ${rpcErr.message}`);
+      }
+    })
+    .catch(() => {});
+}
+
+// Waktu start/restart bot: ingat key yang SUDAH habis hari ini (dicatat bot
+// ini sendiri sebelumnya), supaya habis restart bot tidak buang-buang request
+// mencoba key yang sudah pasti ditolak lagi. Hanya baris source='wa-bot' yang
+// dipakai -- status dari Edge Function chat bisa beda (model/jalur berbeda).
+async function primeExhaustedKeysFromDb() {
+  if (WA_AI_ENGINE !== "gemini" || GEMINI_API_KEYS.length === 0) return;
+  try {
+    const { data, error } = await supabase
+      .from("gemini_key_usage")
+      .select("key_hint, exhausted_until")
+      .eq("usage_date", pacificDateString())
+      .eq("source", "wa-bot")
+      .gt("exhausted_until", new Date().toISOString());
+    if (error) return; // tabel belum ada / error lain: abaikan, bot tetap jalan normal
+    for (const row of data ?? []) {
+      const matches = GEMINI_API_KEYS.filter((k) => geminiKeyHint(k) === row.key_hint);
+      if (matches.length !== 1) continue; // hint ambigu: lebih aman tidak ditebak
+      geminiKeyExhaustedUntil.set(matches[0], new Date(row.exhausted_until).getTime());
+      console.log(`ℹ️  API key Gemini ...${row.key_hint} tercatat masih habis kuota, dilewati sampai reset.`);
+    }
+  } catch (_err) {
+    /* abaikan */
+  }
+}
+
+// ---------------- Alert "semua API key habis" ke nomor pemilik ----------------
+// True kalau SEMUA key lagi dalam masa istirahat PANJANG (> 10 menit = jatah
+// harian habis, bukan sekadar rate-limit per menit yang sembuh sendiri).
+function allGeminiKeysExhaustedForLong() {
+  if (GEMINI_API_KEYS.length === 0) return false;
+  const threshold = Date.now() + 10 * 60_000;
+  return GEMINI_API_KEYS.every((k) => (geminiKeyExhaustedUntil.get(k) || 0) > threshold);
+}
+
+function formatClockInTimezone(ms) {
+  return new Intl.DateTimeFormat("id-ID", { timeZone: WA_TIMEZONE, hour: "2-digit", minute: "2-digit", hourCycle: "h23" })
+    .format(new Date(ms))
+    .replace(".", ":");
+}
+
+// Dipanggil tiap kali sebuah key ditandai habis (atau saat semua key sudah
+// habis waktu mau dipakai). Maksimal SEKALI per hari (dicatat di bot_state,
+// jadi aman walau bot di-restart) supaya tidak spam.
+let allKeysAlertInFlight = false;
+async function notifyOwnerAllKeysExhausted() {
+  if (!OWNER_JID || !currentSock || allKeysAlertInFlight || !allGeminiKeysExhaustedForLong()) return;
+  allKeysAlertInFlight = true;
+  try {
+    const today = pacificDateString();
+    const { data } = await supabase.from("bot_state").select("value").eq("key", "all_keys_alert_date").maybeSingle();
+    if (data?.value === today) return;
+
+    const resetMs = Math.min(...GEMINI_API_KEYS.map((k) => geminiKeyExhaustedUntil.get(k) || Infinity));
+    const resetText = Number.isFinite(resetMs) ? `sekitar pukul ${formatClockInTimezone(resetMs)} ${WA_TIMEZONE_LABEL}` : "besok";
+    await currentSock.sendMessage(OWNER_JID, {
+      text:
+        `⚠️ *Semua API key Gemini habis kuota harian* (${GEMINI_API_KEYS.length} key).\n\n` +
+        `Auto-reply WA & chat di aplikasi tidak bisa memakai AI sampai kuota reset, ${resetText}. ` +
+        `Pesan WA yang masuk selama itu akan dibalas otomatis begitu kuota kembali.\n\n` +
+        `Tambah API key baru di GEMINI_API_KEYS (bot WA) dan secret Supabase kalau mau tetap jalan sebelum itu.`
+    });
+    await supabase.from("bot_state").upsert({ key: "all_keys_alert_date", value: today, updated_at: new Date().toISOString() });
+    console.log("📣 Peringatan 'semua key habis' dikirim ke nomor pemilik.");
+  } catch (err) {
+    console.error("Gagal kirim peringatan semua-key-habis:", err instanceof Error ? err.message : String(err));
+  } finally {
+    allKeysAlertInFlight = false;
+  }
+}
+
 function markGeminiKeyExhausted(key, err) {
   // 429 "PerDay" = jatah harian habis (tunggu reset tengah malam Pacific);
   // 429 lain biasanya cuma rate-limit per menit -- cukup istirahat 1 menit.
   const isDaily = /PerDay/i.test(err?.message || "");
-  geminiKeyExhaustedUntil.set(key, isDaily ? nextMidnightPacificMs() : Date.now() + 60_000);
+  const untilMs = isDaily ? nextMidnightPacificMs() : Date.now() + 60_000;
+  geminiKeyExhaustedUntil.set(key, untilMs);
   const idx = GEMINI_API_KEYS.indexOf(key);
   geminiKeyCursor = (idx + 1) % GEMINI_API_KEYS.length; // mulai dr key berikutnya lain kali
   console.warn(
     `⚠️  API key Gemini #${idx + 1}/${GEMINI_API_KEYS.length} kena ${isDaily ? "kuota harian (sampai tengah malam Pacific Time)" : "rate limit (istirahat 1 menit)"}, pindah ke key lain.`
   );
+  reportKeyEvent(key, { exhaustedUntilMs: untilMs, error: err?.message });
+  if (isDaily) notifyOwnerAllKeysExhausted().catch(() => {});
 }
 
 // Satu kali panggilan mentah ke Gemini API. withTools=true nyalakan akses
@@ -643,6 +784,58 @@ async function generateAutoReply(jid) {
   return generateAutoReplyWithGemini(jid);
 }
 
+// Satu "panggilan Gemini" lengkap dgn rotasi API key -- dipakai auto-reply
+// DAN ringkasan harian. Urutan percobaan sama seperti generateChatReply() di
+// Edge Function `chat`: kalau useSearch, coba dulu DENGAN akses internet (1x
+// saja, jangan buang waktu retry di jalur ini kalau lagi padat), baru kalau
+// gagal lanjut TANPA internet dengan sisa jatah retry. Semuanya dibungkus
+// loop rotasi key: kalau key yang lagi dipakai ternyata kena kuota (429 yang
+// masih bertahan setelah retry di callGeminiWithRetry), tandai habis & coba
+// lagi dari awal pakai key berikutnya -- maksimal sebanyak jumlah key yang
+// ada, biar tidak muter selamanya kalau semua key memang habis. Error selain
+// 429 TIDAK memicu rotasi (langsung dilempar ke pemanggil).
+async function geminiGenerateWithRotation(systemText, contents, { useSearch = true } = {}) {
+  let attemptsLeft = Math.max(GEMINI_API_KEYS.length, 1);
+  for (;;) {
+    const apiKey = pickAvailableGeminiKey();
+    if (!apiKey) {
+      notifyOwnerAllKeysExhausted().catch(() => {});
+      const err = new Error(
+        `Semua API key Gemini (${GEMINI_API_KEYS.length}) kena kuota harian, coba lagi setelah tengah malam (Pacific Time).`
+      );
+      err.allKeysExhausted = true;
+      throw err;
+    }
+    try {
+      let data;
+      if (useSearch) {
+        try {
+          data = await callGeminiWithRetry(systemText, contents, true, 1, apiKey);
+        } catch (err) {
+          // Jatah HARIAN key ini habis: coba lagi tanpa internet di key yang sama
+          // percuma, langsung rotasi. (429 jenis lain, mis. limit khusus jalur
+          // Google Search, tetap lanjut ke percobaan tanpa internet di bawah.)
+          if (err.status === 429 && /PerDay/i.test(err.message)) throw err;
+          console.warn(`Auto-reply WA: percobaan dgn Google Search gagal (${err.message}), lanjut tanpa akses internet...`);
+          data = await callGeminiWithRetry(systemText, contents, false, 2, apiKey);
+        }
+      } else {
+        data = await callGeminiWithRetry(systemText, contents, false, 2, apiKey);
+      }
+      reportKeyEvent(apiKey, { requestsInc: 1 });
+      return data;
+    } catch (err) {
+      attemptsLeft -= 1;
+      if (err.status === 429 && attemptsLeft > 0) {
+        markGeminiKeyExhausted(apiKey, err);
+        continue; // coba lagi dari awal pakai key berikutnya
+      }
+      if (err.status === 429) markGeminiKeyExhausted(apiKey, err); // key terakhir: tetap catat habis
+      throw err; // bukan soal kuota (atau semua key sudah dicoba) -- lempar ke pemanggil spt biasa
+    }
+  }
+}
+
 // Minta Gemini bikinkan satu balasan buat obrolan WA tertentu, pakai
 // AUTO_REPLY_HISTORY_LIMIT pesan terakhir di obrolan itu sebagai konteks
 // (TANPA Dokumen Pengetahuan -- lihat catatan di atas). Return null kalau
@@ -683,42 +876,7 @@ async function generateAutoReplyWithGemini(jid) {
   }
   if (contents.length === 0) return null;
 
-  const systemText = WA_BASE_SYSTEM_PROMPT;
-
-  // Urutan percobaan sama seperti generateChatReply() di Edge Function
-  // `chat`: coba dulu DENGAN akses internet (1x saja, jangan buang waktu
-  // retry di jalur ini kalau lagi padat), baru kalau gagal lanjut TANPA
-  // internet dengan sisa jatah retry. Dibungkus loop rotasi key: kalau
-  // key yang lagi dipakai ternyata kena kuota HARIAN (429 yang masih
-  // bertahan setelah retry di callGeminiWithRetry), tandai habis & coba
-  // lagi dari awal pakai key berikutnya -- maksimal sebanyak jumlah key
-  // yang ada, biar tidak muter selamanya kalau semua key memang habis.
-  let data;
-  let attemptsLeft = Math.max(GEMINI_API_KEYS.length, 1);
-  for (;;) {
-    const apiKey = pickAvailableGeminiKey();
-    if (!apiKey) {
-      throw new Error(
-        `Semua API key Gemini (${GEMINI_API_KEYS.length}) kena kuota harian, coba lagi setelah tengah malam (Pacific Time).`
-      );
-    }
-    try {
-      try {
-        data = await callGeminiWithRetry(systemText, contents, true, 1, apiKey);
-      } catch (err) {
-        console.warn(`Auto-reply WA: percobaan dgn Google Search gagal (${err.message}), lanjut tanpa akses internet...`);
-        data = await callGeminiWithRetry(systemText, contents, false, 2, apiKey);
-      }
-      break; // sukses, keluar dari loop rotasi key
-    } catch (err) {
-      attemptsLeft -= 1;
-      if (err.status === 429 && attemptsLeft > 0) {
-        markGeminiKeyExhausted(apiKey, err);
-        continue; // coba lagi dari awal (dengan Google Search) pakai key berikutnya
-      }
-      throw err; // bukan soal kuota (atau key sudah habis semua) -- lempar ke pemanggil spt biasa
-    }
-  }
+  const data = await geminiGenerateWithRotation(WA_BASE_SYSTEM_PROMPT, contents);
 
   const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
   if (!rawText) throw new Error(`Respons Gemini tidak berisi teks: ${JSON.stringify(data).slice(0, 300)}`);
@@ -769,7 +927,239 @@ async function recordTokenUsage(tokensUsed, costUsd) {
 const AUTO_REPLY_FALLBACK_TEXT =
   "Maaf, sistem balasan otomatisnya lagi ada kendala teknis. Pesannya sudah diterima kok, nanti dibalas langsung ya 🙏";
 
-async function sendAutoReply(sock, jid) {
+// Dipakai waktu AI gagal DAN pesannya berhasil diantre buat dicoba lagi otomatis
+// (lihat wa_retry_queue & processRetryQueue) -- janji "dibalas otomatis" itu
+// BENAR karena bot memang akan mencoba lagi sendiri, bukan sekadar basa-basi.
+const AUTO_REPLY_QUEUED_TEXT =
+  "Maaf, sistem balasan otomatisnya lagi penuh/ada kendala sementara. Pesannya sudah diterima dan akan dibalas otomatis begitu sistemnya siap lagi ya 🙏";
+
+// ---------------- Template jawaban (tabel wa_quick_replies) ----------------
+// Pesan masuk yang cocok dgn kata kunci sebuah template dijawab LANGSUNG dari
+// template itu -- AI tidak dipanggil sama sekali (hemat kuota, lebih cepat,
+// jawabannya konsisten). Template dikelola dari aplikasi (Pengaturan >
+// Template Jawaban WA).
+let quickReplyCache = { at: 0, rows: [] };
+let quickReplyLoadWarned = false;
+
+async function loadQuickReplies() {
+  if (Date.now() - quickReplyCache.at < 60_000) return quickReplyCache.rows;
+  const { data, error } = await supabase
+    .from("wa_quick_replies")
+    .select("id, title, keywords, reply, use_count")
+    .eq("enabled", true);
+  if (error) {
+    if (!quickReplyLoadWarned) {
+      quickReplyLoadWarned = true;
+      console.warn(`Gagal baca template jawaban (sudah jalankan migration 0013?): ${error.message}`);
+    }
+    quickReplyCache = { at: Date.now(), rows: [] };
+    return [];
+  }
+  quickReplyCache = { at: Date.now(), rows: data ?? [] };
+  return quickReplyCache.rows;
+}
+
+// Huruf kecil, tanda baca jadi spasi, spasi dirapikan, lalu DIAPIT spasi di
+// kedua ujung -- supaya mencocokkan " jam buka " ke dalam teks pesan otomatis
+// berarti cocok sebagai kata/frasa UTUH (bukan potongan kata lain).
+function normalizeForMatch(text) {
+  const cleaned = String(text)
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s]+/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return cleaned ? ` ${cleaned} ` : "";
+}
+
+// Cari template yang kata kuncinya cocok dgn teks pesan. Kalau beberapa
+// template cocok sekaligus, menang yang kata kunci cocoknya PALING PANJANG
+// (paling spesifik). Pesan panjang (> QUICK_REPLY_MAX_WORDS kata) & placeholder
+// media seperti "[gambar] ..." tidak pernah memicu template.
+function findQuickReply(text, rows) {
+  if (!text || text.startsWith("[")) return null;
+  const normalized = normalizeForMatch(text);
+  if (!normalized) return null;
+  if (normalized.trim().split(" ").length > QUICK_REPLY_MAX_WORDS) return null;
+
+  let best = null;
+  let bestLen = 0;
+  for (const row of rows) {
+    for (const kw of row.keywords ?? []) {
+      const nk = normalizeForMatch(kw);
+      if (!nk) continue;
+      if (normalized.includes(nk) && nk.length > bestLen) {
+        best = row;
+        bestLen = nk.length;
+      }
+    }
+  }
+  return best;
+}
+
+async function sendQuickReply(sock, jid, template) {
+  const sent = await sock.sendMessage(jid, { text: template.reply });
+  await supabase.from("whatsapp_messages").insert({
+    wa_jid: jid,
+    direction: "out",
+    content: template.reply,
+    status: "sent",
+    wa_message_id: sent?.key?.id ?? null
+  });
+  template.use_count = (template.use_count || 0) + 1;
+  supabase
+    .from("wa_quick_replies")
+    .update({ use_count: template.use_count, last_used_at: new Date().toISOString() })
+    .eq("id", template.id)
+    .then(
+      () => {},
+      () => {}
+    );
+  console.log(`⚡ Template "${template.title}" dipakai utk ${jid} (tanpa AI).`);
+}
+
+// ---------------- Antrean retry (tabel wa_retry_queue) ----------------
+// Dipanggil waktu AI gagal membalas. Return "queued" (baru diantre),
+// "already" (kontak ini sudah punya antrean aktif -- tidak perlu kirim teks
+// permintaan maaf lagi), atau "unavailable" (tabel belum ada/error -- tetap
+// kirim teks permintaan maaf biasa).
+async function enqueueRetry(jid, errorMessage) {
+  const { error } = await supabase.from("wa_retry_queue").insert({ wa_jid: jid, last_error: String(errorMessage).slice(0, 300) });
+  if (!error) return "queued";
+  if (error.code === "23505") return "already";
+  console.warn(`Gagal antre retry utk ${jid} (sudah jalankan migration 0013?): ${error.message}`);
+  return "unavailable";
+}
+
+async function finishRetry(id, status, extra = {}) {
+  await supabase
+    .from("wa_retry_queue")
+    .update({ status, updated_at: new Date().toISOString(), ...extra })
+    .eq("id", id);
+}
+
+let retryProcessing = false;
+async function processRetryQueue(sock) {
+  if (!sock || retryProcessing || !AUTO_REPLY_ACTIVE) return;
+  retryProcessing = true;
+  try {
+    const { data, error } = await supabase
+      .from("wa_retry_queue")
+      .select("id, wa_jid, attempts, created_at")
+      .eq("status", "pending")
+      .lte("next_attempt_at", new Date().toISOString())
+      .order("created_at", { ascending: true })
+      .limit(3);
+    if (error || !data || data.length === 0) return;
+
+    for (const row of data) {
+      const ageHours = (Date.now() - new Date(row.created_at).getTime()) / 3_600_000;
+      if (ageHours > RETRY_EXPIRE_HOURS) {
+        await finishRetry(row.id, "expired");
+        continue;
+      }
+      // Mesin Gemini: nunggu sampai ADA key yang tersedia lagi (kalau semua
+      // masih habis, berhenti di sini & coba lagi menit depan -- tanpa
+      // menambah hitungan percobaan).
+      if (WA_AI_ENGINE === "gemini" && pickAvailableGeminiKey() === null) break;
+
+      if (!(await isAutoReplyEnabledForContact(row.wa_jid))) {
+        await finishRetry(row.id, "skipped");
+        continue;
+      }
+      // Sudah ada balasan lain (mis. kamu balas manual dari aplikasi/HP) sejak
+      // antrean dibuat? Kalau ya, tidak perlu balasan otomatis susulan.
+      const { data: later } = await supabase
+        .from("whatsapp_messages")
+        .select("content")
+        .eq("wa_jid", row.wa_jid)
+        .eq("direction", "out")
+        .gt("created_at", row.created_at)
+        .limit(10);
+      const alreadyHandled = (later ?? []).some(
+        (m) => m.content !== AUTO_REPLY_FALLBACK_TEXT && m.content !== AUTO_REPLY_QUEUED_TEXT
+      );
+      if (alreadyHandled) {
+        await finishRetry(row.id, "skipped");
+        continue;
+      }
+
+      sock.sendPresenceUpdate("composing", row.wa_jid).catch(() => {});
+      try {
+        const result = await generateAutoReply(row.wa_jid);
+        sock.sendPresenceUpdate("paused", row.wa_jid).catch(() => {});
+        if (!result || !result.reply) {
+          await finishRetry(row.id, "skipped");
+          continue;
+        }
+        await deliverAutoReplyText(sock, row.wa_jid, result, "🔁 Balasan ulang");
+        await finishRetry(row.id, "done");
+      } catch (err) {
+        sock.sendPresenceUpdate("paused", row.wa_jid).catch(() => {});
+        const msg = err instanceof Error ? err.message : String(err);
+        const attempts = row.attempts + 1;
+        console.error(`Retry auto-reply utk ${row.wa_jid} gagal (percobaan ${attempts}/${RETRY_MAX_ATTEMPTS}): ${msg}`);
+        if (attempts >= RETRY_MAX_ATTEMPTS) {
+          await finishRetry(row.id, "expired", { attempts, last_error: msg.slice(0, 300) });
+        } else {
+          const delayMin = Math.min(5 * 2 ** (attempts - 1), 60);
+          await supabase
+            .from("wa_retry_queue")
+            .update({
+              attempts,
+              last_error: msg.slice(0, 300),
+              next_attempt_at: new Date(Date.now() + delayMin * 60_000).toISOString(),
+              updated_at: new Date().toISOString()
+            })
+            .eq("id", row.id);
+        }
+      }
+    }
+  } catch (err) {
+    console.error("Loop retry auto-reply error:", err instanceof Error ? err.message : String(err));
+  } finally {
+    retryProcessing = false;
+  }
+}
+
+// Kirim teks balasan AI ke kontak + catat ke whatsapp_messages + catat token.
+// Dipakai balasan normal (sendAutoReply) DAN balasan ulang dari antrean.
+async function deliverAutoReplyText(sock, jid, result, logLabel = "🤖 Auto-reply") {
+  try {
+    const sent = await sock.sendMessage(jid, { text: result.reply });
+    await supabase.from("whatsapp_messages").insert({
+      wa_jid: jid,
+      direction: "out",
+      content: result.reply,
+      status: "sent",
+      wa_message_id: sent?.key?.id ?? null
+    });
+    console.log(`${logLabel} ke ${jid}: ${result.reply.slice(0, 60)}`);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`Gagal kirim auto-reply ke ${jid}:`, msg);
+    await supabase.from("whatsapp_messages").insert({
+      wa_jid: jid,
+      direction: "out",
+      content: result.reply,
+      status: "failed",
+      error: msg
+    });
+  }
+  await recordTokenUsage(result.tokensUsed, result.costUsd);
+}
+
+async function sendAutoReply(sock, jid, incomingText) {
+  // 1) Template jawaban dulu -- kalau cocok, AI tidak dipanggil sama sekali.
+  try {
+    const template = findQuickReply(incomingText, await loadQuickReplies());
+    if (template) {
+      await sendQuickReply(sock, jid, template);
+      return;
+    }
+  } catch (err) {
+    console.error(`Template jawaban gagal utk ${jid}, lanjut ke AI:`, err instanceof Error ? err.message : String(err));
+  }
+
   // Indikator "mengetik..." di WA -- murni kosmetik, tapi berguna terutama
   // buat mesin "ollama": inferensi CPU-only di laptop tua bisa makan waktu
   // puluhan detik (apalagi dgn konteks RAG+web search), drpd kontak nunggu
@@ -782,14 +1172,22 @@ async function sendAutoReply(sock, jid) {
   try {
     result = await generateAutoReply(jid);
   } catch (err) {
-    console.error(`Gagal generate auto-reply utk ${jid}:`, err instanceof Error ? err.message : String(err));
+    const errMsg = err instanceof Error ? err.message : String(err);
+    console.error(`Gagal generate auto-reply utk ${jid}:`, errMsg);
     sock.sendPresenceUpdate("paused", jid).catch(() => {});
+
+    // Antre buat dicoba lagi otomatis nanti (lihat processRetryQueue). Kalau
+    // kontak ini SUDAH punya antrean aktif, permintaan maaf tidak dikirim
+    // lagi (supaya tidak spam tiap kali dia kirim pesan susulan).
+    const queued = await enqueueRetry(jid, errMsg);
+    if (queued === "already") return;
+    const fallbackText = queued === "queued" ? AUTO_REPLY_QUEUED_TEXT : AUTO_REPLY_FALLBACK_TEXT;
     try {
-      const sent = await sock.sendMessage(jid, { text: AUTO_REPLY_FALLBACK_TEXT });
+      const sent = await sock.sendMessage(jid, { text: fallbackText });
       await supabase.from("whatsapp_messages").insert({
         wa_jid: jid,
         direction: "out",
-        content: AUTO_REPLY_FALLBACK_TEXT,
+        content: fallbackText,
         status: "sent",
         wa_message_id: sent?.key?.id ?? null
       });
@@ -801,29 +1199,198 @@ async function sendAutoReply(sock, jid) {
   sock.sendPresenceUpdate("paused", jid).catch(() => {});
   if (!result || !result.reply) return;
 
-  try {
-    const sent = await sock.sendMessage(jid, { text: result.reply });
-    await supabase.from("whatsapp_messages").insert({
-      wa_jid: jid,
-      direction: "out",
-      content: result.reply,
-      status: "sent",
-      wa_message_id: sent?.key?.id ?? null
-    });
-    console.log(`🤖 Auto-reply ke ${jid}: ${result.reply.slice(0, 60)}`);
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.error(`Gagal kirim auto-reply ke ${jid}:`, msg);
-    await supabase.from("whatsapp_messages").insert({
-      wa_jid: jid,
-      direction: "out",
-      content: result.reply,
-      status: "failed",
-      error: msg
-    });
+  await deliverAutoReplyText(sock, jid, result);
+}
+
+// ---------------- Ringkasan percakapan harian ke nomor pemilik ----------------
+// Tiap hari setelah jam WA_DAILY_SUMMARY_HOUR (zona WA_TIMEZONE), bot merangkum
+// SEMUA percakapan WA hari itu pakai Gemini lalu mengirimnya ke OWNER_JID.
+// Sekali per hari (dicatat di bot_state, aman walau bot di-restart).
+function zonedParts(ms, timeZone) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    hourCycle: "h23",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit"
+  }).formatToParts(new Date(ms));
+  const o = {};
+  for (const p of parts) o[p.type] = p.value;
+  return {
+    dateStr: `${o.year}-${o.month}-${o.day}`,
+    year: Number(o.year),
+    month: Number(o.month),
+    day: Number(o.day),
+    hour: Number(o.hour),
+    minute: Number(o.minute),
+    second: Number(o.second)
+  };
+}
+
+// Jam 00:00 tanggal dateStr (YYYY-MM-DD) di zona timeZone, dalam ms UTC.
+function zonedStartOfDayUtcMs(dateStr, timeZone) {
+  const [y, m, d] = dateStr.split("-").map(Number);
+  const guessUtc = Date.UTC(y, m - 1, d, 0, 0, 0);
+  const p = zonedParts(guessUtc, timeZone);
+  const asLocalUtc = Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute, p.second);
+  return guessUtc - (asLocalUtc - guessUtc);
+}
+
+function describeJidForSummary(jid, name) {
+  if (name) return name;
+  const userPart = jid.split("@")[0];
+  if (jid.endsWith("@s.whatsapp.net")) return `+${userPart}`;
+  return `Kontak (ID …${userPart.slice(-4)})`;
+}
+
+const SUMMARY_SYSTEM_PROMPT = `Kamu asisten pribadi pemilik nomor WhatsApp ini. Tugasmu merangkum percakapan WhatsApp HARI INI antara kontak-kontak dan nomor ini. Baris bertanda "Balasan" dikirim oleh nomor ini (otomatis oleh bot AI/template, atau manual oleh pemilik).
+Tulis dalam Bahasa Indonesia dengan format teks WhatsApp: *tebal* pakai SATU bintang, boleh bullet "•", TANPA heading markdown (#) dan TANPA tabel.
+Struktur jawaban:
+1) Satu-dua kalimat gambaran umum hari ini.
+2) Per kontak (sebut namanya): 1-2 kalimat inti yang ditanyakan/dibicarakan dan apakah sudah terjawab.
+3) Penutup "*Perlu ditindaklanjuti:*" berisi daftar singkat hal yang butuh keputusan/jawaban manual dari pemilik (permintaan mendesak, negosiasi, hal pribadi/emosional, pertanyaan yang belum terjawab bot). Kalau tidak ada, tulis "Tidak ada".
+Aturan: JANGAN mengarang fakta, angka, atau janji yang tidak ada di percakapan. Maksimal sekitar 250 kata.`;
+
+async function buildDailySummaryText(dateStr, { allowAi = true } = {}) {
+  const startMs = zonedStartOfDayUtcMs(dateStr, WA_TIMEZONE);
+  const { data: rows, error } = await supabase
+    .from("whatsapp_messages")
+    .select("wa_jid, wa_name, direction, content, status, created_at")
+    .gte("created_at", new Date(startMs).toISOString())
+    .order("created_at", { ascending: true })
+    .limit(1500);
+  if (error) throw new Error(`Gagal ambil pesan hari ini: ${error.message}`);
+
+  const skipJids = new Set([OWNER_JID, ...(currentSock ? getOwnJids(currentSock) : [])].filter(Boolean));
+  const byJid = new Map();
+  for (const row of rows ?? []) {
+    if (skipJids.has(row.wa_jid) || !row.content) continue;
+    if (!byJid.has(row.wa_jid)) byJid.set(row.wa_jid, { name: null, messages: [] });
+    const entry = byJid.get(row.wa_jid);
+    if (row.wa_name && !entry.name) entry.name = row.wa_name;
+    entry.messages.push(row);
   }
 
-  await recordTokenUsage(result.tokensUsed, result.costUsd);
+  const dateLabel = new Intl.DateTimeFormat("id-ID", {
+    timeZone: WA_TIMEZONE,
+    weekday: "long",
+    day: "numeric",
+    month: "long",
+    year: "numeric"
+  }).format(new Date());
+  const header = `📋 *Ringkasan WhatsApp — ${dateLabel}*`;
+
+  let pendingLine = "";
+  const { count: pendingCount, error: pendingErr } = await supabase
+    .from("wa_retry_queue")
+    .select("id", { count: "exact", head: true })
+    .eq("status", "pending");
+  if (!pendingErr && pendingCount > 0) pendingLine = `\n\n⏳ ${pendingCount} pesan masih menunggu balasan otomatis ulang.`;
+
+  if (byJid.size === 0) return `${header}\n\nTidak ada percakapan WhatsApp hari ini.${pendingLine}`;
+
+  let incoming = 0;
+  let outgoing = 0;
+  for (const { messages } of byJid.values()) {
+    for (const m of messages) {
+      if (m.direction === "in") incoming += 1;
+      else if (m.status === "sent") outgoing += 1;
+    }
+  }
+  const statsLine = `${byJid.size} kontak • ${incoming} pesan masuk • ${outgoing} balasan terkirim`;
+
+  const buildTranscript = (perContactLimit) =>
+    [...byJid.entries()]
+      .map(([jid, { name, messages }]) => {
+        const lines = messages
+          .slice(-perContactLimit)
+          .map((m) => `${m.direction === "in" ? "Kontak" : "Balasan"}: ${m.content.replace(/\s+/g, " ").slice(0, 280)}`);
+        return `=== ${describeJidForSummary(jid, name)} (${messages.length} pesan) ===\n${lines.join("\n")}`;
+      })
+      .join("\n\n");
+
+  let limit = 25;
+  let transcript = buildTranscript(limit);
+  while (transcript.length > 14000 && limit > 3) {
+    limit = Math.floor(limit / 2);
+    transcript = buildTranscript(limit);
+  }
+
+  if (allowAi && GEMINI_API_KEYS.length > 0) {
+    const data = await geminiGenerateWithRotation(
+      SUMMARY_SYSTEM_PROMPT,
+      [{ role: "user", parts: [{ text: transcript }] }],
+      { useSearch: false }
+    );
+    const aiText = data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+    if (!aiText) throw new Error("Respons Gemini untuk ringkasan kosong.");
+    const tokensUsed = data?.usageMetadata?.totalTokenCount ?? 0;
+    if (tokensUsed > 0) {
+      await recordTokenUsage(
+        tokensUsed,
+        estimateCostUsd(GEMINI_MODEL, tokensUsed * 0.7, tokensUsed * 0.3)
+      );
+    }
+    return `${header}\n${statsLine}\n\n${aiText}${pendingLine}`;
+  }
+
+  // Cadangan tanpa AI (belum ada API key / semua habis / AI gagal berkali2):
+  // daftar sederhana per kontak, supaya ringkasan harian tetap sampai.
+  const plain = [...byJid.entries()]
+    .map(([jid, { name, messages }]) => {
+      const lastIn = [...messages].reverse().find((m) => m.direction === "in");
+      const inCount = messages.filter((m) => m.direction === "in").length;
+      return `• *${describeJidForSummary(jid, name)}* — ${inCount} pesan masuk${lastIn ? `, terakhir: "${lastIn.content.replace(/\s+/g, " ").slice(0, 100)}"` : ""}`;
+    })
+    .join("\n");
+  return `${header}\n${statsLine}\n\n${plain}\n\n_(Ringkasan AI sedang tidak tersedia, ini daftar sederhana.)_${pendingLine}`;
+}
+
+let summarySentDate = null;
+let summaryRunning = false;
+let summaryLastAttemptMs = 0;
+let summaryFailures = { date: null, count: 0 };
+
+async function checkDailySummary() {
+  if (!WA_DAILY_SUMMARY_ENABLED || !currentSock || summaryRunning) return;
+  const local = zonedParts(Date.now(), WA_TIMEZONE);
+  if (local.hour < WA_DAILY_SUMMARY_HOUR) return;
+  if (summarySentDate === local.dateStr) return;
+  if (Date.now() - summaryLastAttemptMs < 10 * 60_000) return;
+
+  summaryRunning = true;
+  try {
+    const { data: state } = await supabase.from("bot_state").select("value").eq("key", "daily_summary_date").maybeSingle();
+    if (state?.value === local.dateStr) {
+      summarySentDate = local.dateStr;
+      return;
+    }
+
+    summaryLastAttemptMs = Date.now();
+    if (summaryFailures.date !== local.dateStr) summaryFailures = { date: local.dateStr, count: 0 };
+
+    let text;
+    try {
+      // Setelah 3 kali gagal di hari yang sama (mis. semua key habis), kirim
+      // versi sederhana tanpa AI daripada ringkasannya tidak sampai sama sekali.
+      text = await buildDailySummaryText(local.dateStr, { allowAi: summaryFailures.count < 3 });
+    } catch (err) {
+      summaryFailures.count += 1;
+      throw err;
+    }
+
+    await currentSock.sendMessage(OWNER_JID, { text });
+    await supabase.from("bot_state").upsert({ key: "daily_summary_date", value: local.dateStr, updated_at: new Date().toISOString() });
+    summarySentDate = local.dateStr;
+    console.log("📋 Ringkasan harian terkirim ke nomor pemilik.");
+  } catch (err) {
+    console.error("Gagal kirim ringkasan harian (dicoba lagi 10 menit lagi):", err instanceof Error ? err.message : String(err));
+  } finally {
+    summaryRunning = false;
+  }
 }
 
 // Dipakai loop pengirim (setInterval di bawah) -- selalu nunjuk ke socket
@@ -951,7 +1518,7 @@ async function handleIncoming(msg, sock) {
   if (!isSelfChat && AUTO_REPLY_ACTIVE) {
     const contactEnabled = await isAutoReplyEnabledForContact(jid);
     if (contactEnabled) {
-      await sendAutoReply(sock, jid);
+      await sendAutoReply(sock, jid, text);
     } else {
       console.log(`🔕 Auto-reply dimatikan khusus utk ${jid}, dilewati.`);
     }
@@ -1057,6 +1624,20 @@ setInterval(() => {
     });
   }
 }, POLL_INTERVAL_MS);
+
+// Retry pesan yang gagal dibalas AI + ringkasan harian + ingat key yang sudah
+// habis hari ini (lihat processRetryQueue, checkDailySummary,
+// primeExhaustedKeysFromDb).
+setInterval(() => {
+  processRetryQueue(currentSock).catch(() => {});
+}, RETRY_CHECK_INTERVAL_MS);
+setInterval(() => {
+  checkDailySummary().catch(() => {});
+}, 60_000);
+primeExhaustedKeysFromDb().catch(() => {});
+console.log(
+  `📋 Ringkasan harian ke pemilik: ${WA_DAILY_SUMMARY_ENABLED ? `AKTIF (tiap hari setelah ${String(WA_DAILY_SUMMARY_HOUR).padStart(2, "0")}:00 ${WA_TIMEZONE_LABEL})` : "mati (isi WA_OWNER_NUMBER di .env buat menyalakan)"}`
+);
 
 // Jaga-jaga: bot ini harus jalan LAMA tanpa diawasi -- jangan sampai mati
 // total cuma gara-gara satu error tak terduga yang tidak ketangkep try/catch

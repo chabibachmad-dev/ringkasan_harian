@@ -52,6 +52,13 @@
 //     kode akses yang BENAR [lihat pengecekan di bawah] karena isinya cuma
 //     angka, bukan isi chat pribadi -- supaya bisa ditampilkan di footer
 //     layar daftar.)
+//   { "code": "...", "action": "key_status" }
+//     -> { ok: true, dailyLimit, resetAtMs, keys: [{ hint, requests, exhaustedUntilMs, exhausted, lastError }, ...] }
+//     (status tiap API key Gemini hari ini, zona Pasifik: jumlah request yang
+//     TERCATAT sistem ini (bot WA + chat aplikasi), apakah lagi habis kuota,
+//     dan kapan reset. Hanya 4 karakter TERAKHIR key yang pernah keluar dari
+//     server (hint) -- key aslinya tidak pernah dikirim ke klien. Dibaca dari
+//     tabel gemini_key_usage, lihat migrations/0013.)
 //
 // --- "Dokumen Pengetahuan" (Pengaturan > Upload Dokumen) ---
 // Teks PDF-nya diekstrak DI BROWSER (lihat src/pdfText.js) sebelum dikirim
@@ -70,7 +77,13 @@
 
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { corsHeaders } from "../_shared/cors.ts";
-import { generateChatReply, getGeminiApiKeys, type ChatMessage } from "../_shared/gemini.ts";
+import {
+  generateChatReply,
+  geminiKeyHint,
+  getGeminiApiKeys,
+  setGeminiKeyReporter,
+  type ChatMessage
+} from "../_shared/gemini.ts";
 
 // ID obrolan dibuat client-side sebagai `freeform-<uuid>` (lihat main.js).
 const FREEFORM_RE = /^freeform-[0-9a-fA-F-]{36}$/;
@@ -260,6 +273,54 @@ Deno.serve(async (req) => {
     if (upsertErr) return json({ ok: false, error: upsertErr.message }, 500);
 
     return json({ ok: true, pinned: nextPinned, title: nextTitle, useKb: nextUseKb });
+  }
+
+  if (body.action === "key_status") {
+    const today = getPacificDateString();
+    const { data, error } = await supabaseAdmin
+      .from("gemini_key_usage")
+      .select("key_hint, source, requests, exhausted_until, last_error")
+      .eq("usage_date", today);
+    if (error) return json({ ok: false, error: error.message }, 500);
+
+    // Daftar key yang DIKONFIGURASI di Supabase selalu tampil (walau belum
+    // ada pemakaian = 0 request), digabung dgn hint dari tabel (mis. key yang
+    // cuma dipakai bot WA).
+    type KeyUsageRow = {
+      key_hint: string;
+      source: string;
+      requests: number | null;
+      exhausted_until: string | null;
+      last_error: string | null;
+    };
+    const usageRows = (data ?? []) as KeyUsageRow[];
+    const hints = new Set<string>(getGeminiApiKeys().map(geminiKeyHint));
+    for (const row of usageRows) hints.add(row.key_hint);
+
+    const nowMs = Date.now();
+    const keys = [...hints].map((hint) => {
+      const rows = usageRows.filter((r) => r.key_hint === hint);
+      const requests = rows.reduce((sum, r) => sum + (r.requests ?? 0), 0);
+      let exhaustedUntilMs = 0;
+      let lastError: string | null = null;
+      for (const r of rows) {
+        const until = r.exhausted_until ? new Date(r.exhausted_until).getTime() : 0;
+        if (until > exhaustedUntilMs) {
+          exhaustedUntilMs = until;
+          lastError = r.last_error ?? null;
+        }
+      }
+      const exhausted = exhaustedUntilMs > nowMs;
+      return { hint, requests, exhausted, exhaustedUntilMs: exhausted ? exhaustedUntilMs : null, lastError: exhausted ? lastError : null };
+    });
+
+    // Tengah malam Pasifik berikutnya (ms epoch) = jadwal reset kuota harian.
+    const pacificNow = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Los_Angeles" }));
+    const nextMidnight = new Date(pacificNow);
+    nextMidnight.setHours(24, 0, 0, 0);
+    const resetAtMs = nowMs + (nextMidnight.getTime() - pacificNow.getTime());
+
+    return json({ ok: true, dailyLimit: Number(Deno.env.get("GEMINI_DAILY_LIMIT")) || 20, resetAtMs, keys });
   }
 
   if (body.action === "kb_list") {
@@ -471,6 +532,19 @@ Deno.serve(async (req) => {
     let tokensUsed = 0;
     let costUsd = 0;
     try {
+      // Catat tiap panggilan sukses & key yang kena kuota ke gemini_key_usage
+      // (buat layar "Status API Gemini"). Best-effort -- gagal catat tidak
+      // menggagalkan chat (lihat setGeminiKeyReporter di _shared/gemini.ts).
+      setGeminiKeyReporter(async (event) => {
+        await supabaseAdmin.rpc("report_gemini_key_event", {
+          p_usage_date: getPacificDateString(),
+          p_key_hint: event.keyHint,
+          p_source: "chat",
+          p_requests_inc: event.kind === "success" ? 1 : 0,
+          p_exhausted_until: event.kind === "exhausted" && event.exhaustedUntilMs ? new Date(event.exhaustedUntilMs).toISOString() : null,
+          p_error: event.kind === "exhausted" ? (event.error ?? null) : null
+        });
+      });
       const result = await generateChatReply(history, geminiApiKeys, knowledgeContext);
       reply = result.reply;
       tokensUsed = result.tokensUsed;
@@ -571,7 +645,7 @@ Deno.serve(async (req) => {
     {
       ok: false,
       error:
-        "action tidak dikenal (pakai 'history', 'send', 'delete', 'delete_message', 'last_messages', 'list_threads', 'set_thread_meta', 'token_usage', 'kb_list', 'kb_upload', atau 'kb_delete')."
+        "action tidak dikenal (pakai 'history', 'send', 'delete', 'delete_message', 'last_messages', 'list_threads', 'set_thread_meta', 'token_usage', 'key_status', 'kb_list', 'kb_upload', atau 'kb_delete')."
     },
     400
   );

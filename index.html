@@ -368,6 +368,14 @@
             <span id="settings-whatsapp-icon" class="sheet-action-icon"></span>
             <span data-i18n="settings_whatsapp">WhatsApp</span>
           </button>
+          <button type="button" id="settings-qr-btn" class="sheet-action">
+            <span id="settings-qr-icon" class="sheet-action-icon"></span>
+            <span data-i18n="settings_qr">Template Jawaban WA</span>
+          </button>
+          <button type="button" id="settings-keys-btn" class="sheet-action">
+            <span id="settings-keys-icon" class="sheet-action-icon"></span>
+            <span data-i18n="settings_keys">Status API Gemini</span>
+          </button>
           <button type="button" id="settings-change-code-btn" class="sheet-action">
             <span id="settings-change-code-icon" class="sheet-action-icon"></span>
             <span data-i18n="settings_change_code">Ubah kode chat</span>
@@ -414,6 +422,78 @@
 
           <div class="chat-code-dialog-actions">
             <button type="button" id="kb-close-btn" class="primary-btn" data-i18n="detail_close">Tutup</button>
+          </div>
+        </div>
+      </dialog>
+
+      <!-- Dialog Template Jawaban WA: pesan WA masuk yang cocok dgn kata kunci
+           dijawab langsung dari template (AI tidak dipanggil). Dibaca bot
+           wa-bot/ dari tabel wa_quick_replies. -->
+      <dialog id="qr-dialog" class="kb-dialog">
+        <div class="kb-dialog-card">
+          <h2 data-i18n="qr_title">Template Jawaban WA</h2>
+          <p class="kb-intro" data-i18n="qr_intro">
+            Pesan WhatsApp masuk yang mengandung salah satu kata kunci akan dijawab langsung dengan template ini, tanpa
+            memanggil AI -- lebih cepat, hemat kuota, dan jawabannya selalu sama. Hanya berlaku untuk pesan pendek.
+          </p>
+
+          <form id="qr-form" class="kb-upload-form">
+            <input
+              id="qr-title-input"
+              type="text"
+              maxlength="100"
+              autocomplete="off"
+              data-i18n-placeholder="qr_title_placeholder"
+              placeholder="Nama template (mis. Jam layanan)"
+            />
+            <input
+              id="qr-keywords-input"
+              type="text"
+              autocomplete="off"
+              data-i18n-placeholder="qr_keywords_placeholder"
+              placeholder="Kata kunci, pisahkan koma"
+            />
+            <textarea
+              id="qr-reply-input"
+              class="qr-reply-input"
+              rows="4"
+              maxlength="3000"
+              data-i18n-placeholder="qr_reply_placeholder"
+              placeholder="Isi jawaban yang dikirim otomatis…"
+            ></textarea>
+            <div class="chat-code-dialog-actions">
+              <button type="button" id="qr-cancel-edit-btn" class="secondary-btn" data-i18n="qr_cancel_edit" hidden>Batal ubah</button>
+              <button type="submit" id="qr-save-btn" class="primary-btn" data-i18n="qr_save_btn">Simpan</button>
+            </div>
+          </form>
+          <p id="qr-status" class="kb-upload-status" hidden></p>
+
+          <div id="qr-list" class="kb-doc-list qr-list"></div>
+          <p id="qr-list-empty" class="status-text" data-i18n="qr_empty" hidden>Belum ada template jawaban.</p>
+
+          <div class="chat-code-dialog-actions">
+            <button type="button" id="qr-close-btn" class="primary-btn" data-i18n="detail_close">Tutup</button>
+          </div>
+        </div>
+      </dialog>
+
+      <!-- Dialog Status API Gemini: pemakaian & status habis/aktif tiap API
+           key hari ini (dicatat bot wa-bot/ & Edge Function chat). -->
+      <dialog id="keys-dialog" class="kb-dialog">
+        <div class="kb-dialog-card">
+          <h2 data-i18n="keys_title">Status API Gemini</h2>
+          <p class="kb-intro" data-i18n="keys_intro">
+            Pemakaian tiap API key hari ini, dihitung dari panggilan yang tercatat di sistem ini (bot WhatsApp + chat di
+            aplikasi). Angkanya perkiraan -- pemakaian di luar aplikasi ini tidak ikut terhitung.
+          </p>
+
+          <div id="keys-list" class="kb-doc-list keys-list"></div>
+          <p id="keys-status" class="status-text" hidden></p>
+          <p id="keys-reset-note" class="kb-doc-meta"></p>
+
+          <div class="chat-code-dialog-actions">
+            <button type="button" id="keys-refresh-btn" class="secondary-btn" data-i18n="keys_refresh">Muat ulang</button>
+            <button type="button" id="keys-close-btn" class="primary-btn" data-i18n="detail_close">Tutup</button>
           </div>
         </div>
       </dialog>

@@ -213,12 +213,21 @@ async function callGeminiWithModelFallback(
           step.maxAttempts,
           !multiKey
         )) as GeminiData;
+        await reportKeyEvent({ keyHint: geminiKeyHint(apiKey), kind: "success", model: step.model });
         return { data, model: step.model };
       } catch (err) {
         lastErr = err;
         const reason = err instanceof Error ? err.message : String(err);
         if (multiKey && err instanceof GeminiHttpError && err.status === 429) {
-          markKeyExhausted(apiKeys, apiKey, tag, step.model, err.message);
+          const info = markKeyExhausted(apiKeys, apiKey, tag, step.model, err.message);
+          await reportKeyEvent({
+            keyHint: geminiKeyHint(apiKey),
+            kind: "exhausted",
+            model: step.model,
+            daily: info.daily,
+            exhaustedUntilMs: info.untilMs,
+            error: err.message.slice(0, 300)
+          });
           continue; // coba key berikutnya utk step/model yang sama
         }
         console.warn(`Model "${step.model}" gagal (${reason}), lanjut ke opsi berikutnya...`);
@@ -227,6 +236,39 @@ async function callGeminiWithModelFallback(
     }
   }
   throw lastErr instanceof Error ? lastErr : new Error("Semua percobaan ke Gemini API gagal.");
+}
+
+// ---------------- Pelaporan pemakaian key (buat layar "Status API Gemini") ----------------
+// Edge Function pemanggil (chat) bisa mendaftarkan "reporter" lewat
+// setGeminiKeyReporter() buat mencatat tiap panggilan sukses & tiap key yang
+// kena kuota ke database (tabel gemini_key_usage). Disengaja berupa hook,
+// bukan import langsung ke Supabase, supaya file bersama ini tetap bersih dari
+// urusan database. Kegagalan reporter TIDAK PERNAH menggagalkan chat.
+export interface GeminiKeyEvent {
+  keyHint: string; // 4 karakter terakhir key -- key aslinya tidak pernah keluar dari sini
+  kind: "success" | "exhausted";
+  model: string;
+  daily?: boolean;
+  exhaustedUntilMs?: number;
+  error?: string;
+}
+let keyReporter: ((event: GeminiKeyEvent) => Promise<void> | void) | null = null;
+
+export function setGeminiKeyReporter(fn: ((event: GeminiKeyEvent) => Promise<void> | void) | null): void {
+  keyReporter = fn;
+}
+
+export function geminiKeyHint(apiKey: string): string {
+  return apiKey.slice(-4);
+}
+
+async function reportKeyEvent(event: GeminiKeyEvent): Promise<void> {
+  if (!keyReporter) return;
+  try {
+    await keyReporter(event);
+  } catch (err) {
+    console.warn("Gagal melaporkan status key Gemini:", err instanceof Error ? err.message : String(err));
+  }
 }
 
 // ---------------- Rotasi API key ----------------
@@ -272,16 +314,24 @@ function availableKeysInOrder(apiKeys: string[], tag: string, model: string): st
   return result;
 }
 
-function markKeyExhausted(apiKeys: string[], apiKey: string, tag: string, model: string, errorMessage: string): void {
+function markKeyExhausted(
+  apiKeys: string[],
+  apiKey: string,
+  tag: string,
+  model: string,
+  errorMessage: string
+): { daily: boolean; untilMs: number } {
   // 429 "PerDay" = jatah harian habis (tunggu reset tengah malam Pacific);
   // 429 lain biasanya cuma rate-limit per menit -- cukup istirahat 1 menit.
-  const isDaily = /PerDay/i.test(errorMessage);
-  exhaustedUntil.set(exhaustedId(tag, model, apiKey), isDaily ? nextMidnightPacificMs() : Date.now() + 60_000);
+  const daily = /PerDay/i.test(errorMessage);
+  const untilMs = daily ? nextMidnightPacificMs() : Date.now() + 60_000;
+  exhaustedUntil.set(exhaustedId(tag, model, apiKey), untilMs);
   const idx = apiKeys.indexOf(apiKey);
   keyCursor = (idx + 1) % apiKeys.length;
   console.warn(
-    `API key Gemini #${idx + 1}/${apiKeys.length} kena ${isDaily ? "kuota harian" : "rate limit"} (model "${model}"), pindah ke key berikutnya.`
+    `API key Gemini #${idx + 1}/${apiKeys.length} kena ${daily ? "kuota harian" : "rate limit"} (model "${model}"), pindah ke key berikutnya.`
   );
+  return { daily, untilMs };
 }
 
 export async function generateSummary(items: NewsItem[], apiKeyOrKeys: string | string[]): Promise<SummaryResult> {

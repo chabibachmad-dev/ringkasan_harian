@@ -923,6 +923,107 @@ mark.chat-search-hit--active {
   margin-top: 2px;
 }
 
+/* ---------- Template Jawaban WA & Status API Gemini (dialog Pengaturan) ---------- */
+
+.qr-reply-input {
+  padding: 11px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  font-family: inherit;
+  /* WAJIB >= 16px, sama alasannya seperti input lain di file ini. */
+  font-size: 16px;
+  resize: vertical;
+  min-height: 90px;
+}
+
+.qr-list {
+  max-height: 300px;
+}
+
+.qr-row {
+  align-items: flex-start;
+}
+
+.qr-row--disabled {
+  opacity: 0.55;
+}
+
+.qr-toggle {
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  margin-top: 2px;
+  accent-color: var(--accent, currentColor);
+  cursor: pointer;
+}
+
+.qr-reply-preview {
+  margin-top: 4px;
+  font-size: 0.8rem;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.keys-list {
+  max-height: 340px;
+}
+
+.keys-row {
+  align-items: stretch;
+}
+
+.keys-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.keys-chip {
+  flex-shrink: 0;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  font-size: 0.7rem;
+  font-weight: 700;
+}
+
+.keys-chip--active {
+  color: var(--text);
+}
+
+/* Tema aplikasi ini monokrom (--danger sama dgn warna teks), jadi status
+   "habis" dibedakan lewat chip yang DIBALIK warnanya, bukan lewat warna merah. */
+.keys-chip--exhausted {
+  background: var(--text);
+  color: var(--bg);
+  border-color: var(--text);
+}
+
+.keys-bar {
+  height: 6px;
+  margin: 8px 0 6px;
+  border-radius: 999px;
+  background: var(--notify-bg);
+  border: 1px solid var(--border);
+  overflow: hidden;
+}
+
+.keys-bar-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--text-muted);
+  transition: width 0.3s ease;
+}
+
+.keys-bar-fill--warn,
+.keys-bar-fill--exhausted {
+  background: var(--text);
+}
+
 .footer {
   text-align: center;
   /* Padding bawah ekstra supaya teks footer tidak ketiban tombol "+"

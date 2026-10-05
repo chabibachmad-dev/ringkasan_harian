@@ -62,3 +62,21 @@ export function sendWaMessage(jid, message, code) {
 export function setWaAutoReply(jid, enabled, code) {
   return callWhatsappFunction({ code, action: "set_auto_reply", jid, enabled });
 }
+
+// ---------- Template jawaban otomatis (tabel wa_quick_replies) ----------
+// Pesan WA masuk yang cocok dgn kata kunci sebuah template dijawab langsung
+// dari template itu oleh bot (AI tidak dipanggil). Dikelola di Pengaturan >
+// Template Jawaban WA.
+
+export function listWaQuickReplies(code) {
+  return callWhatsappFunction({ code, action: "qr_list" });
+}
+
+// Tanpa `id` = buat template baru; dengan `id` = ubah template yang ada.
+export function saveWaQuickReply(code, { id, title, keywords, reply, enabled } = {}) {
+  return callWhatsappFunction({ code, action: "qr_save", id, title, keywords, reply, enabled });
+}
+
+export function deleteWaQuickReply(code, id) {
+  return callWhatsappFunction({ code, action: "qr_delete", id });
+}
