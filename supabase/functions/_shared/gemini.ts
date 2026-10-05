@@ -273,6 +273,22 @@ export function geminiKeyHint(apiKey: string): string {
   return apiKey.slice(-4);
 }
 
+// Ambil teks jawaban dari respons Gemini dengan menggabung SEMUA bagian
+// (parts) berupa teks. Model "thinking" kadang mengirim bagian PERTAMA
+// berisi text:"" + thoughtSignature, dan jawaban aslinya baru ada di bagian
+// berikutnya -- membaca parts[0] saja salah mengira respons kosong.
+// deno-lint-ignore no-explicit-any
+function extractGeminiText(data: any): string {
+  const parts = data?.candidates?.[0]?.content?.parts;
+  if (!Array.isArray(parts)) return "";
+  return parts
+    // deno-lint-ignore no-explicit-any
+    .filter((p: any) => typeof p?.text === "string" && !p.thought)
+    // deno-lint-ignore no-explicit-any
+    .map((p: any) => p.text as string)
+    .join("");
+}
+
 // Ringkas pesan error 429 dari Google jadi 1 baris yang memuat PENYEBAB-nya.
 // Respons aslinya JSON panjang; bagian yang berguna (quotaId / quotaMetric,
 // model, retryDelay) ada di "details" SETELAH kalimat generik "You exceeded
@@ -405,7 +421,7 @@ export async function generateSummary(items: NewsItem[], apiKeyOrKeys: string | 
   }
 
   const { data } = await callGeminiWithModelFallback(apiKeys, buildBody, steps, "summary");
-  const rawText: string | undefined = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+  const rawText: string | undefined = extractGeminiText(data) || undefined;
   if (!rawText) {
     throw new Error(`Respons Gemini tidak berisi teks yang diharapkan: ${JSON.stringify(data).slice(0, 500)}`);
   }
@@ -495,9 +511,15 @@ export async function generateChatReply(
 
   const systemText = buildSystemText(knowledgeContext);
 
+  // Jalur TANPA Google Search (fallback) harus jujur soal itu: prompt dasar
+  // bilang model punya akses internet, jadi tanpa catatan ini ia menjawab
+  // angka/aturan dari ingatan lamanya dengan nada yakin.
+  const noInternetNote =
+    "\n\nCATATAN: untuk balasan ini akses pencarian internet SEDANG TIDAK TERSEDIA (abaikan klaim sebelumnya bahwa kamu punya akses internet). Untuk peraturan, tarif, angka resmi, berita, atau hal lain yang bisa sudah berubah, JANGAN menyebut angka/fakta dengan yakin dari ingatan -- katakan terus terang kamu belum bisa memastikan versi terbarunya dan sarankan cek sumber resmi.";
+
   const buildBody = (withTools: boolean) =>
     JSON.stringify({
-      system_instruction: { parts: [{ text: systemText }] },
+      system_instruction: { parts: [{ text: withTools ? systemText : systemText + noInternetNote }] },
       contents,
       ...(withTools ? { tools: [{ google_search: {} }] } : {}),
       generationConfig: { temperature: 0.6 }
@@ -530,8 +552,8 @@ export async function generateChatReply(
     modelUsed = result.model;
   }
 
-  const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-  if (!rawText) {
+  const rawText = extractGeminiText(data);
+  if (!rawText.trim()) {
     throw new Error(`Respons Gemini (chat) tidak berisi teks yang diharapkan: ${JSON.stringify(data).slice(0, 500)}`);
   }
 

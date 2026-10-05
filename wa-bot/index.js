@@ -81,6 +81,13 @@ const GEMINI_API_KEYS = (process.env.GEMINI_API_KEYS || process.env.GEMINI_API_K
   .map((k) => k.trim())
   .filter(Boolean);
 const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-3.6-flash";
+// Log jumlah key yang kebaca (cuma 4 karakter terakhir) -- supaya gampang
+// cek di `pm2 logs` apakah GEMINI_API_KEYS di .env benar2 terbaca semua.
+if (GEMINI_API_KEYS.length > 0 && (process.env.WA_AI_ENGINE || "ollama").trim().toLowerCase() === "gemini") {
+  console.log(
+    `🔑 ${GEMINI_API_KEYS.length} API key Gemini terbaca (${GEMINI_API_KEYS.map((k) => "..." + k.slice(-4)).join(", ")}), model ${GEMINI_MODEL}.`
+  );
+}
 // Berapa pesan terakhir (masuk+keluar) di satu obrolan yang dikasihkan ke
 // AI sebagai konteks -- sengaja lebih pendek drpd riwayat Obrolan AI (yang
 // 40) karena chat WA biasanya lebih singkat/kasual, dan tiap pesan WA baru
@@ -257,19 +264,97 @@ const ID_STOPWORDS = new Set([
   "tolong", "mohon", "coba", "gimana", "kenapa", "siapa", "dimana", "kapan"
 ]);
 
+// Ejaan/singkatan yang SERING beda antara cara orang menulis di WA & di
+// dokumen resmi -- disamakan di kedua sisi (pertanyaan & potongan dokumen)
+// supaya "Jogja" nyambung ke "Yogyakarta" di tabel tarif.
+const ID_ALIASES = {
+  jogja: "yogyakarta",
+  jogjakarta: "yogyakarta",
+  yogya: "yogyakarta",
+  jogyakarta: "yogyakarta",
+  diy: "yogyakarta",
+  gol: "golongan"
+};
+
 function tokenizeForScoring(text) {
   return (text || "")
     .toLowerCase()
     .replace(/[^a-z0-9\s]/g, " ")
     .split(/\s+/)
+    .map((w) => ID_ALIASES[w] ?? w)
     .filter((w) => w.length > 2 && !ID_STOPWORDS.has(w));
 }
 
 // Pecah teks dokumen jadi potongan ~RAG_CHUNK_SIZE_CHARS karakter, usahakan
 // tidak motong di tengah paragraf (gabung paragraf pendek sampai mendekati
 // batas ukuran).
+// Satu paragraf yang jauh lebih panjang dari ukuran potongan (mis. tabel tarif
+// hasil ekstrak PDF yang tidak punya baris kosong) dipecah per baris, dan kalau
+// sebuah baris saja sudah kepanjangan, dipotong per jendela karakter yang
+// saling tumpang-tindih sedikit -- supaya 1 potongan tidak jadi puluhan ribu
+// karakter & baris tabel yang terpotong masih utuh di potongan sebelah.
+function splitOversizedText(text, size) {
+  if (text.length <= size * 2) return [text];
+  const overlap = Math.min(200, Math.floor(size / 4));
+  const out = [];
+  let buf = "";
+  for (const line of text.split("\n")) {
+    if (line.length > size * 2) {
+      if (buf) {
+        out.push(buf);
+        buf = "";
+      }
+      for (let i = 0; i < line.length; i += size - overlap) out.push(line.slice(i, i + size));
+      continue;
+    }
+    if (buf && buf.length + line.length + 1 > size) {
+      out.push(buf);
+      buf = line;
+    } else {
+      buf = buf ? `${buf}\n${line}` : line;
+    }
+  }
+  if (buf) out.push(buf);
+  return out;
+}
+
+// Judul bagian/tabel dokumen resmi ("Tabel 30 Satuan Biaya Penginapan...",
+// "Lampiran I", "BAB II") -- dipakai sebagai konteks potongan lanjutan.
+const HEADING_RE = /^(tabel|lampiran|bab)\b/i;
+
 function chunkDocumentText(text, chunkSize) {
-  const paragraphs = (text || "").split(/\n{2,}/).map((p) => p.trim()).filter(Boolean);
+  // PENTING (tabel panjang): baris-baris tabel di potongan ke-2 dst. TIDAK
+  // memuat judul tabelnya ("Penginapan", "Perjalanan Dinas"...), jadi baris
+  // "D.I. Yogyakarta ..." tidak akan nyambung ke pertanyaan soal penginapan &
+  // tak pernah ketemu. Solusi: tiap potongan lanjutan dari paragraf yang
+  // dipecah diberi awalan "(Lanjutan dari: <judul/awal bagian>…)".
+  let lastHeading = "";
+  let carry = ""; // judul yang menunggu digabung ke paragraf isi berikutnya
+  const paragraphs = [];
+  for (const raw of (text || "").split(/\n{2,}/)) {
+    let p = raw.trim();
+    if (!p) continue;
+    if (p.length <= 200 && HEADING_RE.test(p)) {
+      // Judul digabung ke paragraf isi tepat di bawahnya (bukan jadi potongan
+      // sendiri) supaya isi tabel & judulnya selalu 1 kesatuan.
+      carry = carry ? `${carry} ${p.replace(/\s+/g, " ")}` : p.replace(/\s+/g, " ");
+      lastHeading = carry;
+      continue;
+    }
+    if (carry) {
+      p = `${carry}\n${p}`;
+      carry = "";
+    }
+    const parts = splitOversizedText(p, chunkSize);
+    if (parts.length === 1) {
+      paragraphs.push(parts[0]);
+      continue;
+    }
+    const head = p.slice(0, 160).replace(/\s+/g, " ");
+    const ctx = lastHeading && !head.startsWith(lastHeading.slice(0, 40)) ? `${lastHeading} | ${head}` : head;
+    parts.forEach((part, i) => paragraphs.push(i === 0 ? part : `(Lanjutan dari: ${ctx}…)\n${part}`));
+  }
+  if (carry) paragraphs.push(carry);
   const chunks = [];
   let buffer = "";
   for (const p of paragraphs) {
@@ -320,6 +405,87 @@ async function fetchRelevantKnowledgeChunks(question, budgetChars) {
     if (used >= budgetChars) break;
     picked.push(item);
     used += item.text.length;
+  }
+  return picked;
+}
+
+// ----------------------------------------------------------------
+// Versi untuk mesin GEMINI: dokumen jadi sumber UTAMA angka/tarif/aturan
+// (model dapat potongan dokumen + hasil web, bukan Google Search). Beda dari
+// versi Ollama di atas:
+//   - skor berbobot "kelangkaan kata" (IDF): kata yang jarang di seluruh
+//     dokumen (mis. "yogyakarta") jauh lebih berharga daripada kata yang ada
+//     di mana-mana (mis. "tarif", "golongan") -- jadi baris tabel yang memuat
+//     nama wilayah yang ditanyakan menang atas potongan yang cuma mengulang
+//     kata umum;
+//   - wajib cocok minimal 2 kata berbeda (kecuali query-nya cuma 1-2 kata)
+//     supaya tidak menyodorkan potongan yang kebetulan cuma 1 kata sama
+//     (potongan lanjutan tabel membawa judul tabelnya, lihat chunkDocumentText,
+//     jadi baris "Yogyakarta" di tabel PENGINAPAN cocok 2 kata, sedangkan baris
+//     "Yogyakarta" di tabel uang harian tidak);
+//   - budget lebih besar (Gemini jauh lebih lega dari Ollama CPU), tapi tetap
+//     DIBATASI -- tidak "baca seluruh dokumen";
+//   - dokumen dipotong & diindeks SEKALI lalu di-cache GEMINI_RAG_CACHE_MS,
+//     supaya tiap pertanyaan tidak menarik ulang & memproses semua dokumen.
+// ----------------------------------------------------------------
+const GEMINI_RAG_BUDGET_CHARS = 7000;
+const GEMINI_RAG_MAX_CHUNKS = 5;
+const GEMINI_RAG_MAX_CHUNK_CHARS = 2500;
+const GEMINI_RAG_CACHE_MS = 5 * 60_000;
+let knowledgeIndexCache = { at: 0, chunks: [], df: new Map() };
+
+async function getKnowledgeIndexCached() {
+  if (Date.now() - knowledgeIndexCache.at < GEMINI_RAG_CACHE_MS) return knowledgeIndexCache;
+  const { data, error } = await supabase.from("knowledge_documents").select("title, content");
+  if (error) {
+    console.error("RAG: gagal ambil Dokumen Pengetahuan, lanjut tanpa konteks dokumen:", error.message);
+    return knowledgeIndexCache; // pakai indeks lama kalau ada
+  }
+  const chunks = [];
+  const df = new Map(); // kata -> jumlah potongan yang memuatnya
+  for (const doc of data ?? []) {
+    for (const text of chunkDocumentText(doc.content, RAG_CHUNK_SIZE_CHARS)) {
+      const counts = new Map();
+      for (const w of tokenizeForScoring(text)) counts.set(w, (counts.get(w) || 0) + 1);
+      if (counts.size === 0) continue;
+      chunks.push({ title: doc.title, text, counts });
+      for (const w of counts.keys()) df.set(w, (df.get(w) || 0) + 1);
+    }
+  }
+  knowledgeIndexCache = { at: Date.now(), chunks, df };
+  return knowledgeIndexCache;
+}
+
+// Return [{ score, distinct, title, text }] terurut skor menurun (bisa kosong).
+async function fetchKnowledgeChunksForGemini(query) {
+  const qWords = [...new Set(tokenizeForScoring(query))];
+  if (qWords.length === 0) return [];
+  const { chunks, df } = await getKnowledgeIndexCached();
+  if (chunks.length === 0) return [];
+  const n = chunks.length;
+  const minDistinct = Math.min(2, qWords.length);
+
+  const scored = [];
+  for (const ch of chunks) {
+    let distinct = 0;
+    let score = 0;
+    for (const w of qWords) {
+      const c = ch.counts.get(w);
+      if (!c) continue;
+      distinct++;
+      score += Math.log(1 + n / (df.get(w) || 1)) * (1 + 0.1 * Math.min(c - 1, 4));
+    }
+    if (distinct >= minDistinct) scored.push({ score, distinct, title: ch.title, text: ch.text });
+  }
+  scored.sort((a, b) => b.score - a.score);
+
+  const picked = [];
+  let used = 0;
+  for (const item of scored) {
+    if (picked.length >= GEMINI_RAG_MAX_CHUNKS || used >= GEMINI_RAG_BUDGET_CHARS) break;
+    const text = item.text.length > GEMINI_RAG_MAX_CHUNK_CHARS ? `${item.text.slice(0, GEMINI_RAG_MAX_CHUNK_CHARS)}...` : item.text;
+    picked.push({ ...item, text });
+    used += text.length;
   }
   return picked;
 }
@@ -625,6 +791,20 @@ function geminiKeyHint(key) {
   return key.slice(-4);
 }
 
+// Ambil teks jawaban dari respons Gemini dengan menggabung SEMUA bagian
+// (parts) yang berupa teks. Model "thinking" kadang mengirim bagian PERTAMA
+// berisi text:"" + thoughtSignature, dan jawaban aslinya baru ada di bagian
+// berikutnya -- membaca parts[0] saja salah mengira respons kosong & bot
+// membalas "sistem penuh" padahal AI-nya sebenarnya menjawab.
+function extractGeminiText(data) {
+  const parts = data?.candidates?.[0]?.content?.parts;
+  if (!Array.isArray(parts)) return "";
+  return parts
+    .filter((p) => typeof p?.text === "string" && !p.thought)
+    .map((p) => p.text)
+    .join("");
+}
+
 // Ringkas pesan error 429 dari Google jadi 1 baris yang memuat PENYEBAB-nya.
 // Respons aslinya JSON panjang; bagian yang berguna (quotaId / quotaMetric,
 // model, retryDelay) ada di "details" SETELAH kalimat generik "You exceeded
@@ -829,8 +1009,55 @@ async function generateAutoReply(jid) {
 // lagi dari awal pakai key berikutnya -- maksimal sebanyak jumlah key yang
 // ada, biar tidak muter selamanya kalau semua key memang habis. Error selain
 // 429 TIDAK memicu rotasi (langsung dilempar ke pemanggil).
-async function geminiGenerateWithRotation(systemText, contents, { useSearch = true } = {}) {
+//
+// CATATAN Google Search: di akun gratis, tool google_search BISA ditolak 429
+// di SEMUA key walau jalur biasa (tanpa tool) normal 200 -- terbukti lewat tes
+// curl di server (4 key, 4 project beda). Maka begitu ditolak, tool itu
+// "diistirahatkan" GOOGLE_SEARCH_BLOCK_MS (tidak dicoba lagi tiap pesan -- hemat
+// 1 request & ~detik latensi), dan sebagai gantinya bot mencari sendiri lewat
+// Bing (webSearchBing) lalu menyisipkan hasilnya ke pesan terakhir -- hanya
+// kalau `webQuery` diberikan pemanggil.
+let googleSearchBlockedUntil = 0;
+const GOOGLE_SEARCH_BLOCK_MS = 30 * 60_000;
+const GEMINI_WEB_MAX_RESULTS = 5;
+
+// Kata tanya/tanda pengenal pesan yang kemungkinan butuh fakta dari internet.
+const WEB_QUESTION_WORDS =
+  /\b(apa|apakah|siapa|berapa|kapan|dimana|di mana|kemana|bagaimana|gimana|kenapa|mengapa|tarif|aturan|peraturan|harga|berita|terbaru|update|pmk|sbm|uu|perpres|jadwal|link|tautan)\b/i;
+
+// Bikin query pencarian dari pesan masuk TERAKHIR (+ pesan sebelumnya kalau
+// yang terakhir pendek, krn biasanya follow-up spt "sesuai sbm 2026?").
+// Return "" = tidak usah cari (sapaan/basa-basi/pesan sangat pendek).
+function buildWebQuery(userTexts) {
+  const clean = (s) => String(s ?? "").replace(/\s+/g, " ").trim();
+  const wordCount = (s) => (s ? s.split(" ").length : 0);
+  const looksLikeQuestion = (s) => wordCount(s) >= 3 && (s.includes("?") || WEB_QUESTION_WORDS.test(s));
+  const last = clean(userTexts[userTexts.length - 1]);
+  const prev = clean(userTexts[userTexts.length - 2]);
+  if (!last || last.startsWith("[")) return "";
+  const prevUsable = prev && !prev.startsWith("[");
+  if (!looksLikeQuestion(last)) {
+    // Jawaban/lanjutan pendek atas pertanyaan sebelumnya (mis. bot tanya
+    // "wilayah mana?" -> kontak jawab "Yogyakarta"): cari pakai pertanyaan
+    // sebelumnya + jawaban ini, bukan dilewati.
+    if (wordCount(last) <= 4 && prevUsable && looksLikeQuestion(prev)) return `${prev} ${last}`.slice(0, 200);
+    return "";
+  }
+  // Pertanyaan pendek ("sesuai sbm 2026?") biasanya lanjutan -- gabung dgn
+  // pesan sebelumnya supaya query-nya punya konteks.
+  return (wordCount(last) < 8 && prevUsable ? `${prev} ${last}` : last).slice(0, 200);
+}
+
+async function geminiGenerateWithRotation(systemText, contents, { useSearch = true, webQuery = "", docChunks = [] } = {}) {
   let attemptsLeft = Math.max(GEMINI_API_KEYS.length, 1);
+  const hasDocs = docChunks.length > 0;
+  // Isi giliran "user" terakhir dgn KONTEKS DOKUMEN (kalau ada) -- dipakai di
+  // SEMUA jalur (dgn/tanpa Google Search). Hasil web (Bing) ditambahkan di atasnya
+  // khusus jalur tanpa Google Search (lihat getNoSearchPayload).
+  const lastUserText = contents[contents.length - 1]?.parts?.[0]?.text ?? "";
+  const withDocsContents = hasDocs
+    ? [...contents.slice(0, -1), { role: "user", parts: [{ text: buildGroundedUserMessage(lastUserText, docChunks, []) }] }]
+    : contents;
   // Model TIDAK tahu tanggal hari ini kecuali diberi tahu -- tanpa ini ia
   // menjawab pakai "kalender" data latihannya (mis. bilang aturan 2026 "baru
   // terbit pertengahan 2025 nanti").
@@ -839,13 +1066,41 @@ async function geminiGenerateWithRotation(systemText, contents, { useSearch = tr
     timeStyle: "short",
     timeZone: WA_TIMEZONE
   }).format(new Date());
+  const docNote = hasDocs
+    ? `\n\nKONTEKS DOKUMEN di pesan terakhir berasal dari Dokumen Pengetahuan milik pemilik nomor ini (dokumen resmi/internal) -- itu sumber UTAMA untuk angka, tarif, dan aturan. Kalau dokumen memuat jawabannya, pakai angkanya apa adanya dan sebut judul dokumennya singkat. Hasil pencarian web (kalau ada) hanya pelengkap; kalau bertentangan dengan dokumen, utamakan dokumen dan sebut perbedaannya singkat. Kalau jawabannya tidak ada di dokumen maupun hasil web, katakan terus terang. Jangan mengutip dokumen panjang-panjang -- ambil bagian yang menjawab saja.`
+    : "";
   const systemWithDate =
-    `${systemText}\n\nWaktu sekarang: ${nowText} ${WA_TIMEZONE_LABEL}. Anggap ini tanggal hari ini. Jangan mengira tahun ini masih tahun sebelumnya, dan jangan bilang aturan/peraturan tahun ini "belum terbit" atau "akan terbit" kecuali hasil pencarian memastikannya.`;
+    `${systemText}\n\nWaktu sekarang: ${nowText} ${WA_TIMEZONE_LABEL}. Anggap ini tanggal hari ini. Jangan mengira tahun ini masih tahun sebelumnya, dan jangan bilang aturan/peraturan tahun ini "belum terbit" atau "akan terbit" kecuali hasil pencarian memastikannya.${docNote}`;
   // Dipakai HANYA kalau jalur dengan internet gagal & jatuh ke jalur tanpa
   // internet: tanpa ini model menjawab angka/aturan dari ingatan lamanya
   // dengan nada yakin (bisa salah/usang).
   const systemNoSearch =
-    `${systemWithDate}\n\nCATATAN: untuk balasan ini akses pencarian internet SEDANG TIDAK TERSEDIA. Untuk peraturan, tarif, angka resmi, atau hal lain yang bisa sudah berubah, JANGAN menyebut angka/aturan dengan yakin dari ingatan -- katakan terus terang kamu belum bisa memastikan versi terbarunya dan sarankan cek sumber resmi (mis. PMK/situs Kemenkeu).`;
+    `${systemWithDate}\n\nCATATAN: untuk balasan ini akses pencarian internet SEDANG TIDAK TERSEDIA. Untuk peraturan, tarif, angka resmi, atau hal lain yang bisa sudah berubah, JANGAN menyebut angka/aturan dengan yakin dari ingatan (angka yang tertulis di KONTEKS DOKUMEN boleh dipakai) -- katakan terus terang kamu belum bisa memastikan versi terbarunya dan sarankan cek sumber resmi (mis. PMK/situs Kemenkeu).`;
+  const systemWithWeb =
+    `${systemWithDate}\n\nCATATAN: Google Search sedang tidak tersedia, jadi sistem mencarikan HASIL PENCARIAN WEB (judul + cuplikan dari Bing) dan melampirkannya di pesan terakhir. Jadikan itu acuan utama untuk fakta/angka/aturan terbaru dan sebut sumbernya singkat (nama situs/judul) kalau relevan. Cuplikan sering terpotong: kalau belum cukup untuk memastikan angka atau aturan resmi, katakan terus terang dan sarankan cek sumber resmi. Jangan mengarang link/URL.`;
+  // Payload jalur tanpa Google Search: dihitung malas & maksimal 1x per
+  // panggilan (kalau rotasi key mengulang, Bing tidak dicari ulang).
+  let noSearchPayload = null;
+  const getNoSearchPayload = async () => {
+    if (noSearchPayload) return noSearchPayload;
+    noSearchPayload = { system: systemNoSearch, contents: withDocsContents };
+    if (!webQuery) {
+      console.log("🌐 [Bing] dilewati (pesan terakhir tidak terlihat seperti pertanyaan yang butuh internet).");
+    } else {
+      const results = await webSearchBing(webQuery, GEMINI_WEB_MAX_RESULTS);
+      console.log(`🌐 [Bing] ${results.length} hasil web disisipkan ke prompt Gemini (query: "${webQuery.slice(0, 80)}")`);
+      if (results.length > 0) {
+        noSearchPayload = {
+          system: systemWithWeb,
+          contents: [
+            ...contents.slice(0, -1),
+            { role: "user", parts: [{ text: buildGroundedUserMessage(lastUserText, docChunks, results) }] }
+          ]
+        };
+      }
+    }
+    return noSearchPayload;
+  };
   for (;;) {
     const apiKey = pickAvailableGeminiKey();
     if (!apiKey) {
@@ -859,15 +1114,30 @@ async function geminiGenerateWithRotation(systemText, contents, { useSearch = tr
     try {
       let data;
       if (useSearch) {
-        try {
-          data = await callGeminiWithRetry(systemWithDate, contents, true, 1, apiKey);
-        } catch (err) {
-          // Jatah HARIAN key ini habis: coba lagi tanpa internet di key yang sama
-          // percuma, langsung rotasi. (429 jenis lain, mis. limit khusus jalur
-          // Google Search, tetap lanjut ke percobaan tanpa internet di bawah.)
-          if (err.status === 429 && /PerDay/i.test(err.message)) throw err;
-          console.warn(`Auto-reply WA: percobaan dgn Google Search gagal (${err.message}), lanjut tanpa akses internet...`);
-          data = await callGeminiWithRetry(systemNoSearch, contents, false, 2, apiKey);
+        if (Date.now() < googleSearchBlockedUntil) {
+          // Google Search lagi "diistirahatkan" (ditolak barusan) -- langsung
+          // jalur tanpa tool + hasil Bing, tanpa buang 1 request percuma.
+          const p = await getNoSearchPayload();
+          data = await callGeminiWithRetry(p.system, p.contents, false, 2, apiKey);
+        } else {
+          try {
+            data = await callGeminiWithRetry(systemWithDate, withDocsContents, true, 1, apiKey);
+          } catch (err) {
+            // Jatah HARIAN key ini habis: coba lagi tanpa internet di key yang sama
+            // percuma, langsung rotasi. (429 jenis lain, mis. limit khusus jalur
+            // Google Search, tetap lanjut ke percobaan tanpa tool di bawah.)
+            if (err.status === 429 && /PerDay/i.test(err.message)) throw err;
+            if (err.status === 429) {
+              googleSearchBlockedUntil = Date.now() + GOOGLE_SEARCH_BLOCK_MS;
+              console.warn(
+                `Auto-reply WA: Google Search ditolak (${summarizeGeminiError(err.message)}) -- tool itu diistirahatkan ${GOOGLE_SEARCH_BLOCK_MS / 60_000} menit, pakai pencarian Bing.`
+              );
+            } else {
+              console.warn(`Auto-reply WA: percobaan dgn Google Search gagal (${summarizeGeminiError(err.message)}), lanjut tanpa tool...`);
+            }
+            const p = await getNoSearchPayload();
+            data = await callGeminiWithRetry(p.system, p.contents, false, 2, apiKey);
+          }
         }
       } else {
         data = await callGeminiWithRetry(systemWithDate, contents, false, 2, apiKey);
@@ -926,10 +1196,29 @@ async function generateAutoReplyWithGemini(jid) {
   }
   if (contents.length === 0) return null;
 
-  const data = await geminiGenerateWithRotation(WA_BASE_SYSTEM_PROMPT, contents);
+  const webQuery = buildWebQuery(contents.filter((c) => c.role === "user").map((c) => c.parts?.[0]?.text ?? ""));
+  // Dokumen Pengetahuan dicek untuk pertanyaan yang sama (bukan sapaan) --
+  // hasilnya dibatasi budget, bukan baca seluruh dokumen. Gagal = lanjut tanpa.
+  let docChunks = [];
+  if (webQuery) {
+    try {
+      docChunks = await fetchKnowledgeChunksForGemini(webQuery);
+    } catch (err) {
+      console.error("RAG (Gemini): gagal cari di Dokumen Pengetahuan, lanjut tanpa:", err instanceof Error ? err.message : String(err));
+    }
+    const titles = docChunks.map((c) => `"${c.title}"(skor ${c.score.toFixed(1)})`).join(", ") || "-";
+    console.log(`📚 [Dokumen] ${docChunks.length} potongan dipakai: ${titles}`);
+  }
+  const data = await geminiGenerateWithRotation(WA_BASE_SYSTEM_PROMPT, contents, { webQuery, docChunks });
 
-  const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-  if (!rawText) throw new Error(`Respons Gemini tidak berisi teks: ${JSON.stringify(data).slice(0, 300)}`);
+  const rawText = extractGeminiText(data);
+  if (!rawText.trim()) {
+    const cand = data?.candidates?.[0];
+    const partsInfo = (cand?.content?.parts ?? []).map((p) => Object.keys(p ?? {}).join("+")).join(", ");
+    throw new Error(
+      `Respons Gemini tidak berisi teks (finishReason=${cand?.finishReason ?? "?"}, blockReason=${data?.promptFeedback?.blockReason ?? "-"}, parts=[${partsInfo}])`
+    );
+  }
 
   const tokensUsed = data?.usageMetadata?.totalTokenCount ?? 0;
   const ESTIMATED_INPUT_SHARE = 0.7;
@@ -1375,7 +1664,7 @@ async function buildDailySummaryText(dateStr, { allowAi = true } = {}) {
       [{ role: "user", parts: [{ text: transcript }] }],
       { useSearch: false }
     );
-    const aiText = data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+    const aiText = extractGeminiText(data).trim();
     if (!aiText) throw new Error("Respons Gemini untuk ringkasan kosong.");
     const tokensUsed = data?.usageMetadata?.totalTokenCount ?? 0;
     if (tokensUsed > 0) {
