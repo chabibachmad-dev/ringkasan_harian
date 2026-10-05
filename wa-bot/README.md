@@ -312,6 +312,28 @@ bot minta di-tag lagi), dan ada jeda `WA_GROUP_COOLDOWN_SEC` (20 detik) per oran
 Pesan yang kamu ketik sendiri dari nomor ini tidak memicu bot. Percakapan grup ikut
 masuk ringkasan harian dengan nama grupnya.
 
+**SiMAB lewat WhatsApp (hanya baca).** Kirim pesan berawalan `simab` dari nomor
+pemilik (`WA_OWNER_NUMBER`) ke nomor bot, atau lewat chat ke diri sendiri:
+
+- `simab pagu 4701.EBA.994.002.A.521111.10` -- pagu, blokir, realisasi, sisa satu kode
+  (kode tidak lengkap = semua turunannya; angka 6 digit = satu akun; kata = cari di uraian)
+- `simab sisa 521111`, `simab pagu perjalanan dinas`
+- `simab cek 123/ST/2026` -- cari kegiatan dari uraian, nomor ST, pelaksana, MAK, nomor SPM
+- `simab perjadin budi` -- kegiatan seorang pelaksana
+- `simab sbm yogyakarta`, `simab rpd`, `simab rpd oktober`
+- akhiri dengan tahun untuk tahun lain: `simab pagu 521111 2025`
+- kalimat bebas juga boleh (ditafsirkan Ollama menjadi salah satu perintah di atas, ±1 menit)
+
+Rumus: Sisa = Pagu - Blokir - Realisasi; Realisasi = jumlah `kegiatan.jumlah` per MAK
+(semua status); RPD memakai bulan `tgl_sp2d`. Jawaban disusun kode dengan format tetap,
+model bahasa tidak pernah menulis angka. Perintah dan jawabannya tidak disimpan ke
+`whatsapp_messages` (tidak muncul di aplikasi/ringkasan harian).
+
+Persiapan sekali saja: (1) buat akun bot di Dashboard Supabase SiMAB (Authentication >
+Users), (2) jalankan `simab-bot-readonly.sql` di SQL Editor SiMAB agar akun itu tidak bisa
+menulis dan tidak bisa membaca tabel pegawai, (3) isi `SIMAB_*` di `.env`, (4)
+`pm2 restart wa-bot`. Bot selalu menyaring `kantor_id` = `SIMAB_KANTOR_ID`.
+
 **Cadangan lokal saat kuota Gemini habis.** Dengan `WA_AI_ENGINE=gemini`, kalau
 Gemini gagal karena kuota (semua key habis / 429 / 503), pertanyaan yang BUKAN soal
 angka/aturan dijawab Ollama dulu (konteks Dokumen Pengetahuan + Bing), bukan cuma

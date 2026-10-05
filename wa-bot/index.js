@@ -36,6 +36,7 @@ import qrcode from "qrcode-terminal";
 import * as cheerio from "cheerio";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
+import { createSimab, SIMAB_OLLAMA_SYSTEM } from "./simab.js";
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -709,7 +710,7 @@ function enqueueOllamaCall(fn) {
 // mentah). stream:false biar responsnya 1 JSON utuh sekali balik, bukan
 // potongan-potongan (lebih gampang ditangani drpd streaming, auto-reply WA
 // toh baru dikirim setelah teksnya LENGKAP).
-async function callOllamaChat(messages, { timeoutMs = OLLAMA_TIMEOUT_MS, maxTokens = OLLAMA_MAX_OUTPUT_TOKENS, numCtx = OLLAMA_NUM_CTX } = {}) {
+async function callOllamaChat(messages, { timeoutMs = OLLAMA_TIMEOUT_MS, maxTokens = OLLAMA_MAX_OUTPUT_TOKENS, numCtx = OLLAMA_NUM_CTX, format = undefined, temperature = 0.4 } = {}) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   let res;
@@ -727,7 +728,8 @@ async function callOllamaChat(messages, { timeoutMs = OLLAMA_TIMEOUT_MS, maxToke
         // tidak kena ongkos "load_duration" lagi (~5-8 detik dari hasil tes
         // user -- lumayan kalau CPU-nya memang sudah pas-pasan).
         keep_alive: "10m",
-        options: { num_ctx: numCtx, num_predict: maxTokens, temperature: 0.4 }
+        ...(format ? { format } : {}),
+        options: { num_ctx: numCtx, num_predict: maxTokens, temperature }
       }),
       signal: controller.signal
     });
@@ -2027,6 +2029,77 @@ async function isAutoReplyEnabledForContact(jid) {
   return data?.auto_reply_enabled ?? true;
 }
 
+// ---------------- Perintah SiMAB (hanya baca, hanya dari pemilik) ----------------
+// Pesan berawalan "simab ..." dari nomor pemilik (WA_OWNER_NUMBER) atau dari chat-ke-
+// diri-sendiri dijawab dari database SiMAB (Supabase TERPISAH) lewat akun bot
+// baca-saja. Pesan & jawabannya SENGAJA tidak disimpan ke whatsapp_messages (isinya
+// data anggaran; juga supaya tidak ikut masuk ringkasan harian / dikirim ke Gemini).
+// Lihat simab.js dan simab-bot-readonly.sql.
+const OWNER_LIDS = (process.env.WA_OWNER_LIDS || "")
+  .split(",")
+  .map((x) => x.trim().split("@")[0].split(":")[0])
+  .filter(Boolean);
+
+async function parseSimabWithOllama(freeText) {
+  const raw = await enqueueOllamaCall(() =>
+    callOllamaChat(
+      [
+        { role: "system", content: SIMAB_OLLAMA_SYSTEM },
+        { role: "user", content: freeText.slice(0, 300) }
+      ],
+      { timeoutMs: 180_000, maxTokens: 80, numCtx: 2048, format: "json", temperature: 0 }
+    )
+  );
+  const parsed = JSON.parse(raw);
+  return { aksi: String(parsed?.aksi ?? "").toLowerCase().trim(), kueri: String(parsed?.kueri ?? "") };
+}
+
+const simab = createSimab({
+  url: process.env.SIMAB_SUPABASE_URL,
+  anonKey: process.env.SIMAB_SUPABASE_ANON_KEY,
+  email: process.env.SIMAB_BOT_EMAIL,
+  password: process.env.SIMAB_BOT_PASSWORD,
+  kantorId: (process.env.SIMAB_KANTOR_ID || "538065").trim(),
+  fixedTahun: Number(process.env.SIMAB_TAHUN) || null,
+  timeZone: WA_TIMEZONE,
+  ollamaParse: parseSimabWithOllama
+});
+
+// Pengirim = pemilik? Nomor bisa datang sbg "@s.whatsapp.net" ATAU "@lid"; untuk "@lid"
+// Baileys 7 menyertakan nomor aslinya di remoteJidAlt/participantAlt.
+function senderUserParts(msg) {
+  return [msg.key.remoteJid, msg.key.remoteJidAlt, msg.key.participant, msg.key.participantAlt]
+    .filter(Boolean)
+    .map((j) => j.split("@")[0].split(":")[0]);
+}
+function isOwnerSender(msg, isSelfChat) {
+  if (isSelfChat) return true;
+  const parts = senderUserParts(msg);
+  if (OWNER_NUMBER && parts.includes(OWNER_NUMBER)) return true;
+  return parts.some((p) => OWNER_LIDS.includes(p));
+}
+
+async function handleSimabMessage(sock, jid, msg, text) {
+  const send = (t) =>
+    sock.sendMessage(jid, { text: t }, { quoted: msg }).catch((err) => {
+      console.error("🏛️ [SiMAB] gagal kirim balasan:", err instanceof Error ? err.message : String(err));
+    });
+  console.log(`🏛️ [SiMAB] perintah dari pemilik: ${text.slice(0, 80)}`);
+  sock.sendPresenceUpdate("composing", jid).catch(() => {});
+  const started = Date.now();
+  try {
+    const reply = await simab.run(text, { notify: send });
+    await send(reply);
+    console.log(`🏛️ [SiMAB] dijawab dalam ${Math.round((Date.now() - started) / 100) / 10} detik.`);
+  } catch (err) {
+    const m = err instanceof Error ? err.message : String(err);
+    console.error(`🏛️ [SiMAB] gagal: ${m}`);
+    await send(`⚠️ SiMAB: ${m.slice(0, 300)}`);
+  } finally {
+    sock.sendPresenceUpdate("paused", jid).catch(() => {});
+  }
+}
+
 // ---------------- Grup WhatsApp (dijawab hanya kalau bot di-mention) ----------------
 // Default MATI. Nyalakan dengan mengisi WA_GROUP_ALLOWED_NAMES (nama grup, pisah
 // koma; cukup potongan nama, huruf besar-kecil/emoji/tanda baca diabaikan) dan/
@@ -2284,6 +2357,24 @@ async function handleIncoming(msg, sock) {
   const text = extractText(msg);
   if (!text) return;
 
+  // Perintah SiMAB dari pemilik: dijawab dari database SiMAB, TIDAK disimpan & TIDAK
+  // diteruskan ke auto-reply AI. Dari orang lain, pesan "simab ..." diperlakukan biasa.
+  if (/^\s*simab\b/i.test(text)) {
+    if (!simab.enabled) {
+      if (isOwnerSender(msg, isSelfChat)) {
+        await sock.sendMessage(jid, { text: "Fitur SiMAB belum aktif: isi SIMAB_SUPABASE_URL, SIMAB_SUPABASE_ANON_KEY, SIMAB_BOT_EMAIL, SIMAB_BOT_PASSWORD di .env lalu restart bot." }).catch(() => {});
+        return;
+      }
+    } else if (isOwnerSender(msg, isSelfChat)) {
+      await handleSimabMessage(sock, jid, msg, text);
+      return;
+    } else {
+      console.log(
+        `🏛️ [SiMAB] perintah ditolak: pengirim bukan pemilik (id: ${senderUserParts(msg).join(", ")}). Kalau ini nomormu tapi tampil sbg id @lid, isi WA_OWNER_LIDS=<id lid itu> di .env.`
+      );
+    }
+  }
+
   const { error } = await supabase.from("whatsapp_messages").insert({
     wa_jid: jid,
     wa_name: msg.pushName || null,
@@ -2307,7 +2398,7 @@ async function handleIncoming(msg, sock) {
 
   // Perintah pemilik: "/ringkasan" (dari chat-ke-diri-sendiri atau dari nomor
   // WA_OWNER_NUMBER) = kirim ringkasan hari ini sekarang juga.
-  if ((isSelfChat || jid === OWNER_JID) && text.trim().toLowerCase() === "/ringkasan") {
+  if (isOwnerSender(msg, isSelfChat) && text.trim().toLowerCase() === "/ringkasan") {
     sendSummaryNow("perintah /ringkasan").catch(() => {});
     return;
   }
@@ -2440,6 +2531,9 @@ setInterval(() => {
 primeExhaustedKeysFromDb().catch(() => {});
 console.log(
   `📋 Ringkasan harian ke pemilik: ${WA_DAILY_SUMMARY_ENABLED ? `AKTIF (tiap hari setelah ${String(WA_DAILY_SUMMARY_HOUR).padStart(2, "0")}:00 ${WA_TIMEZONE_LABEL}, mesin: ${WA_SUMMARY_ENGINE}${WA_SUMMARY_ENGINE === "ollama" ? `, cadangan Gemini: ${WA_SUMMARY_GEMINI_FALLBACK ? "ya" : "tidak"}` : ""})` : "mati (isi WA_OWNER_NUMBER di .env buat menyalakan)"}`
+);
+console.log(
+  `🏛️ SiMAB lewat WhatsApp (hanya baca): ${simab.enabled && OWNER_NUMBER ? `AKTIF (satker ${(process.env.SIMAB_KANTOR_ID || "538065").trim()}, awali pesan dengan "simab")` : "mati (isi SIMAB_* di .env buat menyalakan)"}`
 );
 console.log(
   `👥 Grup WhatsApp: ${GROUP_ENABLED && AUTO_REPLY_ACTIVE ? `AKTIF (grup diizinkan: ${[...(process.env.WA_GROUP_ALLOWED_NAMES || "").split(",").map((x) => x.trim()).filter(Boolean), ...GROUP_ALLOWED_JIDS].join(" | ")}; pemicu: ${[GROUP_MENTION_TRIGGER ? "mention" : null, "balas pesan bot", GROUP_KEYWORDS.length ? `kata "${GROUP_KEYWORDS.join(",")}"` : null].filter(Boolean).join(", ")})` : "mati (isi WA_GROUP_ALLOWED_NAMES di .env buat menyalakan)"}`
