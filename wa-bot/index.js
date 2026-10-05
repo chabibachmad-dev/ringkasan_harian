@@ -261,7 +261,8 @@ const ID_STOPWORDS = new Set([
   "supaya", "hal", "nya", "mu", "ku", "saya", "kamu", "anda", "kita",
   "mereka", "dia", "tersebut", "begitu", "maka", "namun", "tetapi", "serta",
   "antara", "tiap", "setiap", "banyak", "sedikit", "satu", "dua", "tiga",
-  "tolong", "mohon", "coba", "gimana", "kenapa", "siapa", "dimana", "kapan"
+  "tolong", "mohon", "coba", "gimana", "kenapa", "siapa", "dimana", "kapan",
+  "berapa"
 ]);
 
 // Ejaan/singkatan yang SERING beda antara cara orang menulis di WA & di
@@ -274,6 +275,23 @@ const ID_ALIASES = {
   jogyakarta: "yogyakarta",
   diy: "yogyakarta",
   gol: "golongan"
+};
+
+// Perluasan KHUSUS sisi pertanyaan: kata yang diketik orang -> istilah yang
+// kemungkinan tertulis di dokumen resmi (alternatif, BUKAN tambahan wajib).
+// Mis. "honor ppk" -> dokumen menulis "honorarium ... Pejabat Pembuat Komitmen".
+const QUERY_EXPANSIONS = {
+  ppk: ["pejabat", "pembuat", "komitmen"],
+  pptk: ["pejabat", "pelaksana", "teknis", "kegiatan"],
+  kpa: ["kuasa", "pengguna", "anggaran"],
+  bpp: ["bendahara", "pengeluaran", "pembantu"],
+  honor: ["honorarium"],
+  honorer: ["honorarium"],
+  uh: ["uang", "harian"],
+  sbm: ["standar", "biaya", "masukan"],
+  sbk: ["standar", "biaya", "keluaran"],
+  perdin: ["perjalanan", "dinas"],
+  spj: ["pertanggungjawaban"]
 };
 
 function tokenizeForScoring(text) {
@@ -458,22 +476,31 @@ async function getKnowledgeIndexCached() {
 
 // Return [{ score, distinct, title, text }] terurut skor menurun (bisa kosong).
 async function fetchKnowledgeChunksForGemini(query) {
-  const qWords = [...new Set(tokenizeForScoring(query))];
-  if (qWords.length === 0) return [];
+  const baseTokens = [...new Set(tokenizeForScoring(query))];
+  if (baseTokens.length === 0) return [];
+  // Tiap kata pertanyaan = 1 "grup" alternatif (kata itu + perluasannya).
+  const groups = baseTokens.map((w) => [w, ...(QUERY_EXPANSIONS[w] ?? [])]);
   const { chunks, df } = await getKnowledgeIndexCached();
   if (chunks.length === 0) return [];
   const n = chunks.length;
-  const minDistinct = Math.min(2, qWords.length);
+  const minDistinct = Math.min(2, groups.length);
 
   const scored = [];
   for (const ch of chunks) {
     let distinct = 0;
     let score = 0;
-    for (const w of qWords) {
-      const c = ch.counts.get(w);
-      if (!c) continue;
-      distinct++;
-      score += Math.log(1 + n / (df.get(w) || 1)) * (1 + 0.1 * Math.min(c - 1, 4));
+    for (const group of groups) {
+      let best = 0;
+      for (const w of group) {
+        const c = ch.counts.get(w);
+        if (!c) continue;
+        const s = Math.log(1 + n / (df.get(w) || 1)) * (1 + 0.1 * Math.min(c - 1, 4));
+        if (s > best) best = s;
+      }
+      if (best > 0) {
+        distinct++;
+        score += best;
+      }
     }
     if (distinct >= minDistinct) scored.push({ score, distinct, title: ch.title, text: ch.text });
   }

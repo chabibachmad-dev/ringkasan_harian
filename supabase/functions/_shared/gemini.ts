@@ -6,6 +6,8 @@
 // utama gagal) dengan nama model lain yang tersedia di akun kamu -- tanpa
 // perlu ubah kode sama sekali.
 
+import { buildWebGroundedMessage, buildWebQuery, searchBing } from "./knowledge.ts";
+
 const DEFAULT_MODEL = "gemini-3.6-flash";
 // Model cadangan: dicoba otomatis kalau model utama gagal terus (mis. 503
 // "model overloaded" karena model utama lagi tinggi permintaan). Model
@@ -464,7 +466,13 @@ Kamu PUNYA akses ke pencarian Google secara real-time -- pakai untuk mencari inf
 // jawabannya memang sudah ada di dokumen yang diupload.
 const KNOWLEDGE_CONTEXT_INTRO = `Pengguna sudah mengupload dokumen referensi berikut ke dalam aplikasi ini (mis. peraturan/perundangan keuangan). ANGGAP dokumen-dokumen ini sebagai sumber paling terpercaya dan PRIORITASKAN jawaban dari sini -- kalau pertanyaan pengguna bisa dijawab dari isi salah satu dokumen di bawah, jawab dari situ duluan dan sebutkan judul dokumennya, TANPA perlu cari di internet dulu. Cari di Google HANYA kalau jawabannya memang tidak ada di dokumen-dokumen ini, atau topiknya jelas di luar cakupan dokumen ini.`;
 
-function buildSystemText(knowledgeContext: { title: string; content: string }[]): string {
+// Ditambahkan kalau yang dikirim cuma POTONGAN dokumen yang relevan (bukan
+// seluruh dokumen) -- supaya model tidak menyimpulkan "dokumennya tidak memuat
+// itu" hanya karena potongan yang kebetulan terkirim belum memuatnya.
+const KB_EXCERPT_NOTE =
+  "CATATAN: yang disertakan di bawah hanyalah POTONGAN dokumen yang paling relevan dengan pertanyaan (bukan seluruh dokumen), dan tabel panjang bisa terpotong di tengah. Kalau jawabannya tidak ada di potongan ini, katakan terus terang bahwa potongan yang tersedia belum memuatnya -- JANGAN menyimpulkan bahwa dokumennya tidak memuatnya.";
+
+function buildSystemText(knowledgeContext: { title: string; content: string }[], kbExcerpts = false): string {
   // Model TIDAK tahu tanggal hari ini kecuali diberi tahu -- tanpa ini ia
   // menjawab pakai "kalender" data latihannya. Zona WITA, sama dgn bot WA.
   const nowText = new Intl.DateTimeFormat("id-ID", {
@@ -480,7 +488,7 @@ function buildSystemText(knowledgeContext: { title: string; content: string }[])
     .map((doc) => `=== Dokumen: "${doc.title}" ===\n${doc.content}`)
     .join("\n\n");
 
-  return `${base}\n\n${KNOWLEDGE_CONTEXT_INTRO}\n\n${docsText}`;
+  return `${base}\n\n${KNOWLEDGE_CONTEXT_INTRO}${kbExcerpts ? `\n${KB_EXCERPT_NOTE}` : ""}\n\n${docsText}`;
 }
 
 export interface ChatReplyResult {
@@ -498,7 +506,8 @@ export interface ChatReplyResult {
 export async function generateChatReply(
   messages: ChatMessage[],
   apiKeyOrKeys: string | string[],
-  knowledgeContext: { title: string; content: string }[] = []
+  knowledgeContext: { title: string; content: string }[] = [],
+  options: { kbExcerpts?: boolean } = {}
 ): Promise<ChatReplyResult> {
   const apiKeys = Array.isArray(apiKeyOrKeys) ? apiKeyOrKeys : [apiKeyOrKeys];
   const primaryModel = Deno.env.get("GEMINI_MODEL") || DEFAULT_MODEL;
@@ -509,7 +518,7 @@ export async function generateChatReply(
     parts: [{ text: m.content }]
   }));
 
-  const systemText = buildSystemText(knowledgeContext);
+  const systemText = buildSystemText(knowledgeContext, options.kbExcerpts === true);
 
   // Jalur TANPA Google Search (fallback) harus jujur soal itu: prompt dasar
   // bilang model punya akses internet, jadi tanpa catatan ini ia menjawab
@@ -517,13 +526,32 @@ export async function generateChatReply(
   const noInternetNote =
     "\n\nCATATAN: untuk balasan ini akses pencarian internet SEDANG TIDAK TERSEDIA (abaikan klaim sebelumnya bahwa kamu punya akses internet). Untuk peraturan, tarif, angka resmi, berita, atau hal lain yang bisa sudah berubah, JANGAN menyebut angka/fakta dengan yakin dari ingatan -- katakan terus terang kamu belum bisa memastikan versi terbarunya dan sarankan cek sumber resmi.";
 
-  const buildBody = (withTools: boolean) =>
+  // Kalau Google Search ditolak (di akun gratis tool ini bisa 429 di SEMUA key),
+  // coba cari lewat Bing & sisipkan hasilnya ke pertanyaan terakhir (lihat
+  // buildFallbackPayload) -- sama seperti bot WA.
+  const webNote =
+    "\n\nCATATAN: Google Search sedang tidak tersedia, jadi sistem mencarikan HASIL PENCARIAN WEB (judul + cuplikan dari Bing) dan melampirkannya di pesan terakhir. Jadikan itu acuan untuk fakta/angka/aturan terbaru dan sebut sumbernya singkat (nama situs/judul) kalau relevan. Cuplikan sering terpotong: kalau belum cukup untuk memastikan angka atau aturan resmi, katakan terus terang dan sarankan cek sumber resmi. Jangan mengarang link/URL. Kalau ada dokumen referensi di atas yang memuat jawabannya, dokumen itu tetap sumber utama.";
+
+  const buildBody = (withTools: boolean, system = systemText, ctn = contents) =>
     JSON.stringify({
-      system_instruction: { parts: [{ text: withTools ? systemText : systemText + noInternetNote }] },
-      contents,
+      system_instruction: { parts: [{ text: system }] },
+      contents: ctn,
       ...(withTools ? { tools: [{ google_search: {} }] } : {}),
       generationConfig: { temperature: 0.6 }
     });
+
+  const buildFallbackPayload = async () => {
+    const webQuery = buildWebQuery(messages.filter((m) => m.role === "user").map((m) => m.content));
+    if (!webQuery) return { system: systemText + noInternetNote, ctn: contents };
+    const results = await searchBing(webQuery, 5);
+    console.log(`[Bing] ${results.length} hasil web disisipkan ke prompt chat (query: "${webQuery.slice(0, 80)}")`);
+    if (results.length === 0) return { system: systemText + noInternetNote, ctn: contents };
+    const lastText = contents[contents.length - 1]?.parts?.[0]?.text ?? "";
+    return {
+      system: systemText + webNote,
+      ctn: [...contents.slice(0, -1), { role: "user", parts: [{ text: buildWebGroundedMessage(lastText, results) }] }]
+    };
+  };
 
   // Urutan percobaan, dari yang paling ideal ke yang paling andal:
   // 1. Model utama + akses internet -- 1x saja, jangan buang waktu retry di
@@ -547,7 +575,8 @@ export async function generateChatReply(
     if (fallbackModel !== primaryModel) {
       steps.push({ model: fallbackModel, maxAttempts: MAX_ATTEMPTS - 1 });
     }
-    const result = await callGeminiWithModelFallback(apiKeys, () => buildBody(false), steps, "chat-plain");
+    const fb = await buildFallbackPayload();
+    const result = await callGeminiWithModelFallback(apiKeys, () => buildBody(false, fb.system, fb.ctn), steps, "chat-plain");
     data = result.data;
     modelUsed = result.model;
   }

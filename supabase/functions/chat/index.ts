@@ -77,6 +77,7 @@
 
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { corsHeaders } from "../_shared/cors.ts";
+import { buildKbQuery, selectKnowledgeChunks, wantsWholeDocument } from "../_shared/knowledge.ts";
 import {
   generateChatReply,
   geminiKeyHint,
@@ -513,15 +514,13 @@ Deno.serve(async (req) => {
     const useKbForThisThread = !!threadMetaRow?.use_kb;
 
     const knowledgeContext: { title: string; content: string }[] = [];
+    let kbExcerpts = false;
     if (!useKbForThisThread) {
       // Obrolan ini tidak mengaktifkan Dokumen Pengetahuan -- lewati query
       // kb sepenuhnya, knowledgeContext tetap kosong.
     } else {
-      // Dibatasi total gabungannya (bukan cuma per-dokumen) supaya tidak
-      // kebablasan kalau dokumennya banyak. Diurut dari yang PALING BARU
-      // diupload supaya kalau harus ada yang dipotong karena kepanjangan,
-      // yang kepotong duluan adalah dokumen lama -- dokumen yang baru saja
-      // diupload (paling relevan buat pengguna saat ini) tetap utuh.
+      // Diurut dari yang PALING BARU diupload supaya kalau harus ada yang
+      // dipotong karena kepanjangan, yang kepotong duluan adalah dokumen lama.
       const { data: kbRows, error: kbErr } = await supabaseAdmin
         .from("knowledge_documents")
         .select("title, content")
@@ -530,14 +529,41 @@ Deno.serve(async (req) => {
       if (kbErr) {
         console.error("chat: gagal ambil dokumen pengetahuan, lanjut tanpa itu:", kbErr.message);
       } else {
-        const TOTAL_KB_BUDGET_CHARS = 600000;
-        let used = 0;
-        for (const row of kbRows ?? []) {
-          if (used >= TOTAL_KB_BUDGET_CHARS) break;
-          const remaining = TOTAL_KB_BUDGET_CHARS - used;
-          const content = row.content.length > remaining ? `${row.content.slice(0, remaining)}\n\n[...dipotong...]` : row.content;
-          knowledgeContext.push({ title: row.title, content });
-          used += content.length;
+        const docs = (kbRows ?? []).map((r) => ({ title: r.title as string, content: r.content as string }));
+        const totalChars = docs.reduce((sum, d) => sum + d.content.length, 0);
+        const userTexts = history.filter((m) => m.role === "user").map((m) => m.content);
+        const lastUser = userTexts[userTexts.length - 1] ?? "";
+
+        // Dokumen KECIL, atau pengguna minta sesuatu yang menyangkut seluruh
+        // dokumen ("ringkas dokumen ini"): kirim utuh seperti dulu. Dokumen
+        // BESAR (mis. PMK SBM ratusan ribu karakter): kirim hanya POTONGAN yang
+        // relevan dgn pertanyaan -- sebelumnya seluruh dokumen (±170 ribu token,
+        // ±$0.28) dikirim di TIAP pertanyaan, dan bagian akhir dokumen malah
+        // terpotong oleh batas total di bawah sehingga tabel di belakang tak
+        // pernah terbaca.
+        const KB_FULL_MAX_CHARS = 60000;
+        if (totalChars <= KB_FULL_MAX_CHARS || wantsWholeDocument(lastUser)) {
+          const TOTAL_KB_BUDGET_CHARS = 600000;
+          let used = 0;
+          for (const row of docs) {
+            if (used >= TOTAL_KB_BUDGET_CHARS) break;
+            const remaining = TOTAL_KB_BUDGET_CHARS - used;
+            const content = row.content.length > remaining ? `${row.content.slice(0, remaining)}\n\n[...dipotong...]` : row.content;
+            knowledgeContext.push({ title: row.title, content });
+            used += content.length;
+          }
+        } else {
+          const query = buildKbQuery(userTexts);
+          const chunks = selectKnowledgeChunks(docs, query);
+          const titles = [...new Set(chunks.map((c) => c.title))];
+          console.log(`chat: dokumen besar (${totalChars} karakter) -> ${chunks.length} potongan relevan dari ${titles.length} dokumen (query: "${query.slice(0, 80)}")`);
+          for (const title of titles) {
+            knowledgeContext.push({
+              title,
+              content: chunks.filter((c) => c.title === title).map((c) => c.text).join("\n\n---\n\n")
+            });
+          }
+          kbExcerpts = chunks.length > 0;
         }
       }
     }
@@ -559,7 +585,7 @@ Deno.serve(async (req) => {
           p_error: event.kind === "exhausted" ? (event.error ?? null) : null
         });
       });
-      const result = await generateChatReply(history, geminiApiKeys, knowledgeContext);
+      const result = await generateChatReply(history, geminiApiKeys, knowledgeContext, { kbExcerpts });
       reply = result.reply;
       tokensUsed = result.tokensUsed;
       costUsd = result.costUsd;
