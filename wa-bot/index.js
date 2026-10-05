@@ -34,6 +34,8 @@ import makeWASocket, { useMultiFileAuthState, fetchLatestBaileysVersion, Disconn
 import pino from "pino";
 import qrcode from "qrcode-terminal";
 import * as cheerio from "cheerio";
+import fs from "node:fs";
+import { fileURLToPath } from "node:url";
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -1882,6 +1884,57 @@ async function checkDailySummary() {
   }
 }
 
+// Kirim ringkasan SEKARANG (buat tes / minta manual). Beda dgn jadwal harian:
+// tidak mengecek jam, tidak menandai "sudah terkirim hari ini" (jadi ringkasan
+// terjadwal malamnya tetap jalan normal). Dipicu lewat file bendera
+// (wa-bot/kirim-ringkasan.flag) atau pesan "/ringkasan" dari nomor pemilik.
+async function sendSummaryNow(source) {
+  if (!OWNER_JID) {
+    console.error("📋 [Tes ringkasan] WA_OWNER_NUMBER belum diisi di .env, tidak ada tujuan kirim.");
+    return;
+  }
+  if (!currentSock) {
+    console.error("📋 [Tes ringkasan] WhatsApp belum tersambung, coba lagi sebentar.");
+    return;
+  }
+  if (summaryRunning) {
+    console.log("📋 [Tes ringkasan] masih ada proses ringkasan lain yang berjalan, dilewati.");
+    return;
+  }
+  summaryRunning = true;
+  const startedAt = Date.now();
+  try {
+    console.log(`📋 [Tes ringkasan] dipicu lewat ${source}, mesin: ${WA_SUMMARY_ENGINE}. Mulai membuat...`);
+    await currentSock
+      .sendMessage(OWNER_JID, {
+        text: `⏳ Membuat ringkasan hari ini (mesin: ${WA_SUMMARY_ENGINE === "ollama" ? "model lokal, bisa beberapa menit" : "Gemini"})...`
+      })
+      .catch(() => {});
+    const local = zonedParts(Date.now(), WA_TIMEZONE);
+    const text = await buildDailySummaryText(local.dateStr, { allowAi: true });
+    await currentSock.sendMessage(OWNER_JID, { text });
+    console.log(`📋 [Tes ringkasan] terkirim ke nomor pemilik (${Math.round((Date.now() - startedAt) / 1000)} detik).`);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`📋 [Tes ringkasan] gagal: ${msg}`);
+    await currentSock?.sendMessage(OWNER_JID, { text: `⚠️ Ringkasan gagal dibuat: ${msg.slice(0, 300)}` }).catch(() => {});
+  } finally {
+    summaryRunning = false;
+  }
+}
+
+const SUMMARY_FLAG_FILE = fileURLToPath(new URL("./kirim-ringkasan.flag", import.meta.url));
+async function checkSummaryFlagFile() {
+  if (!fs.existsSync(SUMMARY_FLAG_FILE)) return;
+  if (!currentSock || summaryRunning) return; // biarkan bendera, coba lagi nanti
+  try {
+    fs.unlinkSync(SUMMARY_FLAG_FILE);
+  } catch {
+    return;
+  }
+  await sendSummaryNow("file bendera");
+}
+
 // Dipakai loop pengirim (setInterval di bawah) -- selalu nunjuk ke socket
 // WhatsApp yang LAGI AKTIF, diupdate ulang tiap kali connect()/reconnect
 // bikin socket baru (lihat connection.update di bawah).
@@ -2000,6 +2053,13 @@ async function handleIncoming(msg, sock) {
     return;
   }
   console.log(`📩 Pesan masuk dari ${jid}${msg.pushName ? ` (${msg.pushName})` : ""}: ${text.slice(0, 60)}`);
+
+  // Perintah pemilik: "/ringkasan" (dari chat-ke-diri-sendiri atau dari nomor
+  // WA_OWNER_NUMBER) = kirim ringkasan hari ini sekarang juga.
+  if ((isSelfChat || jid === OWNER_JID) && text.trim().toLowerCase() === "/ringkasan") {
+    sendSummaryNow("perintah /ringkasan").catch(() => {});
+    return;
+  }
 
   // Chat-ke-diri-sendiri TIDAK PERNAH memicu auto-reply (tidak masuk akal
   // bot membalas catatan kita sendiri) -- baru lanjut cek toggle AKTIF/MATI
@@ -2123,6 +2183,9 @@ setInterval(() => {
 setInterval(() => {
   checkDailySummary().catch(() => {});
 }, 60_000);
+setInterval(() => {
+  checkSummaryFlagFile().catch(() => {});
+}, 5_000);
 primeExhaustedKeysFromDb().catch(() => {});
 console.log(
   `📋 Ringkasan harian ke pemilik: ${WA_DAILY_SUMMARY_ENABLED ? `AKTIF (tiap hari setelah ${String(WA_DAILY_SUMMARY_HOUR).padStart(2, "0")}:00 ${WA_TIMEZONE_LABEL}, mesin: ${WA_SUMMARY_ENGINE}${WA_SUMMARY_ENGINE === "ollama" ? `, cadangan Gemini: ${WA_SUMMARY_GEMINI_FALLBACK ? "ya" : "tidak"}` : ""})` : "mati (isi WA_OWNER_NUMBER di .env buat menyalakan)"}`

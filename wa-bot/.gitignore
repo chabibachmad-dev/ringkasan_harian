@@ -7,3 +7,6 @@ node_modules/
 auth_session/
 
 *.log
+
+# Bendera pemicu tes ringkasan (dibuat sementara, dihapus bot setelah dipakai)
+kirim-ringkasan.flag

@@ -273,7 +273,7 @@ API key kena kuota harian, bot kirim satu WA ke nomor itu (maksimal sekali
 sehari) berisi perkiraan jam kuota kembali.
 
 **Ringkasan percakapan harian.** Dengan `WA_OWNER_NUMBER` terisi, tiap hari
-setelah jam `WA_DAILY_SUMMARY_HOUR` (default 20:00 WITA) bot merangkum semua
+setelah jam `WA_DAILY_SUMMARY_HOUR` (default 20:00 WITA; set `WA_TIMEZONE=Asia/Jakarta` dan `WA_TIMEZONE_LABEL=WIB` untuk WIB) bot merangkum semua
 percakapan WA hari itu dengan Gemini dan mengirimnya ke nomor pemilik:
 gambaran umum, ringkasan per kontak, dan daftar yang perlu ditindaklanjuti
 manual. Secara default ringkasan dibuat **Ollama (model lokal di laptop)**:
@@ -285,6 +285,18 @@ dikirim ke Google). Ringkasan lokal bisa makan beberapa menit dan ditandai
 "dirangkum model lokal" di ujungnya. Kalau AI sedang tidak tersedia setelah 3
 kali percobaan, yang terkirim daftar sederhana tanpa AI. Kalau bot mati pada jam
 itu, ringkasan terkirim begitu bot nyala lagi di hari yang sama.
+
+**Tes ringkasan sekarang (tanpa menunggu jam jadwal).** Dua cara, keduanya
+mengirim ringkasan hari ini ke `WA_OWNER_NUMBER` tanpa menandai "sudah terkirim",
+jadi ringkasan terjadwal malamnya tetap jalan:
+
+1. Di laptop server: `touch ~/ringkasan_harian/wa-bot/kirim-ringkasan.flag`
+   (bot memeriksa tiap 5 detik, memakai lalu menghapus file itu).
+2. Dari WhatsApp: kirim `/ringkasan` lewat chat ke diri sendiri atau dari nomor
+   pemilik ke nomor bot.
+
+Bot lebih dulu mengirim "Membuat ringkasan...", lalu hasilnya. Pantau dengan
+`pm2 logs wa-bot` (cari baris `[Tes ringkasan]`).
 
 **Cadangan lokal saat kuota Gemini habis.** Dengan `WA_AI_ENGINE=gemini`, kalau
 Gemini gagal karena kuota (semua key habis / 429 / 503), pertanyaan yang BUKAN soal
