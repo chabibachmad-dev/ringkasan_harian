@@ -70,7 +70,7 @@
 
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { corsHeaders } from "../_shared/cors.ts";
-import { generateChatReply, type ChatMessage } from "../_shared/gemini.ts";
+import { generateChatReply, getGeminiApiKeys, type ChatMessage } from "../_shared/gemini.ts";
 
 // ID obrolan dibuat client-side sebagai `freeform-<uuid>` (lihat main.js).
 const FREEFORM_RE = /^freeform-[0-9a-fA-F-]{36}$/;
@@ -388,9 +388,9 @@ Deno.serve(async (req) => {
     }
     const trimmed = message.slice(0, MAX_MESSAGE_LENGTH);
 
-    const geminiApiKey = Deno.env.get("GEMINI_API_KEY");
-    if (!geminiApiKey) {
-      return json({ ok: false, error: "GEMINI_API_KEY belum di-set sebagai Supabase secret." }, 500);
+    const geminiApiKeys = getGeminiApiKeys();
+    if (geminiApiKeys.length === 0) {
+      return json({ ok: false, error: "GEMINI_API_KEYS (atau GEMINI_API_KEY) belum di-set sebagai Supabase secret." }, 500);
     }
 
     // Ambil riwayat hari ini dulu buat konteks percakapan.
@@ -471,7 +471,7 @@ Deno.serve(async (req) => {
     let tokensUsed = 0;
     let costUsd = 0;
     try {
-      const result = await generateChatReply(history, geminiApiKey, knowledgeContext);
+      const result = await generateChatReply(history, geminiApiKeys, knowledgeContext);
       reply = result.reply;
       tokensUsed = result.tokensUsed;
       costUsd = result.costUsd;

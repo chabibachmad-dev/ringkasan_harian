@@ -580,12 +580,15 @@ function pickAvailableGeminiKey() {
   return null;
 }
 
-function markGeminiKeyExhausted(key) {
-  geminiKeyExhaustedUntil.set(key, nextMidnightPacificMs());
+function markGeminiKeyExhausted(key, err) {
+  // 429 "PerDay" = jatah harian habis (tunggu reset tengah malam Pacific);
+  // 429 lain biasanya cuma rate-limit per menit -- cukup istirahat 1 menit.
+  const isDaily = /PerDay/i.test(err?.message || "");
+  geminiKeyExhaustedUntil.set(key, isDaily ? nextMidnightPacificMs() : Date.now() + 60_000);
   const idx = GEMINI_API_KEYS.indexOf(key);
   geminiKeyCursor = (idx + 1) % GEMINI_API_KEYS.length; // mulai dr key berikutnya lain kali
   console.warn(
-    `⚠️  API key Gemini #${idx + 1}/${GEMINI_API_KEYS.length} kena kuota harian, pindah ke key lain sampai tengah malam (Pacific Time).`
+    `⚠️  API key Gemini #${idx + 1}/${GEMINI_API_KEYS.length} kena ${isDaily ? "kuota harian (sampai tengah malam Pacific Time)" : "rate limit (istirahat 1 menit)"}, pindah ke key lain.`
   );
 }
 
@@ -710,7 +713,7 @@ async function generateAutoReplyWithGemini(jid) {
     } catch (err) {
       attemptsLeft -= 1;
       if (err.status === 429 && attemptsLeft > 0) {
-        markGeminiKeyExhausted(apiKey);
+        markGeminiKeyExhausted(apiKey, err);
         continue; // coba lagi dari awal (dengan Google Search) pakai key berikutnya
       }
       throw err; // bukan soal kuota (atau key sudah habis semua) -- lempar ke pemanggil spt biasa

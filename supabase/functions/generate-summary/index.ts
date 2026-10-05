@@ -11,7 +11,7 @@ import { createClient } from "jsr:@supabase/supabase-js@2";
 import { corsHeaders } from "../_shared/cors.ts";
 import { FEED_SOURCES, MAX_ITEMS_PER_FEED, MAX_AGE_HOURS } from "../_shared/rss-sources.ts";
 import { fetchFeed, type RawItem } from "../_shared/rss-parser.ts";
-import { generateSummary, type NewsItem } from "../_shared/gemini.ts";
+import { generateSummary, getGeminiApiKeys, type NewsItem } from "../_shared/gemini.ts";
 import { sendPushToAllSubscribers } from "../_shared/send-push.ts";
 
 function isRecentEnough(pubDate: string | null): boolean {
@@ -71,7 +71,7 @@ Deno.serve(async (req) => {
 
   const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
   const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-  const geminiApiKey = Deno.env.get("GEMINI_API_KEY");
+  const geminiApiKeys = getGeminiApiKeys();
   const supabaseAdmin = createClient(supabaseUrl, serviceRoleKey);
 
   // Tanggal "hari ini" dihitung di zona waktu Asia/Makassar (WITA, UTC+8),
@@ -79,8 +79,8 @@ Deno.serve(async (req) => {
   const todayWita = new Date(Date.now() + 8 * 60 * 60 * 1000).toISOString().slice(0, 10);
 
   try {
-    if (!geminiApiKey) {
-      throw new Error("GEMINI_API_KEY belum di-set sebagai Supabase secret.");
+    if (geminiApiKeys.length === 0) {
+      throw new Error("GEMINI_API_KEYS (atau GEMINI_API_KEY) belum di-set sebagai Supabase secret.");
     }
 
     const items = await collectNewsItems();
@@ -89,7 +89,7 @@ Deno.serve(async (req) => {
       throw new Error("Semua sumber RSS gagal diambil atau tidak ada berita baru dalam 30 jam terakhir.");
     }
 
-    const summary = await generateSummary(items, geminiApiKey);
+    const summary = await generateSummary(items, geminiApiKeys);
 
     const contentId = `## 🇮🇩 Indonesia\n\n${summary.indonesia_id}\n\n## 🌍 Dunia\n\n${summary.dunia_id}`;
     const contentEn = `## 🇮🇩 Indonesia\n\n${summary.indonesia_en}\n\n## 🌍 World\n\n${summary.dunia_en}`;
