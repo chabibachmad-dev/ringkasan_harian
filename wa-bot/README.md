@@ -352,6 +352,20 @@ yang jadi pembanding bar default 20, ubah lewat secret Supabase
 sudah habis hari itu, jadi setelah restart tidak membuang request ke key yang
 pasti ditolak.
 
+**Jeda otomatis saat kamu membalas manual.** Kalau kamu membalas sebuah chat
+sendiri (dari HP, atau dari layar obrolan WA di aplikasi), bot berhenti membalas
+otomatis di chat itu selama 60 menit, dihitung dari balasan manual TERAKHIR
+(balas lagi = hitungan mulai ulang). Chat dengan nomor lain tidak terpengaruh,
+dan pesan yang masuk selama jeda tetap tersimpan. Untuk mengaktifkan bot lagi
+sebelum 60 menit: ketik `AI On` di chat itu (pesan "AI On" terlihat oleh
+lawan bicara; isi `WA_AI_ON_DELETE_COMMAND=true` kalau mau bot langsung
+menghapusnya untuk semua orang). Konfirmasi "AI aktif lagi untuk ..." dikirim
+ke nomor pemilik. Di chat-ke-diri-sendiri: `AI On` mengaktifkan semua chat
+sekaligus, `AI Status` menampilkan chat yang sedang dijeda. Balasan manual
+yang dihitung: teks, foto, dokumen, stiker, suara; reaksi emoji tidak. Status
+jeda disimpan di `ai-pause.json` (selamat dari restart). Atur lewat
+`WA_MANUAL_PAUSE_MINUTES` (default 60, `0` = fitur dimatikan).
+
 ## Troubleshooting
 
 - **QR tidak muncul / bot langsung error network** -- cek koneksi internet;

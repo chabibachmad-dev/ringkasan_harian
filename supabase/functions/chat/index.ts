@@ -74,6 +74,15 @@
 //     -> { ok: true, document: { id, title, char_count, original_filename, uploaded_at } }
 //   { "code": "...", "action": "kb_delete", "id": "..." }
 //     -> { ok: true }
+//
+// --- Al-Qur'an (halaman Pengaturan > Al-Qur'an; tabel di migrations/0014) ---
+//   { "code": "...", "action": "quran_sync" }
+//     -> { ok: true, lastRead: { surah, ayah, page, updated_at } | null,
+//          bookmarks: [{ surah, ayah, page, created_at }, ...] }
+//   { "code": "...", "action": "quran_set_last_read", "surah": 2, "ayah": 255, "page": 42 }
+//   { "code": "...", "action": "quran_add_bookmark", "surah": 2, "ayah": 255, "page": 42 }  (idempotent)
+//   { "code": "...", "action": "quran_delete_bookmark", "surah": 2, "ayah": 255 }
+//     -> { ok: true }
 
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { corsHeaders } from "../_shared/cors.ts";
@@ -132,6 +141,9 @@ Deno.serve(async (req) => {
     content?: string;
     filename?: string;
     id?: string;
+    surah?: number;
+    ayah?: number;
+    page?: number;
   };
   try {
     body = await req.json();
@@ -384,6 +396,63 @@ Deno.serve(async (req) => {
     if (!id) return json({ ok: false, error: "ID dokumen tidak valid." }, 400);
 
     const { error } = await supabaseAdmin.from("knowledge_documents").delete().eq("id", id);
+    if (error) return json({ ok: false, error: error.message }, 500);
+    return json({ ok: true });
+  }
+
+  // --- Al-Qur'an: terakhir dibaca + bookmark (lihat migrations/0014) ---
+  if (
+    body.action === "quran_sync" ||
+    body.action === "quran_set_last_read" ||
+    body.action === "quran_add_bookmark" ||
+    body.action === "quran_delete_bookmark"
+  ) {
+    const inRange = (v: unknown, min: number, max: number): v is number =>
+      typeof v === "number" && Number.isInteger(v) && v >= min && v <= max;
+
+    if (body.action === "quran_sync") {
+      const [lr, bm] = await Promise.all([
+        supabaseAdmin.from("quran_last_read").select("surah, ayah, page, updated_at").eq("id", "main").maybeSingle(),
+        supabaseAdmin
+          .from("quran_bookmarks")
+          .select("surah, ayah, page, created_at")
+          .order("created_at", { ascending: false })
+          .limit(1000)
+      ]);
+      if (lr.error) return json({ ok: false, error: lr.error.message }, 500);
+      if (bm.error) return json({ ok: false, error: bm.error.message }, 500);
+      return json({ ok: true, lastRead: lr.data ?? null, bookmarks: bm.data ?? [] });
+    }
+
+    if (body.action === "quran_delete_bookmark") {
+      if (!inRange(body.surah, 1, 114) || !inRange(body.ayah, 1, 286)) {
+        return json({ ok: false, error: "Surah/ayat tidak valid." }, 400);
+      }
+      const { error } = await supabaseAdmin
+        .from("quran_bookmarks")
+        .delete()
+        .eq("surah", body.surah)
+        .eq("ayah", body.ayah);
+      if (error) return json({ ok: false, error: error.message }, 500);
+      return json({ ok: true });
+    }
+
+    if (!inRange(body.surah, 1, 114) || !inRange(body.ayah, 1, 286) || !inRange(body.page, 1, 604)) {
+      return json({ ok: false, error: "Surah/ayat/halaman tidak valid." }, 400);
+    }
+
+    if (body.action === "quran_set_last_read") {
+      const { error } = await supabaseAdmin
+        .from("quran_last_read")
+        .upsert({ id: "main", surah: body.surah, ayah: body.ayah, page: body.page, updated_at: new Date().toISOString() });
+      if (error) return json({ ok: false, error: error.message }, 500);
+      return json({ ok: true });
+    }
+
+    // quran_add_bookmark -- idempotent (unik per surah+ayat).
+    const { error } = await supabaseAdmin
+      .from("quran_bookmarks")
+      .upsert({ surah: body.surah, ayah: body.ayah, page: body.page }, { onConflict: "surah,ayah", ignoreDuplicates: true });
     if (error) return json({ ok: false, error: error.message }, 500);
     return json({ ok: true });
   }
@@ -685,7 +754,7 @@ Deno.serve(async (req) => {
     {
       ok: false,
       error:
-        "action tidak dikenal (pakai 'history', 'send', 'delete', 'delete_message', 'last_messages', 'list_threads', 'set_thread_meta', 'token_usage', 'key_status', 'kb_list', 'kb_upload', atau 'kb_delete')."
+        "action tidak dikenal (pakai 'history', 'send', 'delete', 'delete_message', 'last_messages', 'list_threads', 'set_thread_meta', 'token_usage', 'key_status', 'kb_list', 'kb_upload', 'kb_delete', 'quran_sync', 'quran_set_last_read', 'quran_add_bookmark', atau 'quran_delete_bookmark')."
     },
     400
   );

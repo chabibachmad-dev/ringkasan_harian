@@ -1,7 +1,7 @@
 // Service worker: (1) bikin PWA bisa di-install & jalan offline-ish (app shell caching),
 // (2) menerima & menampilkan Web Push notification, (3) buka app saat notifikasi diklik.
 
-const CACHE_NAME = "ringkasan-harian-v2";
+const CACHE_NAME = "ringkasan-harian-v3";
 const APP_SHELL = ["./", "./index.html", "./manifest.webmanifest"];
 
 self.addEventListener("install", (event) => {
@@ -26,7 +26,28 @@ self.addEventListener("activate", (event) => {
 // Request ke Supabase (origin berbeda) dibiarkan lewat langsung ke network.
 self.addEventListener("fetch", (event) => {
   const url = new URL(event.request.url);
-  if (url.origin !== self.location.origin || event.request.method !== "GET") return;
+  if (event.request.method !== "GET") return;
+
+  // Font Google (mis. Amiri Quran buat halaman Al-Qur'an): cache-first supaya
+  // huruf Arab tetap tampil benar saat offline. File font bersifat statis.
+  if (url.hostname === "fonts.googleapis.com" || url.hostname === "fonts.gstatic.com") {
+    event.respondWith(
+      caches.match(event.request).then(
+        (hit) =>
+          hit ||
+          fetch(event.request).then((res) => {
+            if (res && (res.ok || res.type === "opaque")) {
+              const clone = res.clone();
+              caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
+            }
+            return res;
+          })
+      )
+    );
+    return;
+  }
+
+  if (url.origin !== self.location.origin) return;
 
   event.respondWith(
     fetch(event.request)

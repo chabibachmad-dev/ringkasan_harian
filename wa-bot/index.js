@@ -1497,6 +1497,11 @@ async function processRetryQueue(sock) {
         await finishRetry(row.id, "skipped");
         continue;
       }
+      // Kamu sudah membalas manual -> balasan susulan dari AI tidak perlu.
+      if (aiPauseRemainingMs(jidUserKeys(row.wa_jid)) > 0) {
+        await finishRetry(row.id, "skipped");
+        continue;
+      }
       // Sudah ada balasan lain (mis. kamu balas manual dari aplikasi/HP) sejak
       // antrean dibuat? Kalau ya, tidak perlu balasan otomatis susulan.
       const { data: later } = await supabase
@@ -1640,6 +1645,7 @@ async function sendAutoReply(sock, jid, incomingText) {
     const errMsg = err instanceof Error ? err.message : String(err);
     console.error(`Gagal generate auto-reply utk ${jid}:`, errMsg);
     sock.sendPresenceUpdate("paused", jid).catch(() => {});
+    if (aiPauseRemainingMs(jidUserKeys(jid)) > 0) return; // kamu keburu membalas manual
 
     // Cadangan lokal: Gemini gagal karena KUOTA & pertanyaannya bukan soal
     // angka/aturan -> coba jawab pakai Ollama (gratis, tanpa kuota) dulu.
@@ -1671,6 +1677,11 @@ async function sendAutoReply(sock, jid, incomingText) {
   }
   sock.sendPresenceUpdate("paused", jid).catch(() => {});
   if (!result || !result.reply) return;
+  // Kamu keburu membalas manual selagi AI menyusun jawaban -> jawaban AI dibuang.
+  if (aiPauseRemainingMs(jidUserKeys(jid)) > 0) {
+    console.log(`⏸️ Jawaban AI utk ${jid} dibuang: kamu sudah membalas manual.`);
+    return;
+  }
 
   await deliverAutoReplyText(sock, jid, result);
 }
@@ -2012,6 +2023,192 @@ function getOwnJids(sock) {
   return [normalizeJidSuffix(me.id), normalizeJidSuffix(me.lid)].filter(Boolean);
 }
 
+// ---------------- Jeda auto-reply saat pemilik membalas MANUAL ----------------
+// Kalau kamu membalas sebuah chat sendiri (dari HP, atau dari layar obrolan WA di
+// aplikasi), bot berhenti membalas OTOMATIS di chat itu selama WA_MANUAL_PAUSE_MINUTES
+// (default 60 menit, dihitung dari balasan manual TERAKHIR). Chat dengan nomor lain
+// tidak terpengaruh. Ketik "AI On" di chat itu (atau "AI On" di chat-ke-diri-sendiri
+// untuk semua chat) supaya bot aktif lagi seketika. Status jeda disimpan di
+// ai-pause.json supaya selamat dari restart bot. 0 = fitur ini dimatikan.
+const MANUAL_PAUSE_MINUTES = Number.isFinite(Number(process.env.WA_MANUAL_PAUSE_MINUTES))
+  ? Math.max(0, Number(process.env.WA_MANUAL_PAUSE_MINUTES))
+  : 60;
+const MANUAL_PAUSE_MS = MANUAL_PAUSE_MINUTES * 60_000;
+const AI_ON_DELETE_COMMAND = (process.env.WA_AI_ON_DELETE_COMMAND || "false").toLowerCase() === "true";
+const AI_PAUSE_FILE = fileURLToPath(new URL("./ai-pause.json", import.meta.url));
+const AI_ON_RE = /^\s*ai\s*on\s*[.!]*\s*$/i;
+const AI_STATUS_RE = /^\s*ai\s*status\s*[?.!]*\s*$/i;
+
+// kunci = bagian "user" JID (nomor HP ATAU id @lid, tanpa @domain/:device) -> waktu jeda berakhir (ms).
+// Satu kontak bisa muncul sbg dua id (nomor & @lid), jadi dua-duanya disimpan.
+const aiPausedUntil = new Map();
+const contactNames = new Map(); // kunci -> nama tampilan terakhir (utk pesan konfirmasi)
+const botSentIds = new Map(); // id pesan yang DIKIRIM BOT -> waktu (ms), supaya tidak dikira balasan manual
+
+function jidUserKeys(...jids) {
+  return [...new Set(jids.filter(Boolean).map((j) => String(j).split("@")[0].split(":")[0]).filter(Boolean))];
+}
+
+function loadAiPause() {
+  try {
+    const raw = JSON.parse(fs.readFileSync(AI_PAUSE_FILE, "utf8"));
+    for (const [k, v] of Object.entries(raw || {})) {
+      if (Number(v) > Date.now()) aiPausedUntil.set(k, Number(v));
+    }
+  } catch {
+    /* belum ada file / rusak -> mulai kosong */
+  }
+}
+
+function saveAiPause() {
+  try {
+    fs.writeFileSync(AI_PAUSE_FILE, JSON.stringify(Object.fromEntries(aiPausedUntil)));
+  } catch (err) {
+    console.warn("Gagal simpan ai-pause.json:", err instanceof Error ? err.message : String(err));
+  }
+}
+
+function pauseAiFor(keys) {
+  if (MANUAL_PAUSE_MS <= 0 || keys.length === 0) return 0;
+  const until = Date.now() + MANUAL_PAUSE_MS;
+  for (const k of keys) aiPausedUntil.set(k, until);
+  saveAiPause();
+  return until;
+}
+
+// Sisa waktu jeda (ms) untuk salah satu kunci; 0 = tidak dijeda.
+function aiPauseRemainingMs(keys) {
+  let best = 0;
+  let expiredAny = false;
+  for (const k of keys) {
+    const until = aiPausedUntil.get(k);
+    if (!until) continue;
+    if (until <= Date.now()) {
+      aiPausedUntil.delete(k);
+      expiredAny = true;
+    } else {
+      best = Math.max(best, until - Date.now());
+    }
+  }
+  if (expiredAny) saveAiPause();
+  return best;
+}
+
+function resumeAiFor(keys) {
+  let had = false;
+  for (const k of keys) had = aiPausedUntil.delete(k) || had;
+  if (had) saveAiPause();
+  return had;
+}
+
+function rememberBotSent(id) {
+  if (!id) return;
+  botSentIds.set(id, Date.now());
+  if (botSentIds.size > 500) {
+    const cutoff = Date.now() - 10 * 60_000;
+    for (const [k, t] of botSentIds) if (t < cutoff) botSentIds.delete(k);
+  }
+}
+
+// Pesan dari kita yang "sungguhan" (teks/media/stiker/dll), BUKAN reaksi, hapus-pesan, dsb.
+function isRealOutgoingContent(message) {
+  const m = unwrapMessageContent(message);
+  if (!m) return false;
+  return [
+    "conversation",
+    "extendedTextMessage",
+    "imageMessage",
+    "videoMessage",
+    "documentMessage",
+    "audioMessage",
+    "stickerMessage",
+    "contactMessage",
+    "locationMessage",
+    "pollCreationMessage"
+  ].some((k) => m[k]);
+}
+
+function describeContact(keys) {
+  for (const k of keys) if (contactNames.has(k)) return `${contactNames.get(k)} (${k})`;
+  return keys[0] || "?";
+}
+
+async function notifyOwner(sock, text) {
+  if (!OWNER_JID) return;
+  await sock.sendMessage(OWNER_JID, { text }).catch(() => {});
+}
+
+// Pesan KELUAR dari akun kita ke kontak lain (muncul lewat event pesan sbg fromMe).
+// "AI On" -> aktifkan lagi; selain itu dihitung balasan manual -> jeda auto-reply.
+async function handleOwnOutgoing(msg, sock, jid) {
+  if (MANUAL_PAUSE_MS <= 0) return;
+  if (!jid || !(jid.endsWith("@s.whatsapp.net") || jid.endsWith("@lid"))) return;
+  if (msg.key.id && botSentIds.has(msg.key.id)) return; // dikirim bot sendiri
+  if (!isRealOutgoingContent(msg.message)) return;
+
+  const keys = jidUserKeys(msg.key.remoteJid, msg.key.remoteJidAlt);
+  const text = extractText({ message: unwrapMessageContent(msg.message) });
+
+  if (text && AI_ON_RE.test(text)) {
+    const was = resumeAiFor(keys);
+    console.log(`🤖 "AI On" di chat ${describeContact(keys)} -> auto-reply aktif lagi${was ? "" : " (sebelumnya memang tidak dijeda)"}.`);
+    if (AI_ON_DELETE_COMMAND) {
+      sock.sendMessage(jid, { delete: msg.key }).catch(() => {});
+    }
+    await notifyOwner(sock, `✅ AI aktif lagi untuk ${describeContact(keys)}.`);
+    return;
+  }
+
+  const wasPaused = aiPauseRemainingMs(keys) > 0;
+  const until = pauseAiFor(keys);
+  if (until) {
+    console.log(
+      `✋ Balasan manual ke ${describeContact(keys)} -> auto-reply dijeda sampai ${new Date(until).toLocaleTimeString("id-ID", { timeZone: WA_TIMEZONE, hour: "2-digit", minute: "2-digit" })} ${WA_TIMEZONE_LABEL}${wasPaused ? " (diperpanjang)" : ""}.`
+    );
+  }
+}
+
+// Balasan manual lewat layar WA di aplikasi (antrean "pending") juga dihitung manual.
+function markManualFromApp(jid) {
+  pauseAiFor(jidUserKeys(jid));
+}
+
+// Perintah dari pemilik di chat-ke-diri-sendiri: "AI On" (semua chat) / "AI Status".
+async function handleAiPauseCommand(sock, jid, text) {
+  if (AI_ON_RE.test(text)) {
+    const n = aiPausedUntil.size;
+    aiPausedUntil.clear();
+    saveAiPause();
+    await sock.sendMessage(jid, { text: n > 0 ? "✅ AI aktif lagi untuk semua chat." : "AI sudah aktif di semua chat (tidak ada yang sedang dijeda)." }).catch(() => {});
+    return true;
+  }
+  if (AI_STATUS_RE.test(text)) {
+    const now = Date.now();
+    const seen = new Set();
+    const lines = [];
+    for (const [k, until] of aiPausedUntil) {
+      if (until <= now) continue;
+      const name = contactNames.get(k);
+      const label = name ? `${name} (${k})` : k;
+      const dupKey = `${name || k}|${until}`; // nomor & @lid kontak yang sama dijeda bersamaan -> satu baris
+      if (seen.has(dupKey)) continue;
+      seen.add(dupKey);
+      lines.push(`- ${label}: ${Math.ceil((until - now) / 60_000)} menit lagi`);
+    }
+    await sock
+      .sendMessage(jid, {
+        text: lines.length
+          ? `⏸️ Chat yang auto-replynya sedang dijeda (setelah balasan manual):\n${lines.join("\n")}\n\nKetik "AI On" di chat itu (atau di sini untuk semua) supaya aktif lagi.`
+          : "Tidak ada chat yang sedang dijeda. AI aktif di semua chat."
+      })
+      .catch(() => {});
+    return true;
+  }
+  return false;
+}
+
+loadAiPause();
+
 // Cek toggle auto-reply KHUSUS kontak ini (tabel whatsapp_contacts, diatur
 // dari tombol di layar obrolan WA kontak itu di aplikasi) -- tidak ada baris
 // = dianggap enabled=true/default ON (sama seperti sebelum fitur toggle per-
@@ -2337,7 +2534,10 @@ async function handleIncoming(msg, sock) {
   // event ini -- sudah dicatat duluan waktu diproses dari antrian "pending"
   // (lihat processPendingOutgoing), jadi di sini cukup dilewati supaya tidak
   // dobel. Chat-ke-diri-sendiri DIKECUALIKAN (lihat komentar isSelfChat).
-  if (msg.key.fromMe && !isSelfChat) return;
+  if (msg.key.fromMe && !isSelfChat) {
+    await handleOwnOutgoing(msg, sock, jid);
+    return;
+  }
 
   // Grup: jalur terpisah (hanya dijawab kalau bot dipanggil & grupnya diizinkan).
   if (isGroupJid(jid)) {
@@ -2357,6 +2557,13 @@ async function handleIncoming(msg, sock) {
 
   const text = extractText(msg);
   if (!text) return;
+
+  if (msg.pushName && !isSelfChat) {
+    for (const k of jidUserKeys(jid, msg.key.remoteJidAlt)) contactNames.set(k, msg.pushName);
+  }
+
+  // "AI On" / "AI Status" dari pemilik di chat-ke-diri-sendiri (lihat Jeda auto-reply).
+  if (isSelfChat && (await handleAiPauseCommand(sock, jid, text))) return;
 
   // Perintah SiMAB dari pemilik: dijawab dari database SiMAB, TIDAK disimpan & TIDAK
   // diteruskan ke auto-reply AI. Dari orang lain, pesan "simab ..." diperlakukan biasa.
@@ -2408,6 +2615,12 @@ async function handleIncoming(msg, sock) {
   // bot membalas catatan kita sendiri) -- baru lanjut cek toggle AKTIF/MATI
   // global & per-kontak kalau ini beneran pesan dari kontak lain.
   if (!isSelfChat && AUTO_REPLY_ACTIVE) {
+    // Kamu baru membalas chat ini manual -> bot diam dulu (pesannya tetap disimpan).
+    const pausedMs = aiPauseRemainingMs(jidUserKeys(jid, msg.key.remoteJidAlt));
+    if (pausedMs > 0) {
+      console.log(`⏸️ Auto-reply dijeda utk ${jid} (balasan manual), ${Math.ceil(pausedMs / 60_000)} menit lagi. Ketik "AI On" di chat itu untuk mengaktifkan.`);
+      return;
+    }
     const contactEnabled = await isAutoReplyEnabledForContact(jid);
     if (contactEnabled) {
       await sendAutoReply(sock, jid, text);
@@ -2437,6 +2650,7 @@ async function processPendingOutgoing(sock) {
         .update({ status: "sent", wa_message_id: sent?.key?.id ?? null, error: null })
         .eq("id", row.id);
       console.log(`📤 Terkirim ke ${row.wa_jid}: ${row.content.slice(0, 60)}`);
+      markManualFromApp(row.wa_jid);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error(`Gagal kirim ke ${row.wa_jid}:`, msg);
@@ -2460,6 +2674,14 @@ async function connect() {
   });
 
   currentSock = sock;
+
+  // Catat id tiap pesan yang dikirim BOT supaya tidak pernah dikira balasan manual.
+  const origSendMessage = sock.sendMessage.bind(sock);
+  sock.sendMessage = async (...args) => {
+    const res = await origSendMessage(...args);
+    rememberBotSent(res?.key?.id);
+    return res;
+  };
 
   sock.ev.on("creds.update", saveCreds);
 

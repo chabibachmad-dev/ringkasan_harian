@@ -27,8 +27,18 @@ import {
   ICON_BELL_FILLED,
   ICON_BELL_OUTLINE,
   ICON_ZAP,
-  ICON_GAUGE
+  ICON_GAUGE,
+  ICON_PRAYER,
+  ICON_BOOK,
+  ICON_LOCATE
 } from "./icons.js";
+import {
+  initFeatures,
+  showPrayerScreen,
+  showQuranScreen,
+  stopFeatures,
+  hideFeatureScreens
+} from "./features.js";
 import { registerServiceWorker } from "./push.js";
 import {
   getStoredChatCode,
@@ -68,7 +78,11 @@ const PINNED_CHATS_KEY = "rh_pinned_chats";
 const CHAT_TITLES_KEY = "rh_chat_titles";
 
 const els = {
+  screenHome: document.getElementById("screen-home"),
   screenList: document.getElementById("screen-list"),
+  menuChatBtn: document.getElementById("menu-chat"),
+  menuChatIcon: document.getElementById("menu-chat-icon"),
+  chatsBackBtn: document.getElementById("chats-back-btn"),
   screenDetail: document.getElementById("screen-detail"),
   backBtn: document.getElementById("back-btn"),
   detailDateTitle: document.getElementById("detail-date-title"),
@@ -94,8 +108,8 @@ const els = {
   waNewChatMessage: document.getElementById("wa-new-chat-message"),
   waNewChatError: document.getElementById("wa-new-chat-error"),
   waNewChatCancel: document.getElementById("wa-new-chat-cancel"),
-  settingsWhatsappBtn: document.getElementById("settings-whatsapp-btn"),
-  settingsWhatsappIcon: document.getElementById("settings-whatsapp-icon"),
+  menuWhatsappBtn: document.getElementById("menu-whatsapp"),
+  menuWhatsappIcon: document.getElementById("menu-whatsapp-icon"),
   langToggle: document.getElementById("lang-toggle"),
   langLabel: document.getElementById("lang-label"),
   themeToggle: document.getElementById("theme-toggle"),
@@ -162,14 +176,18 @@ const els = {
   settingsToggle: document.getElementById("settings-toggle"),
   settingsToggleIcon: document.getElementById("settings-toggle-icon"),
   settingsDialog: document.getElementById("settings-dialog"),
-  settingsKbBtn: document.getElementById("settings-kb-btn"),
-  settingsKbIcon: document.getElementById("settings-kb-icon"),
+  menuKbBtn: document.getElementById("menu-kb"),
+  menuKbIcon: document.getElementById("menu-kb-icon"),
   settingsChangeCodeBtn: document.getElementById("settings-change-code-btn"),
   settingsChangeCodeIcon: document.getElementById("settings-change-code-icon"),
   settingsLogoutBtn: document.getElementById("settings-logout-btn"),
   settingsLogoutIcon: document.getElementById("settings-logout-icon"),
-  settingsAboutBtn: document.getElementById("settings-about-btn"),
-  settingsAboutIcon: document.getElementById("settings-about-icon"),
+  menuAboutBtn: document.getElementById("menu-about"),
+  menuPrayerBtn: document.getElementById("menu-prayer"),
+  menuPrayerIcon: document.getElementById("menu-prayer-icon"),
+  menuQuranBtn: document.getElementById("menu-quran"),
+  menuQuranIcon: document.getElementById("menu-quran-icon"),
+  menuAboutIcon: document.getElementById("menu-about-icon"),
   settingsCancelBtn: document.getElementById("settings-cancel-btn"),
   kbDialog: document.getElementById("kb-dialog"),
   kbUploadForm: document.getElementById("kb-upload-form"),
@@ -180,10 +198,10 @@ const els = {
   kbDocList: document.getElementById("kb-doc-list"),
   kbDocListEmpty: document.getElementById("kb-doc-list-empty"),
   kbCloseBtn: document.getElementById("kb-close-btn"),
-  settingsQrBtn: document.getElementById("settings-qr-btn"),
-  settingsQrIcon: document.getElementById("settings-qr-icon"),
-  settingsKeysBtn: document.getElementById("settings-keys-btn"),
-  settingsKeysIcon: document.getElementById("settings-keys-icon"),
+  menuQrBtn: document.getElementById("menu-qr"),
+  menuQrIcon: document.getElementById("menu-qr-icon"),
+  menuKeysBtn: document.getElementById("menu-keys"),
+  menuKeysIcon: document.getElementById("menu-keys-icon"),
   qrDialog: document.getElementById("qr-dialog"),
   qrForm: document.getElementById("qr-form"),
   qrTitleInput: document.getElementById("qr-title-input"),
@@ -1043,7 +1061,16 @@ function handleRoute() {
   // atau rute WhatsApp (#wa, #wa/<jid yang di-encode>).
   const match = location.hash.match(/^#d\/([0-9a-zA-Z_-]{1,60})$/);
   const waMatch = location.hash.match(/^#wa(?:\/(.+))?$/);
-  if (match) {
+  stopFeatures();
+  if (location.hash === "#prayer") {
+    stopWaPolling();
+    hideAllScreens();
+    showPrayerScreen();
+  } else if (/^#quran(\/.*)?$/.test(location.hash)) {
+    stopWaPolling();
+    hideAllScreens();
+    showQuranScreen(location.hash);
+  } else if (match) {
     showDetailScreen(match[1]);
   } else if (waMatch) {
     if (waMatch[1]) {
@@ -1051,16 +1078,29 @@ function handleRoute() {
     } else {
       showWaListScreen();
     }
-  } else {
+  } else if (location.hash === "#chats") {
     showListScreen();
+  } else {
+    showHomeScreen();
   }
+}
+
+function showHomeScreen() {
+  stopWaPolling();
+  hideAllScreens();
+  els.screenHome.hidden = false;
 }
 
 function openDetail(date) {
   location.hash = `d/${date}`;
 }
 
+// "Daftar" = daftar obrolan AI (#chats); beranda menu = hash kosong.
 function openList() {
+  location.hash = "chats";
+}
+
+function openHome() {
   location.hash = "";
 }
 
@@ -1095,10 +1135,12 @@ function stopWaPolling() {
 }
 
 function hideAllScreens() {
+  els.screenHome.hidden = true;
   els.screenList.hidden = true;
   els.screenDetail.hidden = true;
   els.screenWaList.hidden = true;
   els.screenWaDetail.hidden = true;
+  hideFeatureScreens();
 }
 
 async function showWaListScreen() {
@@ -1944,8 +1986,11 @@ function wireEvents() {
   });
 
   els.waListBackBtn.addEventListener("click", () => {
-    openList();
+    openHome();
   });
+
+  els.chatsBackBtn.addEventListener("click", () => openHome());
+  els.menuChatBtn.addEventListener("click", () => openList());
 
   els.waDetailBackBtn.addEventListener("click", () => {
     openWaList();
@@ -2296,13 +2341,17 @@ function wireEvents() {
   // Sama kayak di atas: ikon tombol Pengaturan & isi menunya statis, cukup
   // dipasang sekali.
   els.settingsToggleIcon.innerHTML = ICON_SETTINGS;
-  els.settingsKbIcon.innerHTML = ICON_UPLOAD;
-  els.settingsWhatsappIcon.innerHTML = ICON_CHAT;
-  els.settingsQrIcon.innerHTML = ICON_ZAP;
-  els.settingsKeysIcon.innerHTML = ICON_GAUGE;
+  els.menuChatIcon.innerHTML = ICON_SPARK;
+  els.menuKbIcon.innerHTML = ICON_UPLOAD;
+  els.menuWhatsappIcon.innerHTML = ICON_CHAT;
+  els.menuQrIcon.innerHTML = ICON_ZAP;
+  els.menuKeysIcon.innerHTML = ICON_GAUGE;
   els.settingsChangeCodeIcon.innerHTML = ICON_KEY;
   els.settingsLogoutIcon.innerHTML = ICON_LOGOUT;
-  els.settingsAboutIcon.innerHTML = ICON_INFO;
+  els.menuAboutIcon.innerHTML = ICON_INFO;
+  els.menuPrayerIcon.innerHTML = ICON_PRAYER;
+  els.menuQuranIcon.innerHTML = ICON_BOOK;
+  document.getElementById("prayer-refresh-icon").innerHTML = ICON_LOCATE;
 
   // ---------- Menu titik-3 PER-PESAN (di dalam obrolan): salin / hapus ----------
 
@@ -2554,9 +2603,9 @@ function wireEvents() {
     if (e.target === els.settingsDialog) closeSettingsDialog();
   });
 
-  els.settingsKbBtn.addEventListener("click", () => openKbDialog());
+  els.menuKbBtn.addEventListener("click", () => openKbDialog());
 
-  els.settingsWhatsappBtn.addEventListener("click", () => {
+  els.menuWhatsappBtn.addEventListener("click", () => {
     closeSettingsDialog();
     openWaList();
   });
@@ -2591,7 +2640,17 @@ function wireEvents() {
     }
   });
 
-  els.settingsAboutBtn.addEventListener("click", () => {
+  els.menuPrayerBtn.addEventListener("click", () => {
+    closeSettingsDialog();
+    location.hash = "prayer";
+  });
+
+  els.menuQuranBtn.addEventListener("click", () => {
+    closeSettingsDialog();
+    location.hash = "quran";
+  });
+
+  els.menuAboutBtn.addEventListener("click", () => {
     closeSettingsDialog();
     els.aboutChatsCount.textContent = String(getFreeformThreads().length);
     els.aboutCodeStatus.textContent = t(state.lang, state.chatCode ? "about_code_unlocked" : "about_code_locked");
@@ -2607,8 +2666,8 @@ function wireEvents() {
     }
   });
 
-  els.settingsQrBtn.addEventListener("click", () => openQrDialog());
-  els.settingsKeysBtn.addEventListener("click", () => openKeysDialog());
+  els.menuQrBtn.addEventListener("click", () => openQrDialog());
+  els.menuKeysBtn.addEventListener("click", () => openKeysDialog());
 
   els.qrCloseBtn.addEventListener("click", () => closeDialogEl(els.qrDialog));
   els.qrDialog.addEventListener("click", (e) => {
@@ -2770,6 +2829,7 @@ async function main() {
   applyTheme();
   applyLang();
   wireEvents();
+  initFeatures({ getLang: () => state.lang, getCode: () => state.chatCode });
   fixStickyHeaderOnIOSKeyboard();
   await registerServiceWorker();
   await initChat();

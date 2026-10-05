@@ -152,3 +152,22 @@ export function deleteKnowledgeDoc(code, id) {
 export function fetchKeyStatus(code) {
   return callChatFunction({ code, action: "key_status" });
 }
+
+// ================================================================
+// Al-Qur'an: terakhir dibaca + bookmark (lihat quran.js & migrations/0014).
+// ================================================================
+export function quranSync(code) {
+  return callChatFunction({ code, action: "quran_sync" });
+}
+
+export function quranSetLastRead(code, { surah, ayah, page }) {
+  return callChatFunction({ code, action: "quran_set_last_read", surah, ayah, page });
+}
+
+export function quranAddBookmark(code, { surah, ayah, page }) {
+  return callChatFunction({ code, action: "quran_add_bookmark", surah, ayah, page });
+}
+
+export function quranDeleteBookmark(code, { surah, ayah }) {
+  return callChatFunction({ code, action: "quran_delete_bookmark", surah, ayah });
+}

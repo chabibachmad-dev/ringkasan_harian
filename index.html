@@ -21,7 +21,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
-      href="https://fonts.googleapis.com/css2?family=Ubuntu+Mono:wght@400;700&display=swap"
+      href="https://fonts.googleapis.com/css2?family=Amiri+Quran&family=Ubuntu+Mono:wght@400;700&display=swap"
       rel="stylesheet"
     />
 
@@ -29,8 +29,8 @@
   </head>
   <body>
     <div id="app">
-      <!-- Layar 1: daftar tanggal, mirip daftar chat WhatsApp -->
-      <section id="screen-list" class="screen">
+      <!-- Beranda: menu daftar + thumbnail ke semua fitur -->
+      <section id="screen-home" class="screen">
         <header class="topbar">
           <h1 class="brand"><span data-i18n="brand">Daily Insider</span></h1>
           <div class="topbar-actions">
@@ -43,6 +43,57 @@
             <button id="settings-toggle" class="icon-btn" title="Pengaturan" aria-label="Pengaturan">
               <span id="settings-toggle-icon"></span>
             </button>
+          </div>
+        </header>
+
+        <main class="content">
+          <nav class="menu-grid" aria-label="Menu">
+            <button type="button" id="menu-chat" class="menu-item">
+              <span id="menu-chat-icon" class="menu-thumb"></span>
+              <span class="menu-caption" data-i18n="menu_s_chat">Chat AI</span>
+            </button>
+            <button type="button" id="menu-whatsapp" class="menu-item">
+              <span id="menu-whatsapp-icon" class="menu-thumb"></span>
+              <span class="menu-caption" data-i18n="menu_s_whatsapp">WhatsApp</span>
+            </button>
+            <button type="button" id="menu-prayer" class="menu-item">
+              <span id="menu-prayer-icon" class="menu-thumb"></span>
+              <span class="menu-caption" data-i18n="menu_s_prayer">Shalat</span>
+            </button>
+            <button type="button" id="menu-quran" class="menu-item">
+              <span id="menu-quran-icon" class="menu-thumb"></span>
+              <span class="menu-caption" data-i18n="menu_s_quran">Al-Qur'an</span>
+            </button>
+            <button type="button" id="menu-kb" class="menu-item">
+              <span id="menu-kb-icon" class="menu-thumb"></span>
+              <span class="menu-caption" data-i18n="menu_s_kb">Dokumen</span>
+            </button>
+            <button type="button" id="menu-qr" class="menu-item">
+              <span id="menu-qr-icon" class="menu-thumb"></span>
+              <span class="menu-caption" data-i18n="menu_s_qr">Template WA</span>
+            </button>
+            <button type="button" id="menu-keys" class="menu-item">
+              <span id="menu-keys-icon" class="menu-thumb"></span>
+              <span class="menu-caption" data-i18n="menu_s_keys">API Gemini</span>
+            </button>
+            <button type="button" id="menu-about" class="menu-item">
+              <span id="menu-about-icon" class="menu-thumb"></span>
+              <span class="menu-caption" data-i18n="menu_s_about">Info</span>
+            </button>
+          </nav>
+        </main>
+
+        <footer class="footer">
+          <p data-i18n="footer_note">Asisten AI pribadi kamu.</p>
+        </footer>
+      </section>
+
+      <!-- Layar 1: daftar tanggal, mirip daftar chat WhatsApp -->
+      <section id="screen-list" class="screen" hidden>
+        <header class="topbar detail-topbar">
+          <div class="detail-topbar-row">
+            <button id="chats-back-btn" class="icon-btn" title="Kembali" aria-label="Kembali">←</button>
+            <h1 class="detail-title" data-i18n="menu_chat">Chat dengan AI</h1>
           </div>
         </header>
 
@@ -209,6 +260,55 @@
         </div>
       </section>
 
+      <!-- Layar Jadwal Shalat: dihitung lokal (metode Kemenag RI) dari lokasi GPS. -->
+      <section id="screen-prayer" class="screen" hidden>
+        <header class="topbar detail-topbar">
+          <div class="detail-topbar-row">
+            <button id="prayer-back-btn" class="icon-btn" title="Kembali" aria-label="Kembali">←</button>
+            <h1 class="detail-title" data-i18n="prayer_title">Jadwal Shalat</h1>
+            <button id="prayer-refresh-btn" class="icon-btn" title="Perbarui lokasi" aria-label="Perbarui lokasi"><span id="prayer-refresh-icon"></span></button>
+          </div>
+        </header>
+        <main class="content" id="prayer-body"></main>
+      </section>
+
+      <!-- Layar Al-Qur'an: beranda (terakhir dibaca, surah/juz/bookmark) + pembaca per halaman mushaf. -->
+      <section id="screen-quran" class="screen" hidden>
+        <header class="topbar detail-topbar">
+          <div class="detail-topbar-row">
+            <button id="quran-back-btn" class="icon-btn" title="Kembali" aria-label="Kembali">←</button>
+            <h1 id="quran-title" class="detail-title" data-i18n="quran_title">Al-Qur'an</h1>
+            <span id="quran-font-controls" class="quran-font-controls" hidden>
+              <button type="button" id="quran-font-minus" class="icon-btn icon-btn--small" aria-label="Perkecil huruf" title="Perkecil huruf">A−</button>
+              <button type="button" id="quran-font-plus" class="icon-btn icon-btn--small" aria-label="Perbesar huruf" title="Perbesar huruf">A+</button>
+            </span>
+          </div>
+        </header>
+        <main class="content">
+          <div id="quran-home" class="quran-home"></div>
+          <div id="quran-reader" class="quran-reader" hidden>
+            <article id="quran-page-body" class="quran-page"></article>
+          </div>
+        </main>
+        <div id="quran-reader-bar" class="quran-bars" hidden>
+          <div id="quran-actions" class="quran-actions" hidden>
+            <span id="quran-actions-label" class="quran-actions-label"></span>
+            <button type="button" id="quran-act-bookmark" class="quran-act"></button>
+            <button type="button" id="quran-act-last" class="quran-act" data-i18n="quran_mark_last">Tandai terakhir dibaca</button>
+            <button type="button" id="quran-act-copy" class="quran-act" data-i18n="quran_copy">Salin</button>
+            <button type="button" id="quran-act-close" class="quran-act" data-i18n="quran_close">Tutup</button>
+          </div>
+          <div class="quran-nav">
+            <button type="button" id="quran-nav-prev" class="secondary-btn" data-i18n="quran_prev">‹ Sebelumnya</button>
+            <span class="quran-nav-page">
+              <input id="quran-page-input" type="number" inputmode="numeric" min="1" max="604" aria-label="Halaman" />
+              <span id="quran-page-total"></span>
+            </span>
+            <button type="button" id="quran-nav-next" class="secondary-btn" data-i18n="quran_next">Berikutnya ›</button>
+          </div>
+        </div>
+      </section>
+
       <!-- Popup kode akses -->
       <dialog id="chat-code-dialog" class="chat-code-dialog">
         <form id="chat-code-form" class="chat-code-form-modal">
@@ -360,22 +460,6 @@
         <div class="sheet-card">
           <p class="sheet-title" data-i18n="settings_title">Pengaturan</p>
 
-          <button type="button" id="settings-kb-btn" class="sheet-action">
-            <span id="settings-kb-icon" class="sheet-action-icon"></span>
-            <span data-i18n="settings_kb">Dokumen Pengetahuan</span>
-          </button>
-          <button type="button" id="settings-whatsapp-btn" class="sheet-action">
-            <span id="settings-whatsapp-icon" class="sheet-action-icon"></span>
-            <span data-i18n="settings_whatsapp">WhatsApp</span>
-          </button>
-          <button type="button" id="settings-qr-btn" class="sheet-action">
-            <span id="settings-qr-icon" class="sheet-action-icon"></span>
-            <span data-i18n="settings_qr">Template Jawaban WA</span>
-          </button>
-          <button type="button" id="settings-keys-btn" class="sheet-action">
-            <span id="settings-keys-icon" class="sheet-action-icon"></span>
-            <span data-i18n="settings_keys">Status API Gemini</span>
-          </button>
           <button type="button" id="settings-change-code-btn" class="sheet-action">
             <span id="settings-change-code-icon" class="sheet-action-icon"></span>
             <span data-i18n="settings_change_code">Ubah kode chat</span>
@@ -383,10 +467,6 @@
           <button type="button" id="settings-logout-btn" class="sheet-action">
             <span id="settings-logout-icon" class="sheet-action-icon"></span>
             <span data-i18n="settings_logout">Keluar chat</span>
-          </button>
-          <button type="button" id="settings-about-btn" class="sheet-action">
-            <span id="settings-about-icon" class="sheet-action-icon"></span>
-            <span data-i18n="settings_about">Detail aplikasi</span>
           </button>
 
           <button type="button" id="settings-cancel-btn" class="sheet-cancel" data-i18n="chat_options_cancel">Batal</button>

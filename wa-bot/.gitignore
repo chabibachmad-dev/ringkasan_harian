@@ -10,3 +10,6 @@ auth_session/
 
 # Bendera pemicu tes ringkasan (dibuat sementara, dihapus bot setelah dipakai)
 kirim-ringkasan.flag
+
+# Status jeda auto-reply setelah balasan manual
+ai-pause.json
