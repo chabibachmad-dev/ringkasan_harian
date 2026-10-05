@@ -160,6 +160,23 @@ const WA_TIMEZONE_LABEL = process.env.WA_TIMEZONE_LABEL || "WITA";
 // WA_OWNER_NUMBER diisi (matikan lewat WA_DAILY_SUMMARY_ENABLED=false).
 const WA_DAILY_SUMMARY_ENABLED = OWNER_JID !== null && (process.env.WA_DAILY_SUMMARY_ENABLED || "true").toLowerCase() !== "false";
 const WA_DAILY_SUMMARY_HOUR = Math.min(23, Math.max(0, Number(process.env.WA_DAILY_SUMMARY_HOUR ?? 20) || 20));
+// Mesin pembuat ringkasan harian: "ollama" (DEFAULT -- model lokal di laptop ini,
+// isi percakapan WA tidak keluar dari laptop & tidak makan kuota Gemini) atau
+// "gemini". Kalau "ollama" gagal (mis. "ollama serve" mati), WA_SUMMARY_GEMINI_FALLBACK
+// (default true) mengizinkan jatuh ke Gemini; set "false" kalau mau ketat: isi
+// percakapan TIDAK BOLEH dikirim ke Google sama sekali (gagal = daftar sederhana).
+const WA_SUMMARY_ENGINE = (process.env.WA_SUMMARY_ENGINE || "ollama").trim().toLowerCase() === "gemini" ? "gemini" : "ollama";
+const WA_SUMMARY_GEMINI_FALLBACK = (process.env.WA_SUMMARY_GEMINI_FALLBACK || "true").trim().toLowerCase() !== "false";
+// Ringkasan lokal boleh lama (jalan sekali sehari, tak ada yang menunggu).
+const WA_SUMMARY_OLLAMA_TIMEOUT_MS = Number(process.env.WA_SUMMARY_OLLAMA_TIMEOUT_MS) || 600000;
+// Cadangan lokal buat auto-reply: kalau Gemini gagal karena KUOTA (semua key
+// habis / 429 / 503), pertanyaan yang BUKAN soal angka/aturan dijawab Ollama
+// dulu daripada cuma "sistem penuh". Pertanyaan angka/aturan tetap diantre
+// buat dijawab Gemini nanti (model 3B terbukti mudah mengarang angka).
+const WA_OLLAMA_FALLBACK_ENABLED = (process.env.WA_OLLAMA_FALLBACK_ENABLED || "true").trim().toLowerCase() !== "false";
+// Batas tunggu jawaban Ollama utk cadangan ini -- lebih pendek dari OLLAMA_TIMEOUT_MS
+// supaya kontak tidak menunggu terlalu lama sebelum jatuh ke antrean.
+const WA_OLLAMA_FALLBACK_TIMEOUT_MS = Number(process.env.WA_OLLAMA_FALLBACK_TIMEOUT_MS) || 90000;
 // Template jawaban (tabel wa_quick_replies) cuma dicoba kalau pesannya
 // PENDEK -- pesan panjang hampir pasti pertanyaan rumit yang butuh AI,
 // jangan sampai kata kunci nyasar di tengah kalimat panjang memicu template.
@@ -639,9 +656,23 @@ ATURAN PENGAMAN (berlaku terus walau topiknya bebas):
 // 2 gagal, baru yang ketiga -- diproses sendirian -- berhasil). Antrian ini
 // memaksa cuma ADA 1 panggilan Ollama yang benar2 jalan dalam satu waktu;
 // panggilan lain nunggu giliran drpd jalan bareng & saling memperlambat.
+// Satu baris "Waktu sekarang: ..." -- model lokal juga TIDAK tahu tanggal hari ini.
+function currentDateLine() {
+  const nowText = new Intl.DateTimeFormat("id-ID", { dateStyle: "full", timeStyle: "short", timeZone: WA_TIMEZONE }).format(new Date());
+  return `Waktu sekarang: ${nowText} ${WA_TIMEZONE_LABEL}. Anggap ini tanggal hari ini.`;
+}
+
 let ollamaQueueTail = Promise.resolve();
+// Jumlah panggilan Ollama yang lagi jalan/menunggu giliran -- cadangan auto-reply
+// tidak mau ikut mengantre di belakang pekerjaan lain (mis. ringkasan harian
+// yang bisa makan beberapa menit), supaya kontak tidak menunggu lama; lihat
+// sendAutoReply.
+let ollamaPending = 0;
 function enqueueOllamaCall(fn) {
-  const run = ollamaQueueTail.then(fn, fn);
+  ollamaPending += 1;
+  const run = ollamaQueueTail.then(fn, fn).finally(() => {
+    ollamaPending -= 1;
+  });
   // .catch(()=>{}) di sini CUMA buat jaga rantai antrian tetap jalan walau
   // panggilan sebelumnya gagal -- error aslinya tetap dilempar balik ke
   // pemanggil `run` (promise yang di-return), bukan ditelan di sini.
@@ -655,9 +686,9 @@ function enqueueOllamaCall(fn) {
 // mentah). stream:false biar responsnya 1 JSON utuh sekali balik, bukan
 // potongan-potongan (lebih gampang ditangani drpd streaming, auto-reply WA
 // toh baru dikirim setelah teksnya LENGKAP).
-async function callOllamaChat(messages) {
+async function callOllamaChat(messages, { timeoutMs = OLLAMA_TIMEOUT_MS, maxTokens = OLLAMA_MAX_OUTPUT_TOKENS, numCtx = OLLAMA_NUM_CTX } = {}) {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), OLLAMA_TIMEOUT_MS);
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
   let res;
   try {
     res = await fetch(`${OLLAMA_BASE_URL}/api/chat`, {
@@ -673,13 +704,13 @@ async function callOllamaChat(messages) {
         // tidak kena ongkos "load_duration" lagi (~5-8 detik dari hasil tes
         // user -- lumayan kalau CPU-nya memang sudah pas-pasan).
         keep_alive: "10m",
-        options: { num_ctx: OLLAMA_NUM_CTX, num_predict: OLLAMA_MAX_OUTPUT_TOKENS, temperature: 0.4 }
+        options: { num_ctx: numCtx, num_predict: maxTokens, temperature: 0.4 }
       }),
       signal: controller.signal
     });
   } catch (err) {
     if (err?.name === "AbortError") {
-      throw new Error(`Ollama tidak merespons dalam ${OLLAMA_TIMEOUT_MS}ms (timeout).`);
+      throw new Error(`Ollama tidak merespons dalam ${timeoutMs}ms (timeout).`);
     }
     throw new Error(`Gagal hubungi Ollama di ${OLLAMA_BASE_URL} -- apakah "ollama serve" jalan? (${err instanceof Error ? err.message : String(err)})`);
   } finally {
@@ -702,7 +733,7 @@ async function callOllamaChat(messages) {
 // 0 (model lokal, tidak ada biaya/kuota token API) -- recordTokenUsage
 // sudah otomatis skip kalau tokensUsed 0, jadi tidak mencemari angka
 // pemakaian Gemini di footer aplikasi.
-async function generateAutoReplyWithOllama(jid) {
+async function generateAutoReplyWithOllama(jid, { timeoutMs } = {}) {
   const { data: historyRowsDesc, error: historyErr } = await supabase
     .from("whatsapp_messages")
     .select("direction, content")
@@ -748,7 +779,10 @@ async function generateAutoReplyWithOllama(jid) {
   // permintaan ini BENERAN dieksekusi (bukan dari saat masuk antrian), jadi
   // nunggu antrian TIDAK ikut makan jatah waktu timeout-nya.
   const replyText = await enqueueOllamaCall(() =>
-    callOllamaChat([{ role: "system", content: WA_OLLAMA_SYSTEM_PROMPT }, ...messages])
+    callOllamaChat(
+      [{ role: "system", content: `${WA_OLLAMA_SYSTEM_PROMPT}\n\n${currentDateLine()}` }, ...messages],
+      timeoutMs ? { timeoutMs } : {}
+    )
   );
 
   return { reply: replyText.trim(), tokensUsed: 0, costUsd: 0 };
@@ -1514,6 +1548,39 @@ async function deliverAutoReplyText(sock, jid, result, logLabel = "🤖 Auto-rep
   await recordTokenUsage(result.tokensUsed, result.costUsd);
 }
 
+// Pesan yang jawabannya harus AKURAT (angka, tarif, aturan, uang) -- JANGAN
+// dijawab model lokal 3B yang mudah mengarang; biarkan diantre buat Gemini.
+const NEEDS_ACCURATE_FIGURES_RE =
+  /\d|\b(tarif|biaya|harga|berapa|nominal|rp|rupiah|persen|pmk|sbm|sbk|uu|perpres|peraturan|aturan|honor|honorarium|gaji|tunjangan|pajak|denda|sanksi|batas|plafon|pagu|anggaran)\b|%/i;
+
+// Return { reply, tokensUsed: 0, costUsd: 0 } kalau cadangan lokal berhasil
+// menjawab, atau null (lanjut ke jalur antrean seperti biasa).
+async function tryLocalFallbackReply(sock, jid, incomingText, err) {
+  if (!WA_OLLAMA_FALLBACK_ENABLED || WA_AI_ENGINE === "ollama") return null;
+  // Hanya untuk kegagalan KUOTA/kepadatan (semua key habis, 429, 503) -- bukan
+  // error lain (mis. respons kosong) yang tidak ada hubungannya dgn kuota.
+  const quotaLike = err?.allKeysExhausted === true || err?.status === 429 || err?.status === 503;
+  if (!quotaLike) return null;
+  if (!incomingText || incomingText.startsWith("[") || NEEDS_ACCURATE_FIGURES_RE.test(incomingText)) return null;
+  if (ollamaPending > 0) {
+    console.log("🦙 Cadangan lokal dilewati: Ollama lagi sibuk.");
+    return null;
+  }
+  // Kontak yang sudah punya antrean aktif tidak dijawab dobel.
+  const { data: pending } = await supabase.from("wa_retry_queue").select("id").eq("wa_jid", jid).eq("status", "pending").limit(1);
+  if (pending && pending.length > 0) return null;
+  try {
+    sock.sendPresenceUpdate("composing", jid).catch(() => {});
+    const local = await generateAutoReplyWithOllama(jid, { timeoutMs: WA_OLLAMA_FALLBACK_TIMEOUT_MS });
+    sock.sendPresenceUpdate("paused", jid).catch(() => {});
+    return local && local.reply ? local : null;
+  } catch (fbErr) {
+    sock.sendPresenceUpdate("paused", jid).catch(() => {});
+    console.error(`Cadangan lokal (Ollama) gagal utk ${jid}, lanjut ke antrean:`, fbErr instanceof Error ? fbErr.message : String(fbErr));
+    return null;
+  }
+}
+
 async function sendAutoReply(sock, jid, incomingText) {
   // 1) Template jawaban dulu -- kalau cocok, AI tidak dipanggil sama sekali.
   try {
@@ -1541,6 +1608,14 @@ async function sendAutoReply(sock, jid, incomingText) {
     const errMsg = err instanceof Error ? err.message : String(err);
     console.error(`Gagal generate auto-reply utk ${jid}:`, errMsg);
     sock.sendPresenceUpdate("paused", jid).catch(() => {});
+
+    // Cadangan lokal: Gemini gagal karena KUOTA & pertanyaannya bukan soal
+    // angka/aturan -> coba jawab pakai Ollama (gratis, tanpa kuota) dulu.
+    const localResult = await tryLocalFallbackReply(sock, jid, incomingText, err);
+    if (localResult) {
+      await deliverAutoReplyText(sock, jid, localResult, "🦙 Auto-reply (cadangan lokal)");
+      return;
+    }
 
     // Antre buat dicoba lagi otomatis nanti (lihat processRetryQueue). Kalau
     // kontak ini SUDAH punya antrean aktif, permintaan maaf tidak dikirim
@@ -1620,6 +1695,28 @@ Struktur jawaban:
 3) Penutup "*Perlu ditindaklanjuti:*" berisi daftar singkat hal yang butuh keputusan/jawaban manual dari pemilik (permintaan mendesak, negosiasi, hal pribadi/emosional, pertanyaan yang belum terjawab bot). Kalau tidak ada, tulis "Tidak ada".
 Aturan: JANGAN mengarang fakta, angka, atau janji yang tidak ada di percakapan. Maksimal sekitar 250 kata.`;
 
+// Batas panjang transkrip utk Ollama (karakter): ±7000 karakter Indonesia =
+// ±2000 token, + prompt sistem ±300 + jawaban hingga 700 token = masih muat di
+// jendela 4096 token.
+const OLLAMA_SUMMARY_MAX_CHARS = 7000;
+const OLLAMA_SUMMARY_MAX_TOKENS = 700;
+
+async function summarizeWithOllama(transcript) {
+  return enqueueOllamaCall(() =>
+    callOllamaChat(
+      [
+        { role: "system", content: `${SUMMARY_SYSTEM_PROMPT}\n\n${currentDateLine()}` },
+        { role: "user", content: transcript }
+      ],
+      {
+        timeoutMs: WA_SUMMARY_OLLAMA_TIMEOUT_MS,
+        maxTokens: OLLAMA_SUMMARY_MAX_TOKENS,
+        numCtx: Math.max(OLLAMA_NUM_CTX, 4096)
+      }
+    )
+  );
+}
+
 async function buildDailySummaryText(dateStr, { allowAi = true } = {}) {
   const startMs = zonedStartOfDayUtcMs(dateStr, WA_TIMEZONE);
   const { data: rows, error } = await supabase
@@ -1678,29 +1775,55 @@ async function buildDailySummaryText(dateStr, { allowAi = true } = {}) {
       })
       .join("\n\n");
 
-  let limit = 25;
-  let transcript = buildTranscript(limit);
-  while (transcript.length > 14000 && limit > 3) {
-    limit = Math.floor(limit / 2);
-    transcript = buildTranscript(limit);
-  }
-
-  if (allowAi && GEMINI_API_KEYS.length > 0) {
-    const data = await geminiGenerateWithRotation(
-      SUMMARY_SYSTEM_PROMPT,
-      [{ role: "user", parts: [{ text: transcript }] }],
-      { useSearch: false }
-    );
-    const aiText = extractGeminiText(data).trim();
-    if (!aiText) throw new Error("Respons Gemini untuk ringkasan kosong.");
-    const tokensUsed = data?.usageMetadata?.totalTokenCount ?? 0;
-    if (tokensUsed > 0) {
-      await recordTokenUsage(
-        tokensUsed,
-        estimateCostUsd(GEMINI_MODEL, tokensUsed * 0.7, tokensUsed * 0.3)
-      );
+  // Potong transkrip sampai muat `maxChars` (kurangi jumlah pesan per kontak,
+  // terakhir baru dipotong paksa).
+  const fitTranscript = (maxChars) => {
+    let limit = 25;
+    let t = buildTranscript(limit);
+    while (t.length > maxChars && limit > 2) {
+      limit = Math.floor(limit / 2);
+      t = buildTranscript(limit);
     }
-    return `${header}\n${statsLine}\n\n${aiText}${pendingLine}`;
+    return t.length > maxChars ? `${t.slice(0, maxChars)}\n[...dipotong...]` : t;
+  };
+
+  if (allowAi) {
+    // 1) Ollama (lokal) dulu kalau WA_SUMMARY_ENGINE=ollama: isi percakapan
+    //    tidak keluar laptop & tidak makan kuota Gemini. Anggaran teks kecil
+    //    krn jendela konteks Ollama cuma OLLAMA_NUM_CTX (4096 token) &
+    //    jawabannya pun dibatasi -- prompt + transkrip + jawaban harus muat.
+    if (WA_SUMMARY_ENGINE === "ollama") {
+      try {
+        const localText = (await summarizeWithOllama(fitTranscript(OLLAMA_SUMMARY_MAX_CHARS))).trim();
+        if (!localText) throw new Error("Respons Ollama untuk ringkasan kosong.");
+        console.log("📋 Ringkasan harian dibuat model lokal (Ollama).");
+        return `${header}\n${statsLine}\n\n${localText}\n\n_(Dirangkum model lokal di laptop -- hal penting, cek langsung ya.)_${pendingLine}`;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error(`Ringkasan lokal (Ollama) gagal: ${msg}`);
+        if (!WA_SUMMARY_GEMINI_FALLBACK || GEMINI_API_KEYS.length === 0) throw err;
+        console.log("📋 Ringkasan harian: jatuh ke Gemini (WA_SUMMARY_GEMINI_FALLBACK=true).");
+      }
+    }
+
+    // 2) Gemini (mesin utama kalau WA_SUMMARY_ENGINE=gemini, atau cadangan).
+    if (GEMINI_API_KEYS.length > 0) {
+      const data = await geminiGenerateWithRotation(
+        SUMMARY_SYSTEM_PROMPT,
+        [{ role: "user", parts: [{ text: fitTranscript(14000) }] }],
+        { useSearch: false }
+      );
+      const aiText = extractGeminiText(data).trim();
+      if (!aiText) throw new Error("Respons Gemini untuk ringkasan kosong.");
+      const tokensUsed = data?.usageMetadata?.totalTokenCount ?? 0;
+      if (tokensUsed > 0) {
+        await recordTokenUsage(
+          tokensUsed,
+          estimateCostUsd(GEMINI_MODEL, tokensUsed * 0.7, tokensUsed * 0.3)
+        );
+      }
+      return `${header}\n${statsLine}\n\n${aiText}${pendingLine}`;
+    }
   }
 
   // Cadangan tanpa AI (belum ada API key / semua habis / AI gagal berkali2):
@@ -2002,7 +2125,10 @@ setInterval(() => {
 }, 60_000);
 primeExhaustedKeysFromDb().catch(() => {});
 console.log(
-  `📋 Ringkasan harian ke pemilik: ${WA_DAILY_SUMMARY_ENABLED ? `AKTIF (tiap hari setelah ${String(WA_DAILY_SUMMARY_HOUR).padStart(2, "0")}:00 ${WA_TIMEZONE_LABEL})` : "mati (isi WA_OWNER_NUMBER di .env buat menyalakan)"}`
+  `📋 Ringkasan harian ke pemilik: ${WA_DAILY_SUMMARY_ENABLED ? `AKTIF (tiap hari setelah ${String(WA_DAILY_SUMMARY_HOUR).padStart(2, "0")}:00 ${WA_TIMEZONE_LABEL}, mesin: ${WA_SUMMARY_ENGINE}${WA_SUMMARY_ENGINE === "ollama" ? `, cadangan Gemini: ${WA_SUMMARY_GEMINI_FALLBACK ? "ya" : "tidak"}` : ""})` : "mati (isi WA_OWNER_NUMBER di .env buat menyalakan)"}`
+);
+console.log(
+  `🦙 Cadangan lokal auto-reply (Ollama, saat kuota Gemini habis): ${AUTO_REPLY_ACTIVE && WA_AI_ENGINE === "gemini" && WA_OLLAMA_FALLBACK_ENABLED ? `AKTIF (model ${OLLAMA_MODEL}, hanya pertanyaan non-angka)` : "mati"}`
 );
 
 // Jaga-jaga: bot ini harus jalan LAMA tanpa diawasi -- jangan sampai mati

@@ -276,10 +276,24 @@ sehari) berisi perkiraan jam kuota kembali.
 setelah jam `WA_DAILY_SUMMARY_HOUR` (default 20:00 WITA) bot merangkum semua
 percakapan WA hari itu dengan Gemini dan mengirimnya ke nomor pemilik:
 gambaran umum, ringkasan per kontak, dan daftar yang perlu ditindaklanjuti
-manual. Ringkasan ini memakai 1 request Gemini per hari. Kalau AI sedang tidak
-tersedia setelah 3 kali percobaan, yang terkirim daftar sederhana tanpa AI.
-Kalau bot mati pada jam itu, ringkasan terkirim begitu bot nyala lagi di hari
-yang sama.
+manual. Secara default ringkasan dibuat **Ollama (model lokal di laptop)**:
+isi percakapan tidak keluar dari laptop dan tidak memakai kuota Gemini
+(`WA_SUMMARY_ENGINE=ollama`; ubah ke `gemini` kalau mau pakai Gemini). Kalau
+Ollama gagal (mis. `ollama serve` mati), bot jatuh ke Gemini kecuali
+`WA_SUMMARY_GEMINI_FALLBACK=false` (mode ketat: isi percakapan tidak pernah
+dikirim ke Google). Ringkasan lokal bisa makan beberapa menit dan ditandai
+"dirangkum model lokal" di ujungnya. Kalau AI sedang tidak tersedia setelah 3
+kali percobaan, yang terkirim daftar sederhana tanpa AI. Kalau bot mati pada jam
+itu, ringkasan terkirim begitu bot nyala lagi di hari yang sama.
+
+**Cadangan lokal saat kuota Gemini habis.** Dengan `WA_AI_ENGINE=gemini`, kalau
+Gemini gagal karena kuota (semua key habis / 429 / 503), pertanyaan yang BUKAN soal
+angka/aturan dijawab Ollama dulu (konteks Dokumen Pengetahuan + Bing), bukan cuma
+"sistem penuh". Pertanyaan yang mengandung angka, tarif, aturan, atau uang tetap
+diantre untuk dijawab Gemini nanti, karena model 3B mudah mengarang angka. Cadangan
+dilewati kalau Ollama lagi sibuk atau kontak itu sudah punya antrean aktif.
+Atur lewat `WA_OLLAMA_FALLBACK_ENABLED` (default true) dan
+`WA_OLLAMA_FALLBACK_TIMEOUT_MS` (default 90000).
 
 **Status API Gemini.** Di aplikasi: Pengaturan > Status API Gemini. Tiap key
 tampil dengan 4 karakter terakhirnya, jumlah request hari ini, dan status
