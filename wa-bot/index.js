@@ -2061,6 +2061,7 @@ const simab = createSimab({
   password: process.env.SIMAB_BOT_PASSWORD,
   kantorId: (process.env.SIMAB_KANTOR_ID || "538065").trim(),
   fixedTahun: Number(process.env.SIMAB_TAHUN) || null,
+  perjadinAkun: (process.env.SIMAB_PERJADIN_AKUN || "524111,524113").split(",").map((x) => x.trim()).filter((x) => /^\d{6}$/.test(x)),
   timeZone: WA_TIMEZONE,
   ollamaParse: parseSimabWithOllama
 });

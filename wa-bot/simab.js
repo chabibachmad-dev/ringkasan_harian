@@ -33,7 +33,7 @@ export const SIMAB_HELP = `🏛️ *Perintah SiMAB* (hanya baca)
   contoh: simab pagu perjalanan dinas  (cari di uraian)
 • *simab cek <kata>* — cari kegiatan dari uraian, nomor ST, pelaksana, MAK, atau nomor SPM
   contoh: simab cek 123/ST/2026
-• *simab perjadin <nama>* — kegiatan seorang pelaksana
+• *simab perjadin <nama>* — perjalanan dinas seorang pelaksana (akun 524111/524113)
 • *simab sbm <kota>* — tarif SBM
 • *simab rpd* — RPD vs realisasi per bulan (atau: simab rpd oktober)
 
@@ -119,7 +119,8 @@ export function createSimab({
   fixedTahun = null,
   timeZone = "Asia/Jakarta",
   makeClient = createClient,
-  ollamaParse = null
+  ollamaParse = null,
+  perjadinAkun = ["524111", "524113"]
 }) {
   const enabled = Boolean(url && anonKey && email && password);
   let client = null;
@@ -328,10 +329,22 @@ export function createSimab({
   async function cmdPerjadin(arg, tahun) {
     const k = likeSafe(arg);
     if (!k) return "Tulis nama pelaksana. Contoh: *simab perjadin budi*.";
-    const rows = (await exec(() =>
-      scope(getClient().from("kegiatan").select(KEG_COLS), tahun).ilike("pelaksana", `%${k}%`).order("tgl_mulai", { ascending: false }).limit(200)
-    )).sort(byTglDesc);
-    if (rows.length === 0) return `Tidak ada kegiatan dengan pelaksana “${k}”.\n_${head(tahun)}_`;
+    // Hanya transaksi perjalanan dinas: MAK harus memuat salah satu akun di perjadinAkun
+    // (524111 / 524113), bukan semua kegiatan milik pelaksana itu.
+    const seen = new Map();
+    for (const akun of perjadinAkun) {
+      const part = await exec(() =>
+        scope(getClient().from("kegiatan").select(KEG_COLS), tahun)
+          .ilike("pelaksana", `%${k}%`)
+          .like("mak", `%${akun}%`)
+          .order("tgl_mulai", { ascending: false })
+          .limit(200)
+      );
+      for (const r of part) if (!seen.has(r.id)) seen.set(r.id, r);
+    }
+    const rows = [...seen.values()].sort(byTglDesc);
+    const akunLabel = perjadinAkun.join("/");
+    if (rows.length === 0) return `Tidak ada perjalanan dinas (akun ${akunLabel}) dengan pelaksana “${k}”.\n_${head(tahun)}_`;
     const total = rows.reduce((a, r) => a + (Number(r.jumlah) || 0), 0);
     const perStatus = {};
     for (const r of rows) perStatus[r.status || "-"] = (perStatus[r.status || "-"] || 0) + 1;
@@ -339,7 +352,7 @@ export function createSimab({
     const shown = rows.slice(0, LIST_MAX);
     const lines = [
       `🧳 *Perjadin “${k}”* — ${rows.length} kegiatan`,
-      `${head(tahun)} • total ${rp(total)}`,
+      `${head(tahun)} • akun ${akunLabel} • total ${rp(total)}`,
       `Status: ${statusLine}`,
       "",
       formatKegiatan(shown)
@@ -438,7 +451,7 @@ export const SIMAB_OLLAMA_SYSTEM = `Kamu penerjemah perintah untuk sistem monito
 Aksi yang tersedia:
 - pagu: pagu/sisa/realisasi/blokir sebuah kode POK, akun (6 angka), atau jenis belanja (kata di uraian)
 - cek: cari kegiatan dari uraian, nomor ST, nama pelaksana, kode MAK, atau nomor SPM
-- perjadin: daftar kegiatan perjalanan dinas milik seorang pelaksana (butuh nama)
+- perjadin: daftar perjalanan dinas (akun 524111/524113) milik seorang pelaksana (butuh nama)
 - sbm: tarif standar biaya masukan sebuah kabupaten/kota
 - rpd: rencana penarikan dana per bulan (kueri boleh nama bulan atau kosong)
 - bantuan: kalau tidak ada yang cocok

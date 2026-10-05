@@ -319,7 +319,7 @@ pemilik (`WA_OWNER_NUMBER`) ke nomor bot, atau lewat chat ke diri sendiri:
   (kode tidak lengkap = semua turunannya; angka 6 digit = satu akun; kata = cari di uraian)
 - `simab sisa 521111`, `simab pagu perjalanan dinas`
 - `simab cek 123/ST/2026` -- cari kegiatan dari uraian, nomor ST, pelaksana, MAK, nomor SPM
-- `simab perjadin budi` -- kegiatan seorang pelaksana
+- `simab perjadin budi` -- perjalanan dinas seorang pelaksana (hanya transaksi dengan MAK akun 524111 atau 524113; ubah lewat `SIMAB_PERJADIN_AKUN`)
 - `simab sbm yogyakarta`, `simab rpd`, `simab rpd oktober`
 - akhiri dengan tahun untuk tahun lain: `simab pagu 521111 2025`
 - kalimat bebas juga boleh (ditafsirkan Ollama menjadi salah satu perintah di atas, ±1 menit)
