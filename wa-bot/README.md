@@ -317,7 +317,7 @@ pemilik (`WA_OWNER_NUMBER`) ke nomor bot, atau lewat chat ke diri sendiri:
 
 - `simab pagu 4701.EBA.994.002.A.521111.10` -- pagu, blokir, realisasi, sisa satu kode
   (kode tidak lengkap = semua turunannya; angka 6 digit = satu akun; kata = cari di uraian)
-- `simab sisa 521111`, `simab pagu perjalanan dinas`
+- `simab sisa 521111`, `simab pagu perkantoran 40 bali` -- kata dicari di uraian POK (semua kata harus ada, urutan bebas); tambah `semua` di akhir untuk daftar sampai 25 baris. Kalau yang cocok hanya baris judul/induk, turunannya ikut ditampilkan.
 - `simab cek 123/ST/2026` -- cari kegiatan dari uraian, nomor ST, pelaksana, MAK, nomor SPM
 - `simab perjadin budi` -- perjalanan dinas seorang pelaksana (hanya transaksi dengan MAK akun 524111 atau 524113; ubah lewat `SIMAB_PERJADIN_AKUN`)
 - `simab sbm yogyakarta`, `simab rpd`, `simab rpd oktober`

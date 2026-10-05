@@ -20,6 +20,7 @@ const PAGE_SIZE = 1000;
 const IN_CHUNK = 80;
 const MAX_KODE = 1500;
 const LIST_MAX = 8;
+const LIST_MAX_ALL = 25;
 const MONTHS = ["Januari", "Februari", "Maret", "April", "Mei", "Juni", "Juli", "Agustus", "September", "Oktober", "November", "Desember"];
 const MONTHS_SHORT = ["Jan", "Feb", "Mar", "Apr", "Mei", "Jun", "Jul", "Agu", "Sep", "Okt", "Nov", "Des"];
 
@@ -30,7 +31,8 @@ export const SIMAB_HELP = `🏛️ *Perintah SiMAB* (hanya baca)
 • *simab pagu <kode / akun / kata>*
   contoh: simab pagu 4701.EBA.994.002.A.521111.10
   contoh: simab sisa 521111  (satu akun 6 digit)
-  contoh: simab pagu perjalanan dinas  (cari di uraian)
+  contoh: simab pagu perkantoran 40 bali  (cari di uraian, semua kata harus ada)
+  tambah kata *semua* di akhir untuk daftar lebih panjang
 • *simab cek <kata>* — cari kegiatan dari uraian, nomor ST, pelaksana, MAK, atau nomor SPM
   contoh: simab cek 123/ST/2026
 • *simab perjadin <nama>* — perjalanan dinas seorang pelaksana (akun 524111/524113)
@@ -195,25 +197,57 @@ export function createSimab({
 
   // ---------- pagu / sisa ----------
   async function cmdPagu(arg, tahun) {
-    const q = arg.trim();
-    if (!q) return "Tulis kode, akun, atau kata. Contoh: *simab pagu 4701.EBA.994.002.A.521111.10* atau *simab sisa 521111*.";
+    let q = arg.trim();
+    const wantAll = /(?:^|\s)(semua|all)$/i.test(q) && q.length > 5;
+    if (wantAll) q = q.replace(/\s*(semua|all)$/i, "").trim();
+    const listMax = wantAll ? LIST_MAX_ALL : LIST_MAX;
+    if (!q) return "Tulis kode, akun, atau kata. Contoh: *simab pagu 4701.EBA.994.002.A.521111.10*, *simab sisa 521111*, atau *simab pagu perkantoran*.";
 
     let pokRows;
     let label = q;
     if (KODE_RE.test(q)) {
       const k = q.toUpperCase();
-      pokRows = (await fetchAll(() => scope(getClient().from("pok").select("kode,uraian,pagu,seksi"), tahun).like("kode", `${k}%`))).filter(
+      pokRows = (await fetchAll(() => scope(getClient().from("pok").select("id,kode,uraian,pagu,seksi"), tahun).like("kode", `${k}%`))).filter(
         (r) => r.kode === k || String(r.kode).startsWith(`${k}.`)
       );
       label = k;
     } else if (AKUN_RE.test(q)) {
-      pokRows = await fetchAll(() => scope(getClient().from("pok").select("kode,uraian,pagu,seksi"), tahun).like("kode", `%.${q}.%`));
+      pokRows = await fetchAll(() => scope(getClient().from("pok").select("id,kode,uraian,pagu,seksi"), tahun).like("kode", `%.${q}.%`));
       label = `akun ${q}`;
     } else {
       const k = likeSafe(q);
       if (!k) return "Kata pencarian kosong.";
-      pokRows = await fetchAll(() => scope(getClient().from("pok").select("kode,uraian,pagu,seksi"), tahun).ilike("uraian", `%${k}%`));
+      // Tiap kata harus ada di uraian (urutan bebas): "perkantoran 40 bali" cocok dgn
+      // "Keperluan Sehari-hari Perkantoran kurang 40 Pegawai (Bali) [40 ORG x 1 THN]".
+      const words = k.split(" ").filter((w) => w.length >= 2);
+      const terms = words.length > 0 ? words : [k];
+      pokRows = await fetchAll(() => {
+        let qb = scope(getClient().from("pok").select("id,kode,uraian,pagu,seksi"), tahun);
+        for (const w of terms) qb = qb.ilike("uraian", `%${w}%`);
+        return qb;
+      });
       label = `uraian “${k}”`;
+
+      // Kalau yang cocok HANYA baris judul/induk (pagu kosong), ikutkan semua turunannya,
+      // karena pagu & realisasi hanya ada di baris paling detil. Kalau sudah ada baris
+      // detil yang cocok, turunan induk tidak ditarik (hasil tetap fokus ke kata yang dicari).
+      const paguByKode = new Map();
+      for (const r of pokRows) paguByKode.set(r.kode, (paguByKode.get(r.kode) || 0) + (Number(r.pagu) || 0));
+      const anyDetail = [...paguByKode.values()].some((v) => v > 0);
+      const headers = anyDetail ? [] : [...paguByKode.keys()].slice(0, 20);
+      if (headers.length > 0) {
+        const have = new Set(pokRows.map((r) => r.id ?? `${r.kode}|${r.seksi}`));
+        for (const h of headers) {
+          const kids = await fetchAll(() => scope(getClient().from("pok").select("id,kode,uraian,pagu,seksi"), tahun).like("kode", `${h}.%`));
+          for (const r of kids) {
+            const key = r.id ?? `${r.kode}|${r.seksi}`;
+            if (!have.has(key)) {
+              have.add(key);
+              pokRows.push(r);
+            }
+          }
+        }
+      }
     }
 
     if (pokRows.length === 0) return `Tidak ada kode POK untuk ${label}.\n_${head(tahun)}_`;
@@ -257,7 +291,7 @@ export function createSimab({
       const e = shown[0];
       const lines = [
         `📊 *POK ${e.kode}*`,
-        e.uraian ? `_${cut(e.uraian, 120)}_` : null,
+        e.uraian ? `_${cut(e.uraian, 200)}_` : null,
         `${head(tahun)}`,
         "",
         `Pagu: ${rp(e.pagu)}`,
@@ -284,10 +318,14 @@ export function createSimab({
       `*Sisa: ${rp(tot.pagu - tot.blokir - tot.real)}*`,
       ""
     ];
-    for (const e of shown.slice(0, LIST_MAX)) {
-      lines.push(`• ${e.kode}${e.uraian ? ` — ${cut(e.uraian, 40)}` : ""}\n  pagu ${rp(e.pagu)} • sisa *${rp(e.sisa)}*`);
+    for (const e of shown.slice(0, listMax)) {
+      lines.push(`• *${cut(e.uraian, 110) || e.kode}*\n  ${e.kode}\n  pagu ${rp(e.pagu)} • sisa *${rp(e.sisa)}*`);
     }
-    if (shown.length > LIST_MAX) lines.push(`…dan ${shown.length - LIST_MAX} kode lain. Pakai kode lengkap untuk rincian satu kode.`);
+    if (shown.length > listMax) {
+      lines.push(
+        `…dan ${shown.length - listMax} kode lain. ${wantAll ? "Persempit dengan kata/kode yang lebih spesifik." : "Tambahkan kata *semua* untuk daftar lebih panjang, atau pakai kode lengkap untuk rincian satu kode."}`
+      );
+    }
     return lines.join("\n");
   }
 
