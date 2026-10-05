@@ -298,6 +298,20 @@ jadi ringkasan terjadwal malamnya tetap jalan:
 Bot lebih dulu mengirim "Membuat ringkasan...", lalu hasilnya. Pantau dengan
 `pm2 logs wa-bot` (cari baris `[Tes ringkasan]`).
 
+**Grup WhatsApp (dipanggil lewat mention).** Default mati. Isi di `.env`:
+`WA_GROUP_ALLOWED_NAMES=Salim Family` (cukup potongan nama grup; boleh beberapa,
+pisah koma) lalu `pm2 restart wa-bot`. Bot menjawab di grup itu hanya kalau
+(a) nomor bot di-mention (@), (b) pesan bot dibalas (reply), atau (c) pesan diawali
+kata pemicu di `WA_GROUP_KEYWORDS` (opsional, mis. `bot,ai`). Jawaban mengutip
+pesan penanya, dan kalau pemanggil me-reply sebuah pesan, isi pesan yang dikutip
+ikut dibaca bot. Pesan grup yang tidak memanggil bot TIDAK disimpan. Grup lain
+tidak pernah dijawab; kalau bot dipanggil di grup yang belum diizinkan, log
+menampilkan nama dan id grupnya (`WA_GROUP_ALLOWED_JIDS` untuk mengizinkan lewat id).
+Obrolan santai dijawab langsung; pencarian dokumen/web di grup hanya dipakai kalau pesannya memuat kata seperti harga, berita, cuaca, jadwal, tarif, aturan. Kalau Gemini membalas 503 (sibuk), bot mencoba sekali lagi setelah 12 detik. Template jawaban tidak dipakai di grup, tidak ada antrean ulang (kalau AI gagal,
+bot minta di-tag lagi), dan ada jeda `WA_GROUP_COOLDOWN_SEC` (20 detik) per orang.
+Pesan yang kamu ketik sendiri dari nomor ini tidak memicu bot. Percakapan grup ikut
+masuk ringkasan harian dengan nama grupnya.
+
 **Cadangan lokal saat kuota Gemini habis.** Dengan `WA_AI_ENGINE=gemini`, kalau
 Gemini gagal karena kuota (semua key habis / 429 / 503), pertanyaan yang BUKAN soal
 angka/aturan dijawab Ollama dulu (konteks Dokumen Pengetahuan + Bing), bukan cuma

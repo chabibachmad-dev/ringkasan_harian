@@ -221,6 +221,27 @@ ATURAN PENGAMAN (berlaku terus walau topiknya bebas):
 2. JANGAN membagikan informasi pribadi/sensitif (keuangan, kesehatan, jadwal detail, data pribadi) tentang pemilik nomor.
 3. Kalau pesan masuk jelas butuh keputusan manusia (negosiasi, hal mendesak, masalah pribadi/emosional, komplain serius), jangan improvisasi -- cukup akui pesannya diterima dan akan ditindaklanjuti langsung oleh pemiliknya.`;
 
+// ---- Dukungan grup WhatsApp (bot dipanggil lewat mention) ----
+// Catatan tambahan di prompt kalau percakapannya di GRUP (bukan chat pribadi).
+const GROUP_PROMPT_NOTE = `
+
+KONTEKS GRUP: pesan ini datang dari GRUP WhatsApp (mis. grup keluarga), bukan chat pribadi. Banyak orang bisa bertanya; tiap pesan pengguna diawali "Nama: " (nama pengirim) dan kadang diikuti baris (mengutip: "...") berisi pesan yang dibalas pengirim. Jawab LANGSUNG ke orang yang bertanya di pesan TERAKHIR (boleh menyapa namanya), singkat dan santai, dan JANGAN menulis "Nama:" di awal jawabanmu. Kamu asisten AI, BUKAN pemilik nomor: jangan berbicara seolah-olah kamu pemiliknya dan jangan menjawab hal pribadi tentang pemilik nomor atau anggota grup.`;
+
+function isGroupJid(jid) {
+  return typeof jid === "string" && jid.endsWith("@g.us");
+}
+
+function withGroupNote(basePrompt, jid) {
+  return isGroupJid(jid) ? `${basePrompt}${GROUP_PROMPT_NOTE}` : basePrompt;
+}
+
+// Buang awalan "Nama: " & baris "(mengutip: ...)" supaya pencarian dokumen/web
+// tidak ikut membawa nama pengirim. Hanya dipakai utk jid grup.
+function stripGroupMeta(jid, text) {
+  if (!isGroupJid(jid) || typeof text !== "string") return text;
+  return text.replace(/\n\(mengutip:[\s\S]*$/, "").replace(/^[^:\n]{1,40}:\s+/, "");
+}
+
 // CATATAN SOAL Dokumen Pengetahuan (tabel knowledge_documents) & web search:
 // sempat diputuskan auto-reply WA TIDAK ikut baca Dokumen Pengetahuan sama
 // sekali (lihat riwayat git) -- itu berlaku SELAMA mesinnya Gemini (yang
@@ -755,10 +776,13 @@ async function generateAutoReplyWithOllama(jid, { timeoutMs } = {}) {
   if (messages.length === 0) return null;
 
   const question = messages[messages.length - 1].content;
+  const searchQuestion = stripGroupMeta(jid, question);
 
-  const docChunks = await fetchRelevantKnowledgeChunks(question, RAG_CONTEXT_BUDGET_CHARS);
+  // Grup: obrolan santai tidak perlu dokumen/web (lihat GROUP_LOOKUP_RE).
+  const lookupAllowed = !isGroupJid(jid) || GROUP_LOOKUP_RE.test(searchQuestion);
+  const docChunks = lookupAllowed ? await fetchRelevantKnowledgeChunks(searchQuestion, RAG_CONTEXT_BUDGET_CHARS) : [];
   const topScore = docChunks[0]?.score ?? 0;
-  const webResults = topScore >= RAG_STRONG_MATCH_SCORE ? [] : await webSearchBing(question, WEB_SEARCH_MAX_RESULTS);
+  const webResults = !lookupAllowed || topScore >= RAG_STRONG_MATCH_SCORE ? [] : await webSearchBing(searchQuestion, WEB_SEARCH_MAX_RESULTS);
 
   // Log diagnostik ringan (BUKAN isi lengkap dokumen/pertanyaan, cuma
   // judul+skor) -- biar kalau jawabannya aneh/salah sasaran lagi, langsung
@@ -782,7 +806,7 @@ async function generateAutoReplyWithOllama(jid, { timeoutMs } = {}) {
   // nunggu antrian TIDAK ikut makan jatah waktu timeout-nya.
   const replyText = await enqueueOllamaCall(() =>
     callOllamaChat(
-      [{ role: "system", content: `${WA_OLLAMA_SYSTEM_PROMPT}\n\n${currentDateLine()}` }, ...messages],
+      [{ role: "system", content: `${withGroupNote(WA_OLLAMA_SYSTEM_PROMPT, jid)}\n\n${currentDateLine()}` }, ...messages],
       timeoutMs ? { timeoutMs } : {}
     )
   );
@@ -1259,7 +1283,10 @@ async function generateAutoReplyWithGemini(jid) {
   }
   if (contents.length === 0) return null;
 
-  const webQuery = buildWebQuery(contents.filter((c) => c.role === "user").map((c) => c.parts?.[0]?.text ?? ""));
+  const webQueryRaw = buildWebQuery(contents.filter((c) => c.role === "user").map((c) => stripGroupMeta(jid, c.parts?.[0]?.text ?? "")));
+  // Di grup, obrolan santai ("Mas mau mie instan?") tidak perlu cari dokumen/web --
+  // hanya dicari kalau pesannya jelas butuh data (lihat GROUP_LOOKUP_RE).
+  const webQuery = !isGroupJid(jid) || GROUP_LOOKUP_RE.test(webQueryRaw) ? webQueryRaw : "";
   // Dokumen Pengetahuan dicek untuk pertanyaan yang sama (bukan sapaan) --
   // hasilnya dibatasi budget, bukan baca seluruh dokumen. Gagal = lanjut tanpa.
   let docChunks = [];
@@ -1272,7 +1299,7 @@ async function generateAutoReplyWithGemini(jid) {
     const titles = docChunks.map((c) => `"${c.title}"(skor ${c.score.toFixed(1)})`).join(", ") || "-";
     console.log(`📚 [Dokumen] ${docChunks.length} potongan dipakai: ${titles}`);
   }
-  const data = await geminiGenerateWithRotation(WA_BASE_SYSTEM_PROMPT, contents, { webQuery, docChunks });
+  const data = await geminiGenerateWithRotation(withGroupNote(WA_BASE_SYSTEM_PROMPT, jid), contents, { webQuery, docChunks });
 
   const rawText = extractGeminiText(data);
   if (!rawText.trim()) {
@@ -1525,11 +1552,12 @@ async function processRetryQueue(sock) {
 
 // Kirim teks balasan AI ke kontak + catat ke whatsapp_messages + catat token.
 // Dipakai balasan normal (sendAutoReply) DAN balasan ulang dari antrean.
-async function deliverAutoReplyText(sock, jid, result, logLabel = "🤖 Auto-reply") {
+async function deliverAutoReplyText(sock, jid, result, logLabel = "🤖 Auto-reply", { quoted = null, waName = null } = {}) {
   try {
-    const sent = await sock.sendMessage(jid, { text: result.reply });
+    const sent = await sock.sendMessage(jid, { text: result.reply }, quoted ? { quoted } : undefined);
     await supabase.from("whatsapp_messages").insert({
       wa_jid: jid,
+      wa_name: waName,
       direction: "out",
       content: result.reply,
       status: "sent",
@@ -1999,6 +2027,223 @@ async function isAutoReplyEnabledForContact(jid) {
   return data?.auto_reply_enabled ?? true;
 }
 
+// ---------------- Grup WhatsApp (dijawab hanya kalau bot di-mention) ----------------
+// Default MATI. Nyalakan dengan mengisi WA_GROUP_ALLOWED_NAMES (nama grup, pisah
+// koma; cukup potongan nama, huruf besar-kecil/emoji/tanda baca diabaikan) dan/
+// atau WA_GROUP_ALLOWED_JIDS (id grup "...@g.us"). Grup di luar daftar tidak
+// pernah dijawab maupun disimpan. Pesan grup yang TIDAK memanggil bot juga tidak
+// disimpan sama sekali (privasi anggota lain).
+function normalizeGroupName(name) {
+  return String(name ?? "").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "");
+}
+const GROUP_ALLOWED_NAMES = (process.env.WA_GROUP_ALLOWED_NAMES || "")
+  .split(",")
+  .map(normalizeGroupName)
+  .filter(Boolean);
+const GROUP_ALLOWED_JIDS = (process.env.WA_GROUP_ALLOWED_JIDS || "")
+  .split(",")
+  .map((x) => x.trim())
+  .filter(Boolean);
+const GROUP_ENABLED = GROUP_ALLOWED_NAMES.length > 0 || GROUP_ALLOWED_JIDS.length > 0;
+// Pemicu: mention nomor bot (default aktif), membalas pesan bot, atau pesan yang
+// diawali kata pemicu (WA_GROUP_KEYWORDS, mis. "bot,ai" -> "bot, jam berapa buka?").
+const GROUP_MENTION_TRIGGER = (process.env.WA_GROUP_MENTION_TRIGGER || "true").trim().toLowerCase() !== "false";
+const GROUP_KEYWORDS = (process.env.WA_GROUP_KEYWORDS || "")
+  .split(",")
+  .map((x) => x.trim().toLowerCase())
+  .filter(Boolean);
+// Jeda minimal antar pertanyaan dari ORANG YANG SAMA di grup (detik).
+const GROUP_COOLDOWN_MS = Math.max(0, Number(process.env.WA_GROUP_COOLDOWN_SEC ?? 20) || 0) * 1000;
+const GROUP_QUOTE_MAX_CHARS = 400;
+// Pesan grup baru memicu pencarian dokumen/web kalau mengandung kata yang menandakan
+// butuh data (berita, harga, aturan, dll). Selain itu dijawab langsung tanpa lookup.
+const GROUP_LOOKUP_RE =
+  /\b(berita|terbaru|terkini|hari ini|harga|kurs|cuaca|jadwal|skor|link|tarif|biaya|honor|honorarium|aturan|peraturan|pmk|sbm|sbk|perdin|anggaran|pagu|uu|perpres|alamat|jam buka|buka jam|nomor telepon)\b/i;
+// Gemini kadang 503 ("high demand") beberapa detik; di grup coba sekali lagi dulu.
+const GROUP_RETRY_503_DELAY_MS = 12_000;
+const GROUP_BUSY_TEXT = "Maaf, sistem lagi penuh. Coba tag aku lagi sebentar lagi ya 🙏";
+
+const groupSubjectCache = new Map(); // jid -> { subject, at }
+async function getGroupSubject(sock, jid) {
+  const hit = groupSubjectCache.get(jid);
+  if (hit && Date.now() - hit.at < 10 * 60_000) return hit.subject;
+  try {
+    const meta = await sock.groupMetadata(jid);
+    const subject = meta?.subject || "";
+    groupSubjectCache.set(jid, { subject, at: Date.now() });
+    return subject;
+  } catch (err) {
+    console.error(`👥 Gagal ambil nama grup ${jid}:`, err instanceof Error ? err.message : String(err));
+    return hit?.subject ?? "";
+  }
+}
+
+function isGroupAllowed(jid, subject) {
+  if (GROUP_ALLOWED_JIDS.includes(jid)) return true;
+  const norm = normalizeGroupName(subject);
+  return norm !== "" && GROUP_ALLOWED_NAMES.some((n) => norm.includes(n));
+}
+
+// Pesan di grup yang pakai "pesan sementara"/view-once dibungkus lagi -- buka dulu.
+function unwrapMessageContent(message) {
+  let m = message;
+  for (let i = 0; i < 4 && m; i += 1) {
+    const inner =
+      m.ephemeralMessage?.message ||
+      m.viewOnceMessage?.message ||
+      m.viewOnceMessageV2?.message ||
+      m.documentWithCaptionMessage?.message ||
+      m.editedMessage?.message;
+    if (!inner) break;
+    m = inner;
+  }
+  return m ?? null;
+}
+
+function getMessageContextInfo(m) {
+  if (!m) return null;
+  return (
+    m.extendedTextMessage?.contextInfo ||
+    m.imageMessage?.contextInfo ||
+    m.videoMessage?.contextInfo ||
+    m.documentMessage?.contextInfo ||
+    null
+  );
+}
+
+const groupLastAskAt = new Map(); // "grup|pengirim" -> ms
+
+async function handleGroupMessage(msg, sock) {
+  if (!GROUP_ENABLED || !AUTO_REPLY_ACTIVE) return;
+  const groupJid = msg.key.remoteJid;
+  const content = unwrapMessageContent(msg.message);
+  if (!content) return;
+  const rawText = extractText({ message: content });
+  if (!rawText || rawText.startsWith("[")) return;
+
+  const ctx = getMessageContextInfo(content);
+  const ownJids = getOwnJids(sock);
+  const ownUserParts = ownJids.map((j) => j.split("@")[0]);
+
+  // --- Apakah bot dipanggil? (murni lokal & murah, belum menyentuh DB/jaringan)
+  const mentioned = (ctx?.mentionedJid ?? []).some((j) => ownJids.includes(normalizeJidSuffix(j)));
+  const mentionedInText = ownUserParts.some((u) => u && rawText.includes(`@${u}`));
+  let triggered = GROUP_MENTION_TRIGGER && (mentioned || mentionedInText);
+
+  let text = rawText;
+  for (const u of ownUserParts) {
+    if (u) text = text.split(`@${u}`).join(" ");
+  }
+  text = text.replace(/\s+/g, " ").trim();
+
+  if (!triggered && GROUP_KEYWORDS.length > 0) {
+    const lower = text.toLowerCase();
+    const kw = GROUP_KEYWORDS.find((k) => lower === k || new RegExp(`^${k.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[\\s,:!?-]`, "i").test(lower));
+    if (kw) {
+      triggered = true;
+      text = text.slice(kw.length).replace(/^[\s,:!?-]+/, "").trim();
+    }
+  }
+
+  const quotedParticipant = ctx?.participant ? normalizeJidSuffix(ctx.participant) : null;
+  const repliedToOwn = quotedParticipant !== null && ownJids.includes(quotedParticipant);
+  if (!triggered && repliedToOwn && ctx?.stanzaId) {
+    // Hanya balasan ke pesan BOT (bukan pesan manual pemilik): cek id pesannya
+    // ada di catatan balasan keluar grup ini.
+    const { data: botMsg } = await supabase
+      .from("whatsapp_messages")
+      .select("id")
+      .eq("wa_jid", groupJid)
+      .eq("direction", "out")
+      .eq("wa_message_id", ctx.stanzaId)
+      .limit(1);
+    if (botMsg && botMsg.length > 0) triggered = true;
+  }
+  if (!triggered) return;
+
+  // --- Grup ini diizinkan?
+  const subject = await getGroupSubject(sock, groupJid);
+  if (!isGroupAllowed(groupJid, subject)) {
+    console.log(`👥 Bot dipanggil di grup "${subject || "?"}" (${groupJid}) tapi grup ini tidak ada di WA_GROUP_ALLOWED_NAMES/JIDS, diabaikan.`);
+    return;
+  }
+
+  const sender = msg.pushName || "Anggota grup";
+  const quotedText = ctx?.quotedMessage ? extractText({ message: unwrapMessageContent(ctx.quotedMessage) }) : null;
+  if (!text && !quotedText) return;
+  if (!text) text = "(menandai tanpa pertanyaan, jawab/jelaskan pesan yang dikutip)";
+
+  // --- Jeda per orang (cegah spam & hemat kuota)
+  const senderKey = `${groupJid}|${msg.key.participant || sender}`;
+  const lastAt = groupLastAskAt.get(senderKey) ?? 0;
+  if (GROUP_COOLDOWN_MS > 0 && Date.now() - lastAt < GROUP_COOLDOWN_MS) {
+    console.log(`👥 [${subject}] ${sender} terlalu cepat bertanya lagi, diabaikan.`);
+    return;
+  }
+  groupLastAskAt.set(senderKey, Date.now());
+
+  const stored =
+    `${sender}: ${text}` +
+    (quotedText ? `\n(mengutip: "${quotedText.replace(/\s+/g, " ").slice(0, GROUP_QUOTE_MAX_CHARS)}")` : "");
+  const { error } = await supabase.from("whatsapp_messages").insert({
+    wa_jid: groupJid,
+    wa_name: subject || null,
+    direction: "in",
+    content: stored,
+    status: "received",
+    wa_message_id: msg.key.id
+  });
+  if (error) {
+    if (error.code !== "23505") console.error("Gagal simpan pesan grup:", error.message);
+    return; // 23505 = event terkirim ulang, jangan dijawab dobel
+  }
+  console.log(`👥 [${subject}] ${sender} memanggil bot: ${text.slice(0, 60)}`);
+
+  if (!(await isAutoReplyEnabledForContact(groupJid))) {
+    console.log(`🔕 Auto-reply dimatikan khusus utk grup ${groupJid}, dilewati.`);
+    return;
+  }
+
+  sock.sendPresenceUpdate("composing", groupJid).catch(() => {});
+  let result = null;
+  try {
+    try {
+      result = await generateAutoReply(groupJid);
+    } catch (firstErr) {
+      if (firstErr?.status !== 503 || firstErr?.allKeysExhausted === true) throw firstErr;
+      console.warn(`👥 Gemini 503 (sibuk) untuk grup ${groupJid}, coba lagi ${GROUP_RETRY_503_DELAY_MS / 1000} detik lagi...`);
+      await new Promise((resolve) => setTimeout(resolve, GROUP_RETRY_503_DELAY_MS));
+      result = await generateAutoReply(groupJid);
+    }
+  } catch (err) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    console.error(`Gagal generate balasan grup ${groupJid}:`, errMsg);
+    result = await tryLocalFallbackReply(sock, groupJid, text, err);
+    if (!result) {
+      sock.sendPresenceUpdate("paused", groupJid).catch(() => {});
+      // Di grup tidak ada antrean ulang (balasan susulan berjam-jam kemudian
+      // tidak nyambung); cukup minta mencoba lagi.
+      try {
+        const sent = await sock.sendMessage(groupJid, { text: GROUP_BUSY_TEXT }, { quoted: msg });
+        await supabase.from("whatsapp_messages").insert({
+          wa_jid: groupJid,
+          wa_name: subject || null,
+          direction: "out",
+          content: GROUP_BUSY_TEXT,
+          status: "sent",
+          wa_message_id: sent?.key?.id ?? null
+        });
+      } catch (sendErr) {
+        console.error(`Gagal kirim pesan sibuk ke grup ${groupJid}:`, sendErr instanceof Error ? sendErr.message : String(sendErr));
+      }
+      return;
+    }
+  }
+  sock.sendPresenceUpdate("paused", groupJid).catch(() => {});
+  if (!result || !result.reply) return;
+  await deliverAutoReplyText(sock, groupJid, result, "👥 Balasan grup", { quoted: msg, waName: subject || null });
+}
+
 async function handleIncoming(msg, sock) {
   const jid = msg.key.remoteJid;
   // "Chat ke diri sendiri" (catatan pribadi) di WhatsApp -- remoteJid-nya
@@ -2019,6 +2264,12 @@ async function handleIncoming(msg, sock) {
   // (lihat processPendingOutgoing), jadi di sini cukup dilewati supaya tidak
   // dobel. Chat-ke-diri-sendiri DIKECUALIKAN (lihat komentar isSelfChat).
   if (msg.key.fromMe && !isSelfChat) return;
+
+  // Grup: jalur terpisah (hanya dijawab kalau bot dipanggil & grupnya diizinkan).
+  if (isGroupJid(jid)) {
+    await handleGroupMessage(msg, sock);
+    return;
+  }
 
   // v1 cuma dukung chat PERSONAL (bukan grup/status/broadcast) -- biar
   // scope-nya jelas dulu, grup bisa menyusul kalau memang dibutuhkan nanti.
@@ -2189,6 +2440,9 @@ setInterval(() => {
 primeExhaustedKeysFromDb().catch(() => {});
 console.log(
   `📋 Ringkasan harian ke pemilik: ${WA_DAILY_SUMMARY_ENABLED ? `AKTIF (tiap hari setelah ${String(WA_DAILY_SUMMARY_HOUR).padStart(2, "0")}:00 ${WA_TIMEZONE_LABEL}, mesin: ${WA_SUMMARY_ENGINE}${WA_SUMMARY_ENGINE === "ollama" ? `, cadangan Gemini: ${WA_SUMMARY_GEMINI_FALLBACK ? "ya" : "tidak"}` : ""})` : "mati (isi WA_OWNER_NUMBER di .env buat menyalakan)"}`
+);
+console.log(
+  `👥 Grup WhatsApp: ${GROUP_ENABLED && AUTO_REPLY_ACTIVE ? `AKTIF (grup diizinkan: ${[...(process.env.WA_GROUP_ALLOWED_NAMES || "").split(",").map((x) => x.trim()).filter(Boolean), ...GROUP_ALLOWED_JIDS].join(" | ")}; pemicu: ${[GROUP_MENTION_TRIGGER ? "mention" : null, "balas pesan bot", GROUP_KEYWORDS.length ? `kata "${GROUP_KEYWORDS.join(",")}"` : null].filter(Boolean).join(", ")})` : "mati (isi WA_GROUP_ALLOWED_NAMES di .env buat menyalakan)"}`
 );
 console.log(
   `🦙 Cadangan lokal auto-reply (Ollama, saat kuota Gemini habis): ${AUTO_REPLY_ACTIVE && WA_AI_ENGINE === "gemini" && WA_OLLAMA_FALLBACK_ENABLED ? `AKTIF (model ${OLLAMA_MODEL}, hanya pertanyaan non-angka)` : "mati"}`
