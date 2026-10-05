@@ -625,6 +625,41 @@ function geminiKeyHint(key) {
   return key.slice(-4);
 }
 
+// Ringkas pesan error 429 dari Google jadi 1 baris yang memuat PENYEBAB-nya.
+// Respons aslinya JSON panjang; bagian yang berguna (quotaId / quotaMetric,
+// model, retryDelay) ada di "details" SETELAH kalimat generik "You exceeded
+// your current quota...", jadi kalau cuma dipotong 300 karakter dari depan
+// bagian itu hilang. Gagal parse = jatuh ke potongan teks mentah.
+function summarizeGeminiError(raw) {
+  const text = String(raw ?? "");
+  try {
+    const start = text.indexOf("{");
+    const parsed = start >= 0 ? JSON.parse(text.slice(start)) : null;
+    const e = parsed?.error;
+    if (e) {
+      const parts = [];
+      if (e.code) parts.push(String(e.code));
+      const violations = [];
+      let retry = "";
+      for (const d of e.details ?? []) {
+        if (Array.isArray(d?.violations)) violations.push(...d.violations);
+        if (d?.retryDelay) retry = String(d.retryDelay);
+      }
+      for (const v of violations.slice(0, 3)) {
+        const model = v?.quotaDimensions?.model;
+        parts.push(`${v?.quotaId || v?.quotaMetric || "kuota?"}${model ? ` [${model}]` : ""}`);
+      }
+      if (retry) parts.push(`retry ${retry}`);
+      const msg = String(e.message ?? "").split("\n")[0].slice(0, 140);
+      if (msg) parts.push(msg);
+      if (parts.length > 1 || (parts.length === 1 && msg)) return parts.join(" | ").slice(0, 600);
+    }
+  } catch {
+    // bukan JSON -- pakai teks mentah di bawah
+  }
+  return text.slice(0, 600);
+}
+
 // Catat kejadian key ke tabel gemini_key_usage (buat layar "Status API
 // Gemini" di aplikasi). Best-effort: gagal catat TIDAK boleh mengganggu
 // auto-reply (mis. migration 0013 belum dijalankan).
@@ -637,7 +672,7 @@ function reportKeyEvent(key, { requestsInc = 0, exhaustedUntilMs = null, error =
       p_source: "wa-bot",
       p_requests_inc: requestsInc,
       p_exhausted_until: exhaustedUntilMs ? new Date(exhaustedUntilMs).toISOString() : null,
-      p_error: error ? String(error).slice(0, 300) : null
+      p_error: error ? summarizeGeminiError(error) : null
     })
     .then(({ error: rpcErr }) => {
       if (rpcErr && !keyReportWarned) {
@@ -796,6 +831,21 @@ async function generateAutoReply(jid) {
 // 429 TIDAK memicu rotasi (langsung dilempar ke pemanggil).
 async function geminiGenerateWithRotation(systemText, contents, { useSearch = true } = {}) {
   let attemptsLeft = Math.max(GEMINI_API_KEYS.length, 1);
+  // Model TIDAK tahu tanggal hari ini kecuali diberi tahu -- tanpa ini ia
+  // menjawab pakai "kalender" data latihannya (mis. bilang aturan 2026 "baru
+  // terbit pertengahan 2025 nanti").
+  const nowText = new Intl.DateTimeFormat("id-ID", {
+    dateStyle: "full",
+    timeStyle: "short",
+    timeZone: WA_TIMEZONE
+  }).format(new Date());
+  const systemWithDate =
+    `${systemText}\n\nWaktu sekarang: ${nowText} ${WA_TIMEZONE_LABEL}. Anggap ini tanggal hari ini. Jangan mengira tahun ini masih tahun sebelumnya, dan jangan bilang aturan/peraturan tahun ini "belum terbit" atau "akan terbit" kecuali hasil pencarian memastikannya.`;
+  // Dipakai HANYA kalau jalur dengan internet gagal & jatuh ke jalur tanpa
+  // internet: tanpa ini model menjawab angka/aturan dari ingatan lamanya
+  // dengan nada yakin (bisa salah/usang).
+  const systemNoSearch =
+    `${systemWithDate}\n\nCATATAN: untuk balasan ini akses pencarian internet SEDANG TIDAK TERSEDIA. Untuk peraturan, tarif, angka resmi, atau hal lain yang bisa sudah berubah, JANGAN menyebut angka/aturan dengan yakin dari ingatan -- katakan terus terang kamu belum bisa memastikan versi terbarunya dan sarankan cek sumber resmi (mis. PMK/situs Kemenkeu).`;
   for (;;) {
     const apiKey = pickAvailableGeminiKey();
     if (!apiKey) {
@@ -810,17 +860,17 @@ async function geminiGenerateWithRotation(systemText, contents, { useSearch = tr
       let data;
       if (useSearch) {
         try {
-          data = await callGeminiWithRetry(systemText, contents, true, 1, apiKey);
+          data = await callGeminiWithRetry(systemWithDate, contents, true, 1, apiKey);
         } catch (err) {
           // Jatah HARIAN key ini habis: coba lagi tanpa internet di key yang sama
           // percuma, langsung rotasi. (429 jenis lain, mis. limit khusus jalur
           // Google Search, tetap lanjut ke percobaan tanpa internet di bawah.)
           if (err.status === 429 && /PerDay/i.test(err.message)) throw err;
           console.warn(`Auto-reply WA: percobaan dgn Google Search gagal (${err.message}), lanjut tanpa akses internet...`);
-          data = await callGeminiWithRetry(systemText, contents, false, 2, apiKey);
+          data = await callGeminiWithRetry(systemNoSearch, contents, false, 2, apiKey);
         }
       } else {
-        data = await callGeminiWithRetry(systemText, contents, false, 2, apiKey);
+        data = await callGeminiWithRetry(systemWithDate, contents, false, 2, apiKey);
       }
       reportKeyEvent(apiKey, { requestsInc: 1 });
       return data;

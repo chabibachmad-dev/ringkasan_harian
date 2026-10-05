@@ -237,7 +237,7 @@ async function callGeminiWithModelFallback(
             model: step.model,
             daily: info.daily,
             exhaustedUntilMs: info.untilMs,
-            error: err.message.slice(0, 300)
+            error: summarizeGeminiError(err.message)
           });
           continue; // coba key berikutnya utk step/model yang sama
         }
@@ -271,6 +271,44 @@ export function setGeminiKeyReporter(fn: ((event: GeminiKeyEvent) => Promise<voi
 
 export function geminiKeyHint(apiKey: string): string {
   return apiKey.slice(-4);
+}
+
+// Ringkas pesan error 429 dari Google jadi 1 baris yang memuat PENYEBAB-nya.
+// Respons aslinya JSON panjang; bagian yang berguna (quotaId / quotaMetric,
+// model, retryDelay) ada di "details" SETELAH kalimat generik "You exceeded
+// your current quota...", jadi kalau cuma dipotong dari depan bagian itu
+// hilang. Gagal parse = jatuh ke potongan teks mentah.
+// deno-lint-ignore no-explicit-any
+function summarizeGeminiError(raw: unknown): string {
+  const text = String(raw ?? "");
+  try {
+    const start = text.indexOf("{");
+    // deno-lint-ignore no-explicit-any
+    const parsed: any = start >= 0 ? JSON.parse(text.slice(start)) : null;
+    const e = parsed?.error;
+    if (e) {
+      const parts: string[] = [];
+      if (e.code) parts.push(String(e.code));
+      // deno-lint-ignore no-explicit-any
+      const violations: any[] = [];
+      let retry = "";
+      for (const d of e.details ?? []) {
+        if (Array.isArray(d?.violations)) violations.push(...d.violations);
+        if (d?.retryDelay) retry = String(d.retryDelay);
+      }
+      for (const v of violations.slice(0, 3)) {
+        const model = v?.quotaDimensions?.model;
+        parts.push(`${v?.quotaId || v?.quotaMetric || "kuota?"}${model ? ` [${model}]` : ""}`);
+      }
+      if (retry) parts.push(`retry ${retry}`);
+      const msg = String(e.message ?? "").split("\n")[0].slice(0, 140);
+      if (msg) parts.push(msg);
+      if (parts.length > 1 || (parts.length === 1 && msg)) return parts.join(" | ").slice(0, 600);
+    }
+  } catch {
+    // bukan JSON -- pakai teks mentah di bawah
+  }
+  return text.slice(0, 600);
 }
 
 async function reportKeyEvent(event: GeminiKeyEvent): Promise<void> {
@@ -411,13 +449,22 @@ Kamu PUNYA akses ke pencarian Google secara real-time -- pakai untuk mencari inf
 const KNOWLEDGE_CONTEXT_INTRO = `Pengguna sudah mengupload dokumen referensi berikut ke dalam aplikasi ini (mis. peraturan/perundangan keuangan). ANGGAP dokumen-dokumen ini sebagai sumber paling terpercaya dan PRIORITASKAN jawaban dari sini -- kalau pertanyaan pengguna bisa dijawab dari isi salah satu dokumen di bawah, jawab dari situ duluan dan sebutkan judul dokumennya, TANPA perlu cari di internet dulu. Cari di Google HANYA kalau jawabannya memang tidak ada di dokumen-dokumen ini, atau topiknya jelas di luar cakupan dokumen ini.`;
 
 function buildSystemText(knowledgeContext: { title: string; content: string }[]): string {
-  if (knowledgeContext.length === 0) return CHAT_SYSTEM_PROMPT;
+  // Model TIDAK tahu tanggal hari ini kecuali diberi tahu -- tanpa ini ia
+  // menjawab pakai "kalender" data latihannya. Zona WITA, sama dgn bot WA.
+  const nowText = new Intl.DateTimeFormat("id-ID", {
+    dateStyle: "full",
+    timeStyle: "short",
+    timeZone: "Asia/Makassar"
+  }).format(new Date());
+  const base = `${CHAT_SYSTEM_PROMPT}\n\nWaktu sekarang: ${nowText} WITA. Anggap ini tanggal hari ini. Jangan mengira tahun ini masih tahun sebelumnya, dan jangan bilang aturan/peraturan tahun ini "belum terbit" atau "akan terbit" kecuali hasil pencarian memastikannya.`;
+
+  if (knowledgeContext.length === 0) return base;
 
   const docsText = knowledgeContext
     .map((doc) => `=== Dokumen: "${doc.title}" ===\n${doc.content}`)
     .join("\n\n");
 
-  return `${CHAT_SYSTEM_PROMPT}\n\n${KNOWLEDGE_CONTEXT_INTRO}\n\n${docsText}`;
+  return `${base}\n\n${KNOWLEDGE_CONTEXT_INTRO}\n\n${docsText}`;
 }
 
 export interface ChatReplyResult {

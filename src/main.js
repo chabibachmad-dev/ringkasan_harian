@@ -1910,7 +1910,7 @@ async function renderKeysList() {
     if (k.lastError) {
       const errEl = document.createElement("div");
       errEl.className = "keys-last-error";
-      errEl.textContent = `${t(state.lang, "keys_last_error_prefix")} ${truncate(String(k.lastError), 160)}`;
+      errEl.textContent = `${t(state.lang, "keys_last_error_prefix")} ${truncate(String(k.lastError), 400)}`;
       main.appendChild(errEl);
     }
 
