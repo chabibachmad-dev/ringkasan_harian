@@ -1003,6 +1003,14 @@ mark.chat-search-hit--active {
   border-color: var(--text);
 }
 
+.keys-last-error {
+  margin-top: 4px;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  word-break: break-word;
+  opacity: 0.85;
+}
+
 .keys-bar {
   height: 6px;
   margin: 8px 0 6px;

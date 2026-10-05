@@ -1875,18 +1875,19 @@ async function renderKeysList() {
     const nameEl = document.createElement("span");
     nameEl.className = "kb-doc-title";
     nameEl.textContent = `${t(state.lang, "keys_key_label")} …${k.hint}`;
+    const isDaily = k.exhausted && k.exhaustedKind !== "temporary";
     const chip = document.createElement("span");
-    chip.className = `keys-chip ${k.exhausted ? "keys-chip--exhausted" : "keys-chip--active"}`;
-    chip.textContent = t(state.lang, k.exhausted ? "keys_exhausted" : "keys_active");
+    chip.className = `keys-chip ${isDaily ? "keys-chip--exhausted" : "keys-chip--active"}`;
+    chip.textContent = t(state.lang, isDaily ? "keys_exhausted" : k.exhausted ? "keys_limited" : "keys_active");
     head.appendChild(nameEl);
     head.appendChild(chip);
 
     const bar = document.createElement("div");
     bar.className = "keys-bar";
     const fill = document.createElement("div");
-    const pct = k.exhausted ? 100 : Math.min(100, Math.round((k.requests / limit) * 100));
+    const pct = isDaily ? 100 : Math.min(100, Math.round((k.requests / limit) * 100));
     fill.className = "keys-bar-fill";
-    if (k.exhausted) fill.classList.add("keys-bar-fill--exhausted");
+    if (isDaily) fill.classList.add("keys-bar-fill--exhausted");
     else if (pct >= 80) fill.classList.add("keys-bar-fill--warn");
     fill.style.width = `${pct}%`;
     bar.appendChild(fill);
@@ -1901,8 +1902,16 @@ async function renderKeysList() {
     if (k.exhausted && k.exhaustedUntilMs) {
       const until = document.createElement("div");
       until.className = "kb-doc-meta";
-      until.textContent = `${t(state.lang, "keys_exhausted_until")} ${formatFullDateTime(k.exhaustedUntilMs)}`;
+      until.textContent = `${t(state.lang, isDaily ? "keys_exhausted_until" : "keys_limited_until")} ${formatFullDateTime(k.exhaustedUntilMs)}`;
       main.appendChild(until);
+    }
+    // Pesan error terakhir dari Google (dipotong) -- buat tahu PENYEBAB
+    // sebenarnya tanpa harus buka log server.
+    if (k.lastError) {
+      const errEl = document.createElement("div");
+      errEl.className = "keys-last-error";
+      errEl.textContent = `${t(state.lang, "keys_last_error_prefix")} ${truncate(String(k.lastError), 160)}`;
+      main.appendChild(errEl);
     }
 
     row.appendChild(main);

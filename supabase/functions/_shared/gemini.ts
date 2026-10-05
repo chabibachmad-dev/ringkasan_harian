@@ -220,6 +220,17 @@ async function callGeminiWithModelFallback(
         const reason = err instanceof Error ? err.message : String(err);
         if (multiKey && err instanceof GeminiHttpError && err.status === 429) {
           const info = markKeyExhausted(apiKeys, apiKey, tag, step.model, err.message);
+          // 429 NON-harian di jalur Google Search ("tools") biasanya cuma batas
+          // sementara/khusus fitur pencarian -- BUKAN tanda key-nya habis.
+          // Jangan muter ke semua key lain di jalur ini (membuang 1 request
+          // per key tiap pesan & bikin SEMUA key kelihatan "habis" padahal
+          // jalur biasa tanpa pencarian masih lancar) dan jangan dicatat
+          // sebagai key habis di dashboard: langsung lanjut ke step berikutnya
+          // (tanpa internet), yang punya rotasi key sendiri.
+          if (!info.daily && tag.endsWith("-tools")) {
+            console.warn(`Jalur Google Search kena 429 non-harian (${err.message.slice(0, 160)}), lanjut tanpa internet.`);
+            break;
+          }
           await reportKeyEvent({
             keyHint: geminiKeyHint(apiKey),
             kind: "exhausted",

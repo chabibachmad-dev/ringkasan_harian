@@ -53,7 +53,7 @@
 //     angka, bukan isi chat pribadi -- supaya bisa ditampilkan di footer
 //     layar daftar.)
 //   { "code": "...", "action": "key_status" }
-//     -> { ok: true, dailyLimit, resetAtMs, keys: [{ hint, requests, exhaustedUntilMs, exhausted, lastError }, ...] }
+//     -> { ok: true, dailyLimit, resetAtMs, keys: [{ hint, requests, exhausted, exhaustedKind, exhaustedUntilMs, lastError }, ...] }
 //     (status tiap API key Gemini hari ini, zona Pasifik: jumlah request yang
 //     TERCATAT sistem ini (bot WA + chat aplikasi), apakah lagi habis kuota,
 //     dan kapan reset. Hanya 4 karakter TERAKHIR key yang pernah keluar dari
@@ -303,15 +303,29 @@ Deno.serve(async (req) => {
       const requests = rows.reduce((sum, r) => sum + (r.requests ?? 0), 0);
       let exhaustedUntilMs = 0;
       let lastError: string | null = null;
+      let lastErrorUntil = 0;
       for (const r of rows) {
         const until = r.exhausted_until ? new Date(r.exhausted_until).getTime() : 0;
-        if (until > exhaustedUntilMs) {
-          exhaustedUntilMs = until;
-          lastError = r.last_error ?? null;
+        if (until > exhaustedUntilMs) exhaustedUntilMs = until;
+        if (r.last_error && until >= lastErrorUntil) {
+          lastErrorUntil = until;
+          lastError = r.last_error;
         }
       }
       const exhausted = exhaustedUntilMs > nowMs;
-      return { hint, requests, exhausted, exhaustedUntilMs: exhausted ? exhaustedUntilMs : null, lastError: exhausted ? lastError : null };
+      // "daily" = jatah harian habis (masa istirahat panjang sampai reset);
+      // "temporary" = rate-limit sementara (istirahat ~1 menit).
+      const exhaustedKind = exhausted ? (exhaustedUntilMs - nowMs > 10 * 60_000 ? "daily" : "temporary") : null;
+      return {
+        hint,
+        requests,
+        exhausted,
+        exhaustedKind,
+        exhaustedUntilMs: exhausted ? exhaustedUntilMs : null,
+        // Pesan error terakhir disertakan juga saat sudah tidak habis (buat
+        // diagnosis), diambil dari baris yang paling baru diperbarui.
+        lastError
+      };
     });
 
     // Tengah malam Pasifik berikutnya (ms epoch) = jadwal reset kuota harian.
