@@ -904,6 +904,14 @@ mark.chat-search-hit--active {
   overflow-y: auto;
 }
 
+/* Kartu dialog = kolom flex dengan tinggi maksimal; tanpa ini anak-anaknya
+   (terutama daftar ber-overflow seperti .kb-doc-list) ikut "dijepit" sampai
+   hampir nol tingginya saat isi dialog melebihi layar -- daftar API key
+   di Status Sistem jadi tak terlihat. Biarkan kartu yang menggulir. */
+.kb-dialog-card > * {
+  flex-shrink: 0;
+}
+
 .kb-dialog-card h2 {
   margin: 0;
   font-size: 1.05rem;
