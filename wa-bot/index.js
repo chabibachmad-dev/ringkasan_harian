@@ -2045,8 +2045,23 @@ const aiPausedUntil = new Map();
 const contactNames = new Map(); // kunci -> nama tampilan terakhir (utk pesan konfirmasi)
 const botSentIds = new Map(); // id pesan yang DIKIRIM BOT -> waktu (ms), supaya tidak dikira balasan manual
 
+// kunci -> semua kunci lain yang diketahui milik kontak yang sama (nomor <-> @lid).
+// Diisi tiap kali ada JID + remoteJidAlt bersamaan, sehingga perintah dari aplikasi
+// (yang cuma tahu satu JID) tetap menjangkau kunci jeda yang satunya.
+const jidAliases = new Map();
+
 function jidUserKeys(...jids) {
-  return [...new Set(jids.filter(Boolean).map((j) => String(j).split("@")[0].split(":")[0]).filter(Boolean))];
+  const base = [...new Set(jids.filter(Boolean).map((j) => String(j).split("@")[0].split(":")[0]).filter(Boolean))];
+  if (base.length > 1) {
+    for (const a of base) {
+      let set = jidAliases.get(a);
+      if (!set) jidAliases.set(a, (set = new Set()));
+      for (const b of base) set.add(b);
+    }
+  }
+  const out = new Set(base);
+  for (const k of base) for (const x of jidAliases.get(k) ?? []) out.add(x);
+  return [...out];
 }
 
 function loadAiPause() {
@@ -2644,7 +2659,23 @@ async function processPendingOutgoing(sock) {
 
   for (const row of data ?? []) {
     try {
+      // "AI On" yang diketik dari layar WA di aplikasi = PERINTAH, bukan pesan untuk kontak:
+      // aktifkan lagi auto-reply di chat ini, JANGAN dikirim ke kontak, dan JANGAN memicu jeda.
+      if (typeof row.content === "string" && AI_ON_RE.test(row.content)) {
+        const keys = jidUserKeys(row.wa_jid);
+        const was = resumeAiFor(keys);
+        await supabase
+          .from("whatsapp_messages")
+          .update({ status: "sent", wa_message_id: null, error: null })
+          .eq("id", row.id);
+        console.log(
+          `🤖 "AI On" dari aplikasi untuk ${describeContact(keys)} -> auto-reply aktif lagi${was ? "" : " (sebelumnya memang tidak dijeda)"}. (tidak dikirim ke kontak)`
+        );
+        await notifyOwner(sock, `✅ AI aktif lagi untuk ${describeContact(keys)}.`);
+        continue;
+      }
       const sent = await sock.sendMessage(row.wa_jid, { text: row.content });
+      rememberBotSent(sent?.key?.id);
       await supabase
         .from("whatsapp_messages")
         .update({ status: "sent", wa_message_id: sent?.key?.id ?? null, error: null })

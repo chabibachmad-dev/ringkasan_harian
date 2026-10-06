@@ -357,8 +357,10 @@ sendiri (dari HP, atau dari layar obrolan WA di aplikasi), bot berhenti membalas
 otomatis di chat itu selama 60 menit, dihitung dari balasan manual TERAKHIR
 (balas lagi = hitungan mulai ulang). Chat dengan nomor lain tidak terpengaruh,
 dan pesan yang masuk selama jeda tetap tersimpan. Untuk mengaktifkan bot lagi
-sebelum 60 menit: ketik `AI On` di chat itu (pesan "AI On" terlihat oleh
-lawan bicara; isi `WA_AI_ON_DELETE_COMMAND=true` kalau mau bot langsung
+sebelum 60 menit: ketik `AI On` di chat itu. Kalau diketik dari layar WA di
+aplikasi, `AI On` diperlakukan sebagai PERINTAH: tidak dikirim ke lawan bicara
+dan tidak memicu jeda baru. Kalau diketik dari HP, pesan "AI On" terlihat oleh
+lawan bicara (isi `WA_AI_ON_DELETE_COMMAND=true` kalau mau bot langsung
 menghapusnya untuk semua orang). Konfirmasi "AI aktif lagi untuk ..." dikirim
 ke nomor pemilik. Di chat-ke-diri-sendiri: `AI On` mengaktifkan semua chat
 sekaligus, `AI Status` menampilkan chat yang sedang dijeda. Balasan manual
