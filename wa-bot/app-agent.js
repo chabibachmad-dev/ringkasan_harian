@@ -83,6 +83,7 @@ export function createAppAgentWorker(deps, overrides = {}) {
     ollamaBaseUrl,
     ollamaModel,
     notify, // async ({ title, body, url, tag }) -> void (push ke HP); opsional
+    kbIndex, // indeks dokumen di laptop (kb-index.js); opsional
     getExtra, // () -> { waConnected, extra }; opsional (untuk halaman Status sistem)
     log = console
   } = deps;
@@ -190,7 +191,10 @@ export function createAppAgentWorker(deps, overrides = {}) {
   // Peta-lalu-ringkas atas seluruh Dokumen Pengetahuan. Mengembalikan teks
   // catatan (atau null kalau tidak ada dokumen).
   async function loadKbDocs() {
-    const { data: docs, error } = await supabase.from("knowledge_documents").select("title, content");
+    // Dokumen yang diindeks di laptop: pakai teks LENGKAP dari sana (salinan di
+    // Supabase bisa dipotong untuk Gemini).
+    if (kbIndex && kbIndex.hasDocs()) return kbIndex.getAllDocs();
+    const { data: docs, error } = await supabase.from("knowledge_documents").select("title, content").neq("content", "");
     if (error) throw new Error(`Gagal baca dokumen: ${error.message}`);
     return docs ?? [];
   }
@@ -279,8 +283,7 @@ export function createAppAgentWorker(deps, overrides = {}) {
     } else if (attachments.length > 0) {
       // Pertanyaan spesifik atas lampiran panjang: potongan paling relevan (+ KB bila aktif).
       await setProgress(job.id, "Mencari bagian lampiran yang relevan");
-      const pool = [...attachments, ...(useKb ? await loadKbDocs() : [])];
-      let chunks = rankKnowledgeChunks(pool, job.question, cfg.ragBudgetChars);
+      let chunks = rankKnowledgeChunks(attachments, job.question, cfg.ragBudgetChars);
       if (!chunks.some((c) => c.title.startsWith("Lampiran:"))) {
         // Tidak ada kata yang cocok ("apa isi file ini?"): ambil awal lampiran.
         const head = [];
@@ -294,6 +297,10 @@ export function createAppAgentWorker(deps, overrides = {}) {
         }
         chunks = [...head, ...chunks];
         docNote = "\n\n_Catatan: pertanyaan tidak spesifik, jadi yang dibaca model hanya bagian awal lampiran._";
+      }
+      if (useKb) {
+        const kb = await fetchRelevantKnowledgeChunks(job.question, Math.floor(cfg.ragBudgetChars / 2));
+        chunks = [...chunks, ...kb];
       }
       addContext("KONTEKS LAMPIRAN/DOKUMEN (potongan paling relevan; bukan seluruh isi):", formatChunks(chunks));
     } else if (useKb && whole) {

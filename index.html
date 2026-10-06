@@ -498,8 +498,8 @@
         <div class="kb-dialog-card">
           <h2 data-i18n="kb_title">Dokumen Pengetahuan</h2>
           <p class="kb-intro" data-i18n="kb_intro">
-            Upload PDF peraturan atau referensi lain supaya AI bisa menjawab dari dokumen ini duluan, tanpa perlu cari di
-            internet.
+            Upload PDF (atau .txt/.md/.csv) peraturan atau referensi lain — utuh, tanpa batas jumlah halaman. Laptop
+            mengubahnya jadi teks dan membuat indeks pencarian supaya AI bisa menjawab dari dokumen ini duluan.
           </p>
 
           <form id="kb-upload-form" class="kb-upload-form">
@@ -511,7 +511,7 @@
               data-i18n-placeholder="kb_title_placeholder"
               placeholder="Judul dokumen (mis. Permen Keuangan No. 1 Tahun 2024)"
             />
-            <input id="kb-file-input" type="file" accept="application/pdf,.pdf" />
+            <input id="kb-file-input" type="file" accept="application/pdf,.pdf,.txt,.md,.csv,text/plain" />
             <button type="submit" id="kb-upload-btn" class="primary-btn" data-i18n="kb_upload_btn">Upload</button>
           </form>
           <p id="kb-upload-status" class="kb-upload-status" hidden></p>

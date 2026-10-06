@@ -15,3 +15,6 @@ kirim-ringkasan.flag
 ai-pause.json
 
 khatam-state.json
+
+# Indeks dokumen pengetahuan di laptop (bisa dibangun ulang, tapi besar)
+kb/

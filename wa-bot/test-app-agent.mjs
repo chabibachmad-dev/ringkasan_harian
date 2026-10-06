@@ -10,9 +10,9 @@ const check = (c, m) => { if (!c) { fails++; console.log("FAIL:", m); } else con
 function makeDb(tables) {
   let idc = 0;
   const from = (name) => {
-    const st = { name, filters: [], order: null, limit: null, op: "select", payload: null, wantSel: false, single: false };
+    const st = { name, filters: [], neqs: [], order: null, limit: null, op: "select", payload: null, wantSel: false, single: false };
     const rows = () => (tables[name] ??= []);
-    const match = (r) => st.filters.every(([c, v]) => r[c] === v);
+    const match = (r) => st.filters.every(([c, v]) => r[c] === v) && st.neqs.every(([c, v]) => r[c] !== v);
     const run = () => {
       const t = rows();
       if (st.op === "select") {
@@ -40,6 +40,7 @@ function makeDb(tables) {
     const b = {
       select() { if (st.op === "select") st.op = "select"; else st.wantSel = true; return b; },
       eq(c, v) { st.filters.push([c, v]); return b; },
+      neq(c, v) { st.neqs.push([c, v]); return b; },
       order(c, o) { st.order = { c, asc: o?.ascending !== false }; return b; },
       limit(n) { st.limit = n; return b; },
       insert(p) { st.op = "insert"; st.payload = p; return b; },
@@ -82,6 +83,7 @@ function setup(over = {}) {
   const w = createAppAgentWorker(
     {
       supabase: makeDb(tables),
+      kbIndex: over.kbIndex,
       callOllamaChat: async (messages, opts) => { calls.push({ messages, opts }); if (over.fail) throw new Error("Ollama mati"); return over.reply ? over.reply(messages) : "jawaban lokal"; },
       enqueueOllamaCall: (fn) => fn(),
       fetchRelevantKnowledgeChunks: async () => [{ title: "Dok A", text: "isi potongan relevan" }],
@@ -144,6 +146,20 @@ check(JSON.stringify(pickEvenly([1,2,3,4,5,6,7,8,9,10], 3)) === "[1,6,10]" && pi
   check(calls.at(-1).messages.at(-1).content.includes("[Dok A — bagian 1]"), "reduce: catatan bagian dimasukkan");
   const reply = tables.chat_messages.find((m) => m.id === tables.agent_jobs[0].assistant_message_id);
   check(reply.content.startsWith("RINGKASAN AKHIR") && /hanya membaca 3 dari 4 bagian/.test(reply.content), "jawaban memuat catatan 'sebagian dokumen'");
+}
+
+// 4b. Indeks laptop (kbIndex): RAG pakai FTS, ringkas pakai teks lengkap dari indeks
+{
+  const fakeIndex = {
+    hasDocs: () => true,
+    getAllDocs: () => [{ id: "x", title: "Dok Besar", content: "Z".repeat(5000) + "Y".repeat(5000) }]
+  };
+  const t2 = setup({ reply: (m) => (m[0].content.startsWith("Kamu membaca") ? "- poin" : "RINGKASAN"), kbIndex: fakeIndex });
+  t2.tables.chat_thread_meta[0].use_kb = true;
+  t2.tables.agent_jobs[0].question = "tolong ringkas dokumen ini";
+  t2.tables.chat_messages[2].content = "tolong ringkas dokumen ini";
+  await t2.w.tick();
+  check(t2.calls.slice(0, -1).every((c) => /Dok Besar/.test(c.messages.at(-1).content)), "ringkas: bagian dibaca dari teks LENGKAP di indeks laptop, bukan salinan Supabase");
 }
 
 // 5. Gagal -> status failed + pesan error

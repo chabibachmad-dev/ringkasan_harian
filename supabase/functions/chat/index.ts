@@ -88,6 +88,13 @@
 //     -> { ok: true, document: { id, title, char_count, original_filename, uploaded_at } }
 //   { "code": "...", "action": "kb_delete", "id": "..." }
 //     -> { ok: true }
+//   Upload file MENTAH (PDF/txt/md/csv, sampai 50 MB; diproses bot di laptop,
+//   lihat migrations/0017 + wa-bot/kb-ingest.js):
+//   { "code": "...", "action": "kb_upload_url", "title": "...", "filename": "x.pdf", "size": 123 }
+//     -> { ok: true, document, upload: { path, token } }  (browser lalu upload ke
+//        bucket kb-inbox dengan uploadToSignedUrl(path, token, file))
+//   { "code": "...", "action": "kb_upload_done", "id": "..." }  -> status 'queued'
+//   { "code": "...", "action": "kb_retry", "id": "..." }        -> ulangi yang 'error'
 //
 // --- Al-Qur'an (halaman Pengaturan > Al-Qur'an; tabel di migrations/0014) ---
 //   { "code": "...", "action": "quran_sync" }
@@ -420,17 +427,130 @@ Deno.serve(async (req) => {
     return json({ ok: true, dailyLimit: Number(Deno.env.get("GEMINI_DAILY_LIMIT")) || 20, resetAtMs, keys });
   }
 
+  // --- Dokumen Pengetahuan (lihat migrations/0007 + 0017) ---
+  const KB_BUCKET = "kb-inbox";
+  const KB_LIST_COLS_NEW =
+    "id, title, char_count, original_filename, uploaded_at, status, status_detail, error, page_count, truncated, on_laptop, ocr_pages";
+  const KB_LIST_COLS_OLD = "id, title, char_count, original_filename, uploaded_at";
+  const KB_ALLOWED_EXT = ["pdf", "txt", "md", "csv"];
+  const KB_MAX_FILE_BYTES = Number(Deno.env.get("KB_MAX_FILE_BYTES")) || 50 * 1024 * 1024;
+  const isMissingColumn = (msg: string) => /column|schema cache/i.test(msg || "");
+
   if (body.action === "kb_list") {
-    const { data, error } = await supabaseAdmin
+    let res = await supabaseAdmin
       .from("knowledge_documents")
-      .select("id, title, char_count, original_filename, uploaded_at")
+      .select(KB_LIST_COLS_NEW)
       .order("uploaded_at", { ascending: false })
       .limit(200);
-
-    if (error) return json({ ok: false, error: error.message }, 500);
-    return json({ ok: true, documents: data ?? [] });
+    // Migrasi 0017 belum dijalankan -> kolom status belum ada; pakai daftar lama.
+    if (res.error && isMissingColumn(res.error.message)) {
+      res = await supabaseAdmin
+        .from("knowledge_documents")
+        .select(KB_LIST_COLS_OLD)
+        .order("uploaded_at", { ascending: false })
+        .limit(200);
+    }
+    if (res.error) return json({ ok: false, error: res.error.message }, 500);
+    return json({ ok: true, documents: res.data ?? [] });
   }
 
+  // Langkah 1 upload file mentah: buat baris + tiket upload ke bucket inbox.
+  if (body.action === "kb_upload_url") {
+    const title = typeof body.title === "string" ? body.title.trim().slice(0, 200) : "";
+    const filename = typeof body.filename === "string" ? body.filename.trim().slice(0, 200) : "";
+    const size = Number(body.size) || 0;
+    if (!title) return json({ ok: false, error: "Judul dokumen tidak boleh kosong." }, 400);
+    const ext = (filename.split(".").pop() ?? "").toLowerCase();
+    if (!filename || !KB_ALLOWED_EXT.includes(ext)) {
+      return json({ ok: false, error: `Jenis file tidak didukung (boleh: ${KB_ALLOWED_EXT.join(", ")}).` }, 400);
+    }
+    if (size > KB_MAX_FILE_BYTES) {
+      return json(
+        { ok: false, error: `File terlalu besar (maks ${Math.floor(KB_MAX_FILE_BYTES / 1024 / 1024)} MB per file).` },
+        400
+      );
+    }
+
+    const docId = crypto.randomUUID();
+    const path = `${docId}/source.${ext}`;
+    const { data: signed, error: signErr } = await supabaseAdmin.storage.from(KB_BUCKET).createSignedUploadUrl(path);
+    if (signErr || !signed) {
+      return json(
+        {
+          ok: false,
+          error: `Gagal menyiapkan tempat upload (${signErr?.message ?? "tanpa detail"}). Pastikan migrasi 0017_kb_inbox.sql sudah dijalankan.`
+        },
+        500
+      );
+    }
+    const { data, error } = await supabaseAdmin
+      .from("knowledge_documents")
+      .insert({
+        id: docId,
+        title,
+        content: "",
+        char_count: 0,
+        original_filename: filename,
+        status: "uploading",
+        status_detail: "Mengirim file…",
+        storage_path: path
+      })
+      .select(KB_LIST_COLS_NEW)
+      .single();
+    if (error) {
+      return json(
+        { ok: false, error: isMissingColumn(error.message) ? "Jalankan dulu migrasi 0017_kb_inbox.sql di Supabase." : error.message },
+        500
+      );
+    }
+    return json({ ok: true, document: data, upload: { path, token: signed.token } });
+  }
+
+  // Langkah 2: file sudah terkirim -> antrekan supaya diambil bot di laptop.
+  if (body.action === "kb_upload_done") {
+    const id = typeof body.id === "string" ? body.id : "";
+    if (!UUID_RE.test(id)) return json({ ok: false, error: "ID dokumen tidak valid." }, 400);
+    const { data: row } = await supabaseAdmin
+      .from("knowledge_documents")
+      .select("id, status, storage_path")
+      .eq("id", id)
+      .maybeSingle();
+    if (!row || row.status !== "uploading" || !row.storage_path) {
+      return json({ ok: false, error: "Dokumen tidak dalam status upload." }, 400);
+    }
+    const dir = String(row.storage_path).split("/")[0];
+    const { data: files } = await supabaseAdmin.storage.from(KB_BUCKET).list(dir);
+    if (!files || files.length === 0) {
+      return json({ ok: false, error: "File belum sampai di server -- ulangi upload." }, 400);
+    }
+    const { error } = await supabaseAdmin
+      .from("knowledge_documents")
+      .update({ status: "queued", status_detail: "Menunggu diproses di laptop…", error: null })
+      .eq("id", id)
+      .eq("status", "uploading");
+    if (error) return json({ ok: false, error: error.message }, 500);
+    return json({ ok: true });
+  }
+
+  // Coba ulang dokumen yang gagal diproses (file mentah masih di inbox).
+  if (body.action === "kb_retry") {
+    const id = typeof body.id === "string" ? body.id : "";
+    if (!UUID_RE.test(id)) return json({ ok: false, error: "ID dokumen tidak valid." }, 400);
+    const { data, error } = await supabaseAdmin
+      .from("knowledge_documents")
+      .update({ status: "queued", status_detail: "Menunggu diproses di laptop…", error: null })
+      .eq("id", id)
+      .eq("status", "error")
+      .not("storage_path", "is", null)
+      .select("id");
+    if (error) return json({ ok: false, error: error.message }, 500);
+    if (!data || data.length === 0) {
+      return json({ ok: false, error: "Dokumen ini tidak bisa diulang (file mentahnya sudah tidak ada) -- upload ulang." }, 400);
+    }
+    return json({ ok: true });
+  }
+
+  // Jalur lama/cadangan: teks sudah diekstrak oleh klien.
   if (body.action === "kb_upload") {
     const title = typeof body.title === "string" ? body.title.trim().slice(0, 200) : "";
     const content = typeof body.content === "string" ? body.content.trim() : "";
@@ -444,17 +564,16 @@ Deno.serve(async (req) => {
       );
     }
 
-    // Batasi per-dokumen supaya satu PDF yang sangat panjang tidak membuat
-    // konteks yang dikirim ke Gemini tiap chat membengkak tak terkendali
-    // (lihat pemotongan total gabungan semua dokumen di action "send").
-    const MAX_DOC_CHARS = 300000;
+    // Salinan teks untuk Gemini dibatasi supaya konteks tiap chat tidak
+    // membengkak. (Dokumen yang lewat laptop tetap utuh di indeks Ollama.)
+    const MAX_DOC_CHARS = 600000;
     const trimmed =
       content.length > MAX_DOC_CHARS ? `${content.slice(0, MAX_DOC_CHARS)}\n\n[...dipotong, dokumen terlalu panjang...]` : content;
 
     const { data, error } = await supabaseAdmin
       .from("knowledge_documents")
       .insert({ title, content: trimmed, char_count: trimmed.length, original_filename: originalFilename })
-      .select("id, title, char_count, original_filename, uploaded_at")
+      .select(KB_LIST_COLS_OLD)
       .single();
 
     if (error) return json({ ok: false, error: error.message }, 500);
@@ -465,6 +584,16 @@ Deno.serve(async (req) => {
     const id = typeof body.id === "string" ? body.id : "";
     if (!id) return json({ ok: false, error: "ID dokumen tidak valid." }, 400);
 
+    // Hapus juga file mentah di inbox kalau masih ada (best-effort).
+    const { data: row } = await supabaseAdmin.from("knowledge_documents").select("storage_path").eq("id", id).maybeSingle();
+    const sp = (row as { storage_path?: string | null } | null)?.storage_path;
+    if (sp) {
+      try {
+        await supabaseAdmin.storage.from(KB_BUCKET).remove([sp]);
+      } catch (_e) {
+        // abaikan
+      }
+    }
     const { error } = await supabaseAdmin.from("knowledge_documents").delete().eq("id", id);
     if (error) return json({ ok: false, error: error.message }, 500);
     return json({ ok: true });
@@ -908,6 +1037,7 @@ Deno.serve(async (req) => {
       const { data: kbRows, error: kbErr } = await supabaseAdmin
         .from("knowledge_documents")
         .select("title, content")
+        .neq("content", "") // lewati dokumen yang belum selesai diproses
         .order("uploaded_at", { ascending: false })
         .limit(50);
       if (kbErr) {
@@ -1103,7 +1233,7 @@ Deno.serve(async (req) => {
     {
       ok: false,
       error:
-        "action tidak dikenal (pakai 'history', 'send', 'agent_job', 'agent_status', 'system_status', 'attachment_add', 'attachment_delete', 'quran_khatam_set', 'quran_khatam_clear', 'delete', 'delete_message', 'last_messages', 'list_threads', 'set_thread_meta', 'token_usage', 'key_status', 'kb_list', 'kb_upload', 'kb_delete', 'quran_sync', 'quran_set_last_read', 'quran_add_bookmark', atau 'quran_delete_bookmark')."
+        "action tidak dikenal (pakai 'history', 'send', 'agent_job', 'agent_status', 'system_status', 'attachment_add', 'attachment_delete', 'quran_khatam_set', 'quran_khatam_clear', 'delete', 'delete_message', 'last_messages', 'list_threads', 'set_thread_meta', 'token_usage', 'key_status', 'kb_list', 'kb_upload', 'kb_upload_url', 'kb_upload_done', 'kb_retry', 'kb_delete', 'quran_sync', 'quran_set_last_read', 'quran_add_bookmark', atau 'quran_delete_bookmark')."
     },
     400
   );

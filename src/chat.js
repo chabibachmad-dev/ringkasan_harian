@@ -2,6 +2,8 @@
 // Function `chat` (lihat supabase/functions/chat/index.ts), karena
 // tabel chat_messages dikunci total dari anon key.
 
+import { supabase } from "./supabaseClient.js";
+
 const CODE_STORAGE_KEY = "rh_chat_code";
 
 export function getStoredChatCode() {
@@ -157,6 +159,32 @@ export function listKnowledgeDocs(code) {
 // Function tidak perlu library PDF sama sekali.
 export function uploadKnowledgeDoc(code, { title, content, filename } = {}) {
   return callChatFunction({ code, action: "kb_upload", title, content, filename });
+}
+
+// Upload file MENTAH (PDF/txt/md/csv, sampai 50 MB) tanpa batas karakter:
+// 1) minta tiket upload, 2) kirim file ke bucket privat `kb-inbox`,
+// 3) antrekan -- lalu bot di laptop mengubahnya jadi teks + indeks pencarian
+// (lihat wa-bot/kb-ingest.js). Mengembalikan { ok, document } atau error.
+export async function uploadKnowledgeFile(code, { title, file, onStatus } = {}) {
+  const ticket = await callChatFunction({ code, action: "kb_upload_url", title, filename: file.name, size: file.size });
+  if (!ticket.ok) return ticket;
+  if (onStatus) onStatus("sending");
+  const { error } = await supabase.storage.from("kb-inbox").uploadToSignedUrl(ticket.upload.path, ticket.upload.token, file, {
+    contentType: file.type || undefined
+  });
+  if (error) {
+    // Bersihkan baris yatim supaya tidak menggantung 'uploading' selamanya.
+    await callChatFunction({ code, action: "kb_delete", id: ticket.document.id });
+    return { ok: false, message: error.message || "Gagal mengirim file." };
+  }
+  const done = await callChatFunction({ code, action: "kb_upload_done", id: ticket.document.id });
+  if (!done.ok) return done;
+  return { ok: true, document: ticket.document };
+}
+
+// Ulangi pemrosesan dokumen yang gagal (file mentahnya masih di inbox).
+export function retryKnowledgeDoc(code, id) {
+  return callChatFunction({ code, action: "kb_retry", id });
 }
 
 // Hapus satu dokumen pengetahuan (tombol tempat sampah di daftar dokumen).

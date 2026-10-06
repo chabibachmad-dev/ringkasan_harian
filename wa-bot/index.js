@@ -39,6 +39,8 @@ import { fileURLToPath } from "node:url";
 import { createSimab, SIMAB_OLLAMA_SYSTEM } from "./simab.js";
 import { createAppAgentWorker } from "./app-agent.js";
 import { createKhatamReminder } from "./khatam.js";
+import { openKbIndex } from "./kb-index.js";
+import { createKbIngestWorker, readKbConfig } from "./kb-ingest.js";
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -466,11 +468,21 @@ function rankKnowledgeChunks(docs, question, budgetChars) {
   return picked;
 }
 
+// Indeks pencarian dokumen di laptop (SQLite FTS5, lihat kb-index.js / kb-ingest.js).
+// Diisi saat start; kalau gagal dibuka, RAG kembali ke cara lama (ambil dari Supabase).
+let kbIndex = null;
+
 async function fetchRelevantKnowledgeChunks(question, budgetChars) {
+  // Dokumen yang diupload lewat laptop diindeks FULL (tanpa batas ukuran) --
+  // cari di indeks itu dulu. Rekonsiliasi berkala menjamin isinya sama dengan
+  // tabel knowledge_documents, jadi kalau indeks ada isinya, tak perlu ke Supabase.
+  if (kbIndex && kbIndex.hasDocs()) {
+    return kbIndex.search(question, { budgetChars, maxChunks: 8 }).map(({ title, text }) => ({ title, text }));
+  }
   const qWords = new Set(tokenizeForScoring(question));
   if (qWords.size === 0) return [];
 
-  const { data, error } = await supabase.from("knowledge_documents").select("title, content");
+  const { data, error } = await supabase.from("knowledge_documents").select("title, content").neq("content", "");
   if (error) {
     console.error("RAG: gagal ambil Dokumen Pengetahuan, lanjut tanpa konteks dokumen:", error.message);
     return [];
@@ -2833,8 +2845,21 @@ async function sendPush({ title, body, url, tag }) {
   if (!res.ok) throw new Error(`send-push HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`);
 }
 
+const kbCfg = readKbConfig(process.env, fileURLToPath(new URL(".", import.meta.url)));
+let kbIngest = null;
+if (kbCfg.enabled) {
+  try {
+    kbIndex = await openKbIndex({ file: kbCfg.indexFile });
+    kbIngest = createKbIngestWorker({ supabase, index: kbIndex, notify: sendPush, env: process.env, baseDir: fileURLToPath(new URL(".", import.meta.url)) });
+  } catch (err) {
+    console.error("📚 Indeks dokumen tidak aktif:", err instanceof Error ? err.message : String(err));
+    kbIndex = null;
+  }
+}
+
 const appAgent = createAppAgentWorker({
   supabase,
+  kbIndex,
   callOllamaChat,
   enqueueOllamaCall,
   fetchRelevantKnowledgeChunks,
@@ -2846,7 +2871,24 @@ const appAgent = createAppAgentWorker({
   notify: sendPush,
   getExtra: () => ({
     waConnected: waOpen,
-    extra: { pausedChats: aiPausedUntil.size, engine: WA_AI_ENGINE, autoReply: AUTO_REPLY_ACTIVE }
+    extra: {
+      pausedChats: aiPausedUntil.size,
+      engine: WA_AI_ENGINE,
+      autoReply: AUTO_REPLY_ACTIVE,
+      kb: kbIngest
+        ? (() => {
+            const st = kbIngest.status();
+            return {
+              docs: st.docs,
+              chunks: st.chunks,
+              pdftotext: !!st.tools?.pdftotext,
+              ocr: !!(st.tools?.tesseract && st.tools?.pdftoppm),
+              processing: st.current ? st.current.title : null,
+              lastError: st.lastError
+            };
+          })()
+        : null
+    }
   })
 });
 
@@ -2864,8 +2906,14 @@ setInterval(() => {
 appAgent.start().catch((err) => {
   console.error("Agen Ollama aplikasi gagal start:", err instanceof Error ? err.message : String(err));
 });
+if (kbIngest) {
+  kbIngest.start().catch((err) => {
+    console.error("Ingest dokumen gagal start:", err instanceof Error ? err.message : String(err));
+  });
+}
 for (const sig of ["SIGINT", "SIGTERM"]) {
   process.on(sig, () => {
+    kbIngest?.stop();
     appAgent
       .stop()
       .catch(() => {})

@@ -981,6 +981,26 @@ mark.chat-search-hit--active {
   margin-top: 2px;
 }
 
+.kb-doc-state {
+  font-size: 0.75rem;
+  margin-top: 3px;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+.kb-doc-state--queued,
+.kb-doc-state--processing,
+.kb-doc-state--uploading {
+  color: var(--accent, #2563eb);
+}
+.kb-doc-state--error {
+  color: #dc2626;
+}
+.kb-retry-btn {
+  flex: none;
+  padding: 6px 10px;
+  font-size: 0.8rem;
+}
+
 /* ---------- Template Jawaban WA & Status API Gemini (dialog Pengaturan) ---------- */
 
 .qr-reply-input {

@@ -59,6 +59,8 @@ import {
   fetchTokenUsageToday,
   listKnowledgeDocs,
   uploadKnowledgeDoc,
+  uploadKnowledgeFile,
+  retryKnowledgeDoc,
   deleteKnowledgeDoc,
   fetchKeyStatus,
   addChatAttachment,
@@ -1886,7 +1888,13 @@ async function openKbDialog() {
   await renderKbDocList();
 }
 
+const KB_MAX_FILE_BYTES = 50 * 1024 * 1024;
+let kbPollTimer = null;
+
 async function renderKbDocList() {
+  if (kbPollTimer) clearTimeout(kbPollTimer);
+  kbPollTimer = null;
+  let needsPoll = false;
   els.kbDocList.innerHTML = "";
 
   if (!state.chatCode) {
@@ -1929,9 +1937,34 @@ async function renderKbDocList() {
     const meta = document.createElement("div");
     meta.className = "kb-doc-meta";
     const charCount = typeof doc.char_count === "number" ? doc.char_count : 0;
-    meta.textContent = `${charCount.toLocaleString(locale)} ${t(state.lang, "kb_chars_unit")} • ${formatFullDateTime(doc.uploaded_at)}`;
+    const status = doc.status || "ready";
+    if (status !== "ready") needsPoll = true;
+    if (status === "ready") {
+      const bits = [];
+      if (doc.page_count) bits.push(`${doc.page_count.toLocaleString(locale)} ${t(state.lang, "kb_pages_unit")}`);
+      bits.push(`${charCount.toLocaleString(locale)} ${t(state.lang, "kb_chars_unit")}`);
+      bits.push(formatFullDateTime(doc.uploaded_at));
+      meta.textContent = bits.join(" • ");
+    } else {
+      meta.textContent = formatFullDateTime(doc.uploaded_at);
+    }
     main.appendChild(titleEl);
     main.appendChild(meta);
+
+    const info = document.createElement("div");
+    info.className = `kb-doc-state kb-doc-state--${status}`;
+    if (status === "uploading") info.textContent = t(state.lang, "kb_state_uploading");
+    else if (status === "queued") info.textContent = t(state.lang, "kb_state_queued");
+    else if (status === "processing") info.textContent = `${t(state.lang, "kb_state_processing")}${doc.status_detail ? ` — ${doc.status_detail}` : ""}`;
+    else if (status === "error") info.textContent = `${t(state.lang, "kb_state_error")}${doc.error ? `: ${doc.error}` : ""}`;
+    else {
+      const extra = [];
+      if (doc.on_laptop) extra.push(t(state.lang, "kb_state_indexed"));
+      if (doc.truncated) extra.push(t(state.lang, "kb_state_truncated"));
+      if (doc.ocr_pages) extra.push(`${doc.ocr_pages} ${t(state.lang, "kb_state_ocr")}`);
+      info.textContent = extra.join(" • ");
+    }
+    if (info.textContent) main.appendChild(info);
 
     const delBtn = document.createElement("button");
     delBtn.type = "button";
@@ -1954,8 +1987,29 @@ async function renderKbDocList() {
     });
 
     row.appendChild(main);
+    if (status === "error" && doc.on_laptop !== true) {
+      const retryBtn = document.createElement("button");
+      retryBtn.type = "button";
+      retryBtn.className = "secondary-btn kb-retry-btn";
+      retryBtn.textContent = t(state.lang, "kb_retry_btn");
+      retryBtn.addEventListener("click", async () => {
+        retryBtn.disabled = true;
+        const r = await retryKnowledgeDoc(state.chatCode, doc.id);
+        if (!r.ok) alertWithDetail("kb_retry_error", r);
+        await renderKbDocList();
+      });
+      row.appendChild(retryBtn);
+    }
     row.appendChild(delBtn);
     els.kbDocList.appendChild(row);
+  }
+
+  // Selama ada dokumen yang masih diproses, segarkan daftar tiap 4 detik
+  // (selama dialog terbuka).
+  if (needsPoll) {
+    kbPollTimer = setTimeout(() => {
+      if (els.kbDialog.open) renderKbDocList();
+    }, 4000);
   }
 }
 
@@ -2218,6 +2272,20 @@ async function renderSystemStatus() {
   );
   if (w.extra && typeof w.extra.pausedChats === "number") {
     rows.push(sysRow(w.extra.pausedChats > 0, L("sys_paused"), String(w.extra.pausedChats)));
+  }
+
+  const kb = w.extra && w.extra.kb;
+  if (kb && typeof kb.docs === "number") {
+    const tools = `${kb.pdftotext ? "pdftotext" : L("sys_kb_no_pdftotext")} · ${kb.ocr ? "OCR" : L("sys_kb_no_ocr")}`;
+    const busyKb = kb.processing ? ` · ${L("sys_kb_processing")}: ${kb.processing}` : "";
+    const err = kb.lastError ? ` · ${kb.lastError}` : "";
+    rows.push(
+      sysRow(
+        !!kb.pdftotext && !kb.lastError,
+        L("sys_kb"),
+        `${kb.docs} ${L("sys_kb_docs")} · ${(kb.chunks || 0).toLocaleString()} ${L("sys_kb_chunks")} · ${tools}${busyKb}${err}`
+      )
+    );
   }
 
   const frag = document.createDocumentFragment();
@@ -3168,34 +3236,19 @@ function wireEvents() {
       return;
     }
 
+    if (file.size > KB_MAX_FILE_BYTES) {
+      els.kbUploadStatus.hidden = false;
+      els.kbUploadStatus.textContent = t(state.lang, "kb_file_too_big");
+      return;
+    }
+
+    // File dikirim MENTAH; konversi ke teks + pengindeksan dikerjakan bot di
+    // laptop (lihat wa-bot/kb-ingest.js), jadi tidak ada batas karakter dan
+    // PDF scan pun bisa di-OCR di sana.
     els.kbUploadBtn.disabled = true;
     els.kbUploadStatus.hidden = false;
-    els.kbUploadStatus.textContent = t(state.lang, "kb_extracting");
-
-    // Ekstrak teksnya DI BROWSER (lihat pdfText.js) -- Edge Function cuma
-    // terima teks polos, tidak pernah lihat file PDF mentahnya sama sekali.
-    // Di-import DINAMIS (bukan di atas bareng import lain) supaya library
-    // pdfjs-dist yang lumayan besar itu CUMA diunduh begitu fitur ini benar-
-    // benar dipakai, tidak ikut membengkakkan bundle utama yang dimuat tiap
-    // kali app dibuka (termasuk cuma buat sekadar chat biasa).
-    let extracted;
-    try {
-      const { extractPdfText } = await import("./pdfText.js");
-      extracted = await extractPdfText(file);
-    } catch (_err) {
-      els.kbUploadBtn.disabled = false;
-      els.kbUploadStatus.textContent = t(state.lang, "kb_extract_error");
-      return;
-    }
-
-    if (!extracted.text || extracted.text.length < 20) {
-      els.kbUploadBtn.disabled = false;
-      els.kbUploadStatus.textContent = t(state.lang, "kb_extract_empty");
-      return;
-    }
-
     els.kbUploadStatus.textContent = t(state.lang, "kb_uploading");
-    const result = await uploadKnowledgeDoc(state.chatCode, { title, content: extracted.text, filename: file.name });
+    const result = await uploadKnowledgeFile(state.chatCode, { title, file });
     els.kbUploadBtn.disabled = false;
 
     if (!result.ok) {
@@ -3209,7 +3262,7 @@ function wireEvents() {
       return;
     }
 
-    els.kbUploadStatus.textContent = t(state.lang, "kb_upload_success");
+    els.kbUploadStatus.textContent = t(state.lang, "kb_upload_queued");
     els.kbTitleInput.value = "";
     els.kbFileInput.value = "";
     await renderKbDocList();

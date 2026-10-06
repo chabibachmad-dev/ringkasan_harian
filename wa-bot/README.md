@@ -441,6 +441,37 @@ Setup: jalankan `supabase/migrations/0016_attachments_khatam_status.sql`, deploy
 `pm2 restart wa-bot`. Tes tanpa jaringan: `node test-app-agent.mjs` dan `node test-khatam.mjs`
 (`test-khatam.mjs` mengimpor `../src/khatam.js`, jadi jalankan di dalam repo lengkap).
 
+## 9. Dokumen Pengetahuan penuh: PDF diproses di laptop (butuh migration 0017)
+
+Sebelumnya teks PDF diambil di browser dan dipotong di 300 ribu karakter. Sekarang file **mentah** (PDF, .txt, .md, .csv, sampai 50 MB per file) diunggah dari aplikasi ke bucket Storage privat `kb-inbox`, lalu bot di laptop:
+
+1. mengunduhnya dan mengubahnya jadi teks per halaman dengan `pdftotext -layout` (tabel tetap rapi);
+2. untuk halaman **tanpa teks** (hasil scan) menjalankan OCR `tesseract` — opsional, dilewati bila tidak terpasang; PDF yang teksnya bisa diseleksi tidak butuh OCR sama sekali;
+3. membuat indeks pencarian **SQLite FTS5 (BM25)** di `wa-bot/kb/kb.sqlite` yang memuat SELURUH teks, tanpa batas halaman;
+4. menyalin teks ke kolom `content` di Supabase (dipotong di `KB_SYNC_MAX_CHARS`, default 600 ribu karakter) supaya **Gemini** tetap bisa memakai dokumen ini — dokumen yang terpotong ditandai di aplikasi;
+5. menghapus file mentah dari inbox dan mengirim notifikasi push "Dokumen sudah siap".
+
+Ollama tidak membaca ratusan halaman sekaligus: tiap pertanyaan dicarikan beberapa potongan paling relevan (dengan nomor halaman) dari indeks. Permintaan menyeluruh ("ringkas dokumen") tetap memakai peta-lalu-ringkas atas teks lengkap dari indeks.
+
+**Persiapan satu kali di laptop**
+
+```bash
+sudo apt install poppler-utils                      # wajib: pdftotext
+sudo apt install tesseract-ocr tesseract-ocr-ind    # opsional: OCR untuk PDF scan
+node -v                                             # Node >= 22.5 memakai node:sqlite bawaan.
+# Kalau Node lebih lama dari 22.5:  cd wa-bot && npm install better-sqlite3
+```
+
+Lalu: jalankan `supabase/migrations/0017_kb_inbox.sql` (SQL Editor atau `npx supabase db push`), deploy ulang function `chat`, deploy front-end, salin file bot baru ke laptop dan `pm2 restart wa-bot`. Status (jumlah dokumen, ada/tidaknya pdftotext & OCR) tampil di Pengaturan > Status Sistem.
+
+Hal yang perlu diketahui:
+
+- Dokumen lama (hasil upload sebelum fitur ini) otomatis ikut diindeks lewat "rekonsiliasi" tiap 2 menit; dokumen yang dihapus di aplikasi otomatis dibuang dari indeks.
+- Indeks hanya ada di laptop. Kalau laptop mati, pencarian dokumen untuk Ollama ikut mati (Gemini tetap jalan memakai salinan di Supabase). Kalau `kb/kb.sqlite` terhapus, indeks dibangun ulang dari salinan di Supabase (bisa terpotong untuk dokumen sangat panjang) — simpan file PDF aslinya.
+- Dokumen yang gagal diproses (mis. PDF berkata sandi) tampil dengan pesan dan tombol **Coba lagi**; file mentahnya tetap di inbox sampai berhasil atau dokumennya dihapus.
+- OCR di laptop CPU-only lambat (puluhan detik per halaman) dan berjalan berprioritas rendah (`nice`); dibatasi `KB_OCR_MAX_PAGES` halaman per dokumen.
+- Tes: `node test-kb.mjs` (memakai PDF contoh di `test-fixtures/`).
+
 ## Troubleshooting
 
 - **QR tidak muncul / bot langsung error network** -- cek koneksi internet;
