@@ -200,9 +200,18 @@ function toAyah(raw, surahNumber) {
     surah,
     ayah,
     juz: raw.juz,
+    hq: raw.hizbQuarter,
     page: raw.page,
     text: stripBasmalah(String(raw.text || "").trim(), surah, ayah)
   };
+}
+
+// Label seperempat hizb ala mushaf: hizbQuarter 1..240 -> "Hizb 1", "¼ Hizb 1", "½ Hizb 1", "¾ Hizb 1".
+export function hizbLabel(hq) {
+  if (!Number.isFinite(hq) || hq < 1 || hq > 240) return "";
+  const hizb = Math.ceil(hq / 4);
+  const frac = ["", "¼ ", "½ ", "¾ "][(hq - 1) % 4];
+  return `${frac}Hizb ${hizb}`;
 }
 
 // Kelompokkan ayat sehalaman menurut surah -> blok; blok yang diawali ayat 1
@@ -316,15 +325,29 @@ export async function getPage(page) {
   if (memPages.has(page)) return memPages.get(page);
 
   const cached = await idbGet(page);
-  if (cached && Array.isArray(cached.ayahs) && cached.ayahs.length) {
+  const cachedOk = cached && Array.isArray(cached.ayahs) && cached.ayahs.length;
+  if (cachedOk && cached.v === 2) {
     memPages.set(page, cached);
     return cached;
   }
 
-  const data = await fetchJson(`${API}/page/${page}/quran-uthmani`);
+  let data;
+  try {
+    data = await fetchJson(`${API}/page/${page}/quran-uthmani`);
+  } catch (err) {
+    // Cache versi lama (tanpa info hizb) tetap layak dipakai bila offline.
+    if (cachedOk) {
+      memPages.set(page, cached);
+      return cached;
+    }
+    throw err;
+  }
   const ayahs = (data.ayahs || []).map((r) => toAyah(r));
-  if (!ayahs.length) throw new Error("Halaman kosong");
-  const rec = { page, ayahs };
+  if (!ayahs.length) {
+    if (cachedOk) return cached;
+    throw new Error("Halaman kosong");
+  }
+  const rec = { page, ayahs, v: 2 };
   memPages.set(page, rec);
   idbPutMany([rec]);
   return rec;
@@ -349,7 +372,7 @@ export async function downloadAll(onProgress) {
       byPage.get(a.page).push(a);
     }
   }
-  const records = [...byPage.entries()].map(([page, ayahs]) => ({ page, ayahs }));
+  const records = [...byPage.entries()].map(([page, ayahs]) => ({ page, ayahs, v: 2 }));
   if (records.length < TOTAL_PAGES) throw new Error(`Data tidak lengkap (${records.length}/${TOTAL_PAGES} halaman)`);
   const CH = 60;
   for (let i = 0; i < records.length; i += CH) {

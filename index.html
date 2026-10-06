@@ -283,6 +283,8 @@
               <button type="button" id="quran-font-plus" class="icon-btn icon-btn--small" aria-label="Perbesar huruf" title="Perbesar huruf">A+</button>
             </span>
           </div>
+          <!-- Kontrol beranda Qur'an (terakhir dibaca, lompat halaman, tab, cari) -- ikut "membeku" di atas karena berada di dalam header sticky. -->
+          <div id="quran-home-controls" class="quran-controls" hidden></div>
         </header>
         <main class="content">
           <div id="quran-home" class="quran-home"></div>
@@ -294,7 +296,7 @@
           <div id="quran-actions" class="quran-actions" hidden>
             <span id="quran-actions-label" class="quran-actions-label"></span>
             <button type="button" id="quran-act-bookmark" class="quran-act"></button>
-            <button type="button" id="quran-act-last" class="quran-act" data-i18n="quran_mark_last">Tandai terakhir dibaca</button>
+            <button type="button" id="quran-act-last" class="quran-act" data-i18n="quran_mark_last">Terakhir dibaca</button>
             <button type="button" id="quran-act-copy" class="quran-act" data-i18n="quran_copy">Salin</button>
             <button type="button" id="quran-act-close" class="quran-act" data-i18n="quran_close">Tutup</button>
           </div>

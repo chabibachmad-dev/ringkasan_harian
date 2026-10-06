@@ -1491,19 +1491,48 @@ mark.chat-search-hit--active {
 
 /* Pembaca halaman mushaf */
 .quran-reader {
-  --q-size: calc(1.55rem * var(--q-scale, 1));
+  --q-size: calc(1.5rem * var(--q-scale, 1));
 }
 
 .quran-page {
-  padding: 4px 2px 16px;
+  padding: 2px 2px 20px;
+}
+
+.q-page-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding-bottom: 8px;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.q-page-head-r {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.q-page-head-ar {
+  font-family: "Amiri Quran", "Scheherazade New", "Noto Naskh Arabic", serif;
+  font-size: 1.15rem;
+  color: var(--text);
+}
+
+.q-page-foot {
+  margin-top: 14px;
+  text-align: center;
+  font-size: 0.9rem;
+  color: var(--text-muted);
 }
 
 .q-surah-head {
   display: flex;
   flex-direction: column;
   align-items: center;
-  margin: 14px 0 8px;
-  padding: 8px 10px;
+  margin: 12px 0 6px;
+  padding: 6px 10px;
   border: 2px solid var(--border);
   border-radius: 6px;
   outline: 1px solid var(--border);
@@ -1521,21 +1550,30 @@ mark.chat-search-hit--active {
 }
 
 .q-basmalah {
-  margin: 8px 0 4px;
+  margin: 6px 0 2px;
   text-align: center;
   font-family: "Amiri Quran", "Scheherazade New", "Noto Naskh Arabic", serif;
   font-size: var(--q-size);
-  line-height: 2.2;
+  line-height: 2.1;
 }
 
 .q-text {
-  margin: 0 0 6px;
+  margin: 0 0 4px;
   font-family: "Amiri Quran", "Scheherazade New", "Noto Naskh Arabic", serif;
   font-size: var(--q-size);
-  line-height: 2.5;
+  line-height: 2.35;
   text-align: justify;
   text-justify: inter-word;
-  word-spacing: 0.04em;
+  text-align-last: start;
+  word-spacing: 0.02em;
+}
+
+.q-text.justify-last {
+  text-align-last: justify;
+}
+
+.q-text.ends-surah:not(.justify-last) {
+  text-align-last: center;
 }
 
 .q-ayah {
@@ -1546,24 +1584,41 @@ mark.chat-search-hit--active {
 
 .q-ayah.is-selected {
   background: var(--notify-bg);
-  box-shadow: 0 0 0 3px var(--notify-bg);
+  box-shadow: 0 0 0 4px var(--notify-bg);
 }
 
+.q-hizb {
+  font-size: 0.95em;
+}
+
+/* Penanda akhir ayat: lingkaran bergaris ganda berisi nomor (angka Arab) */
 .q-no {
-  font-size: 0.8em;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.75em;
+  height: 1.75em;
+  margin: 0 0.25em;
+  padding: 0 0.12em;
+  box-sizing: border-box;
+  border: 1.5px solid currentColor;
+  border-radius: 50%;
+  box-shadow: 0 0 0 2px var(--bg), 0 0 0 3px currentColor;
+  font-size: 0.5em;
+  line-height: 1;
+  vertical-align: 0.35em;
   white-space: nowrap;
 }
 
 .q-ayah.is-bm .q-no {
-  text-decoration: underline;
-  text-decoration-style: double;
-  text-underline-offset: 6px;
+  background: var(--accent);
+  color: var(--accent-contrast);
+  box-shadow: 0 0 0 2px var(--bg), 0 0 0 3px var(--accent);
 }
 
 .q-ayah.is-last .q-no {
-  border: 1.5px solid var(--border);
-  border-radius: 6px;
-  padding: 0 4px;
+  outline: 2px dashed currentColor;
+  outline-offset: 5px;
 }
 
 .quran-retry {
@@ -1611,6 +1666,7 @@ mark.chat-search-hit--active {
 }
 
 .quran-nav {
+  direction: rtl; /* urutan seperti mushaf: "Sebelumnya" di kanan, "Berikutnya" di kiri */
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -1630,6 +1686,7 @@ mark.chat-search-hit--active {
 }
 
 .quran-nav-page {
+  direction: ltr;
   white-space: nowrap;
   display: flex;
   align-items: center;
@@ -1712,4 +1769,39 @@ mark.chat-search-hit--active {
 
 #screen-home .menu-grid {
   margin-top: clamp(40px, 19vh, 170px);
+}
+
+/* Beranda Qur'an: kontrol di dalam header sticky -> tidak ikut ter-scroll */
+.quran-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--notify-bg);
+}
+
+.quran-controls .quran-last {
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: baseline;
+  column-gap: 10px;
+  padding: 8px 14px;
+}
+
+.quran-controls .quran-last-label {
+  width: 100%;
+}
+
+.quran-controls .quran-last-name {
+  font-size: 0.95rem;
+}
+
+.quran-controls .quran-filter {
+  margin-bottom: 0;
+}
+
+.quran-controls .quran-jump .primary-btn,
+.quran-controls .quran-jump input {
+  padding-top: 8px;
+  padding-bottom: 8px;
 }

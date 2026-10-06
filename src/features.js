@@ -31,6 +31,7 @@ import {
   getLastRead,
   getPage,
   groupBySurah,
+  hizbLabel,
   isBookmarked,
   juzOfPage,
   listBookmarks,
@@ -249,6 +250,7 @@ function applyFont() {
 function changeFont(delta) {
   fontScale = Math.min(2, Math.max(0.75, Math.round((fontScale + delta) * 1000) / 1000));
   document.documentElement.style.setProperty("--q-scale", String(fontScale));
+  requestAnimationFrame(fitLastLines);
   try {
     localStorage.setItem(FONT_KEY, String(fontScale));
   } catch (_err) {
@@ -289,6 +291,7 @@ async function openHome() {
   $("quran-reader").hidden = true;
   $("quran-reader-bar").hidden = true;
   $("quran-home").hidden = false;
+  $("quran-home-controls").hidden = false;
   setQuranTitle(L("quran_title"), false);
   renderHome();
   window.scrollTo(0, 0);
@@ -318,7 +321,8 @@ function renderHome() {
        </button>`
     : `<div class="quran-last quran-last--empty">${esc(L("quran_no_last"))}</div>`;
 
-  home.innerHTML = `
+  const controls = $("quran-home-controls");
+  controls.innerHTML = `
     ${lastCard}
     <form id="quran-jump" class="quran-jump">
       <input id="quran-jump-input" type="number" inputmode="numeric" min="1" max="${TOTAL_PAGES}" placeholder="${esc(L("quran_page_ph"))}" />
@@ -332,11 +336,14 @@ function renderHome() {
         )
         .join("")}
     </div>
+    ${homeTab === "surah" ? `<input id="quran-surah-filter" class="quran-filter" type="search" autocomplete="off" placeholder="${esc(L("quran_search_ph"))}" value="${esc(surahFilter)}" />` : ""}`;
+
+  home.innerHTML = `
     <div id="quran-list" class="quran-list"></div>
     <section class="quran-offline" id="quran-offline"></section>
     ${code ? "" : `<p class="prayer-foot">${esc(L("quran_need_code"))}</p>`}`;
 
-  home.querySelector(".quran-last[data-go-page]")?.addEventListener("click", (e) => {
+  controls.querySelector(".quran-last[data-go-page]")?.addEventListener("click", (e) => {
     const b = e.currentTarget;
     goPage(Number(b.dataset.goPage), Number(b.dataset.goS), Number(b.dataset.goA));
   });
@@ -345,12 +352,16 @@ function renderHome() {
     const v = Number($("quran-jump-input").value);
     if (Number.isFinite(v) && v >= 1) goPage(clampPage(v));
   });
-  home.querySelectorAll(".quran-tab").forEach((b) =>
+  controls.querySelectorAll(".quran-tab").forEach((b) =>
     b.addEventListener("click", () => {
       homeTab = b.dataset.tab;
       renderHome();
     })
   );
+  $("quran-surah-filter")?.addEventListener("input", (e) => {
+    surahFilter = e.target.value;
+    renderHomeList();
+  });
   renderHomeList();
   renderOffline();
 }
@@ -361,26 +372,15 @@ function renderHomeList() {
   if (homeTab === "surah") {
     const f = surahFilter.trim().toLowerCase();
     const items = SURAHS.filter((s) => !f || s.name.toLowerCase().includes(f) || String(s.number) === f || s.arabic.includes(f));
-    box.innerHTML =
-      `<input id="quran-surah-filter" class="quran-filter" type="search" placeholder="${esc(L("quran_search_ph"))}" value="${esc(surahFilter)}" />` +
-      items
-        .map(
-          (s) => `<button type="button" class="quran-item" data-page="${s.page}">
+    box.innerHTML = items
+      .map(
+        (s) => `<button type="button" class="quran-item" data-page="${s.page}">
             <span class="quran-item-no">${s.number}</span>
             <span class="quran-item-main"><b>${esc(s.name)}</b><small>${s.ayahs} ${esc(L("quran_ayah"))} · ${esc(L("quran_page"))} ${s.page}</small></span>
             <span class="quran-item-ar" dir="rtl" lang="ar">${s.arabic}</span>
           </button>`
-        )
-        .join("");
-    const inp = $("quran-surah-filter");
-    inp.addEventListener("input", () => {
-      surahFilter = inp.value;
-      const pos = inp.selectionStart;
-      renderHomeList();
-      const n = $("quran-surah-filter");
-      n.focus();
-      n.setSelectionRange(pos, pos);
-    });
+      )
+      .join("");
   } else if (homeTab === "juz") {
     box.innerHTML = JUZ_START_PAGES.map((p, i) => {
       const first = SURAHS.filter((s) => s.page <= p).pop();
@@ -459,13 +459,14 @@ async function openReader(page, focus) {
   selected = null;
   currentPage = page;
   $("quran-home").hidden = true;
+  $("quran-home-controls").hidden = true;
   const reader = $("quran-reader");
   reader.hidden = false;
   $("quran-reader-bar").hidden = false;
   hideActions();
   const body = $("quran-page-body");
   body.innerHTML = `<div class="status-text">${esc(L("loading"))}</div>`;
-  setQuranTitle(`${L("quran_page")} ${page}`, true);
+  setQuranTitle(L("quran_title"), true);
   window.scrollTo(0, 0);
   updateNav(page);
 
@@ -482,7 +483,6 @@ async function openReader(page, focus) {
   if (token !== routeToken) return;
 
   const first = rec.ayahs[0];
-  setQuranTitle(`${surahName(first.surah)} · ${L("quran_juz")} ${first.juz ?? juzOfPage(page)}`, true);
   renderPageBody(rec, focus);
   prefetchPages([page + 1, page - 1, page + 2]);
 
@@ -509,22 +509,39 @@ function ayahMarks(a) {
 function renderPageBody(rec, focus) {
   const body = $("quran-page-body");
   const blocks = groupBySurah(rec.ayahs);
-  body.innerHTML = blocks
+  const first = rec.ayahs[0];
+  const last = rec.ayahs[rec.ayahs.length - 1];
+  const firstInfo = surahInfo(first.surah);
+  const juz = first.juz ?? juzOfPage(rec.page);
+  const hz = hizbLabel(last.hq);
+
+  const headHtml = `<div class="q-page-head">
+      <span class="q-page-head-l">${esc(L("quran_juz"))} ${juz}${hz ? ", " + esc(hz) : ""}</span>
+      <span class="q-page-head-r"><span>${esc(firstInfo.name)}</span><span dir="rtl" lang="ar" class="q-page-head-ar">${firstInfo.arabic}</span></span>
+    </div>`;
+
+  const blocksHtml = blocks
     .map((b) => {
       const info = surahInfo(b.surah);
       const head = b.header
         ? `<div class="q-surah-head"><span class="q-surah-ar" dir="rtl" lang="ar">سورة ${info.arabic}</span><small>${esc(info.name)}</small></div>
            ${b.surah !== 1 && b.surah !== 9 ? `<div class="q-basmalah" dir="rtl" lang="ar">${BASMALAH_TEXT}</div>` : ""}`
         : "";
+      const endsSurah = b.ayahs[b.ayahs.length - 1].ayah === info.ayahs;
       const text = b.ayahs
-        .map(
-          (a) =>
-            `<span class="q-ayah ${ayahMarks(a)}" data-s="${a.surah}" data-a="${a.ayah}">${esc(a.text)} <span class="q-no">﴿${toArabicDigits(a.ayah)}﴾</span></span> `
-        )
+        .map((a, i) => {
+          // Tanda awal seperempat hizb (۞) saat hizbQuarter berganti di dalam halaman.
+          const prev = i > 0 ? b.ayahs[i - 1] : null;
+          const mark = prev && a.hq !== prev.hq ? `<span class="q-hizb" aria-hidden="true">۞</span> ` : "";
+          return `${mark}<span class="q-ayah ${ayahMarks(a)}" data-s="${a.surah}" data-a="${a.ayah}">${esc(a.text)}<span class="q-no">${toArabicDigits(a.ayah)}</span></span> `;
+        })
         .join("");
-      return `${head}<p class="q-text" dir="rtl" lang="ar">${text}</p>`;
+      return `${head}<p class="q-text${endsSurah ? " ends-surah" : ""}" dir="rtl" lang="ar">${text}</p>`;
     })
     .join("");
+
+  body.innerHTML = `${headHtml}${blocksHtml}<div class="q-page-foot">${rec.page}</div>`;
+  fitLastLines();
 
   body.querySelectorAll(".q-ayah").forEach((el) =>
     el.addEventListener("click", () => {
@@ -545,6 +562,21 @@ function renderPageBody(rec, focus) {
       el.scrollIntoView({ block: "center" });
     }
   }
+}
+
+// Baris terakhir tiap paragraf: kalau sudah cukup penuh (>= 55% lebar), ratakan
+// kanan-kiri seperti baris mushaf; kalau pendek (akhir surah) biarkan/tengahkan.
+function fitLastLines() {
+  document.querySelectorAll("#quran-page-body .q-text").forEach((p) => {
+    p.classList.remove("justify-last");
+    const spans = p.querySelectorAll(".q-ayah");
+    const lastEl = spans[spans.length - 1];
+    if (!lastEl || !p.clientWidth) return;
+    const rects = lastEl.getClientRects();
+    if (!rects.length) return;
+    const r = rects[rects.length - 1];
+    if (r.width / p.clientWidth >= 0.55) p.classList.add("justify-last");
+  });
 }
 
 function refreshMarks() {
@@ -633,4 +665,39 @@ export function wireQuranReader() {
     }
   });
   $("quran-act-close")?.addEventListener("click", hideActions);
+
+  // Geser seperti membalik mushaf (huruf Arab dibaca dari kanan ke kiri):
+  // jari bergerak KIRI -> KANAN = halaman berikutnya, KANAN -> KIRI = sebelumnya.
+  const reader = $("quran-reader");
+  let sx = 0;
+  let sy = 0;
+  let tracking = false;
+  reader?.addEventListener(
+    "touchstart",
+    (e) => {
+      const t = e.touches[0];
+      tracking = e.touches.length === 1 && t.clientX > 24 && t.clientX < window.innerWidth - 24; // jangan bentrok dgn gestur tepi layar iOS
+      sx = t.clientX;
+      sy = t.clientY;
+    },
+    { passive: true }
+  );
+  reader?.addEventListener(
+    "touchend",
+    (e) => {
+      if (!tracking) return;
+      tracking = false;
+      const t = e.changedTouches[0];
+      const dx = t.clientX - sx;
+      const dy = t.clientY - sy;
+      if (Math.abs(dx) < 70 || Math.abs(dx) < Math.abs(dy) * 1.6) return;
+      if (String(window.getSelection?.() || "").length > 0) return;
+      if (dx > 0 && currentPage < TOTAL_PAGES) goPage(currentPage + 1);
+      else if (dx < 0 && currentPage > 1) goPage(currentPage - 1);
+    },
+    { passive: true }
+  );
+  window.addEventListener("resize", () => {
+    if (active === "quran" && !$("quran-reader").hidden) fitLastLines();
+  });
 }
