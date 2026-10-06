@@ -46,6 +46,7 @@ import {
   toArabicDigits,
   toggleBookmark
 } from "./quran.js";
+import { getAyahInfo } from "./tafsir.js";
 
 let ctx = { getLang: () => "id", getCode: () => "" };
 const $ = (id) => document.getElementById(id);
@@ -741,6 +742,85 @@ function paintActions() {
   $("quran-act-bookmark").innerHTML = `${bm ? ICON_BOOKMARK_FILLED : ICON_BOOKMARK}<span>${esc(L(bm ? "quran_bookmark_remove" : "quran_bookmark_add"))}</span>`;
 }
 
+// Terjemahan & tafsir ayat yang sedang dipilih (dialog).
+let tafsirToken = 0;
+async function openTafsir() {
+  if (!selected) return;
+  const sel = { ...selected };
+  const token = ++tafsirToken;
+  const dlg = $("quran-tafsir-dialog");
+  const body = $("quran-tafsir-body");
+  const retry = $("quran-tafsir-retry");
+  if (!dlg || !body) return;
+
+  $("quran-tafsir-title").textContent = `${surahName(sel.surah)} : ${sel.ayah}`;
+  const el = document.querySelector(`#quran-page-body .q-ayah[data-s="${sel.surah}"][data-a="${sel.ayah}"]`);
+  $("quran-tafsir-arabic").textContent = el && el.firstChild ? el.firstChild.textContent.trim() : "";
+  retry.hidden = true;
+  body.replaceChildren();
+  const loading = document.createElement("p");
+  loading.className = "status-text";
+  loading.textContent = L("quran_tafsir_loading");
+  body.appendChild(loading);
+  if (!dlg.open) {
+    if (typeof dlg.showModal === "function") dlg.showModal();
+    else dlg.setAttribute("open", "");
+  }
+
+  const section = (heading, parts, source) => {
+    const wrap = document.createElement("section");
+    wrap.className = "quran-tafsir-section";
+    const h = document.createElement("h3");
+    h.textContent = heading;
+    wrap.appendChild(h);
+    for (const para of String(parts).split(/\n{2,}/)) {
+      if (!para.trim()) continue;
+      const p = document.createElement("p");
+      p.textContent = para.trim();
+      wrap.appendChild(p);
+    }
+    if (source) {
+      const src = document.createElement("small");
+      src.className = "quran-tafsir-source";
+      src.textContent = `${L("quran_tafsir_source")}: ${source}`;
+      wrap.appendChild(src);
+    }
+    return wrap;
+  };
+
+  try {
+    const info = await getAyahInfo(sel.surah, sel.ayah);
+    if (token !== tafsirToken) return; // pengguna sudah menutup/membuka ayat lain
+    body.replaceChildren();
+    if (info.translation) {
+      body.appendChild(section(L("quran_tafsir_translation"), info.translation.text, info.translation.name));
+    } else {
+      retry.hidden = false;
+      const p = document.createElement("p");
+      p.className = "status-text";
+      p.textContent = L("quran_tafsir_no_translation");
+      body.appendChild(p);
+    }
+    if (info.tafsirs.length) {
+      for (const t of info.tafsirs) body.appendChild(section(`${L("quran_tafsir_tafsir")}`, t.text, t.name));
+    } else {
+      const p = document.createElement("p");
+      p.className = "status-text";
+      p.textContent = L("quran_tafsir_no_tafsir");
+      body.appendChild(p);
+      retry.hidden = false;
+    }
+  } catch (_err) {
+    if (token !== tafsirToken) return;
+    body.replaceChildren();
+    const p = document.createElement("p");
+    p.className = "status-text";
+    p.textContent = L("quran_tafsir_error");
+    body.appendChild(p);
+    retry.hidden = false;
+  }
+}
+
 function updateNav(page) {
   $("quran-page-input").value = String(page);
   $("quran-page-total").textContent = `/ ${TOTAL_PAGES}`;
@@ -796,6 +876,9 @@ export function wireQuranReader() {
     }
   });
   $("quran-act-close")?.addEventListener("click", hideActions);
+  $("quran-act-tafsir")?.addEventListener("click", openTafsir);
+  $("quran-tafsir-close")?.addEventListener("click", () => $("quran-tafsir-dialog")?.close());
+  $("quran-tafsir-retry")?.addEventListener("click", openTafsir);
 
   // Geser seperti membalik mushaf (huruf Arab dibaca dari kanan ke kiri):
   // jari bergerak KIRI -> KANAN = halaman berikutnya, KANAN -> KIRI = sebelumnya.

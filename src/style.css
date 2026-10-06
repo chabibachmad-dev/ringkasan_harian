@@ -2139,3 +2139,50 @@ mark.chat-search-hit--active {
   align-items: center;
   gap: 8px !important;
 }
+
+/* ---------- Terjemahan & tafsir ayat ---------- */
+.quran-act--primary {
+  background: var(--text);
+  color: var(--bg);
+  border-color: var(--text);
+  font-weight: 700;
+}
+
+.quran-tafsir-card {
+  max-height: 88vh;
+}
+
+.quran-tafsir-arabic {
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  font-family: "Amiri Quran", "Scheherazade New", "Noto Naskh Arabic", serif;
+  font-size: 1.5rem;
+  line-height: 2.1;
+  text-align: right;
+}
+
+.quran-tafsir-body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.quran-tafsir-section h3 {
+  margin: 0 0 6px;
+  font-size: 0.95rem;
+}
+
+.quran-tafsir-section p {
+  margin: 0 0 8px;
+  font-size: 0.92rem;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.quran-tafsir-source {
+  color: var(--text-muted);
+  font-size: 0.75rem;
+}

@@ -312,6 +312,7 @@
         <div id="quran-reader-bar" class="quran-bars" hidden>
           <div id="quran-actions" class="quran-actions" hidden>
             <span id="quran-actions-label" class="quran-actions-label"></span>
+            <button type="button" id="quran-act-tafsir" class="quran-act quran-act--primary" data-i18n="quran_tafsir">Terjemah &amp; Tafsir</button>
             <button type="button" id="quran-act-bookmark" class="quran-act"></button>
             <button type="button" id="quran-act-last" class="quran-act" data-i18n="quran_mark_last">Terakhir dibaca</button>
             <button type="button" id="quran-act-copy" class="quran-act" data-i18n="quran_copy">Salin</button>
@@ -494,6 +495,19 @@
 
       <!-- Dialog Dokumen Pengetahuan: upload PDF peraturan/referensi supaya AI
            baca dari sini duluan, + daftar dokumen yang sudah diupload. -->
+      <!-- Terjemahan & tafsir satu ayat (halaman Qur'an) -->
+      <dialog id="quran-tafsir-dialog" class="kb-dialog">
+        <div class="kb-dialog-card quran-tafsir-card">
+          <h2 id="quran-tafsir-title"></h2>
+          <p id="quran-tafsir-arabic" class="quran-tafsir-arabic" lang="ar" dir="rtl"></p>
+          <div id="quran-tafsir-body" class="quran-tafsir-body"></div>
+          <div class="chat-code-dialog-actions">
+            <button type="button" id="quran-tafsir-retry" class="secondary-btn" hidden data-i18n="quran_tafsir_retry">Coba lagi</button>
+            <button type="button" id="quran-tafsir-close" class="primary-btn" data-i18n="quran_close">Tutup</button>
+          </div>
+        </div>
+      </dialog>
+
       <dialog id="kb-dialog" class="kb-dialog">
         <div class="kb-dialog-card">
           <h2 data-i18n="kb_title">Dokumen Pengetahuan</h2>
