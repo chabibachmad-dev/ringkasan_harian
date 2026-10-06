@@ -74,7 +74,7 @@
             </button>
             <button type="button" id="menu-keys" class="menu-item">
               <span id="menu-keys-icon" class="menu-thumb"></span>
-              <span class="menu-caption" data-i18n="menu_s_keys">API Gemini</span>
+              <span class="menu-caption" data-i18n="menu_s_keys">Status</span>
             </button>
             <button type="button" id="menu-about" class="menu-item">
               <span id="menu-about-icon" class="menu-thumb"></span>
@@ -193,7 +193,11 @@
             </button>
           </div>
 
+          <div id="chat-attachments" class="chat-attachments" hidden></div>
+
           <form id="chat-form" class="chat-form" hidden>
+            <button type="button" id="chat-attach-btn" class="chat-attach-btn" aria-label="Lampirkan file" data-i18n-aria-label="attach_btn" data-i18n-title="attach_btn" title="Lampirkan file"></button>
+            <input type="file" id="chat-attach-input" accept=".pdf,.txt,.md,.csv,.json,.log,text/plain,application/pdf" hidden />
             <textarea id="chat-input" rows="1"></textarea>
             <button type="submit" id="chat-send-btn" class="chat-send-btn" aria-label="Kirim" title="Kirim">
               <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
@@ -576,7 +580,11 @@
            key hari ini (dicatat bot wa-bot/ & Edge Function chat). -->
       <dialog id="keys-dialog" class="kb-dialog">
         <div class="kb-dialog-card">
-          <h2 data-i18n="keys_title">Status API Gemini</h2>
+          <h2 data-i18n="sys_title">Status Sistem</h2>
+          <p class="kb-intro" data-i18n="sys_intro">Kondisi bot di laptop, WhatsApp, Ollama, dan antreannya.</p>
+          <div id="sys-status" class="sys-status"></div>
+
+          <h3 class="sys-subtitle" data-i18n="sys_gemini">Kuota API Gemini</h3>
           <p class="kb-intro" data-i18n="keys_intro">
             Pemakaian tiap API key hari ini, dihitung dari panggilan yang tercatat di sistem ini (bot WhatsApp + chat di
             aplikasi). Angkanya perkiraan -- pemakaian di luar aplikasi ini tidak ikut terhitung.

@@ -13,3 +13,5 @@ kirim-ringkasan.flag
 
 # Status jeda auto-reply setelah balasan manual
 ai-pause.json
+
+khatam-state.json

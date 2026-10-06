@@ -20,6 +20,7 @@ import {
   qiblaBearing,
   tzLabel
 } from "./prayer.js";
+import { computeKhatam, localDateString } from "./khatam.js";
 import {
   JUZ_START_PAGES,
   SURAHS,
@@ -29,6 +30,9 @@ import {
   clampPage,
   downloadAll,
   getLastRead,
+  getKhatam,
+  setKhatam,
+  clearKhatam,
   getPage,
   groupBySurah,
   hizbLabel,
@@ -339,6 +343,7 @@ function renderHome() {
     ${homeTab === "surah" ? `<input id="quran-surah-filter" class="quran-filter" type="search" autocomplete="off" placeholder="${esc(L("quran_search_ph"))}" value="${esc(surahFilter)}" />` : ""}`;
 
   home.innerHTML = `
+    <section id="quran-khatam" class="quran-khatam"></section>
     <div id="quran-list" class="quran-list"></div>
     <section class="quran-offline" id="quran-offline"></section>
     ${code ? "" : `<p class="prayer-foot">${esc(L("quran_need_code"))}</p>`}`;
@@ -362,8 +367,134 @@ function renderHome() {
     surahFilter = e.target.value;
     renderHomeList();
   });
+  renderKhatam();
   renderHomeList();
   renderOffline();
+}
+
+// ---------------------------------------------------------------- Target khatam
+
+let khatamEditing = false;
+
+function renderKhatam() {
+  const box = $("quran-khatam");
+  if (!box) return;
+  const k = getKhatam();
+  const last = getLastRead();
+
+  if (khatamEditing) {
+    const cur = k || { startDate: localDateString(), targetDays: 30, startPage: 1, reminder: true };
+    const lastPage = last?.page ?? 1;
+    const startsAtLast = cur.startPage > 1 && last && cur.startPage === last.page;
+    box.innerHTML = `
+      <form id="khatam-form" class="khatam-card khatam-form">
+        <div class="khatam-title">${esc(L("khatam_title"))}</div>
+        <label>${esc(L("khatam_days_label"))}
+          <input id="khatam-days" type="number" inputmode="numeric" min="1" max="730" value="${cur.targetDays}" required />
+        </label>
+        <div class="khatam-presets">
+          ${[7, 30, 60, 90].map((d) => `<button type="button" data-days="${d}">${d}</button>`).join("")}
+        </div>
+        <label>${esc(L("khatam_start_label"))}
+          <select id="khatam-start">
+            <option value="1"${!startsAtLast ? " selected" : ""}>${esc(L("khatam_start_page1"))}</option>
+            <option value="${lastPage}"${startsAtLast ? " selected" : ""}>${esc(L("khatam_start_last"))} (${lastPage})</option>
+          </select>
+        </label>
+        <label class="khatam-check"><input id="khatam-remind" type="checkbox"${cur.reminder !== false ? " checked" : ""} /> ${esc(L("khatam_remind"))}</label>
+        <div class="khatam-actions">
+          <button type="submit" class="primary-btn">${esc(L("khatam_save"))}</button>
+          <button type="button" id="khatam-cancel" class="secondary-btn">${esc(L("khatam_cancel"))}</button>
+          ${k ? `<button type="button" id="khatam-stop" class="secondary-btn">${esc(L("khatam_stop"))}</button>` : ""}
+        </div>
+      </form>`;
+    box.querySelectorAll("[data-days]").forEach((b) =>
+      b.addEventListener("click", () => {
+        $("khatam-days").value = b.dataset.days;
+      })
+    );
+    $("khatam-cancel").addEventListener("click", () => {
+      khatamEditing = false;
+      renderKhatam();
+    });
+    $("khatam-stop")?.addEventListener("click", () => {
+      clearKhatam(ctx.getCode());
+      khatamEditing = false;
+      renderKhatam();
+    });
+    $("khatam-form").addEventListener("submit", (e) => {
+      e.preventDefault();
+      const days = Math.round(Number($("khatam-days").value));
+      if (!Number.isFinite(days) || days < 1 || days > 730) return;
+      const changedStart = !k || Number(k.startPage) !== Number($("khatam-start").value) || Number(k.targetDays) !== days;
+      setKhatam(
+        {
+          // Mengubah jumlah hari/halaman awal memulai hitungan dari hari ini; hanya mengubah pengingat tidak.
+          startDate: changedStart ? localDateString() : k.startDate,
+          targetDays: days,
+          startPage: Number($("khatam-start").value),
+          reminder: $("khatam-remind").checked
+        },
+        ctx.getCode()
+      );
+      khatamEditing = false;
+      renderKhatam();
+    });
+    return;
+  }
+
+  if (!k) {
+    box.innerHTML = `<div class="khatam-card">
+      <div class="khatam-title">${esc(L("khatam_title"))}</div>
+      <div class="khatam-goal">${esc(L("khatam_none"))}</div>
+      <div class="khatam-actions"><button type="button" id="khatam-set" class="primary-btn">${esc(L("khatam_set"))}</button></div>
+    </div>`;
+    $("khatam-set").addEventListener("click", () => {
+      khatamEditing = true;
+      renderKhatam();
+    });
+    return;
+  }
+
+  const c = computeKhatam(k, last?.page ?? null, localDateString());
+  const cycle = L("khatam_count") + ((k.khatamCount || 0) + 1);
+  let goal;
+  if (c.finished) {
+    goal = `<b>${esc(L("khatam_done"))}</b>`;
+  } else if (c.status === "not_started") {
+    goal = `${esc(L("khatam_not_started"))} ${esc(k.startDate)}`;
+  } else if (c.status === "on_track") {
+    goal = `<b>${esc(L("khatam_on_track"))}</b> · ${c.perDay} ${esc(L("khatam_per_day"))}`;
+  } else if (c.status === "overdue") {
+    goal = `<b>${esc(L("khatam_overdue"))} ${c.remaining} ${esc(L("khatam_pages"))}</b> (${esc(L("khatam_read_from"))} ${c.todayFrom})`;
+  } else {
+    goal = `${esc(L("khatam_today_goal"))} <b>${c.goalToday}</b> (${esc(L("khatam_read_from"))} ${c.todayFrom}) · ${esc(L("khatam_behind"))} <b>${c.behindPages}</b> ${esc(L("khatam_pages"))}`;
+  }
+  box.innerHTML = `<div class="khatam-card">
+    <div class="khatam-head">
+      <span class="khatam-title">${esc(L("khatam_title"))}</span>
+      <span class="khatam-meta">${(k.khatamCount || 0) > 0 ? esc(cycle) + " · " : ""}${esc(L("khatam_day"))} ${c.dayNo} ${esc(L("khatam_of"))} ${c.targetDays}</span>
+    </div>
+    <div class="khatam-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${c.percent}"><div class="khatam-bar-fill" style="width:${c.percent}%"></div></div>
+    <div class="khatam-meta">${c.percent}% ${esc(L("khatam_percent"))} · ${esc(L("khatam_remaining"))} ${c.remaining} ${esc(L("khatam_pages"))}${last ? ` · ${esc(L("khatam_last_at"))} ${last.page}` : ""}</div>
+    <div class="khatam-goal">${goal}</div>
+    <div class="khatam-actions">
+      ${c.finished ? `<button type="button" id="khatam-new" class="primary-btn">${esc(L("khatam_new"))}</button>` : `<button type="button" id="khatam-go" class="primary-btn">${esc(L("quran_continue"))}</button>`}
+      <button type="button" id="khatam-edit" class="secondary-btn">${esc(L("khatam_edit"))}</button>
+    </div>
+  </div>`;
+  $("khatam-go")?.addEventListener("click", () => goPage(clampPage(c.todayFrom)));
+  $("khatam-edit").addEventListener("click", () => {
+    khatamEditing = true;
+    renderKhatam();
+  });
+  $("khatam-new")?.addEventListener("click", () => {
+    setKhatam(
+      { startDate: localDateString(), targetDays: k.targetDays, startPage: 1, reminder: k.reminder, khatamCount: (k.khatamCount || 0) + 1 },
+      ctx.getCode()
+    );
+    renderKhatam();
+  });
 }
 
 function renderHomeList() {

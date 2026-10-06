@@ -39,7 +39,12 @@ export function readAppAgentConfig(env = process.env) {
     ragBudgetChars: num(env.OLLAMA_CHAT_RAG_BUDGET_CHARS, 5000),
     docChunkChars: num(env.OLLAMA_DOC_CHUNK_CHARS, 5000),
     docMaxChunks: num(env.OLLAMA_DOC_MAX_CHUNKS, 6),
-    docNoteTokens: num(env.OLLAMA_DOC_NOTE_TOKENS, 220)
+    docNoteTokens: num(env.OLLAMA_DOC_NOTE_TOKENS, 220),
+    // Lampiran sangat pendek (total karakter <= ini) disisipkan UTUH ke prompt.
+    attachInlineChars: num(env.OLLAMA_ATTACH_INLINE_CHARS, 6000),
+    // Kirim push ke HP kalau job selesai lebih lama dari ini (detik) -- yang cepat
+    // tidak perlu, pengguna masih menatap layar. 0 = selalu kirim.
+    notifyMinSeconds: Number.isFinite(Number(env.APP_AGENT_NOTIFY_MIN_SECONDS)) ? Math.max(0, Number(env.APP_AGENT_NOTIFY_MIN_SECONDS)) : 20
   };
 }
 
@@ -72,12 +77,16 @@ export function createAppAgentWorker(deps, overrides = {}) {
     callOllamaChat,
     enqueueOllamaCall,
     fetchRelevantKnowledgeChunks,
+    rankKnowledgeChunks, // (docs, question, budgetChars) -> [{score,title,text}]
     chunkDocumentText,
     currentDateLine,
     ollamaBaseUrl,
     ollamaModel,
+    notify, // async ({ title, body, url, tag }) -> void (push ke HP); opsional
+    getExtra, // () -> { waConnected, extra }; opsional (untuk halaman Status sistem)
     log = console
   } = deps;
+  const startedAtIso = new Date().toISOString();
 
   let pollTimer = null;
   let hbTimer = null;
@@ -110,14 +119,30 @@ export function createAppAgentWorker(deps, overrides = {}) {
     // Saat sedang generate, CPU penuh & /api/tags bisa lambat -- kalau kita
     // sendiri sedang memanggil Ollama, anggap hidup.
     const ollamaOk = chk.ok || working;
-    const { error } = await supabase.from("agent_worker_status").upsert({
+    let ex = {};
+    try {
+      ex = (typeof getExtra === "function" ? getExtra() : null) || {};
+    } catch {
+      /* info tambahan best-effort */
+    }
+    const row = {
       id: "ollama",
       last_seen: new Date().toISOString(),
       ollama_ok: ollamaOk,
       model: ollamaModel,
       busy: working,
-      detail: ollamaOk ? null : chk.detail
-    });
+      detail: ollamaOk ? null : chk.detail,
+      started_at: startedAtIso,
+      ...(typeof ex.waConnected === "boolean" ? { wa_connected: ex.waConnected } : {}),
+      ...(ex.extra ? { extra: ex.extra } : {})
+    };
+    let { error } = await supabase.from("agent_worker_status").upsert(row);
+    // Migrasi 0016 (kolom started_at/wa_connected/extra) belum dijalankan: ulangi tanpa kolom baru
+    // supaya denyut dasar tetap jalan.
+    if (error && /started_at|wa_connected|extra/i.test(error.message || "")) {
+      const { started_at, wa_connected, extra, ...basic } = row;
+      ({ error } = await supabase.from("agent_worker_status").upsert(basic));
+    }
     if (error) noteDbError(error);
   }
 
@@ -164,9 +189,25 @@ export function createAppAgentWorker(deps, overrides = {}) {
 
   // Peta-lalu-ringkas atas seluruh Dokumen Pengetahuan. Mengembalikan teks
   // catatan (atau null kalau tidak ada dokumen).
-  async function mapDocuments(job) {
+  async function loadKbDocs() {
     const { data: docs, error } = await supabase.from("knowledge_documents").select("title, content");
     if (error) throw new Error(`Gagal baca dokumen: ${error.message}`);
+    return docs ?? [];
+  }
+
+  async function loadAttachments(chatDate) {
+    const { data, error } = await supabase
+      .from("chat_attachments")
+      .select("name, content, created_at")
+      .eq("chat_date", chatDate)
+      .order("created_at", { ascending: true })
+      .limit(3);
+    // Tabel belum ada (migrasi 0016 belum jalan) -> anggap tidak ada lampiran.
+    if (error) return [];
+    return (data ?? []).map((a) => ({ title: `Lampiran: ${a.name}`, content: a.content }));
+  }
+
+  async function mapDocuments(job, docs) {
     if (!docs || docs.length === 0) return null;
 
     const all = [];
@@ -201,19 +242,65 @@ export function createAppAgentWorker(deps, overrides = {}) {
   async function answerJob(job) {
     const history = await loadHistory(job.chat_date, job.question);
     const useKb = await threadUsesKb(job.chat_date);
+    const attachments = await loadAttachments(job.chat_date);
     const system = `${SYSTEM_PROMPT}\n\n${currentDateLine()}`;
+    const lastIdx = history.length - 1;
+    const addContext = (label, body) => {
+      history[lastIdx] = { role: "user", content: `${history[lastIdx].content}\n\n---\n${label}\n${body}` };
+    };
+    const formatChunks = (chunks) => {
+      const titles = [...new Set(chunks.map((c) => c.title))];
+      return titles
+        .map((t) => `=== Dokumen: "${t}" ===\n${chunks.filter((c) => c.title === t).map((c) => c.text).join("\n\n---\n\n")}`)
+        .join("\n\n");
+    };
     let docNote = "";
+    const whole = wantsWholeDocument(job.question);
+    const attChars = attachments.reduce((n, a) => n + a.content.length, 0);
 
-    if (useKb && wantsWholeDocument(job.question)) {
-      const mapped = await mapDocuments(job);
+    if (attachments.length > 0 && attChars <= cfg.attachInlineChars) {
+      // Lampiran pendek: sisipkan utuh. KB (kalau aktif) tetap dicari relevan.
+      addContext("LAMPIRAN dari pengguna (utuh):", attachments.map((a) => `=== ${a.title} ===\n${a.content}`).join("\n\n"));
+      if (useKb && !whole) {
+        await setProgress(job.id, "Mencari bagian dokumen yang relevan");
+        const chunks = await fetchRelevantKnowledgeChunks(job.question, cfg.ragBudgetChars);
+        if (chunks.length > 0) addContext("KONTEKS DOKUMEN (potongan relevan dari dokumen pengetahuan):", formatChunks(chunks));
+      }
+    } else if (attachments.length > 0 && whole) {
+      // Permintaan menyeluruh atas lampiran panjang: baca per bagian.
+      const mapped = await mapDocuments(job, attachments);
+      if (mapped) {
+        await setProgress(job.id, "Menyusun jawaban dari catatan lampiran");
+        addContext("KONTEKS LAMPIRAN (catatan hasil membaca file yang dilampirkan pengguna):", mapped.notes.length > 0 ? mapped.notes.join("\n\n") : "(tidak ada bagian yang tampak relevan)");
+        if (mapped.partial) {
+          docNote = `\n\n_Catatan: model lokal hanya membaca ${mapped.read} dari ${mapped.total} bagian lampiran (dipilih merata) agar tidak terlalu lama — untuk file panjang, hasilnya bisa belum lengkap._`;
+        }
+      }
+    } else if (attachments.length > 0) {
+      // Pertanyaan spesifik atas lampiran panjang: potongan paling relevan (+ KB bila aktif).
+      await setProgress(job.id, "Mencari bagian lampiran yang relevan");
+      const pool = [...attachments, ...(useKb ? await loadKbDocs() : [])];
+      let chunks = rankKnowledgeChunks(pool, job.question, cfg.ragBudgetChars);
+      if (!chunks.some((c) => c.title.startsWith("Lampiran:"))) {
+        // Tidak ada kata yang cocok ("apa isi file ini?"): ambil awal lampiran.
+        const head = [];
+        let used = 0;
+        for (const a of attachments) {
+          for (const text of chunkDocumentText(a.content, cfg.docChunkChars)) {
+            if (used >= cfg.ragBudgetChars) break;
+            head.push({ title: a.title, text });
+            used += text.length;
+          }
+        }
+        chunks = [...head, ...chunks];
+        docNote = "\n\n_Catatan: pertanyaan tidak spesifik, jadi yang dibaca model hanya bagian awal lampiran._";
+      }
+      addContext("KONTEKS LAMPIRAN/DOKUMEN (potongan paling relevan; bukan seluruh isi):", formatChunks(chunks));
+    } else if (useKb && whole) {
+      const mapped = await mapDocuments(job, await loadKbDocs());
       if (mapped) {
         await setProgress(job.id, "Menyusun jawaban dari catatan dokumen");
-        const lastIdx = history.length - 1;
-        const notesText = mapped.notes.length > 0 ? mapped.notes.join("\n\n") : "(tidak ada bagian yang tampak relevan)";
-        history[lastIdx] = {
-          role: "user",
-          content: `${history[lastIdx].content}\n\n---\nKONTEKS DOKUMEN (catatan hasil membaca dokumen yang diupload pengguna):\n${notesText}`
-        };
+        addContext("KONTEKS DOKUMEN (catatan hasil membaca dokumen yang diupload pengguna):", mapped.notes.length > 0 ? mapped.notes.join("\n\n") : "(tidak ada bagian yang tampak relevan)");
         if (mapped.partial) {
           docNote = `\n\n_Catatan: model lokal hanya membaca ${mapped.read} dari ${mapped.total} bagian dokumen (dipilih merata) agar tidak terlalu lama — untuk dokumen panjang, hasilnya bisa belum lengkap._`;
         }
@@ -221,17 +308,7 @@ export function createAppAgentWorker(deps, overrides = {}) {
     } else if (useKb) {
       await setProgress(job.id, "Mencari bagian dokumen yang relevan");
       const chunks = await fetchRelevantKnowledgeChunks(job.question, cfg.ragBudgetChars);
-      if (chunks.length > 0) {
-        const titles = [...new Set(chunks.map((c) => c.title))];
-        const ctx = titles
-          .map((t) => `=== Dokumen: "${t}" ===\n${chunks.filter((c) => c.title === t).map((c) => c.text).join("\n\n---\n\n")}`)
-          .join("\n\n");
-        const lastIdx = history.length - 1;
-        history[lastIdx] = {
-          role: "user",
-          content: `${history[lastIdx].content}\n\n---\nKONTEKS DOKUMEN (potongan paling relevan dari dokumen yang diupload pengguna; bukan seluruh dokumen):\n${ctx}`
-        };
-      }
+      if (chunks.length > 0) addContext("KONTEKS DOKUMEN (potongan paling relevan dari dokumen yang diupload pengguna; bukan seluruh dokumen):", formatChunks(chunks));
     }
 
     await setProgress(job.id, "Menulis jawaban");
@@ -281,7 +358,9 @@ export function createAppAgentWorker(deps, overrides = {}) {
         .from("agent_jobs")
         .update({ status: "done", assistant_message_id: row?.id ?? null, progress: null, error: null, finished_at: new Date().toISOString() })
         .eq("id", job.id);
-      log.log(`🦙 Job ${job.id.slice(0, 8)} selesai dalam ${Math.round((Date.now() - t0) / 1000)} dtk.`);
+      const secs = Math.round((Date.now() - t0) / 1000);
+      log.log(`🦙 Job ${job.id.slice(0, 8)} selesai dalam ${secs} dtk.`);
+      await pushNotice(job, secs, true);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       log.error(`🦙 Job ${job.id.slice(0, 8)} gagal: ${msg}`);
@@ -289,6 +368,23 @@ export function createAppAgentWorker(deps, overrides = {}) {
         .from("agent_jobs")
         .update({ status: "failed", error: clip(msg, 500), progress: null, finished_at: new Date().toISOString() })
         .eq("id", job.id);
+      await pushNotice(job, Math.round((Date.now() - t0) / 1000), false);
+    }
+  }
+
+  // Push ke HP saat job (yang cukup lama) selesai/gagal. Isi jawaban TIDAK ikut
+  // dikirim lewat push -- hanya pemberitahuan + tautan ke obrolannya.
+  async function pushNotice(job, secs, ok) {
+    if (typeof notify !== "function" || secs < cfg.notifyMinSeconds) return;
+    try {
+      await notify({
+        title: ok ? "Jawaban Ollama sudah siap" : "Ollama gagal menjawab",
+        body: ok ? "Ketuk untuk membuka obrolan." : "Ketuk untuk membuka obrolan, lalu coba lagi atau pilih Gemini.",
+        url: `./#d/${job.chat_date}`,
+        tag: `ollama-${job.id}`
+      });
+    } catch (err) {
+      log.error("🦙 Push notifikasi gagal:", err instanceof Error ? err.message : String(err));
     }
   }
 

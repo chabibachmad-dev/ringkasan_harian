@@ -190,3 +190,31 @@ export function quranAddBookmark(code, { surah, ayah, page }) {
 export function quranDeleteBookmark(code, { surah, ayah }) {
   return callChatFunction({ code, action: "quran_delete_bookmark", surah, ayah });
 }
+
+// ---------------------------------------------------------------- Lampiran, status sistem, khatam
+
+// Lampiran file di obrolan (teks diekstrak di browser; max 3 per obrolan).
+export function addChatAttachment(code, date, { name, content }) {
+  return callChatFunction({ code, date, action: "attachment_add", name, content });
+}
+
+export function deleteChatAttachment(code, date, id) {
+  return callChatFunction({ code, date, action: "attachment_delete", id });
+}
+
+// Kondisi bot/WhatsApp/Ollama/antrean untuk dialog "Status Sistem".
+export function fetchSystemStatus(code) {
+  return callChatFunction({ code, action: "system_status" });
+}
+
+// Target khatam Al-Qur'an (satu baris di server; lihat quran.js).
+export function quranKhatamSet(code, { startDate, targetDays, startPage, reminder, khatamCount }) {
+  const payload = { code, action: "quran_khatam_set", startDate, targetDays, startPage };
+  if (typeof reminder === "boolean") payload.reminder = reminder;
+  if (Number.isInteger(khatamCount)) payload.khatamCount = khatamCount;
+  return callChatFunction(payload);
+}
+
+export function quranKhatamClear(code) {
+  return callChatFunction({ code, action: "quran_khatam_clear" });
+}

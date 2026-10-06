@@ -64,6 +64,7 @@ const base = `http://127.0.0.1:${srv.address().port}`;
 
 const chunker = (text, size) => { const out = []; for (let i = 0; i < text.length; i += size) out.push(text.slice(i, i + size)); return out; };
 const silent = { log() {}, error() {} };
+const pushes = [];
 
 function setup(over = {}) {
   const tables = {
@@ -84,13 +85,24 @@ function setup(over = {}) {
       callOllamaChat: async (messages, opts) => { calls.push({ messages, opts }); if (over.fail) throw new Error("Ollama mati"); return over.reply ? over.reply(messages) : "jawaban lokal"; },
       enqueueOllamaCall: (fn) => fn(),
       fetchRelevantKnowledgeChunks: async () => [{ title: "Dok A", text: "isi potongan relevan" }],
+      rankKnowledgeChunks: (docs, q) => {
+        const words = q.toLowerCase().split(/\s+/).filter((w) => w.length > 3);
+        const out = [];
+        for (const d of docs) for (const text of chunker(d.content, 400)) {
+          const score = words.filter((w) => text.toLowerCase().includes(w)).length;
+          if (score > 0) out.push({ score, title: d.title, text });
+        }
+        return out.sort((a, b) => b.score - a.score).slice(0, 2);
+      },
+      notify: async (p) => { pushes.push(p); },
+      getExtra: () => ({ waConnected: true, extra: { pausedChats: 2 } }),
       chunkDocumentText: chunker,
       currentDateLine: () => "Waktu sekarang: tes.",
       ollamaBaseUrl: base,
       ollamaModel: "qwen2.5:3b",
       log: silent
     },
-    { docChunkChars: 2500, docMaxChunks: 3 }
+    { docChunkChars: 2500, docMaxChunks: 3, attachInlineChars: 300, notifyMinSeconds: 0, ...(over.cfg || {}) }
   );
   return { tables, calls, w };
 }
@@ -150,6 +162,72 @@ check(JSON.stringify(pickEvenly([1,2,3,4,5,6,7,8,9,10], 3)) === "[1,6,10]" && pi
   tables.agent_jobs.push({ id: "job-3", chat_date: "freeform-x", agent: "gemini", question: "x", status: "pending", created_at: "2026-01-01T00:00:06Z" });
   await w.tick();
   check(tables.agent_jobs[0].status === "done" && tables.agent_jobs[1].status === "running" && tables.agent_jobs[2].status === "pending" && calls.length === 1, "hanya job pending milik ollama yang diambil");
+}
+
+
+// 9. Lampiran: pendek -> utuh
+{
+  const { tables, calls, w } = setup();
+  tables.chat_attachments = [{ id: "a1", chat_date: "freeform-x", name: "kecil.txt", content: "ISI LAMPIRAN KECIL", created_at: "2026-01-01T00:00:00Z" }];
+  await w.tick();
+  const last = calls.at(-1).messages.at(-1).content;
+  check(last.includes("LAMPIRAN dari pengguna (utuh)") && last.includes("ISI LAMPIRAN KECIL"), "lampiran pendek disisipkan utuh");
+}
+// 10. Lampiran panjang + pertanyaan spesifik -> potongan relevan
+{
+  const long = "x".repeat(1500) + " tarif penginapan golongan tiga adalah 900000 " + "y".repeat(1500);
+  const { tables, calls, w } = setup();
+  tables.chat_attachments = [{ id: "a1", chat_date: "freeform-x", name: "besar.pdf", content: long, created_at: "2026-01-01T00:00:00Z" }];
+  tables.agent_jobs[0].question = "berapa tarif penginapan golongan tiga";
+  tables.chat_messages[2].content = "berapa tarif penginapan golongan tiga";
+  await w.tick();
+  const last = calls.at(-1).messages.at(-1).content;
+  check(last.includes("KONTEKS LAMPIRAN/DOKUMEN") && last.includes("tarif penginapan"), "lampiran panjang: potongan relevan");
+  check(calls.length === 1, "satu panggilan Ollama utk pertanyaan spesifik");
+}
+// 11. Lampiran panjang + tanpa kata cocok -> awal lampiran + catatan
+{
+  const { tables, calls, w } = setup({ reply: () => "ok" });
+  tables.chat_attachments = [{ id: "a1", chat_date: "freeform-x", name: "besar.pdf", content: "AWAL-DOKUMEN " + "z".repeat(3000), created_at: "2026-01-01T00:00:00Z" }];
+  tables.agent_jobs[0].question = "apa ini";
+  tables.chat_messages[2].content = "apa ini";
+  await w.tick();
+  const reply = tables.chat_messages.find((m) => m.id === tables.agent_jobs[0].assistant_message_id);
+  check(calls.at(-1).messages.at(-1).content.includes("AWAL-DOKUMEN") && /hanya bagian awal lampiran/.test(reply.content), "tanpa kata cocok: bagian awal + catatan jujur");
+}
+// 12. Lampiran panjang + ringkas -> peta-lalu-ringkas hanya atas lampiran (bukan KB)
+{
+  const { tables, calls, w } = setup({ reply: (m) => (m[0].content.startsWith("Kamu membaca") ? "- poin" : "RINGKAS") });
+  tables.chat_thread_meta[0].use_kb = true;
+  tables.chat_attachments = [{ id: "a1", chat_date: "freeform-x", name: "laporan.pdf", content: "L".repeat(5000), created_at: "2026-01-01T00:00:00Z" }];
+  tables.agent_jobs[0].question = "tolong ringkas file ini";
+  tables.chat_messages[2].content = "tolong ringkas file ini";
+  await w.tick();
+  const mapCalls = calls.filter((c) => c.messages[0].content.startsWith("Kamu membaca"));
+  check(mapCalls.length === 2 && mapCalls.every((c) => c.messages[1].content.includes("Lampiran: laporan.pdf")), "ringkas lampiran: 2 bagian dibaca, bukan KB");
+  check(calls.at(-1).messages.at(-1).content.includes("KONTEKS LAMPIRAN (catatan"), "reduce memakai catatan lampiran");
+}
+// 13. Push notifikasi
+{
+  pushes.length = 0;
+  const { w } = setup();
+  await w.tick();
+  check(pushes.length === 1 && pushes[0].url === "./#d/freeform-x" && /siap/i.test(pushes[0].title) && pushes[0].tag === "ollama-job-1", "push saat selesai membuka obrolan yang benar");
+  check(!JSON.stringify(pushes[0]).includes("jawaban lokal"), "isi jawaban TIDAK ikut dikirim lewat push");
+  pushes.length = 0;
+  const f = setup({ fail: true }); await f.w.tick();
+  check(pushes.length === 1 && /gagal/i.test(pushes[0].title), "push saat gagal");
+  pushes.length = 0;
+  const q = setup({ cfg: { notifyMinSeconds: 60 } }); await q.w.tick();
+  check(pushes.length === 0, "job cepat (< ambang) tidak memicu push");
+}
+// 14. Denyut membawa info tambahan
+{
+  const { tables, w } = setup();
+  tagsBody = { models: [{ name: "qwen2.5:3b" }] };
+  await w.heartbeat();
+  const st = tables.agent_worker_status[0];
+  check(st.wa_connected === true && st.extra?.pausedChats === 2 && !!st.started_at, "denyut memuat wa_connected/extra/started_at");
 }
 
 // 7. Denyut

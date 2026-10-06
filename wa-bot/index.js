@@ -38,6 +38,7 @@ import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import { createSimab, SIMAB_OLLAMA_SYSTEM } from "./simab.js";
 import { createAppAgentWorker } from "./app-agent.js";
+import { createKhatamReminder } from "./khatam.js";
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -434,19 +435,15 @@ function chunkDocumentText(text, chunkSize) {
 // inget num_ctx cuma 4096 token & inferensinya CPU-only). Return array
 // kosong kalau tabel kosong/error (BUKAN exception -- kegagalan RAG tidak
 // boleh bikin seluruh auto-reply gagal, cukup lanjut tanpa konteks dokumen).
-async function fetchRelevantKnowledgeChunks(question, budgetChars) {
+// Peringkat potongan dari kumpulan dokumen {title, content} (tanpa akses database) --
+// dipakai fetchRelevantKnowledgeChunks (Dokumen Pengetahuan) & agen chat aplikasi
+// (lampiran file).
+function rankKnowledgeChunks(docs, question, budgetChars) {
   const qWords = new Set(tokenizeForScoring(question));
-  if (qWords.size === 0) return [];
-
-  const { data, error } = await supabase.from("knowledge_documents").select("title, content");
-  if (error) {
-    console.error("RAG: gagal ambil Dokumen Pengetahuan, lanjut tanpa konteks dokumen:", error.message);
-    return [];
-  }
-  if (!data || data.length === 0) return [];
+  if (qWords.size === 0 || !docs || docs.length === 0) return [];
 
   const scored = [];
-  for (const doc of data) {
+  for (const doc of docs) {
     for (const chunk of chunkDocumentText(doc.content, RAG_CHUNK_SIZE_CHARS)) {
       const chunkWords = tokenizeForScoring(chunk);
       if (chunkWords.length === 0) continue;
@@ -467,6 +464,19 @@ async function fetchRelevantKnowledgeChunks(question, budgetChars) {
     used += item.text.length;
   }
   return picked;
+}
+
+async function fetchRelevantKnowledgeChunks(question, budgetChars) {
+  const qWords = new Set(tokenizeForScoring(question));
+  if (qWords.size === 0) return [];
+
+  const { data, error } = await supabase.from("knowledge_documents").select("title, content");
+  if (error) {
+    console.error("RAG: gagal ambil Dokumen Pengetahuan, lanjut tanpa konteks dokumen:", error.message);
+    return [];
+  }
+  if (!data || data.length === 0) return [];
+  return rankKnowledgeChunks(data, question, budgetChars);
 }
 
 // ----------------------------------------------------------------
@@ -1981,6 +1991,7 @@ async function checkSummaryFlagFile() {
 // WhatsApp yang LAGI AKTIF, diupdate ulang tiap kali connect()/reconnect
 // bikin socket baru (lihat connection.update di bawah).
 let currentSock = null;
+let waOpen = false; // koneksi WhatsApp benar-benar terbuka (untuk halaman Status sistem)
 
 // Ambil teks dari berbagai tipe pesan WhatsApp yang umum. Tipe yang tidak
 // dikenali (voice note, lokasi, kontak dibagikan, dll) sengaja DILEWATI
@@ -2730,6 +2741,7 @@ async function connect() {
       const statusCode = lastDisconnect?.error?.output?.statusCode;
       const loggedOut = statusCode === DisconnectReason.loggedOut;
       currentSock = null;
+      waOpen = false;
       if (loggedOut) {
         console.error(
           "\n❌ Sesi WhatsApp logout/dicabut dari HP (atau sesi tidak valid lagi).\n" +
@@ -2740,6 +2752,7 @@ async function connect() {
         setTimeout(connect, 5000);
       }
     } else if (connection === "open") {
+      waOpen = true;
       console.log(`\n✅ WhatsApp tersambung (${sock.user?.id || "?"}). Bot siap jalan.\n`);
     }
   });
@@ -2800,16 +2813,54 @@ console.log(
 // Agen Ollama untuk chat di APLIKASI (pilihan agen di halaman chat): mengambil
 // antrean `agent_jobs` dari Supabase & menjawab pakai Ollama lokal. Tidak
 // butuh koneksi WhatsApp & tidak mengirim pesan WA apa pun -- lihat app-agent.js.
+// Push notifikasi ke HP lewat Edge Function send-push (memakai CRON_SECRET yang sama
+// dengan di Supabase). Tanpa CRON_SECRET di .env, push dimatikan (fitur lain tetap jalan).
+const CRON_SECRET = process.env.CRON_SECRET || "";
+let warnedNoPush = false;
+async function sendPush({ title, body, url, tag }) {
+  if (!CRON_SECRET) {
+    if (!warnedNoPush) {
+      warnedNoPush = true;
+      console.warn("🔔 Push notifikasi dimatikan: isi CRON_SECRET di wa-bot/.env (sama dengan secret Supabase).");
+    }
+    return;
+  }
+  const res = await fetch(`${SUPABASE_URL}/functions/v1/send-push`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${SERVICE_ROLE_KEY}`, "x-cron-secret": CRON_SECRET },
+    body: JSON.stringify({ title, body, url, tag })
+  });
+  if (!res.ok) throw new Error(`send-push HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`);
+}
+
 const appAgent = createAppAgentWorker({
   supabase,
   callOllamaChat,
   enqueueOllamaCall,
   fetchRelevantKnowledgeChunks,
+  rankKnowledgeChunks,
   chunkDocumentText,
   currentDateLine,
   ollamaBaseUrl: OLLAMA_BASE_URL,
-  ollamaModel: OLLAMA_MODEL
+  ollamaModel: OLLAMA_MODEL,
+  notify: sendPush,
+  getExtra: () => ({
+    waConnected: waOpen,
+    extra: { pausedChats: aiPausedUntil.size, engine: WA_AI_ENGINE, autoReply: AUTO_REPLY_ACTIVE }
+  })
 });
+
+// Pengingat harian target khatam Al-Qur'an (push). Jam: KHATAM_REMINDER_TIME (default 20:30, zona WA_TIMEZONE).
+const khatamReminder = createKhatamReminder({
+  supabase,
+  notify: sendPush,
+  timeZone: WA_TIMEZONE,
+  stateFile: fileURLToPath(new URL("./khatam-state.json", import.meta.url)),
+  reminderTime: process.env.KHATAM_REMINDER_TIME || "20:30"
+});
+setInterval(() => {
+  khatamReminder.check().catch((err) => console.error("📖 Pengingat khatam error:", err instanceof Error ? err.message : String(err)));
+}, 60_000);
 appAgent.start().catch((err) => {
   console.error("Agen Ollama aplikasi gagal start:", err instanceof Error ? err.message : String(err));
 });

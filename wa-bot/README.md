@@ -406,6 +406,41 @@ jawabannya tetap muncul walau halaman ditutup/dibuka lagi. Panggilan Ollama berb
 auto-reply WhatsApp (satu per satu, supaya CPU tidak rebutan). Variabel pengaturan: lihat bagian
 "Agen Ollama untuk chat di APLIKASI" di `.env.example`. Tes tanpa jaringan: `node test-app-agent.mjs`.
 
+## 8. Notifikasi Ollama, lampiran file, Status Sistem, target khatam (butuh migration 0016)
+
+**Notifikasi push saat jawaban Ollama selesai.** Kalau satu job Ollama berjalan lebih dari 20 detik
+(`APP_AGENT_NOTIFY_MIN_SECONDS`), bot mengirim push ke HP: "Jawaban Ollama sudah siap" (atau "gagal")
+dengan tautan ke obrolannya. Isi jawaban tidak ikut dikirim lewat push. Syarat: isi `CRON_SECRET` di
+`wa-bot/.env` dengan nilai yang SAMA dengan secret `CRON_SECRET` di Supabase (dipakai Edge Function
+`send-push`), dan deploy ulang `send-push`: `npx supabase functions deploy send-push`. Tanpa
+`CRON_SECRET`, push dimatikan dan bot hanya menulis peringatan di log (fitur lain tetap jalan).
+Push hanya sampai ke perangkat yang sudah menekan "Aktifkan Notifikasi" (PWA di Layar Utama).
+
+**Lampiran file di chat.** Tombol klip di kolom ketik: PDF (yang punya lapisan teks) atau file teks
+(.txt/.md/.csv/.json/.log), maks 15 MB dan 3 lampiran per obrolan. Teks diekstrak di browser lalu
+disimpan sebagai lampiran obrolan itu (tabel `chat_attachments`, ikut terhapus bersama obrolan) dan
+dibaca AI di setiap pesan obrolan itu sampai chip lampirannya dihapus. Gemini menerimanya utuh (dibatasi
+600 ribu karakter total); Ollama: lampiran pendek (<= `OLLAMA_ATTACH_INLINE_CHARS`) disisipkan utuh,
+yang panjang diambil potongan relevannya, dan permintaan seperti "ringkas file ini" memakai mode baca
+per bagian (maks `OLLAMA_DOC_MAX_CHUNKS`). PDF hasil scan/foto tanpa teks tidak bisa dibaca.
+
+**Status Sistem.** Menu "Status" di beranda: bot hidup/mati (denyut terakhir & lama menyala), WhatsApp
+tersambung atau tidak, Ollama siap/sibuk/mati (beserta penyebabnya, mis. model belum di-pull), antrean
+dan statistik 24 jam, jumlah chat WA yang sedang dijeda, pekerjaan Ollama terakhir, dan kuota tiap API key
+Gemini. Diperbarui otomatis tiap 10 detik selama jendelanya terbuka.
+
+**Target khatam.** Di halaman Al-Qur'an ada kartu "Target khatam": pilih jumlah hari (7/30/60/90 atau
+bebas) dan mulai dari halaman 1 atau halaman terakhir dibaca. Aplikasi menghitung target halaman hari
+ini, posisi, sisa halaman/hari, dan kemajuan berdasarkan "terakhir dibaca" (tersimpan otomatis saat
+membaca). Setelah khatam, tombol "Mulai khatam baru" menambah hitungan khatam. Pengingat: tiap malam pada
+jam `KHATAM_REMINDER_TIME` (default 20:30, zona `WA_TIMEZONE`) bot mengirim push HANYA kalau target hari
+ini belum tercapai (butuh `CRON_SECRET` seperti di atas; bisa dimatikan di formulir target).
+
+Setup: jalankan `supabase/migrations/0016_attachments_khatam_status.sql`, deploy ulang Edge Function
+`chat` dan `send-push`, salin file bot (`index.js`, `app-agent.js`, `khatam.js`), isi `CRON_SECRET`, lalu
+`pm2 restart wa-bot`. Tes tanpa jaringan: `node test-app-agent.mjs` dan `node test-khatam.mjs`
+(`test-khatam.mjs` mengimpor `../src/khatam.js`, jadi jalankan di dalam repo lengkap).
+
 ## Troubleshooting
 
 - **QR tidak muncul / bot langsung error network** -- cek koneksi internet;

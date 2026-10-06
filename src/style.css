@@ -1863,3 +1863,251 @@ mark.chat-search-hit--active {
   padding-top: 8px;
   padding-bottom: 8px;
 }
+
+/* ---------------- Lampiran file di chat ---------------- */
+.chat-attach-btn {
+  flex-shrink: 0;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: var(--bg-card);
+  color: var(--text);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  cursor: pointer;
+}
+
+.chat-attach-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.chat-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.chat-attachments[hidden] {
+  display: none;
+}
+
+.chat-attach-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 3px 4px 3px 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 0.75rem;
+  color: var(--text);
+  background: var(--bg-card);
+}
+
+.chat-attach-chip-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 46vw;
+}
+
+.chat-attach-chip small {
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.chat-attach-chip button {
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: var(--text);
+  color: var(--bg);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+/* ---------------- Status sistem ---------------- */
+.sys-status {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.sys-subtitle {
+  margin: 14px 0 4px;
+  font-size: 0.95rem;
+}
+
+.sys-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.sys-dot {
+  flex-shrink: 0;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 1.5px solid var(--text);
+  background: transparent;
+}
+
+.sys-dot--on {
+  background: var(--text);
+}
+
+.sys-row-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.sys-row-label {
+  font-weight: 700;
+  font-size: 0.85rem;
+}
+
+.sys-row-value {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
+.sys-jobs {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.sys-job {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 0;
+  border-bottom: 1px dashed var(--border);
+}
+
+/* ---------------- Target khatam ---------------- */
+.khatam-card {
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: var(--bg-card);
+}
+
+.khatam-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.khatam-title {
+  font-weight: 700;
+  font-size: 0.95rem;
+}
+
+.khatam-meta {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.khatam-bar {
+  height: 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.khatam-bar-fill {
+  height: 100%;
+  background: var(--text);
+}
+
+.khatam-goal {
+  font-size: 0.88rem;
+  line-height: 1.4;
+}
+
+.khatam-goal b {
+  font-weight: 700;
+}
+
+.khatam-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.khatam-actions button {
+  padding: 6px 12px;
+  font-size: 0.8rem;
+}
+
+.khatam-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.khatam-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.8rem;
+}
+
+.khatam-form input[type="number"],
+.khatam-form select {
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-card);
+  color: var(--text);
+  font: inherit;
+  font-size: 16px;
+}
+
+.khatam-presets {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.khatam-presets button {
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg-card);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+
+.khatam-check {
+  flex-direction: row !important;
+  align-items: center;
+  gap: 8px !important;
+}

@@ -9,7 +9,7 @@
 // jalan offline), lalu disinkronkan ke Supabase lewat Edge Function `chat`
 // (lihat chat.js & migrations/0014) supaya sama di semua perangkat.
 
-import { quranAddBookmark, quranDeleteBookmark, quranSetLastRead, quranSync } from "./chat.js";
+import { quranAddBookmark, quranDeleteBookmark, quranKhatamClear, quranKhatamSet, quranSetLastRead, quranSync } from "./chat.js";
 
 // ---------------------------------------------------------------- Data surah
 // [nama latin, nama arab, jumlah ayat, halaman mulai (mushaf Madinah)]
@@ -389,7 +389,9 @@ export async function downloadAll(onProgress) {
 const STATE_KEY = "rh_quran_state";
 
 function emptyState() {
-  return { lastRead: null, lastReadDirty: false, bookmarks: [], pendingDeletes: [] };
+  // khatam: { startDate, targetDays, startPage, reminder, khatamCount } | null
+  // khatamDirty: "set" | "clear" | false -- perubahan lokal yang belum terkirim ke server.
+  return { lastRead: null, lastReadDirty: false, bookmarks: [], pendingDeletes: [], khatam: null, khatamDirty: false };
 }
 
 let cache = null;
@@ -553,7 +555,65 @@ export async function syncWithServer(code) {
     save();
     await pushLastRead(code);
   }
+
+  // 6) Target khatam: perubahan lokal yang tertunda didorong dulu; kalau tidak ada,
+  //    ikuti server (termasuk target yang dihapus/diubah dari perangkat lain).
+  if (st.khatamDirty) {
+    await pushKhatam(code);
+  } else if (Object.prototype.hasOwnProperty.call(res, "khatam")) {
+    const a = JSON.stringify(st.khatam);
+    const b = JSON.stringify(res.khatam ?? null);
+    if (a !== b) {
+      st.khatam = res.khatam ?? null;
+      changed = true;
+      save();
+    }
+  }
   return { ok: true, changed };
+}
+
+// ---------------------------------------------------------------- Target khatam
+
+export function getKhatam() {
+  return load().khatam;
+}
+
+// Simpan target (lokal dulu, lalu ke server). cfg: { startDate, targetDays, startPage, reminder?, khatamCount? }
+export function setKhatam(cfg, code) {
+  const st = load();
+  const prev = st.khatam || {};
+  st.khatam = {
+    startDate: cfg.startDate,
+    targetDays: cfg.targetDays,
+    startPage: cfg.startPage,
+    reminder: typeof cfg.reminder === "boolean" ? cfg.reminder : prev.reminder ?? true,
+    khatamCount: Number.isInteger(cfg.khatamCount) ? cfg.khatamCount : prev.khatamCount ?? 0
+  };
+  st.khatamDirty = "set";
+  save();
+  pushKhatam(code);
+  return st.khatam;
+}
+
+export function clearKhatam(code) {
+  const st = load();
+  st.khatam = null;
+  st.khatamDirty = "clear";
+  save();
+  pushKhatam(code);
+}
+
+async function pushKhatam(code) {
+  const st = load();
+  if (!code || !st.khatamDirty) return;
+  const mode = st.khatamDirty;
+  const snapshot = st.khatam;
+  const res = mode === "clear" ? await quranKhatamClear(code) : await quranKhatamSet(code, snapshot);
+  // Berhasil & tidak berubah lagi selama request -> bersih.
+  if (res.ok && st.khatamDirty === mode && st.khatam === snapshot) {
+    st.khatamDirty = false;
+    save();
+  }
 }
 
 // Dipakai tes: reset status lokal.

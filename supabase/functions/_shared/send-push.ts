@@ -11,6 +11,8 @@ export interface PushPayload {
   title: string;
   body: string;
   url?: string;
+  // Notifikasi dengan tag yang sama saling menggantikan (tidak menumpuk).
+  tag?: string;
 }
 
 export interface PushResult {

@@ -30,7 +30,14 @@ Deno.serve(async (req) => {
     const title = body.title || "Tes notifikasi Ringkasan Harian";
     const bodyText = body.body || "Kalau kamu terima ini, push notification-nya berfungsi 🎉";
 
-    const result = await sendPushToAllSubscribers({ title, body: bodyText, url: "/" });
+    // url opsional (dipakai bot saat jawaban Ollama selesai -> buka obrolannya).
+    // Hanya jalur relatif ke aplikasi sendiri yang diterima ("./#d/..." atau "/..."),
+    // supaya notifikasi tidak bisa diarahkan ke situs lain.
+    const rawUrl = typeof body.url === "string" ? body.url : "";
+    const url = /^(\.\/|\/)[0-9A-Za-z#\/_.\-?=&%:]*$/.test(rawUrl) && !rawUrl.startsWith("//") ? rawUrl : "./";
+    const tag = typeof body.tag === "string" ? body.tag.slice(0, 64) : undefined;
+
+    const result = await sendPushToAllSubscribers({ title, body: bodyText, url, tag });
 
     return new Response(JSON.stringify({ ok: true, ...result }), {
       headers: { ...corsHeaders, "Content-Type": "application/json" }

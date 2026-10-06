@@ -19,6 +19,12 @@
 //     agent "ollama" ditolak (503, ollamaOffline: true) kalau laptop/bot/Ollama sedang tidak hidup.
 //   { "code": "...", "action": "agent_job", "jobId": "<uuid>" }
 //     -> { ok: true, status: "pending"|"running"|"done"|"failed", progress, error, reply?, assistantMessageId?, agent, fallbackFrom }
+//   { "code": "...", "date": "...", "action": "attachment_add", "name": "x.pdf", "content": "<teks>" }
+//     -> { ok: true, attachment: { id, name, charCount } }   (lampiran obrolan; teks diekstrak di browser)
+//   { "code": "...", "date": "...", "action": "attachment_delete", "id": "<uuid>" }  -> { ok: true }
+//     history juga mengembalikan attachments: [{ id, name, charCount }]
+//   { "code": "...", "action": "system_status" }
+//     -> { ok: true, worker: {...}, jobs: { pending, running, done24h, failed24h, avgSeconds, recent: [...] } }
 //   { "code": "...", "action": "agent_status" }
 //     -> { ok: true, ollama: { online, ollamaOk, model, busy, lastSeenMs } }
 //   { "code": "...", "action": "last_messages", "dates": ["...", ...] }
@@ -91,6 +97,9 @@
 //   { "code": "...", "action": "quran_add_bookmark", "surah": 2, "ayah": 255, "page": 42 }  (idempotent)
 //   { "code": "...", "action": "quran_delete_bookmark", "surah": 2, "ayah": 255 }
 //     -> { ok: true }
+//   { "code": "...", "action": "quran_khatam_set", "startDate": "2026-10-06", "targetDays": 30, "startPage": 1, "reminder"?: bool, "khatamCount"?: n }
+//   { "code": "...", "action": "quran_khatam_clear" }
+//     -> { ok: true, khatam }    (quran_sync juga mengembalikan khatam: {startDate,targetDays,startPage,reminder,khatamCount} | null)
 
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { corsHeaders } from "../_shared/cors.ts";
@@ -109,6 +118,9 @@ function isValidThreadId(id: string): boolean {
   return FREEFORM_RE.test(id);
 }
 const MAX_MESSAGE_LENGTH = 4000;
+// Lampiran file per obrolan (teks hasil ekstrak di browser).
+const MAX_ATTACHMENT_CHARS = 300_000;
+const MAX_ATTACHMENTS_PER_THREAD = 3;
 const MAX_HISTORY_FOR_CONTEXT = 40;
 
 // Kuota harian GRATIS Gemini reset berdasarkan tengah malam waktu Pasifik
@@ -187,6 +199,12 @@ Deno.serve(async (req) => {
     useKb?: boolean;
     agent?: string;
     jobId?: string;
+    name?: string;
+    startDate?: string;
+    targetDays?: number;
+    startPage?: number;
+    reminder?: boolean;
+    khatamCount?: number;
     content?: string;
     filename?: string;
     id?: string;
@@ -457,23 +475,64 @@ Deno.serve(async (req) => {
     body.action === "quran_sync" ||
     body.action === "quran_set_last_read" ||
     body.action === "quran_add_bookmark" ||
-    body.action === "quran_delete_bookmark"
+    body.action === "quran_delete_bookmark" ||
+    body.action === "quran_khatam_set" ||
+    body.action === "quran_khatam_clear"
   ) {
     const inRange = (v: unknown, min: number, max: number): v is number =>
       typeof v === "number" && Number.isInteger(v) && v >= min && v <= max;
 
+    const khatamOut = (r: Record<string, unknown> | null) =>
+      r
+        ? {
+            startDate: r.start_date as string,
+            targetDays: r.target_days as number,
+            startPage: r.start_page as number,
+            reminder: !!r.reminder,
+            khatamCount: (r.khatam_count as number) ?? 0
+          }
+        : null;
+
+    if (body.action === "quran_khatam_clear") {
+      const { error } = await supabaseAdmin.from("quran_khatam").delete().eq("id", "main");
+      if (error) return json({ ok: false, error: error.message }, 500);
+      return json({ ok: true, khatam: null });
+    }
+
+    if (body.action === "quran_khatam_set") {
+      const okDate = typeof body.startDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(body.startDate) && !Number.isNaN(Date.parse(body.startDate));
+      if (!okDate || !inRange(body.targetDays, 1, 730) || !inRange(body.startPage, 1, 604)) {
+        return json({ ok: false, error: "Target khatam tidak valid (tanggal, jumlah hari 1-730, halaman 1-604)." }, 400);
+      }
+      const { data: prev } = await supabaseAdmin.from("quran_khatam").select("reminder, khatam_count").eq("id", "main").maybeSingle();
+      const row = {
+        id: "main",
+        start_date: body.startDate,
+        target_days: body.targetDays,
+        start_page: body.startPage,
+        reminder: typeof body.reminder === "boolean" ? body.reminder : prev?.reminder ?? true,
+        khatam_count: inRange(body.khatamCount, 0, 999) ? body.khatamCount : prev?.khatam_count ?? 0,
+        updated_at: new Date().toISOString()
+      };
+      const { data, error } = await supabaseAdmin.from("quran_khatam").upsert(row).select("*").single();
+      if (error) return json({ ok: false, error: error.message }, 500);
+      return json({ ok: true, khatam: khatamOut(data) });
+    }
+
     if (body.action === "quran_sync") {
-      const [lr, bm] = await Promise.all([
+      const [lr, bm, kh] = await Promise.all([
         supabaseAdmin.from("quran_last_read").select("surah, ayah, page, updated_at").eq("id", "main").maybeSingle(),
         supabaseAdmin
           .from("quran_bookmarks")
           .select("surah, ayah, page, created_at")
           .order("created_at", { ascending: false })
-          .limit(1000)
+          .limit(1000),
+        supabaseAdmin.from("quran_khatam").select("*").eq("id", "main").maybeSingle()
       ]);
       if (lr.error) return json({ ok: false, error: lr.error.message }, 500);
       if (bm.error) return json({ ok: false, error: bm.error.message }, 500);
-      return json({ ok: true, lastRead: lr.data ?? null, bookmarks: bm.data ?? [] });
+      // Tabel khatam belum ada (migrasi 0016 belum dijalankan) -> abaikan, bukan gagal.
+      return json({ ok: true, lastRead: lr.data ?? null, bookmarks: bm.data ?? [], khatam: kh.error ? null : khatamOut(kh.data) });
     }
 
     if (body.action === "quran_delete_bookmark") {
@@ -507,6 +566,60 @@ Deno.serve(async (req) => {
       .upsert({ surah: body.surah, ayah: body.ayah, page: body.page }, { onConflict: "surah,ayah", ignoreDuplicates: true });
     if (error) return json({ ok: false, error: error.message }, 500);
     return json({ ok: true });
+  }
+
+  if (body.action === "system_status") {
+    const w = await getWorkerStatus(supabaseAdmin);
+    const since = new Date(Date.now() - 24 * 3600_000).toISOString();
+    const [pend, run, done, failed, recent, ws] = await Promise.all([
+      supabaseAdmin.from("agent_jobs").select("id", { count: "exact", head: true }).eq("status", "pending"),
+      supabaseAdmin.from("agent_jobs").select("id", { count: "exact", head: true }).eq("status", "running"),
+      supabaseAdmin.from("agent_jobs").select("started_at, finished_at").eq("status", "done").gte("created_at", since).limit(200),
+      supabaseAdmin.from("agent_jobs").select("id", { count: "exact", head: true }).eq("status", "failed").gte("created_at", since),
+      supabaseAdmin
+        .from("agent_jobs")
+        .select("id, status, progress, error, fallback_from, created_at, started_at, finished_at")
+        .order("created_at", { ascending: false })
+        .limit(6),
+      supabaseAdmin.from("agent_worker_status").select("wa_connected, started_at, extra").eq("id", "ollama").maybeSingle()
+    ]);
+    const durations = (done.data ?? [])
+      .filter((r) => r.started_at && r.finished_at)
+      .map((r) => (new Date(r.finished_at as string).getTime() - new Date(r.started_at as string).getTime()) / 1000);
+    const avgSeconds = durations.length ? Math.round(durations.reduce((a, b) => a + b, 0) / durations.length) : null;
+    return json({
+      ok: true,
+      serverNowMs: Date.now(),
+      worker: {
+        botAlive: w.botAlive,
+        ollamaOk: w.ollamaOk,
+        online: w.online,
+        model: w.model,
+        busy: w.busy,
+        detail: w.detail,
+        lastSeenMs: w.lastSeenMs,
+        waConnected: ws.data?.wa_connected ?? null,
+        startedAt: ws.data?.started_at ?? null,
+        extra: ws.data?.extra ?? null
+      },
+      jobs: {
+        pending: pend.count ?? 0,
+        running: run.count ?? 0,
+        done24h: durations.length,
+        failed24h: failed.count ?? 0,
+        avgSeconds,
+        recent: (recent.data ?? []).map((r) => ({
+          id: r.id,
+          status: r.status,
+          progress: r.progress,
+          error: r.error,
+          fallbackFrom: r.fallback_from,
+          createdAt: r.created_at,
+          startedAt: r.started_at,
+          finishedAt: r.finished_at
+        }))
+      }
+    });
   }
 
   if (body.action === "agent_status") {
@@ -597,7 +710,43 @@ Deno.serve(async (req) => {
     const pendingJob = activeJobs && activeJobs.length > 0 ? activeJobs[0] : null;
     // Agen pilihan obrolan ini (sinkron lintas perangkat).
     const { data: metaRow } = await supabaseAdmin.from("chat_thread_meta").select("agent").eq("id", date).maybeSingle();
-    return json({ ok: true, messages, pendingJob, agent: parseAgent(metaRow?.agent) });
+    // Lampiran file obrolan ini (tabel belum ada kalau migrasi 0016 belum jalan -> kosong).
+    const { data: attRows } = await supabaseAdmin
+      .from("chat_attachments")
+      .select("id, name, char_count")
+      .eq("chat_date", date)
+      .order("created_at", { ascending: true })
+      .limit(20);
+    const attachments = (attRows ?? []).map((a) => ({ id: a.id, name: a.name, charCount: a.char_count }));
+    return json({ ok: true, messages, pendingJob, agent: parseAgent(metaRow?.agent), attachments });
+  }
+
+  if (body.action === "attachment_add") {
+    const name = typeof body.name === "string" ? body.name.trim().slice(0, 200) : "";
+    const content = typeof body.content === "string" ? body.content : "";
+    if (!name || !content.trim()) return json({ ok: false, error: "Nama/isi lampiran kosong." }, 400);
+    if (content.length > MAX_ATTACHMENT_CHARS) {
+      return json({ ok: false, error: `Lampiran terlalu panjang (maks ${MAX_ATTACHMENT_CHARS.toLocaleString("id-ID")} karakter).` }, 413);
+    }
+    const { count } = await supabaseAdmin.from("chat_attachments").select("id", { count: "exact", head: true }).eq("chat_date", date);
+    if ((count ?? 0) >= MAX_ATTACHMENTS_PER_THREAD) {
+      return json({ ok: false, error: `Maksimal ${MAX_ATTACHMENTS_PER_THREAD} lampiran per obrolan -- hapus salah satu dulu.` }, 400);
+    }
+    const { data, error } = await supabaseAdmin
+      .from("chat_attachments")
+      .insert({ chat_date: date, name, content, char_count: content.length })
+      .select("id, name, char_count")
+      .single();
+    if (error) return json({ ok: false, error: error.message }, 500);
+    return json({ ok: true, attachment: { id: data.id, name: data.name, charCount: data.char_count } });
+  }
+
+  if (body.action === "attachment_delete") {
+    const id = typeof body.id === "string" ? body.id : "";
+    if (!UUID_RE.test(id)) return json({ ok: false, error: "ID lampiran tidak valid." }, 400);
+    const { error } = await supabaseAdmin.from("chat_attachments").delete().eq("id", id).eq("chat_date", date);
+    if (error) return json({ ok: false, error: error.message }, 500);
+    return json({ ok: true });
   }
 
   if (body.action === "delete_message") {
@@ -639,6 +788,7 @@ Deno.serve(async (req) => {
     // chat_thread_meta. Gagal di sini tidak fatal (chat-nya sendiri sudah
     // terhapus), jadi cukup dicoba saja tanpa menggagalkan seluruh request.
     await supabaseAdmin.from("chat_thread_meta").delete().eq("id", date);
+    await supabaseAdmin.from("chat_attachments").delete().eq("chat_date", date);
 
     return json({ ok: true, deleted: data?.length ?? 0 });
   }
@@ -802,6 +952,29 @@ Deno.serve(async (req) => {
       }
     }
 
+    // Lampiran file obrolan ini selalu disertakan penuh (pengguna sengaja
+    // melampirkannya), terlepas dari toggle Dokumen Pengetahuan.
+    {
+      const { data: attRows } = await supabaseAdmin
+        .from("chat_attachments")
+        .select("name, content")
+        .eq("chat_date", date)
+        .order("created_at", { ascending: true })
+        .limit(MAX_ATTACHMENTS_PER_THREAD);
+      // Anggaran total sama seperti Dokumen Pengetahuan (600rb karakter) supaya
+      // 3 lampiran besar tidak membengkakkan token Gemini di tiap pesan.
+      let attBudget = 600_000;
+      const attDocs: { title: string; content: string }[] = [];
+      for (const a of attRows ?? []) {
+        if (attBudget <= 0) break;
+        const text = a.content as string;
+        const content = text.length > attBudget ? `${text.slice(0, attBudget)}\n\n[...dipotong...]` : text;
+        attBudget -= content.length;
+        attDocs.push({ title: `Lampiran: ${a.name as string}`, content });
+      }
+      knowledgeContext.unshift(...attDocs);
+    }
+
     let reply: string;
     let tokensUsed = 0;
     let costUsd = 0;
@@ -930,7 +1103,7 @@ Deno.serve(async (req) => {
     {
       ok: false,
       error:
-        "action tidak dikenal (pakai 'history', 'send', 'agent_job', 'agent_status', 'delete', 'delete_message', 'last_messages', 'list_threads', 'set_thread_meta', 'token_usage', 'key_status', 'kb_list', 'kb_upload', 'kb_delete', 'quran_sync', 'quran_set_last_read', 'quran_add_bookmark', atau 'quran_delete_bookmark')."
+        "action tidak dikenal (pakai 'history', 'send', 'agent_job', 'agent_status', 'system_status', 'attachment_add', 'attachment_delete', 'quran_khatam_set', 'quran_khatam_clear', 'delete', 'delete_message', 'last_messages', 'list_threads', 'set_thread_meta', 'token_usage', 'key_status', 'kb_list', 'kb_upload', 'kb_delete', 'quran_sync', 'quran_set_last_read', 'quran_add_bookmark', atau 'quran_delete_bookmark')."
     },
     400
   );

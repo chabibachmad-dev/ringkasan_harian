@@ -28,6 +28,9 @@ import {
   ICON_BELL_OUTLINE,
   ICON_ZAP,
   ICON_GAUGE,
+  ICON_PAPERCLIP,
+  ICON_X_SMALL,
+  ICON_PULSE,
   ICON_PRAYER,
   ICON_BOOK,
   ICON_LOCATE
@@ -57,7 +60,10 @@ import {
   listKnowledgeDocs,
   uploadKnowledgeDoc,
   deleteKnowledgeDoc,
-  fetchKeyStatus
+  fetchKeyStatus,
+  addChatAttachment,
+  deleteChatAttachment,
+  fetchSystemStatus
 } from "./chat.js";
 import {
   listWaChats,
@@ -133,6 +139,10 @@ const els = {
   chatInput: document.getElementById("chat-input"),
   chatSendBtn: document.getElementById("chat-send-btn"),
   chatAgentBar: document.getElementById("chat-agent-bar"),
+  chatAttachBtn: document.getElementById("chat-attach-btn"),
+  chatAttachInput: document.getElementById("chat-attach-input"),
+  chatAttachments: document.getElementById("chat-attachments"),
+  sysStatus: document.getElementById("sys-status"),
   newChatFab: document.getElementById("new-chat-fab"),
   chatInputBar: document.getElementById("chat-input-bar"),
   scrollBottomBtn: document.getElementById("scroll-bottom-btn"),
@@ -255,6 +265,10 @@ const state = {
   threadAgent: new Map(),
   // Job Ollama yang sedang ditunggu (id job) + status laptop (true/false/null=belum tahu).
   agentJobWaiting: null,
+  // Lampiran file obrolan yang sedang dibuka: [{ id, name, charCount }] + penanda sedang unggah.
+  threadAttachments: [],
+  attachBusy: false,
+  sysTimer: null,
   ollamaOnline: null,
   // Fitur WhatsApp (lihat wa.js, wa-bot/) -- jid obrolan WA yang lagi
   // dibuka di screen-wa-detail, & timer polling buat masing-masing layar
@@ -987,6 +1001,107 @@ function showChatUnlocked() {
   renderAgentBar();
 }
 
+// ---------- Lampiran file di chat ----------
+// Teks PDF/file teks diekstrak DI BROWSER lalu disimpan sebagai lampiran obrolan
+// (maks 3, ikut terhapus bersama obrolan). Dibaca Gemini (Edge Function) maupun
+// Ollama (bot) di setiap pesan obrolan ini sampai lampirannya dihapus.
+
+const ATTACH_MAX_BYTES = 15 * 1024 * 1024;
+const ATTACH_MAX_CHARS = 299000;
+const ATTACH_MAX_COUNT = 3;
+
+function formatCount(n) {
+  return Number(n || 0).toLocaleString(state.lang === "id" ? "id-ID" : "en-US");
+}
+
+function renderAttachments() {
+  const box = els.chatAttachments;
+  box.innerHTML = "";
+  const list = state.threadAttachments;
+  box.hidden = list.length === 0;
+  for (const a of list) {
+    const chip = document.createElement("span");
+    chip.className = "chat-attach-chip";
+    chip.title = t(state.lang, "attach_chip_hint");
+    const name = document.createElement("span");
+    name.className = "chat-attach-chip-name";
+    name.textContent = a.name;
+    const size = document.createElement("small");
+    size.textContent = `${formatCount(a.charCount)} ${t(state.lang, "attach_chars")}`;
+    const del = document.createElement("button");
+    del.type = "button";
+    del.innerHTML = ICON_X_SMALL;
+    del.title = t(state.lang, "attach_remove");
+    del.setAttribute("aria-label", t(state.lang, "attach_remove"));
+    del.addEventListener("click", () => removeAttachment(a.id));
+    chip.append(name, size, del);
+    box.appendChild(chip);
+  }
+}
+
+async function removeAttachment(id) {
+  const date = state.currentDate;
+  if (!date || !state.chatCode) return;
+  const prev = state.threadAttachments;
+  state.threadAttachments = prev.filter((a) => a.id !== id);
+  renderAttachments();
+  const res = await deleteChatAttachment(state.chatCode, date, id);
+  if (!res.ok && state.currentDate === date) {
+    state.threadAttachments = prev; // gagal hapus di server: tampilkan lagi
+    renderAttachments();
+    setChatStatus(`${t(state.lang, "attach_failed")} ${res.message || ""}`.trim());
+  }
+}
+
+async function extractFileText(file) {
+  const name = file.name || "file";
+  const isPdf = file.type === "application/pdf" || /\.pdf$/i.test(name);
+  const isText = /^text\//.test(file.type) || /\.(txt|md|csv|json|log)$/i.test(name);
+  if (!isPdf && !isText) throw new Error(t(state.lang, "attach_unsupported"));
+  if (file.size > ATTACH_MAX_BYTES) throw new Error(t(state.lang, "attach_too_big"));
+  let text;
+  if (isPdf) {
+    const { extractPdfText } = await import("./pdfText.js");
+    text = (await extractPdfText(file)).text;
+  } else {
+    text = (await file.text()).trim();
+  }
+  if (!text || !text.trim()) throw new Error(t(state.lang, "attach_empty"));
+  return text.length > ATTACH_MAX_CHARS ? `${text.slice(0, ATTACH_MAX_CHARS)}\n\n[...dipotong, file terlalu panjang...]` : text;
+}
+
+async function handleAttachFile(file) {
+  const date = state.currentDate;
+  if (!file || !date || !state.chatCode || state.attachBusy) return;
+  if (state.threadAttachments.length >= ATTACH_MAX_COUNT) {
+    setChatStatus(t(state.lang, "attach_limit"));
+    return;
+  }
+  state.attachBusy = true;
+  els.chatAttachBtn.disabled = true;
+  try {
+    setChatStatus(t(state.lang, "attach_reading"));
+    const content = await extractFileText(file);
+    setChatStatus(t(state.lang, "attach_uploading"));
+    const res = await addChatAttachment(state.chatCode, date, { name: file.name || "file", content });
+    if (!res.ok) {
+      dropChatCodeIfUnauthorized(res);
+      throw new Error(res.message || "");
+    }
+    if (state.currentDate === date) {
+      state.threadAttachments = [...state.threadAttachments, res.attachment];
+      renderAttachments();
+    }
+    setChatStatus("");
+  } catch (err) {
+    setChatStatus(`${t(state.lang, "attach_failed")} ${err instanceof Error ? err.message : String(err)}`.trim());
+  } finally {
+    state.attachBusy = false;
+    els.chatAttachBtn.disabled = false;
+    els.chatAttachInput.value = "";
+  }
+}
+
 // ---------- Pemilih agen AI (Auto / Gemini / Ollama) ----------
 // Ollama = model lokal di laptop; Edge Function di cloud tak bisa
 // menjangkaunya, jadi pesan diantrekan lewat tabel agent_jobs & dikerjakan bot
@@ -1135,6 +1250,8 @@ async function loadChatForDate(date) {
   if (result.agent === "auto" || result.agent === "gemini" || result.agent === "ollama") {
     state.threadAgent.set(date, result.agent);
   }
+  state.threadAttachments = Array.isArray(result.attachments) ? result.attachments : [];
+  renderAttachments();
   renderAgentBar();
   refreshOllamaStatus();
   // Halaman di-reload/dibuka lagi saat Ollama masih bekerja: lanjut menunggu.
@@ -1166,6 +1283,10 @@ async function showListScreen() {
 
 async function showDetailScreen(date) {
   stopWaPolling();
+  if (state.currentDate !== date) {
+    state.threadAttachments = [];
+    renderAttachments();
+  }
   state.currentDate = date;
   hideAllScreens();
   els.screenDetail.hidden = false;
@@ -2001,7 +2122,134 @@ async function renderQrList() {
 async function openKeysDialog() {
   closeSettingsDialog();
   openDialogEl(els.keysDialog);
-  await renderKeysList();
+  stopSystemStatusTimer();
+  // Status sistem (bot/WA/Ollama/antrean) diperbarui tiap 10 detik selama dialog terbuka.
+  state.sysTimer = setInterval(() => {
+    if (els.keysDialog.open) renderSystemStatus();
+    else stopSystemStatusTimer();
+  }, 10000);
+  await Promise.all([renderSystemStatus(), renderKeysList()]);
+}
+
+function stopSystemStatusTimer() {
+  if (state.sysTimer) clearInterval(state.sysTimer);
+  state.sysTimer = null;
+}
+
+// "12 dtk", "3 mnt", "2 jam", "1 hr" (id) / "12 s", "3 m", "2 h", "1 d" (en).
+function formatDuration(seconds) {
+  const id = state.lang === "id";
+  const s = Math.max(0, Math.round(seconds));
+  if (s < 60) return `${s} ${id ? "dtk" : "s"}`;
+  if (s < 3600) return `${Math.round(s / 60)} ${id ? "mnt" : "m"}`;
+  if (s < 86400) return `${Math.round(s / 3600)} ${id ? "jam" : "h"}`;
+  return `${Math.round(s / 86400)} ${id ? "hr" : "d"}`;
+}
+
+function sysRow(on, label, value) {
+  const row = document.createElement("div");
+  row.className = "sys-row";
+  const dot = document.createElement("span");
+  dot.className = `sys-dot${on === true ? " sys-dot--on" : ""}`;
+  const main = document.createElement("div");
+  main.className = "sys-row-main";
+  const l = document.createElement("span");
+  l.className = "sys-row-label";
+  l.textContent = label;
+  const v = document.createElement("span");
+  v.className = "sys-row-value";
+  v.textContent = value;
+  main.append(l, v);
+  row.append(dot, main);
+  return row;
+}
+
+async function renderSystemStatus() {
+  const box = els.sysStatus;
+  if (!state.chatCode) {
+    box.textContent = t(state.lang, "keys_need_code");
+    return;
+  }
+  const res = await fetchSystemStatus(state.chatCode);
+  if (!res.ok) {
+    dropChatCodeIfUnauthorized(res);
+    if (!box.children.length) box.textContent = t(state.lang, "sys_load_error");
+    return;
+  }
+  const L = (k) => t(state.lang, k);
+  const w = res.worker || {};
+  const jobs = res.jobs || {};
+  const now = res.serverNowMs || Date.now();
+  const ago = w.lastSeenMs ? formatDuration((now - w.lastSeenMs) / 1000) : null;
+
+  const rows = [];
+  rows.push(
+    sysRow(
+      !!w.botAlive,
+      L("sys_bot"),
+      w.botAlive
+        ? `${L("sys_on")} · ${L("sys_seen")} ${ago} ${L("sys_ago")}${w.startedAt ? ` · ${L("sys_up")} ${formatDuration((now - Date.parse(w.startedAt)) / 1000)}` : ""}`
+        : `${L("sys_off")}${ago ? ` · ${L("sys_seen")} ${ago} ${L("sys_ago")}` : ""}`
+    )
+  );
+  rows.push(
+    sysRow(
+      w.waConnected === true,
+      L("sys_wa"),
+      w.waConnected === true ? L("sys_connected") : w.waConnected === false ? L("sys_disconnected") : L("sys_unknown")
+    )
+  );
+  rows.push(
+    sysRow(
+      !!w.online,
+      L("sys_ollama"),
+      w.online
+        ? `${L("sys_ready")}${w.model ? ` · ${w.model}` : ""}${w.busy ? ` · ${L("sys_busy")}` : ""}`
+        : `${L("sys_off")}${w.detail ? ` · ${w.detail}` : ""}`
+    )
+  );
+  const avg = jobs.avgSeconds != null ? ` · ${L("sys_avg")} ${formatDuration(jobs.avgSeconds)}` : "";
+  rows.push(
+    sysRow(
+      (jobs.running || 0) > 0 || (jobs.pending || 0) > 0,
+      L("sys_queue"),
+      `${jobs.pending || 0} ${L("sys_waiting")} · ${jobs.running || 0} ${L("sys_running")} | ${L("sys_last24")}: ${jobs.done24h || 0} ${L("sys_done")}, ${jobs.failed24h || 0} ${L("sys_failed")}${avg}`
+    )
+  );
+  if (w.extra && typeof w.extra.pausedChats === "number") {
+    rows.push(sysRow(w.extra.pausedChats > 0, L("sys_paused"), String(w.extra.pausedChats)));
+  }
+
+  const frag = document.createDocumentFragment();
+  rows.forEach((r) => frag.appendChild(r));
+
+  const recent = document.createElement("div");
+  const rt = document.createElement("span");
+  rt.className = "sys-row-label";
+  rt.textContent = L("sys_recent");
+  recent.appendChild(rt);
+  const list = document.createElement("div");
+  list.className = "sys-jobs";
+  if (!(jobs.recent || []).length) {
+    list.textContent = L("sys_no_jobs");
+  } else {
+    for (const j of jobs.recent) {
+      const line = document.createElement("div");
+      line.className = "sys-job";
+      const left = document.createElement("span");
+      const statusKey = { pending: "sys_waiting", running: "sys_running", done: "sys_done", failed: "sys_failed" }[j.status] || "sys_unknown";
+      left.textContent = `${L(statusKey)}${j.fallbackFrom ? " (Gemini→Ollama)" : ""}${j.status === "failed" && j.error ? ` — ${truncate(String(j.error), 60)}` : ""}${j.status === "running" && j.progress ? ` — ${j.progress}` : ""}`;
+      const right = document.createElement("span");
+      const dur = j.startedAt && j.finishedAt ? formatDuration((Date.parse(j.finishedAt) - Date.parse(j.startedAt)) / 1000) : "";
+      right.textContent = `${dur}${dur ? " · " : ""}${formatFullDateTime(Date.parse(j.createdAt))}`;
+      line.append(left, right);
+      list.appendChild(line);
+    }
+  }
+  recent.appendChild(list);
+  frag.appendChild(recent);
+
+  box.replaceChildren(frag);
 }
 
 async function renderKeysList() {
@@ -2411,6 +2659,10 @@ function wireEvents() {
     }
   });
 
+  // Lampiran file.
+  els.chatAttachBtn.addEventListener("click", () => els.chatAttachInput.click());
+  els.chatAttachInput.addEventListener("change", () => handleAttachFile(els.chatAttachInput.files?.[0]));
+
   // Pemilih agen AI (Auto / Gemini / Ollama).
   els.chatAgentBar.addEventListener("click", (e) => {
     const btn = e.target.closest(".chat-agent-pill");
@@ -2505,7 +2757,8 @@ function wireEvents() {
   els.menuKbIcon.innerHTML = ICON_UPLOAD;
   els.menuWhatsappIcon.innerHTML = ICON_CHAT;
   els.menuQrIcon.innerHTML = ICON_ZAP;
-  els.menuKeysIcon.innerHTML = ICON_GAUGE;
+  els.menuKeysIcon.innerHTML = ICON_PULSE;
+  els.chatAttachBtn.innerHTML = ICON_PAPERCLIP;
   els.settingsChangeCodeIcon.innerHTML = ICON_KEY;
   els.settingsLogoutIcon.innerHTML = ICON_LOGOUT;
   els.menuAboutIcon.innerHTML = ICON_INFO;
@@ -2878,10 +3131,11 @@ function wireEvents() {
   });
 
   els.keysCloseBtn.addEventListener("click", () => closeDialogEl(els.keysDialog));
+  els.keysDialog.addEventListener("close", stopSystemStatusTimer);
   els.keysDialog.addEventListener("click", (e) => {
     if (e.target === els.keysDialog) closeDialogEl(els.keysDialog);
   });
-  els.keysRefreshBtn.addEventListener("click", () => renderKeysList());
+  els.keysRefreshBtn.addEventListener("click", () => Promise.all([renderSystemStatus(), renderKeysList()]));
 
   els.aboutCloseBtn.addEventListener("click", () => closeDialogEl(els.aboutDialog));
 
