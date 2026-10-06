@@ -75,7 +75,10 @@ export function initFeatures(context) {
   });
   $("quran-font-minus")?.addEventListener("click", () => changeFont(-0.125));
   $("quran-font-plus")?.addEventListener("click", () => changeFont(0.125));
+  $("quran-style-btn")?.addEventListener("click", openStyleDialog);
+  $("quran-style-close")?.addEventListener("click", () => $("quran-style-dialog")?.close());
   applyFont();
+  applyStyle();
   wireQuranReader();
 }
 
@@ -250,6 +253,93 @@ function applyFont() {
     /* noop */
   }
   document.documentElement.style.setProperty("--q-scale", String(fontScale));
+}
+
+// ---- Desain huruf (data-q-font di <html>; huruf Hafs dimuat hanya saat dipakai)
+const STYLE_KEY = "rh_quran_style";
+const STYLES = ["amiri", "hafs"];
+let qStyle = "amiri";
+
+function applyStyle() {
+  try {
+    const v = localStorage.getItem(STYLE_KEY);
+    if (STYLES.includes(v)) qStyle = v;
+  } catch (_err) {
+    /* noop */
+  }
+  setStyleAttr();
+}
+
+function setStyleAttr() {
+  if (qStyle === "amiri") document.documentElement.removeAttribute("data-q-font");
+  else document.documentElement.setAttribute("data-q-font", qStyle);
+  // Huruf baru memengaruhi lebar teks -> hitung ulang perataan baris terakhir
+  // setelah huruf selesai dimuat.
+  requestAnimationFrame(fitLastLines);
+  if (document.fonts && document.fonts.load && qStyle === "hafs") {
+    document.fonts
+      .load('1.5rem "KFGQPC Hafs"')
+      .then(() => requestAnimationFrame(fitLastLines))
+      .catch(() => {});
+  }
+}
+
+function chooseStyle(id) {
+  if (!STYLES.includes(id)) return;
+  qStyle = id;
+  try {
+    localStorage.setItem(STYLE_KEY, id);
+  } catch (_err) {
+    /* noop */
+  }
+  setStyleAttr();
+  renderStyleOptions();
+}
+
+function renderStyleOptions() {
+  const box = $("quran-style-options");
+  if (!box) return;
+  box.replaceChildren();
+  for (const id of STYLES) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = `quran-style-option${id === qStyle ? " is-active" : ""}`;
+    btn.setAttribute("aria-pressed", id === qStyle ? "true" : "false");
+    btn.dataset.style = id;
+
+    const head = document.createElement("span");
+    head.className = "quran-style-option-head";
+    const name = document.createElement("span");
+    name.textContent = L(`quran_style_${id}_name`);
+    head.appendChild(name);
+    if (id === qStyle) {
+      const on = document.createElement("span");
+      on.textContent = `✓ ${L("quran_style_active")}`;
+      head.appendChild(on);
+    }
+
+    const sample = document.createElement("span");
+    sample.className = `quran-style-sample quran-style-sample--${id}`;
+    sample.setAttribute("lang", "ar");
+    sample.textContent = "بِسْمِ ٱللَّهِ ٱلرَّحْمَٰنِ ٱلرَّحِيمِ";
+
+    const desc = document.createElement("small");
+    desc.textContent = L(`quran_style_${id}_desc`);
+
+    btn.append(head, sample, desc);
+    btn.addEventListener("click", () => chooseStyle(id));
+    box.appendChild(btn);
+  }
+}
+
+function openStyleDialog() {
+  const dlg = $("quran-style-dialog");
+  if (!dlg) return;
+  renderStyleOptions();
+  if (!dlg.open) {
+    if (typeof dlg.showModal === "function") dlg.showModal();
+    else dlg.setAttribute("open", "");
+  }
 }
 
 function changeFont(delta) {

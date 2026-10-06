@@ -1557,7 +1557,7 @@ mark.chat-search-hit--active {
 }
 
 .quran-item-ar {
-  font-family: "Amiri Quran", "Scheherazade New", "Noto Naskh Arabic", serif;
+  font-family: var(--q-font);
   font-size: 1.3rem;
 }
 
@@ -1575,9 +1575,29 @@ mark.chat-search-hit--active {
   font-size: 0.9rem;
 }
 
+/* Desain huruf Qur'an (pilihan pengguna, atribut data-q-font di <html>).
+   Lisensi huruf Hafs: src/fonts/LICENSE-KFGQPC.txt (dipakai apa adanya, tanpa modifikasi). */
+@font-face {
+  font-family: "KFGQPC Hafs";
+  src: url("./fonts/KFGQPC-UthmanicHafs.woff2") format("woff2");
+  font-display: swap;
+}
+
+:root {
+  --q-font: "Amiri Quran", "Scheherazade New", "Noto Naskh Arabic", serif;
+  --q-fmult: 1; /* pengali ukuran huruf per desain */
+  --q-lh: 2.35; /* tinggi baris per desain */
+}
+
+:root[data-q-font="hafs"] {
+  --q-font: "KFGQPC Hafs", "Amiri Quran", "Scheherazade New", "Noto Naskh Arabic", serif;
+  --q-fmult: 1.08;
+  --q-lh: 2.25;
+}
+
 /* Pembaca halaman mushaf */
 .quran-reader {
-  --q-size: calc(1.5rem * var(--q-scale, 1));
+  --q-size: calc(1.5rem * var(--q-scale, 1) * var(--q-fmult, 1));
 }
 
 .quran-page {
@@ -1601,7 +1621,7 @@ mark.chat-search-hit--active {
 }
 
 .q-page-head-ar {
-  font-family: "Amiri Quran", "Scheherazade New", "Noto Naskh Arabic", serif;
+  font-family: var(--q-font);
   font-size: 1.15rem;
   color: var(--text);
 }
@@ -1626,7 +1646,7 @@ mark.chat-search-hit--active {
 }
 
 .q-surah-ar {
-  font-family: "Amiri Quran", "Scheherazade New", "Noto Naskh Arabic", serif;
+  font-family: var(--q-font);
   font-size: calc(var(--q-size) * 1.1);
 }
 
@@ -1638,16 +1658,16 @@ mark.chat-search-hit--active {
 .q-basmalah {
   margin: 6px 0 2px;
   text-align: center;
-  font-family: "Amiri Quran", "Scheherazade New", "Noto Naskh Arabic", serif;
+  font-family: var(--q-font);
   font-size: var(--q-size);
   line-height: 2.1;
 }
 
 .q-text {
   margin: 0 0 4px;
-  font-family: "Amiri Quran", "Scheherazade New", "Noto Naskh Arabic", serif;
+  font-family: var(--q-font);
   font-size: var(--q-size);
-  line-height: 2.35;
+  line-height: var(--q-lh, 2.35);
   text-align: justify;
   text-justify: inter-word;
   text-align-last: start;
@@ -1690,6 +1710,8 @@ mark.chat-search-hit--active {
   border: 1.5px solid currentColor;
   border-radius: 50%;
   box-shadow: 0 0 0 2px var(--bg), 0 0 0 3px currentColor;
+  /* Angka nomor ayat selalu pakai Amiri (angkanya lebih besar & jelas daripada di huruf Hafs). */
+  font-family: "Amiri Quran", "Scheherazade New", "Noto Naskh Arabic", serif;
   font-size: 0.5em;
   line-height: 1;
   vertical-align: 0.35em;
@@ -2157,7 +2179,7 @@ mark.chat-search-hit--active {
   padding: 10px 12px;
   border: 1px solid var(--border);
   border-radius: 10px;
-  font-family: "Amiri Quran", "Scheherazade New", "Noto Naskh Arabic", serif;
+  font-family: var(--q-font);
   font-size: 1.5rem;
   line-height: 2.1;
   text-align: right;
@@ -2185,4 +2207,60 @@ mark.chat-search-hit--active {
 .quran-tafsir-source {
   color: var(--text-muted);
   font-size: 0.75rem;
+}
+
+/* ---------- Pilihan desain huruf Qur'an ---------- */
+.quran-style-options {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.quran-style-option {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+  padding: 12px;
+  border: 1.5px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.quran-style-option.is-active {
+  border-color: var(--text);
+  box-shadow: 0 0 0 2px var(--text);
+}
+
+.quran-style-option-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-weight: 700;
+  font-size: 0.92rem;
+}
+
+.quran-style-option small {
+  color: var(--text-muted);
+  font-size: 0.78rem;
+}
+
+.quran-style-sample {
+  direction: rtl;
+  text-align: center;
+  font-size: 1.6rem;
+  line-height: 2.1;
+}
+
+.quran-style-sample--amiri {
+  font-family: "Amiri Quran", "Scheherazade New", "Noto Naskh Arabic", serif;
+}
+
+.quran-style-sample--hafs {
+  font-family: "KFGQPC Hafs", "Amiri Quran", "Scheherazade New", "Noto Naskh Arabic", serif;
 }

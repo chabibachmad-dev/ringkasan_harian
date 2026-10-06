@@ -296,6 +296,7 @@
             <button id="quran-back-btn" class="icon-btn" title="Kembali" aria-label="Kembali">←</button>
             <h1 id="quran-title" class="detail-title" data-i18n="quran_title">Al-Qur'an</h1>
             <span id="quran-font-controls" class="quran-font-controls" hidden>
+              <button type="button" id="quran-style-btn" class="icon-btn icon-btn--small" aria-label="Desain huruf" title="Desain huruf">ق</button>
               <button type="button" id="quran-font-minus" class="icon-btn icon-btn--small" aria-label="Perkecil huruf" title="Perkecil huruf">A−</button>
               <button type="button" id="quran-font-plus" class="icon-btn icon-btn--small" aria-label="Perbesar huruf" title="Perbesar huruf">A+</button>
             </span>
@@ -495,6 +496,18 @@
 
       <!-- Dialog Dokumen Pengetahuan: upload PDF peraturan/referensi supaya AI
            baca dari sini duluan, + daftar dokumen yang sudah diupload. -->
+      <!-- Pilihan desain huruf Qur'an -->
+      <dialog id="quran-style-dialog" class="kb-dialog">
+        <div class="kb-dialog-card">
+          <h2 data-i18n="quran_style_title">Desain huruf Qur'an</h2>
+          <p class="kb-intro" data-i18n="quran_style_intro">Pilih tampilan huruf untuk membaca. Pilihan diingat di perangkat ini.</p>
+          <div id="quran-style-options" class="quran-style-options"></div>
+          <div class="chat-code-dialog-actions">
+            <button type="button" id="quran-style-close" class="primary-btn" data-i18n="quran_close">Tutup</button>
+          </div>
+        </div>
+      </dialog>
+
       <!-- Terjemahan & tafsir satu ayat (halaman Qur'an) -->
       <dialog id="quran-tafsir-dialog" class="kb-dialog">
         <div class="kb-dialog-card quran-tafsir-card">
