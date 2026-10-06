@@ -48,7 +48,11 @@ async function callChatFunction(payload) {
       return {
         ok: false,
         unauthorized: res.status === 401,
-        message: data.error || `HTTP ${res.status}`
+        // Ollama dipilih tapi laptop/bot/Ollama tidak hidup (server menolak
+        // tanpa menyimpan pesan) -- lihat Edge Function action "send".
+        ollamaOffline: data.ollamaOffline === true,
+        message: data.error || `HTTP ${res.status}`,
+        userMessageId: data.userMessageId
       };
     }
     return { ok: true, ...data };
@@ -62,8 +66,22 @@ export function fetchChatHistory(date, code) {
   return callChatFunction({ code, date, action: "history" });
 }
 
-export function sendChatMessage(date, code, message) {
-  return callChatFunction({ code, date, action: "send", message });
+export function sendChatMessage(date, code, message, agent) {
+  const payload = { code, date, action: "send", message };
+  if (agent === "auto" || agent === "gemini" || agent === "ollama") payload.agent = agent;
+  return callChatFunction(payload);
+}
+
+// Agen Ollama (model lokal di laptop) bekerja lewat antrean: send mengembalikan
+// { pending: true, jobId }, lalu klien polling fetchAgentJob() sampai
+// status "done" (berisi reply) atau "failed".
+export function fetchAgentJob(code, jobId) {
+  return callChatFunction({ code, action: "agent_job", jobId });
+}
+
+// Apakah laptop/bot/Ollama sedang hidup (untuk titik status di pemilih agen).
+export function fetchAgentStatus(code) {
+  return callChatFunction({ code, action: "agent_status" });
 }
 
 // Ambil pesan terakhir dari beberapa obrolan sekaligus -- dipakai buat
@@ -88,11 +106,12 @@ export function listChatThreads(code) {
 // disertakan tidak akan diubah di server. title: null/"" berarti "pakai
 // judul default lagi". useKb default false (opt-in) -- lihat komentar di
 // Edge Function chat/index.ts migrations/0010 kenapa ini sengaja opt-in.
-export function setThreadMeta(id, code, { pinned, title, useKb } = {}) {
+export function setThreadMeta(id, code, { pinned, title, useKb, agent } = {}) {
   const payload = { code, date: id, action: "set_thread_meta" };
   if (typeof pinned === "boolean") payload.pinned = pinned;
   if (title !== undefined) payload.title = title;
   if (typeof useKb === "boolean") payload.useKb = useKb;
+  if (agent === "auto" || agent === "gemini" || agent === "ollama") payload.agent = agent;
   return callChatFunction(payload);
 }
 

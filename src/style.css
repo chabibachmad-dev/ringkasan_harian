@@ -448,6 +448,64 @@ mark.chat-search-hit--active {
   padding: 4px 0;
 }
 
+/* Pemilih agen AI (Auto / Gemini / Ollama) tepat di atas kolom ketik.
+   Tema aplikasi hitam-putih, jadi status Ollama dibedakan dengan titik
+   PENUH (aktif) vs titik KOSONG/berongga (tidak aktif), bukan warna. */
+.chat-agent-bar {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.chat-agent-bar[hidden] {
+  display: none;
+}
+
+.chat-agent-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg-card);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.78rem;
+  line-height: 1.3;
+  cursor: pointer;
+}
+
+.chat-agent-pill[aria-checked="true"] {
+  background: var(--accent);
+  color: var(--accent-contrast);
+}
+
+.chat-agent-pill:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.chat-agent-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  border: 1.5px solid currentColor;
+  background: transparent;
+  flex-shrink: 0;
+}
+
+.chat-agent-pill[data-online="true"] .chat-agent-dot {
+  background: currentColor;
+}
+
+/* Label kecil "Gemini"/"Ollama" di bubble balasan AI. */
+.chat-bubble-agent {
+  font-size: 0.68rem;
+  opacity: 0.65;
+  white-space: nowrap;
+}
+
 .chat-unlock-btn {
   display: flex;
   align-items: center;

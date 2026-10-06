@@ -24,6 +24,21 @@ export const STRINGS = {
     freeform_chat_preview: "Belum ada pesan",
     chat_empty_freeform: "Mulai obrolan bebas dengan AI di bawah ini.",
     chat_sending: "Mengetik…",
+    agent_label: "Agen AI",
+    agent_auto: "Auto",
+    agent_gemini: "Gemini",
+    agent_ollama: "Ollama",
+    agent_auto_hint: "Gemini dulu; kalau gagal (kuota habis) otomatis pakai Ollama di laptop",
+    agent_gemini_hint: "Gemini (cloud, pakai API key)",
+    agent_ollama_hint: "Ollama (model lokal di laptop, tanpa kirim data ke Google; cocok untuk analisis dokumen)",
+    agent_ollama_online: "Ollama aktif di laptop",
+    agent_ollama_offline: "Ollama tidak aktif",
+    agent_working: "Ollama sedang menjawab di laptop… (bisa beberapa menit)",
+    agent_fallback: "Gemini gagal, dialihkan ke Ollama di laptop…",
+    agent_failed: "Ollama gagal menjawab:",
+    agent_offline: "Ollama tidak tersedia:",
+    agent_timeout: "Ollama terlalu lama menjawab. Coba lagi atau pilih Gemini.",
+    agent_answered_by: "dijawab oleh",
     chat_error: "Gagal mengirim pesan. Coba lagi.",
     chat_load_error: "Gagal memuat riwayat diskusi.",
     chat_you_prefix: "Kamu:",
@@ -259,6 +274,21 @@ export const STRINGS = {
     freeform_chat_preview: "No messages yet",
     chat_empty_freeform: "Start a free-form chat with the AI below.",
     chat_sending: "Typing…",
+    agent_label: "AI agent",
+    agent_auto: "Auto",
+    agent_gemini: "Gemini",
+    agent_ollama: "Ollama",
+    agent_auto_hint: "Gemini first; if it fails (quota exhausted) automatically use Ollama on the laptop",
+    agent_gemini_hint: "Gemini (cloud, API key)",
+    agent_ollama_hint: "Ollama (local model on the laptop, no data sent to Google; good for document analysis)",
+    agent_ollama_online: "Ollama is running on the laptop",
+    agent_ollama_offline: "Ollama is offline",
+    agent_working: "Ollama is answering on the laptop… (may take a few minutes)",
+    agent_fallback: "Gemini failed, switching to Ollama on the laptop…",
+    agent_failed: "Ollama failed to answer:",
+    agent_offline: "Ollama unavailable:",
+    agent_timeout: "Ollama took too long. Try again or choose Gemini.",
+    agent_answered_by: "answered by",
     chat_error: "Couldn't send the message. Please try again.",
     chat_load_error: "Couldn't load the discussion history.",
     chat_you_prefix: "You:",
@@ -478,6 +508,12 @@ export function applyStaticI18n(lang) {
   document.querySelectorAll("[data-i18n]").forEach((el) => {
     const key = el.getAttribute("data-i18n");
     el.textContent = t(lang, key);
+  });
+  document.querySelectorAll("[data-i18n-title]").forEach((el) => {
+    el.setAttribute("title", t(lang, el.getAttribute("data-i18n-title")));
+  });
+  document.querySelectorAll("[data-i18n-aria-label]").forEach((el) => {
+    el.setAttribute("aria-label", t(lang, el.getAttribute("data-i18n-aria-label")));
   });
   document.querySelectorAll("[data-i18n-placeholder]").forEach((el) => {
     const key = el.getAttribute("data-i18n-placeholder");

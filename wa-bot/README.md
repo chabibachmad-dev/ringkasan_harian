@@ -368,6 +368,44 @@ yang dihitung: teks, foto, dokumen, stiker, suara; reaksi emoji tidak. Status
 jeda disimpan di `ai-pause.json` (selamat dari restart). Atur lewat
 `WA_MANUAL_PAUSE_MINUTES` (default 60, `0` = fitur dimatikan).
 
+## 7. Agen Ollama untuk chat di aplikasi (butuh migration 0015)
+
+Di halaman chat aplikasi ada pemilih **Auto / Gemini / Ollama** di atas kolom ketik
+(disimpan per obrolan, sinkron lintas perangkat):
+
+- **Auto** (default): Gemini dulu. Kalau Gemini gagal (kuota habis/overloaded) dan Ollama di laptop
+  hidup, pesan otomatis dialihkan ke Ollama.
+- **Gemini**: seperti sebelumnya (API key di Supabase, rotasi key).
+- **Ollama**: model lokal di laptop ini. Data tidak keluar ke Google. Cocok untuk analisis dokumen.
+
+Cara kerjanya: Edge Function di cloud tidak bisa menjangkau Ollama di laptop, jadi aplikasi menaruh
+permintaan di tabel `agent_jobs`; bot ini (proses pm2 yang sama dengan bot WhatsApp) mengambilnya tiap
+~4 detik, menjalankan Ollama, lalu menulis balasan ke obrolan. **Tidak ada pesan WhatsApp yang dikirim
+dan tidak ada port yang dibuka ke internet.** Tiap ~15 detik bot menulis "denyut" ke
+`agent_worker_status`; kalau mati/Ollama tidak menjawab, aplikasi menolak pilihan Ollama dengan pesan
+jelas (titik di tombol Ollama: penuh = aktif, kosong = tidak aktif).
+
+Setup (sekali):
+
+1. Jalankan `supabase/migrations/0015_agent_jobs.sql` (SQL Editor atau `npx supabase db push`).
+2. Deploy ulang Edge Function: `npx supabase functions deploy chat`.
+3. Ganti `wa-bot/index.js`, tambahkan `wa-bot/app-agent.js`, lalu `pm2 restart wa-bot`.
+   Di log harus muncul `🦙 Agen Ollama untuk chat aplikasi aktif (...)`.
+4. Pastikan model ada: `ollama pull qwen2.5:3b` (atau model di `OLLAMA_MODEL`).
+
+Analisis dokumen: aktifkan "Pakai Dokumen Pengetahuan" di menu titik-3 obrolan itu.
+Pertanyaan spesifik ("berapa tarif ...") memakai potongan dokumen paling relevan (cepat).
+Permintaan menyeluruh ("ringkas dokumen ini", "analisis ...") memakai mode baca-per-bagian: dokumen
+dipecah, tiap bagian dicatat poin pentingnya, lalu digabung jadi jawaban. Paling banyak
+`OLLAMA_DOC_MAX_CHUNKS` (6) bagian dibaca (dipilih merata) dan jawabannya diberi catatan kalau hanya
+sebagian dokumen yang terbaca.
+
+Catatan kecepatan: pada laptop CPU-only (~4-5 token/detik) satu jawaban bisa 1-3 menit dan ringkasan
+dokumen bisa 5-10 menit. Aplikasi menampilkan progres ("Membaca dokumen: bagian 2 dari 6") dan
+jawabannya tetap muncul walau halaman ditutup/dibuka lagi. Panggilan Ollama berbagi antrean dengan
+auto-reply WhatsApp (satu per satu, supaya CPU tidak rebutan). Variabel pengaturan: lihat bagian
+"Agen Ollama untuk chat di APLIKASI" di `.env.example`. Tes tanpa jaringan: `node test-app-agent.mjs`.
+
 ## Troubleshooting
 
 - **QR tidak muncul / bot langsung error network** -- cek koneksi internet;

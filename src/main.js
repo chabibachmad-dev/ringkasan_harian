@@ -46,6 +46,8 @@ import {
   clearStoredChatCode,
   fetchChatHistory,
   sendChatMessage,
+  fetchAgentJob,
+  fetchAgentStatus,
   fetchLastMessages,
   listChatThreads,
   setThreadMeta,
@@ -130,6 +132,7 @@ const els = {
   chatForm: document.getElementById("chat-form"),
   chatInput: document.getElementById("chat-input"),
   chatSendBtn: document.getElementById("chat-send-btn"),
+  chatAgentBar: document.getElementById("chat-agent-bar"),
   newChatFab: document.getElementById("new-chat-fab"),
   chatInputBar: document.getElementById("chat-input-bar"),
   scrollBottomBtn: document.getElementById("scroll-bottom-btn"),
@@ -247,6 +250,12 @@ const state = {
   // jalan, dipakai menu titik-3 (lihat openChatOptions). Default (belum ada
   // entry) dianggap false/OFF -- sengaja opt-in, lihat migrations/0010.
   threadUseKb: new Map(),
+  // id obrolan -> "auto" | "gemini" | "ollama" -- agen AI pilihan tiap obrolan
+  // (disimpan di server, chat_thread_meta.agent; default "auto").
+  threadAgent: new Map(),
+  // Job Ollama yang sedang ditunggu (id job) + status laptop (true/false/null=belum tahu).
+  agentJobWaiting: null,
+  ollamaOnline: null,
   // Fitur WhatsApp (lihat wa.js, wa-bot/) -- jid obrolan WA yang lagi
   // dibuka di screen-wa-detail, & timer polling buat masing-masing layar
   // (null kalau layarnya lagi tidak kebuka, supaya tidak polling sia-sia
@@ -422,8 +431,9 @@ function clearChatTitle(id) {
 // dari PERANGKAT LAIN (pin/unpin, ubah judul) ikut kebawa ke sini juga --
 // sebelumnya dua-duanya cuma tersimpan di localStorage per perangkat jadi
 // tidak pernah sinkron sama sekali.
-function applyThreadMetaFromServer(id, pinned, title, useKb) {
+function applyThreadMetaFromServer(id, pinned, title, useKb, agent) {
   state.threadUseKb.set(id, !!useKb);
+  if (agent === "auto" || agent === "gemini" || agent === "ollama") state.threadAgent.set(id, agent);
 
   if (isPinned(id) !== !!pinned) {
     const set = getPinnedChats();
@@ -497,7 +507,7 @@ async function renderChatList() {
     if (threadsResult.ok) {
       for (const th of threadsResult.threads || []) {
         mergeDiscoveredThread(th.id, th.createdAt);
-        applyThreadMetaFromServer(th.id, th.pinned, th.title, th.useKb);
+        applyThreadMetaFromServer(th.id, th.pinned, th.title, th.useKb, th.agent);
       }
     } else if (threadsResult.unauthorized) {
       state.chatCode = "";
@@ -780,7 +790,7 @@ function resetInChatSearch() {
 // sudah mencatat angkanya (lihat Edge Function action "send"). Pesan LAMA
 // (sebelum fitur token/biaya ini ada) tidak punya angka ini sama sekali,
 // jadi parameternya dibiarkan undefined -- lihat setBubbleUsage().
-function appendChatBubble(role, content, timestamp, id, tokensUsed, costUsd) {
+function appendChatBubble(role, content, timestamp, id, tokensUsed, costUsd, agent) {
   const emptyEl = els.chatThread.querySelector(".chat-empty-text");
   if (emptyEl) emptyEl.remove();
 
@@ -809,6 +819,16 @@ function appendChatBubble(role, content, timestamp, id, tokensUsed, costUsd) {
   timeEl.className = "chat-bubble-time";
   timeEl.textContent = formatBubbleTime(timestamp || new Date());
   meta.appendChild(timeEl);
+
+  // Label agen penjawab ("Gemini"/"Ollama") -- hanya untuk balasan AI yang
+  // tercatat agennya (pesan lama tidak punya info ini, jadi tidak diberi label).
+  if (role === "assistant" && (agent === "gemini" || agent === "ollama")) {
+    const agentEl = document.createElement("span");
+    agentEl.className = "chat-bubble-agent";
+    agentEl.textContent = `· ${t(state.lang, agent === "ollama" ? "agent_ollama" : "agent_gemini")}`;
+    agentEl.title = `${t(state.lang, "agent_answered_by")} ${t(state.lang, agent === "ollama" ? "agent_ollama" : "agent_gemini")}`;
+    meta.appendChild(agentEl);
+  }
 
   const menuBtn = document.createElement("button");
   menuBtn.type = "button";
@@ -841,7 +861,7 @@ function renderChatMessages(messages) {
     for (const msg of messages) {
       const tokensUsed = typeof msg.tokens_used === "number" ? msg.tokens_used : undefined;
       const costUsd = typeof msg.cost_usd === "number" ? msg.cost_usd : undefined;
-      appendChatBubble(msg.role, msg.content, msg.created_at, msg.id, tokensUsed, costUsd);
+      appendChatBubble(msg.role, msg.content, msg.created_at, msg.id, tokensUsed, costUsd, msg.agent);
     }
   }
   scrollChatToBottom();
@@ -952,6 +972,7 @@ function setBubbleUsage(bubbleEl, tokensUsed, costUsd) {
 function showChatLocked(errorText) {
   els.chatLockedBar.hidden = false;
   els.chatForm.hidden = true;
+  els.chatAgentBar.hidden = true;
   if (errorText) {
     els.chatCodeError.hidden = false;
     els.chatCodeError.textContent = errorText;
@@ -962,6 +983,104 @@ function showChatLocked(errorText) {
 function showChatUnlocked() {
   els.chatLockedBar.hidden = true;
   els.chatForm.hidden = false;
+  els.chatAgentBar.hidden = false;
+  renderAgentBar();
+}
+
+// ---------- Pemilih agen AI (Auto / Gemini / Ollama) ----------
+// Ollama = model lokal di laptop; Edge Function di cloud tak bisa
+// menjangkaunya, jadi pesan diantrekan lewat tabel agent_jobs & dikerjakan bot
+// di laptop (lihat wa-bot/app-agent.js). Klien menunggu lewat polling.
+
+function currentAgent() {
+  return (state.currentDate && state.threadAgent.get(state.currentDate)) || "auto";
+}
+
+function renderAgentBar() {
+  const agent = currentAgent();
+  for (const btn of els.chatAgentBar.querySelectorAll(".chat-agent-pill")) {
+    const on = btn.dataset.agent === agent;
+    btn.setAttribute("aria-checked", on ? "true" : "false");
+    if (btn.dataset.agent === "ollama") {
+      if (state.ollamaOnline === null) btn.removeAttribute("data-online");
+      else btn.dataset.online = state.ollamaOnline ? "true" : "false";
+      const hint = t(state.lang, "agent_ollama_hint");
+      btn.title =
+        state.ollamaOnline === null ? hint : `${hint} — ${t(state.lang, state.ollamaOnline ? "agent_ollama_online" : "agent_ollama_offline")}`;
+    }
+  }
+}
+
+async function refreshOllamaStatus() {
+  if (!state.chatCode) return;
+  const res = await fetchAgentStatus(state.chatCode);
+  if (res.ok && res.ollama) {
+    state.ollamaOnline = !!res.ollama.online;
+    renderAgentBar();
+  }
+}
+
+async function chooseAgent(agent) {
+  const date = state.currentDate;
+  if (!date || !state.chatCode) return;
+  const prev = currentAgent();
+  if (agent === prev) return;
+  state.threadAgent.set(date, agent);
+  renderAgentBar();
+  const res = await setThreadMeta(date, state.chatCode, { agent });
+  if (!res.ok) {
+    // Gagal simpan di server: kembalikan pilihan supaya tampilan jujur.
+    state.threadAgent.set(date, prev);
+    renderAgentBar();
+  }
+  if (agent === "ollama") refreshOllamaStatus();
+}
+
+// Tunggu hasil job Ollama (polling). Berhenti kalau pengguna pindah layar/obrolan;
+// jawabannya tetap tersimpan di server & muncul lagi saat obrolan dibuka
+// (history mengembalikan pendingJob / balasan yang sudah selesai).
+async function waitForAgentJob(date, jobId, { fallback = false } = {}) {
+  if (state.agentJobWaiting === jobId) return;
+  state.agentJobWaiting = jobId;
+  els.chatSendBtn.disabled = true;
+  const POLL_MS = 3000;
+  const MAX_MS = 30 * 60_000;
+  const t0 = Date.now();
+  let lastProgress = "";
+  try {
+    while (Date.now() - t0 < MAX_MS) {
+      if (state.currentDate !== date || els.screenDetail.hidden || state.agentJobWaiting !== jobId) return;
+      const res = await fetchAgentJob(state.chatCode, jobId);
+      if (state.currentDate !== date || els.screenDetail.hidden || state.agentJobWaiting !== jobId) return;
+      if (res.ok && res.status === "done") {
+        setChatStatus("");
+        if (res.reply && !els.chatThread.querySelector(`[data-id="${res.assistantMessageId}"]`)) {
+          appendChatBubble("assistant", res.reply, new Date(), res.assistantMessageId || undefined, undefined, undefined, "ollama");
+        }
+        if (!els.chatSearchBar.hidden && els.chatInSearchInput.value.trim()) applyInChatSearch(els.chatInSearchInput.value);
+        return;
+      }
+      if (res.ok && res.status === "failed") {
+        setChatStatus(`${t(state.lang, "agent_failed")} ${res.error || ""}`.trim());
+        return;
+      }
+      if (!res.ok && res.unauthorized) {
+        state.chatCode = "";
+        clearStoredChatCode();
+        showChatLocked(t(state.lang, "chat_code_wrong"));
+        return;
+      }
+      // pending/running (atau error jaringan sesaat): tampilkan progres & lanjut.
+      if (res.ok && res.progress) lastProgress = res.progress;
+      const base = t(state.lang, fallback ? "agent_fallback" : "agent_working");
+      setChatStatus(lastProgress ? `${base} · ${lastProgress}` : base);
+      await new Promise((r) => setTimeout(r, POLL_MS));
+    }
+    setChatStatus(t(state.lang, "agent_timeout"));
+  } finally {
+    if (state.agentJobWaiting === jobId) state.agentJobWaiting = null;
+    els.chatSendBtn.disabled = false;
+  }
 }
 
 function openChatCodeDialog() {
@@ -1013,6 +1132,15 @@ async function loadChatForDate(date) {
   }
   setChatStatus("");
   renderChatMessages(result.messages);
+  if (result.agent === "auto" || result.agent === "gemini" || result.agent === "ollama") {
+    state.threadAgent.set(date, result.agent);
+  }
+  renderAgentBar();
+  refreshOllamaStatus();
+  // Halaman di-reload/dibuka lagi saat Ollama masih bekerja: lanjut menunggu.
+  if (result.pendingJob && result.pendingJob.id) {
+    waitForAgentJob(date, result.pendingJob.id);
+  }
 }
 
 async function initChat() {
@@ -2218,10 +2346,29 @@ function wireEvents() {
     setChatStatus(t(state.lang, "chat_sending"));
 
     const date = state.currentDate;
-    const result = await sendChatMessage(date, state.chatCode, text);
+    const result = await sendChatMessage(date, state.chatCode, text, currentAgent());
 
     els.chatSendBtn.disabled = false;
     setChatStatus("");
+
+    // Ollama dipilih tapi laptop/bot/Ollama tidak hidup: server MENOLAK tanpa
+    // menyimpan pesan -- buang bubble sementara & kembalikan teks ke kolom ketik.
+    if (!result.ok && result.ollamaOffline) {
+      userBubble.remove();
+      if (!els.chatThread.querySelector(".chat-bubble")) {
+        const p = document.createElement("p");
+        p.className = "chat-empty-text";
+        p.textContent = t(state.lang, "chat_empty_freeform");
+        els.chatThread.appendChild(p);
+      }
+      els.chatInput.value = text;
+      els.chatInput.style.height = "auto";
+      els.chatInput.style.height = `${els.chatInput.scrollHeight}px`;
+      state.ollamaOnline = false;
+      renderAgentBar();
+      setChatStatus(`${t(state.lang, "agent_offline")} ${result.message || ""}`.trim());
+      return;
+    }
 
     if (result.userMessageId) {
       userBubble.dataset.id = result.userMessageId;
@@ -2248,13 +2395,26 @@ function wireEvents() {
       return;
     }
 
-    appendChatBubble("assistant", result.reply, new Date(), result.assistantMessageId, result.turnTokens, result.turnCostUsd);
+    // Diantrekan ke Ollama di laptop (pilihan "Ollama", atau "Auto" saat Gemini
+    // gagal): tunggu hasilnya lewat polling -- balasan muncul begitu selesai.
+    if (result.pending && result.jobId) {
+      await waitForAgentJob(date, result.jobId, { fallback: result.fallbackFrom === "gemini" });
+      return;
+    }
+
+    appendChatBubble("assistant", result.reply, new Date(), result.assistantMessageId, result.turnTokens, result.turnCostUsd, result.agent || "gemini");
 
     // Kalau pencarian lagi aktif waktu pesan baru masuk, ikut re-scan supaya
     // pesan baru ini juga ketemu kalau cocok dengan kata kuncinya.
     if (!els.chatSearchBar.hidden && els.chatInSearchInput.value.trim()) {
       applyInChatSearch(els.chatInSearchInput.value);
     }
+  });
+
+  // Pemilih agen AI (Auto / Gemini / Ollama).
+  els.chatAgentBar.addEventListener("click", (e) => {
+    const btn = e.target.closest(".chat-agent-pill");
+    if (btn && btn.dataset.agent) chooseAgent(btn.dataset.agent);
   });
 
   // Enter buat kirim, Shift+Enter buat baris baru.

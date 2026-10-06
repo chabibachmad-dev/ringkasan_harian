@@ -11,8 +11,16 @@
 // main.js), formatnya selalu "freeform-<uuid>":
 //   { "code": "...", "date": "freeform-<uuid>", "action": "history" }
 //     -> { ok: true, messages: [{ role, content, created_at }, ...] }
-//   { "code": "...", "date": "...", "action": "send", "message": "..." }
-//     -> { ok: true, reply: "..." }
+//   { "code": "...", "date": "...", "action": "send", "message": "...", "agent"?: "auto"|"gemini"|"ollama" }
+//     -> { ok: true, reply: "...", agent: "gemini" }                      (dijawab Gemini langsung)
+//     -> { ok: true, pending: true, jobId, userMessageId, agent: "ollama" } (diantrekan ke Ollama di laptop;
+//        klien lalu polling action "agent_job" sampai status "done")
+//     agent "auto" (default) = Gemini dulu, kalau Gemini gagal & Ollama hidup -> otomatis diantrekan ke Ollama.
+//     agent "ollama" ditolak (503, ollamaOffline: true) kalau laptop/bot/Ollama sedang tidak hidup.
+//   { "code": "...", "action": "agent_job", "jobId": "<uuid>" }
+//     -> { ok: true, status: "pending"|"running"|"done"|"failed", progress, error, reply?, assistantMessageId?, agent, fallbackFrom }
+//   { "code": "...", "action": "agent_status" }
+//     -> { ok: true, ollama: { online, ollamaOk, model, busy, lastSeenMs } }
 //   { "code": "...", "action": "last_messages", "dates": ["...", ...] }
 //     -> { ok: true, lastMessages: { "<id>": { role, content, created_at }, ... } }
 //     (dipakai buat cuplikan/preview di layar daftar obrolan)
@@ -21,7 +29,7 @@
 //     (hapus semua chat_messages buat obrolan ini -- dipakai menu titik-3
 //     "Hapus chat".)
 //   { "code": "...", "action": "list_threads" }
-//     -> { ok: true, threads: [{ id, createdAt, pinned, title, useKb }, ...] }
+//     -> { ok: true, threads: [{ id, createdAt, pinned, title, useKb, agent }, ...] }
 //     (semua ID obrolan yang PERNAH punya minimal 1 pesan, diambil dari
 //     server -- bukan dari localStorage perangkat. Dipakai supaya daftar
 //     obrolan ikut muncul walau dibuka dari perangkat lain dengan kode akses
@@ -29,8 +37,8 @@
 //     pinned/title/useKb diambil dari tabel chat_thread_meta supaya status
 //     sematan, judul custom, & toggle Dokumen Pengetahuan ikut sinkron ke
 //     semua perangkat juga.)
-//   { "code": "...", "date": "...", "action": "set_thread_meta", "pinned"?: bool, "title"?: string|null, "useKb"?: bool }
-//     -> { ok: true, pinned: bool, title: string|null, useKb: bool }
+//   { "code": "...", "date": "...", "action": "set_thread_meta", "pinned"?: bool, "title"?: string|null, "useKb"?: bool, "agent"?: "auto"|"gemini"|"ollama" }
+//     -> { ok: true, pinned: bool, title: string|null, useKb: bool, agent: string }
 //     (simpan status sematan (pin), judul custom, dan/atau toggle "pakai
 //     Dokumen Pengetahuan" satu obrolan ke tabel chat_thread_meta -- kirim
 //     cuma field yang berubah, field yang tidak dikirim tidak akan diubah.
@@ -120,6 +128,45 @@ function json(body: unknown, status = 200): Response {
   });
 }
 
+// ---------------- Agen lokal (Ollama di laptop) ----------------
+type AgentName = "auto" | "gemini" | "ollama";
+function parseAgent(v: unknown): AgentName {
+  return v === "gemini" || v === "ollama" || v === "auto" ? v : "auto";
+}
+const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+// Worker dianggap hidup kalau denyutnya < 60 detik lalu (bot kirim tiap ~15 dtk).
+const WORKER_ALIVE_MS = 60_000;
+// Job 'pending' yang tidak diambil bot selama ini dianggap gagal; 'running'
+// yang menggantung lebih lama dari ini juga (bot mati di tengah jalan).
+const JOB_PENDING_MAX_MS = 10 * 60_000;
+const JOB_RUNNING_MAX_MS = 25 * 60_000;
+
+// deno-lint-ignore no-explicit-any
+async function getWorkerStatus(db: any) {
+  const { data } = await db
+    .from("agent_worker_status")
+    .select("last_seen, ollama_ok, model, busy, detail")
+    .eq("id", "ollama")
+    .maybeSingle();
+  const lastSeenMs = data?.last_seen ? new Date(data.last_seen as string).getTime() : 0;
+  const fresh = lastSeenMs > 0 && Date.now() - lastSeenMs < WORKER_ALIVE_MS;
+  return {
+    online: fresh && !!data?.ollama_ok,
+    botAlive: fresh,
+    ollamaOk: !!data?.ollama_ok,
+    model: (data?.model as string | null) ?? null,
+    busy: !!data?.busy,
+    detail: (data?.detail as string | null) ?? null,
+    lastSeenMs: lastSeenMs || null
+  };
+}
+
+function offlineMessage(w: { botAlive: boolean; ollamaOk: boolean }): string {
+  if (!w.botAlive) return "Ollama tidak tersedia: bot di laptop sedang tidak aktif (cek pm2 di laptop).";
+  if (!w.ollamaOk) return "Ollama tidak tersedia: bot aktif tapi server Ollama tidak menjawab (jalankan \"ollama serve\" di laptop).";
+  return "Ollama tidak tersedia.";
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders });
@@ -138,6 +185,8 @@ Deno.serve(async (req) => {
     pinned?: boolean;
     title?: string | null;
     useKb?: boolean;
+    agent?: string;
+    jobId?: string;
     content?: string;
     filename?: string;
     id?: string;
@@ -232,15 +281,15 @@ Deno.serve(async (req) => {
     // semua thread ini sekaligus -- supaya pin/rename/toggle yang dilakukan
     // dari PERANGKAT LAIN ikut kebawa ke sini juga (sebelumnya cuma
     // tersimpan di localStorage per perangkat).
-    const metaById: Record<string, { pinned: boolean; title: string | null; useKb: boolean }> = {};
+    const metaById: Record<string, { pinned: boolean; title: string | null; useKb: boolean; agent: AgentName }> = {};
     if (ids.length > 0) {
       const { data: metaRows, error: metaErr } = await supabaseAdmin
         .from("chat_thread_meta")
-        .select("id, pinned, title, use_kb")
+        .select("id, pinned, title, use_kb, agent")
         .in("id", ids);
       if (metaErr) return json({ ok: false, error: metaErr.message }, 500);
       for (const row of metaRows ?? []) {
-        metaById[row.id] = { pinned: !!row.pinned, title: row.title ?? null, useKb: !!row.use_kb };
+        metaById[row.id] = { pinned: !!row.pinned, title: row.title ?? null, useKb: !!row.use_kb, agent: parseAgent(row.agent) };
       }
     }
 
@@ -249,7 +298,8 @@ Deno.serve(async (req) => {
       createdAt: firstSeen[id],
       pinned: metaById[id]?.pinned ?? false,
       title: metaById[id]?.title ?? null,
-      useKb: metaById[id]?.useKb ?? false
+      useKb: metaById[id]?.useKb ?? false,
+      agent: metaById[id]?.agent ?? "auto"
     }));
 
     return json({ ok: true, threads });
@@ -264,13 +314,14 @@ Deno.serve(async (req) => {
     const pinnedProvided = typeof body.pinned === "boolean";
     const titleProvided = body.title !== undefined;
     const useKbProvided = typeof body.useKb === "boolean";
-    if (!pinnedProvided && !titleProvided && !useKbProvided) {
-      return json({ ok: false, error: "Tidak ada perubahan (pinned/title/useKb) yang dikirim." }, 400);
+    const agentProvided = body.agent === "auto" || body.agent === "gemini" || body.agent === "ollama";
+    if (!pinnedProvided && !titleProvided && !useKbProvided && !agentProvided) {
+      return json({ ok: false, error: "Tidak ada perubahan (pinned/title/useKb/agent) yang dikirim." }, 400);
     }
 
     const { data: existing, error: fetchErr } = await supabaseAdmin
       .from("chat_thread_meta")
-      .select("pinned, title, use_kb")
+      .select("pinned, title, use_kb, agent")
       .eq("id", date0)
       .maybeSingle();
     if (fetchErr) return json({ ok: false, error: fetchErr.message }, 500);
@@ -279,13 +330,14 @@ Deno.serve(async (req) => {
     const rawTitle = titleProvided ? body.title : existing?.title ?? null;
     const nextTitle = typeof rawTitle === "string" && rawTitle.trim() ? rawTitle.trim() : null;
     const nextUseKb = useKbProvided ? !!body.useKb : existing?.use_kb ?? false;
+    const nextAgent: AgentName = agentProvided ? (body.agent as AgentName) : parseAgent(existing?.agent);
 
     const { error: upsertErr } = await supabaseAdmin
       .from("chat_thread_meta")
-      .upsert({ id: date0, pinned: nextPinned, title: nextTitle, use_kb: nextUseKb, updated_at: new Date().toISOString() });
+      .upsert({ id: date0, pinned: nextPinned, title: nextTitle, use_kb: nextUseKb, agent: nextAgent, updated_at: new Date().toISOString() });
     if (upsertErr) return json({ ok: false, error: upsertErr.message }, 500);
 
-    return json({ ok: true, pinned: nextPinned, title: nextTitle, useKb: nextUseKb });
+    return json({ ok: true, pinned: nextPinned, title: nextTitle, useKb: nextUseKb, agent: nextAgent });
   }
 
   if (body.action === "key_status") {
@@ -457,6 +509,59 @@ Deno.serve(async (req) => {
     return json({ ok: true });
   }
 
+  if (body.action === "agent_status") {
+    const w = await getWorkerStatus(supabaseAdmin);
+    return json({
+      ok: true,
+      ollama: { online: w.online, botAlive: w.botAlive, ollamaOk: w.ollamaOk, model: w.model, busy: w.busy, lastSeenMs: w.lastSeenMs }
+    });
+  }
+
+  if (body.action === "agent_job") {
+    const jobId = typeof body.jobId === "string" ? body.jobId : "";
+    if (!UUID_RE.test(jobId)) return json({ ok: false, error: "jobId tidak valid." }, 400);
+    const { data: job, error: jobErr } = await supabaseAdmin
+      .from("agent_jobs")
+      .select("id, agent, status, progress, error, assistant_message_id, fallback_from, created_at, started_at")
+      .eq("id", jobId)
+      .maybeSingle();
+    if (jobErr) return json({ ok: false, error: jobErr.message }, 500);
+    if (!job) return json({ ok: false, error: "Job tidak ditemukan." }, 404);
+
+    let status = job.status as string;
+    let errorText = (job.error as string | null) ?? null;
+    // Job yang menggantung (laptop mati/bot restart) ditutup sebagai gagal
+    // supaya klien tidak menunggu selamanya.
+    const age = (iso: string | null) => (iso ? Date.now() - new Date(iso).getTime() : 0);
+    const stalePending = status === "pending" && age(job.created_at as string) > JOB_PENDING_MAX_MS;
+    const staleRunning = status === "running" && age((job.started_at ?? job.created_at) as string) > JOB_RUNNING_MAX_MS;
+    if (stalePending || staleRunning) {
+      status = "failed";
+      errorText = stalePending ? "Laptop tidak mengambil permintaan ini (bot/Ollama tidak aktif)." : "Proses Ollama terlalu lama/terhenti.";
+      await supabaseAdmin
+        .from("agent_jobs")
+        .update({ status, error: errorText, finished_at: new Date().toISOString() })
+        .eq("id", jobId)
+        .in("status", ["pending", "running"]);
+    }
+
+    let reply: string | undefined;
+    if (status === "done" && job.assistant_message_id) {
+      const { data: msg } = await supabaseAdmin.from("chat_messages").select("content").eq("id", job.assistant_message_id).maybeSingle();
+      reply = (msg?.content as string | undefined) ?? undefined;
+    }
+    return json({
+      ok: true,
+      status,
+      progress: job.progress ?? null,
+      error: errorText,
+      reply,
+      assistantMessageId: job.assistant_message_id ?? null,
+      agent: job.agent,
+      fallbackFrom: job.fallback_from ?? null
+    });
+  }
+
   if (typeof body.date !== "string" || !isValidThreadId(body.date)) {
     return json({ ok: false, error: "ID obrolan tidak valid." }, 400);
   }
@@ -465,7 +570,7 @@ Deno.serve(async (req) => {
   if (body.action === "history") {
     const { data, error } = await supabaseAdmin
       .from("chat_messages")
-      .select("id, role, content, created_at, tokens_used, cost_usd")
+      .select("id, role, content, created_at, tokens_used, cost_usd, agent")
       .eq("chat_date", date)
       .order("created_at", { ascending: true })
       .limit(200);
@@ -480,7 +585,19 @@ Deno.serve(async (req) => {
       ...row,
       cost_usd: row.cost_usd != null ? Number(row.cost_usd) : null
     }));
-    return json({ ok: true, messages });
+    // Job Ollama yang masih berjalan di obrolan ini (kalau halaman di-reload
+    // saat menunggu) -- klien lanjut polling tanpa kehilangan jawabannya.
+    const { data: activeJobs } = await supabaseAdmin
+      .from("agent_jobs")
+      .select("id, status, progress, created_at")
+      .eq("chat_date", date)
+      .in("status", ["pending", "running"])
+      .order("created_at", { ascending: false })
+      .limit(1);
+    const pendingJob = activeJobs && activeJobs.length > 0 ? activeJobs[0] : null;
+    // Agen pilihan obrolan ini (sinkron lintas perangkat).
+    const { data: metaRow } = await supabaseAdmin.from("chat_thread_meta").select("agent").eq("id", date).maybeSingle();
+    return json({ ok: true, messages, pendingJob, agent: parseAgent(metaRow?.agent) });
   }
 
   if (body.action === "delete_message") {
@@ -533,7 +650,55 @@ Deno.serve(async (req) => {
     }
     const trimmed = message.slice(0, MAX_MESSAGE_LENGTH);
 
+    const agent = parseAgent(body.agent);
     const geminiApiKeys = getGeminiApiKeys();
+
+    // Simpan pesan pengguna + buat job antrean untuk Ollama (bot di laptop yang
+    // mengerjakan & menulis balasannya ke chat_messages). `userMessageId` diisi
+    // kalau pesan pengguna SUDAH tersimpan (jalur cadangan setelah Gemini gagal).
+    const enqueueOllama = async (opts: { userMessageId?: string; fallbackFrom?: string }) => {
+      let userMessageId = opts.userMessageId;
+      if (!userMessageId) {
+        const { data: row, error: insErr } = await supabaseAdmin
+          .from("chat_messages")
+          .insert({ chat_date: date, role: "user", content: trimmed })
+          .select("id")
+          .single();
+        if (insErr) return json({ ok: false, error: insErr.message }, 500);
+        userMessageId = row?.id as string | undefined;
+      }
+      const { data: job, error: jobErr } = await supabaseAdmin
+        .from("agent_jobs")
+        .insert({
+          chat_date: date,
+          agent: "ollama",
+          user_message_id: userMessageId ?? null,
+          question: trimmed,
+          fallback_from: opts.fallbackFrom ?? null
+        })
+        .select("id")
+        .single();
+      if (jobErr) return json({ ok: false, error: jobErr.message, userMessageId }, 500);
+      return json({
+        ok: true,
+        pending: true,
+        jobId: job?.id,
+        userMessageId,
+        agent: "ollama",
+        fallbackFrom: opts.fallbackFrom ?? null
+      });
+    };
+
+    // Agen "ollama" (atau "auto" tanpa API key Gemini sama sekali): langsung
+    // ke antrean lokal -- tolak DULU (tanpa menyimpan pesan) kalau laptop mati.
+    if (agent === "ollama" || (agent === "auto" && geminiApiKeys.length === 0)) {
+      const w = await getWorkerStatus(supabaseAdmin);
+      if (!w.online) {
+        return json({ ok: false, error: offlineMessage(w), ollamaOffline: true }, 503);
+      }
+      return await enqueueOllama({});
+    }
+
     if (geminiApiKeys.length === 0) {
       return json({ ok: false, error: "GEMINI_API_KEYS (atau GEMINI_API_KEY) belum di-set sebagai Supabase secret." }, 500);
     }
@@ -661,6 +826,15 @@ Deno.serve(async (req) => {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error("chat: gagal dapat balasan Gemini:", msg);
+      // Mode "auto": Gemini gagal (kuota habis/overloaded) -> kalau Ollama di
+      // laptop hidup, antrekan ke sana. Pesan pengguna sudah tersimpan di atas.
+      if (agent === "auto") {
+        const w = await getWorkerStatus(supabaseAdmin);
+        if (w.online) {
+          console.log("chat: Gemini gagal, dialihkan ke Ollama (antrean).");
+          return await enqueueOllama({ userMessageId, fallbackFrom: "gemini" });
+        }
+      }
       // Pesan pengguna SUDAH tersimpan di atas -- sertakan userMessageId
       // juga di respons error ini, supaya bubble yang terlanjur tampil di
       // layar tetap bisa dihapus langsung tanpa perlu reload riwayat dulu.
@@ -684,6 +858,7 @@ Deno.serve(async (req) => {
         chat_date: date,
         role: "assistant",
         content: reply,
+        agent: "gemini",
         tokens_used: tokensUsed || null,
         cost_usd: costUsd || null
       })
@@ -737,6 +912,7 @@ Deno.serve(async (req) => {
     return json({
       ok: true,
       reply,
+      agent: "gemini",
       userMessageId,
       assistantMessageId: assistantRow?.id,
       // Angka giliran INI SAJA -- dipakai klien buat langsung menampilkan
@@ -754,7 +930,7 @@ Deno.serve(async (req) => {
     {
       ok: false,
       error:
-        "action tidak dikenal (pakai 'history', 'send', 'delete', 'delete_message', 'last_messages', 'list_threads', 'set_thread_meta', 'token_usage', 'key_status', 'kb_list', 'kb_upload', 'kb_delete', 'quran_sync', 'quran_set_last_read', 'quran_add_bookmark', atau 'quran_delete_bookmark')."
+        "action tidak dikenal (pakai 'history', 'send', 'agent_job', 'agent_status', 'delete', 'delete_message', 'last_messages', 'list_threads', 'set_thread_meta', 'token_usage', 'key_status', 'kb_list', 'kb_upload', 'kb_delete', 'quran_sync', 'quran_set_last_read', 'quran_add_bookmark', atau 'quran_delete_bookmark')."
     },
     400
   );

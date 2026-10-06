@@ -37,6 +37,7 @@ import * as cheerio from "cheerio";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import { createSimab, SIMAB_OLLAMA_SYSTEM } from "./simab.js";
+import { createAppAgentWorker } from "./app-agent.js";
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -2795,6 +2796,31 @@ console.log(
 console.log(
   `🦙 Cadangan lokal auto-reply (Ollama, saat kuota Gemini habis): ${AUTO_REPLY_ACTIVE && WA_AI_ENGINE === "gemini" && WA_OLLAMA_FALLBACK_ENABLED ? `AKTIF (model ${OLLAMA_MODEL}, hanya pertanyaan non-angka)` : "mati"}`
 );
+
+// Agen Ollama untuk chat di APLIKASI (pilihan agen di halaman chat): mengambil
+// antrean `agent_jobs` dari Supabase & menjawab pakai Ollama lokal. Tidak
+// butuh koneksi WhatsApp & tidak mengirim pesan WA apa pun -- lihat app-agent.js.
+const appAgent = createAppAgentWorker({
+  supabase,
+  callOllamaChat,
+  enqueueOllamaCall,
+  fetchRelevantKnowledgeChunks,
+  chunkDocumentText,
+  currentDateLine,
+  ollamaBaseUrl: OLLAMA_BASE_URL,
+  ollamaModel: OLLAMA_MODEL
+});
+appAgent.start().catch((err) => {
+  console.error("Agen Ollama aplikasi gagal start:", err instanceof Error ? err.message : String(err));
+});
+for (const sig of ["SIGINT", "SIGTERM"]) {
+  process.on(sig, () => {
+    appAgent
+      .stop()
+      .catch(() => {})
+      .finally(() => process.exit(0));
+  });
+}
 
 // Jaga-jaga: bot ini harus jalan LAMA tanpa diawasi -- jangan sampai mati
 // total cuma gara-gara satu error tak terduga yang tidak ketangkep try/catch
