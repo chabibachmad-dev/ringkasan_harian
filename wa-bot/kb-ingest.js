@@ -114,15 +114,16 @@ export async function detectTools(run = defaultRun, cfg = readKbConfig()) {
 // makin besar makin berantakan. Halaman pendek (< 60 huruf) tidak dinilai.
 export function assessPageText(text) {
   const s = String(text || "");
-  const letters = (s.match(/\p{L}/gu) || []).length;
+  const letters = (s.match(/\p{Script=Latin}/gu) || []).length;
   if (letters < 60) return { bad: false, score: 0, reason: null };
   const nonSpace = s.replace(/\s+/g, "");
   const junk = (s.match(/[\uFFFD\uE000-\uF8FF\u0000-\u0008\u000E-\u001F]/g) || []).length;
-  const odd = (nonSpace.match(/[^\p{L}\p{N}.,;:()\-/%'"?!&@+=\[\]•–—_*#°…]/gu) || []).length;
+  const odd = (nonSpace.match(/[^\p{L}\p{M}\p{N}.,;:()\-/%'"?!&@+=\[\]•–—_*#°…،؛؟]/gu) || []).length;
   const tokens = s.split(/\s+/).filter(Boolean);
-  const words = tokens.filter((w) => /^\p{L}{4,}$/u.test(w) && w !== w.toUpperCase());
+  // Hanya kata beraksara LATIN yang dinilai (kata Arab/aksara lain tak punya huruf hidup Latin: bukan tanda rusak).
+  const words = tokens.filter((w) => /^\p{Script=Latin}{4,}$/u.test(w) && w !== w.toUpperCase());
   const noVowel = words.filter((w) => !/[aeiouáéíóúàèìòùâêîôûäëïöü]/i.test(w)).length;
-  const singles = tokens.filter((w) => /^\p{L}$/u.test(w)).length;
+  const singles = tokens.filter((w) => /^\p{Script=Latin}$/u.test(w)).length;
 
   const junkRatio = junk / Math.max(1, nonSpace.length);
   const oddRatio = odd / Math.max(1, nonSpace.length);
