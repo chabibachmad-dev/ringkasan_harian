@@ -39,6 +39,7 @@ import { fileURLToPath } from "node:url";
 import { createSimab, SIMAB_OLLAMA_SYSTEM } from "./simab.js";
 import { createAppAgentWorker } from "./app-agent.js";
 import { createKhatamReminder } from "./khatam.js";
+import { createPriorityQueue, PRIORITY } from "./ollama-queue.js";
 import { openKbIndex } from "./kb-index.js";
 import { createKbIngestWorker, readKbConfig } from "./kb-ingest.js";
 
@@ -115,6 +116,9 @@ const AUTO_REPLY_HISTORY_LIMIT = 20;
 const WA_AI_ENGINE = (process.env.WA_AI_ENGINE || "ollama").toLowerCase();
 const OLLAMA_BASE_URL = process.env.OLLAMA_BASE_URL || "http://127.0.0.1:11434";
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL || "qwen2.5:3b";
+// Berapa lama model dibiarkan di RAM setelah panggilan terakhir (format Ollama: "5m", "30s", "0").
+// Makin pendek = RAM lebih cepat lega, tapi pesan berikutnya kena ongkos muat ulang (±5-8 dtk).
+const OLLAMA_KEEP_ALIVE = process.env.OLLAMA_KEEP_ALIVE || "5m";
 // num_ctx = ukuran jendela konteks (dalam token) yang diminta ke Ollama --
 // default bawaan Ollama cuma 2048, kekecilan begitu riwayat obrolan +
 // konteks dokumen + hasil pencarian web digabung. 4096 aman buat RAM 7.5GB
@@ -709,22 +713,49 @@ function currentDateLine() {
   return `Waktu sekarang: ${nowText} ${WA_TIMEZONE_LABEL}. Anggap ini tanggal hari ini.`;
 }
 
-let ollamaQueueTail = Promise.resolve();
-// Jumlah panggilan Ollama yang lagi jalan/menunggu giliran -- cadangan auto-reply
-// tidak mau ikut mengantre di belakang pekerjaan lain (mis. ringkasan harian
-// yang bisa makan beberapa menit), supaya kontak tidak menunggu lama; lihat
-// sendAutoReply.
-let ollamaPending = 0;
-function enqueueOllamaCall(fn) {
-  ollamaPending += 1;
-  const run = ollamaQueueTail.then(fn, fn).finally(() => {
-    ollamaPending -= 1;
-  });
-  // .catch(()=>{}) di sini CUMA buat jaga rantai antrian tetap jalan walau
-  // panggilan sebelumnya gagal -- error aslinya tetap dilempar balik ke
-  // pemanggil `run` (promise yang di-return), bukan ditelan di sini.
-  ollamaQueueTail = run.catch(() => {});
-  return run;
+// Antrean berprioritas (lihat ollama-queue.js): chat aplikasi (0) mendahului
+// balasan WhatsApp (1) yang mendahului pekerjaan latar seperti ringkasan harian (2).
+// `pending` = jumlah panggilan yang lagi jalan/menunggu giliran -- cadangan
+// auto-reply tidak mau ikut mengantre di belakang pekerjaan lain, supaya kontak
+// tidak menunggu lama; lihat sendAutoReply.
+const ollamaQueue = createPriorityQueue({ agingMs: Number(process.env.OLLAMA_QUEUE_AGING_MS) || 120000 });
+function enqueueOllamaCall(fn, opts) {
+  return ollamaQueue.enqueue(fn, opts);
+}
+
+// Cadangan: model yang terakhir dipakai. Kalau panggilan berikutnya memakai
+// model LAIN, model lama dibongkar dari RAM dulu (keep_alive 0) -- laptop ini
+// hanya 7,5 GB RAM, dua model dimuat bareng akan membuat sistem swap berat.
+let lastOllamaModel = null;
+async function unloadOllamaModel(model) {
+  try {
+    await fetch(`${OLLAMA_BASE_URL}/api/generate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model, keep_alive: 0 }),
+      signal: AbortSignal.timeout(15000)
+    });
+  } catch {
+    // best-effort
+  }
+}
+
+// Info memori laptop (Linux) untuk halaman Status Sistem.
+function readMemInfo() {
+  try {
+    const txt = fs.readFileSync("/proc/meminfo", "utf8");
+    const kb = (k) => {
+      const m = txt.match(new RegExp(`^${k}:\\s+(\\d+)`, "m"));
+      return m ? Number(m[1]) : 0;
+    };
+    return {
+      totalMB: Math.round(kb("MemTotal") / 1024),
+      availableMB: Math.round(kb("MemAvailable") / 1024),
+      swapUsedMB: Math.round((kb("SwapTotal") - kb("SwapFree")) / 1024)
+    };
+  } catch {
+    return null;
+  }
 }
 
 // Satu kali panggilan ke Ollama (server lokal, default port 11434 -- lihat
@@ -733,7 +764,9 @@ function enqueueOllamaCall(fn) {
 // mentah). stream:false biar responsnya 1 JSON utuh sekali balik, bukan
 // potongan-potongan (lebih gampang ditangani drpd streaming, auto-reply WA
 // toh baru dikirim setelah teksnya LENGKAP).
-async function callOllamaChat(messages, { timeoutMs = OLLAMA_TIMEOUT_MS, maxTokens = OLLAMA_MAX_OUTPUT_TOKENS, numCtx = OLLAMA_NUM_CTX, format = undefined, temperature = 0.4 } = {}) {
+async function callOllamaChat(messages, { timeoutMs = OLLAMA_TIMEOUT_MS, maxTokens = OLLAMA_MAX_OUTPUT_TOKENS, numCtx = OLLAMA_NUM_CTX, format = undefined, temperature = 0.4, model = OLLAMA_MODEL } = {}) {
+  if (lastOllamaModel && lastOllamaModel !== model) await unloadOllamaModel(lastOllamaModel);
+  lastOllamaModel = model;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   let res;
@@ -742,7 +775,7 @@ async function callOllamaChat(messages, { timeoutMs = OLLAMA_TIMEOUT_MS, maxToke
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        model: OLLAMA_MODEL,
+        model,
         messages,
         stream: false,
         // keep_alive "10m" -- minta Ollama tetap nyimpen model ini DIMUAT di
@@ -750,7 +783,7 @@ async function callOllamaChat(messages, { timeoutMs = OLLAMA_TIMEOUT_MS, maxToke
         // 5 menit), supaya pesan WA berikutnya yang masih berdekatan waktu
         // tidak kena ongkos "load_duration" lagi (~5-8 detik dari hasil tes
         // user -- lumayan kalau CPU-nya memang sudah pas-pasan).
-        keep_alive: "10m",
+        keep_alive: OLLAMA_KEEP_ALIVE,
         ...(format ? { format } : {}),
         options: { num_ctx: numCtx, num_predict: maxTokens, temperature }
       }),
@@ -829,11 +862,13 @@ async function generateAutoReplyWithOllama(jid, { timeoutMs } = {}) {
   // timer timeout (OLLAMA_TIMEOUT_MS) baru mulai jalan begitu giliran
   // permintaan ini BENERAN dieksekusi (bukan dari saat masuk antrian), jadi
   // nunggu antrian TIDAK ikut makan jatah waktu timeout-nya.
-  const replyText = await enqueueOllamaCall(() =>
-    callOllamaChat(
-      [{ role: "system", content: `${withGroupNote(WA_OLLAMA_SYSTEM_PROMPT, jid)}\n\n${currentDateLine()}` }, ...messages],
-      timeoutMs ? { timeoutMs } : {}
-    )
+  const replyText = await enqueueOllamaCall(
+    () =>
+      callOllamaChat(
+        [{ role: "system", content: `${withGroupNote(WA_OLLAMA_SYSTEM_PROMPT, jid)}\n\n${currentDateLine()}` }, ...messages],
+        timeoutMs ? { timeoutMs } : {}
+      ),
+    { priority: PRIORITY.WA, label: "wa-reply" }
   );
 
   return { reply: replyText.trim(), tokensUsed: 0, costUsd: 0 };
@@ -1622,7 +1657,7 @@ async function tryLocalFallbackReply(sock, jid, incomingText, err) {
   const quotaLike = err?.allKeysExhausted === true || err?.status === 429 || err?.status === 503;
   if (!quotaLike) return null;
   if (!incomingText || incomingText.startsWith("[") || NEEDS_ACCURATE_FIGURES_RE.test(incomingText)) return null;
-  if (ollamaPending > 0) {
+  if (ollamaQueue.pending > 0) {
     console.log("🦙 Cadangan lokal dilewati: Ollama lagi sibuk.");
     return null;
   }
@@ -1768,7 +1803,8 @@ const OLLAMA_SUMMARY_MAX_CHARS = 7000;
 const OLLAMA_SUMMARY_MAX_TOKENS = 700;
 
 async function summarizeWithOllama(transcript) {
-  return enqueueOllamaCall(() =>
+  return enqueueOllamaCall(
+    () =>
     callOllamaChat(
       [
         { role: "system", content: `${SUMMARY_SYSTEM_PROMPT}\n\n${currentDateLine()}` },
@@ -1779,7 +1815,8 @@ async function summarizeWithOllama(transcript) {
         maxTokens: OLLAMA_SUMMARY_MAX_TOKENS,
         numCtx: Math.max(OLLAMA_NUM_CTX, 4096)
       }
-    )
+    ),
+    { priority: PRIORITY.BACKGROUND, label: "daily-summary" }
   );
 }
 
@@ -2277,14 +2314,16 @@ const OWNER_LIDS = (process.env.WA_OWNER_LIDS || "")
   .filter(Boolean);
 
 async function parseSimabWithOllama(freeText) {
-  const raw = await enqueueOllamaCall(() =>
+  const raw = await enqueueOllamaCall(
+    () =>
     callOllamaChat(
       [
         { role: "system", content: SIMAB_OLLAMA_SYSTEM },
         { role: "user", content: freeText.slice(0, 300) }
       ],
       { timeoutMs: 180_000, maxTokens: 80, numCtx: 2048, format: "json", temperature: 0 }
-    )
+    ),
+    { priority: PRIORITY.CHAT, label: "simab-parse" }
   );
   const parsed = JSON.parse(raw);
   return { aksi: String(parsed?.aksi ?? "").toLowerCase().trim(), kueri: String(parsed?.kueri ?? "") };
@@ -2850,7 +2889,16 @@ let kbIngest = null;
 if (kbCfg.enabled) {
   try {
     kbIndex = await openKbIndex({ file: kbCfg.indexFile });
-    kbIngest = createKbIngestWorker({ supabase, index: kbIndex, notify: sendPush, env: process.env, baseDir: fileURLToPath(new URL(".", import.meta.url)) });
+    kbIngest = createKbIngestWorker({
+      supabase,
+      index: kbIndex,
+      notify: sendPush,
+      env: process.env,
+      baseDir: fileURLToPath(new URL(".", import.meta.url)),
+      // Pekerjaan berat di latar (OCR) menunggu Ollama selesai supaya tidak berebut CPU.
+      isBusy: () => !ollamaQueue.isIdle(),
+      waitForIdle: () => ollamaQueue.waitForIdle()
+    });
   } catch (err) {
     console.error("📚 Indeks dokumen tidak aktif:", err instanceof Error ? err.message : String(err));
     kbIndex = null;
@@ -2875,6 +2923,9 @@ const appAgent = createAppAgentWorker({
       pausedChats: aiPausedUntil.size,
       engine: WA_AI_ENGINE,
       autoReply: AUTO_REPLY_ACTIVE,
+      queue: ollamaQueue.stats(),
+      mem: readMemInfo(),
+      keepAlive: OLLAMA_KEEP_ALIVE,
       kb: kbIngest
         ? (() => {
             const st = kbIngest.status();

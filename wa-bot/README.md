@@ -472,6 +472,28 @@ Hal yang perlu diketahui:
 - OCR di laptop CPU-only lambat (puluhan detik per halaman) dan berjalan berprioritas rendah (`nice`); dibatasi `KB_OCR_MAX_PAGES` halaman per dokumen.
 - Tes: `node test-kb.mjs` (memakai PDF contoh di `test-fixtures/`).
 
+## 10. Antrean Ollama berprioritas & pengaman RAM
+
+Laptop 2 inti / 7,5 GB RAM hanya sanggup satu panggilan Ollama pada satu waktu. Semua panggilan lewat satu antrean (`ollama-queue.js`) dengan tiga tingkat prioritas:
+
+| Prioritas | Untuk apa |
+| --- | --- |
+| 0 — CHAT | chat di aplikasi, perintah pemilik (SiMAB) |
+| 1 — WA | balasan otomatis WhatsApp |
+| 2 — BACKGROUND | ringkasan harian |
+
+Yang prioritasnya lebih tinggi didahulukan; di tingkat yang sama berlaku urutan datang. Panggilan yang sedang berjalan tidak dipotong. Supaya pekerjaan latar tidak kelaparan, tiap `OLLAMA_QUEUE_AGING_MS` (default 2 menit) menunggu, prioritasnya naik satu tingkat.
+
+Pekerjaan latar yang berat di luar Ollama, yaitu **OCR dokumen**, ikut mengalah: dokumen baru tidak diambil saat Ollama sibuk, dan OCR berhenti sebentar sebelum tiap halaman sampai antrean kosong.
+
+Pengaman RAM:
+
+- `OLLAMA_KEEP_ALIVE` (default `5m`) mengatur berapa lama model tetap di RAM setelah panggilan terakhir. Makin pendek, RAM makin cepat lega, tetapi pesan berikutnya kena ongkos muat ulang (sekitar 5–8 detik).
+- Kalau suatu saat dipakai model Ollama kedua, model sebelumnya dibongkar dari RAM lebih dulu supaya tidak ada dua model sekaligus.
+- Status Sistem menampilkan RAM tersedia dan swap terpakai; peringatan muncul bila RAM tersedia di bawah 1 GB.
+
+Tes: `node test-ollama-queue.mjs`.
+
 ## Troubleshooting
 
 - **QR tidak muncul / bot langsung error network** -- cek koneksi internet;

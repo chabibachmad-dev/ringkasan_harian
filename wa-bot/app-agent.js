@@ -179,9 +179,11 @@ export function createAppAgentWorker(deps, overrides = {}) {
     return !!data?.use_kb;
   }
 
+  // Chat di aplikasi = prioritas tertinggi (0): didahulukan dari balasan WA & pekerjaan latar.
   const ollamaCall = (messages, opts) =>
-    enqueueOllamaCall(() =>
-      callOllamaChat(messages, { timeoutMs: cfg.timeoutMs, numCtx: cfg.numCtx, temperature: 0.4, ...opts })
+    enqueueOllamaCall(
+      () => callOllamaChat(messages, { timeoutMs: cfg.timeoutMs, numCtx: cfg.numCtx, temperature: 0.4, ...opts }),
+      { priority: 0, label: "app-chat" }
     );
 
   async function setProgress(jobId, text) {

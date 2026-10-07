@@ -169,6 +169,25 @@ function setup(files, over = {}, run) {
   }
 }
 
+// ---------- OCR memberi jalan ke Ollama (gate) + tidak mulai dokumen saat Ollama sibuk ----------
+{
+  const index = await openKbIndex({ file: ":memory:", log: silent });
+  const storage = new Map(); const tables = { knowledge_documents: [] };
+  storage.set("d1/source.pdf", fx("mixed.pdf"));
+  tables.knowledge_documents.push({ id: "d1", title: "campur", content: "", original_filename: "c.pdf", status: "queued", storage_path: "d1/source.pdf", uploaded_at: "2026-01-01T00:00:01Z", on_laptop: false });
+  let gates = 0; let busy = true;
+  const w = createKbIngestWorker(
+    { supabase: makeSupabase(tables, storage), index, log: silent, isBusy: () => busy, waitForIdle: async () => { gates++; } },
+    { reconcileMs: 1e12 }
+  );
+  await w.tick();
+  check(tables.knowledge_documents[0].status === "queued", "Ollama sibuk -> dokumen belum diambil");
+  busy = false;
+  await w.tick();
+  if (realTools.tesseract && realTools.pdftoppm) check(tables.knowledge_documents[0].status === "ready" && gates >= 1, `idle -> diproses, gate dipanggil sebelum tiap halaman OCR (${gates}x)`);
+  else check(tables.knowledge_documents[0].status === "ready", "idle -> diproses");
+}
+
 // ---------- error: alat tidak ada, lalu coba lagi ----------
 {
   const index = await openKbIndex({ file: ":memory:", log: silent });

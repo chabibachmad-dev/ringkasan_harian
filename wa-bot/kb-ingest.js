@@ -107,7 +107,7 @@ export async function detectTools(run = defaultRun, cfg = readKbConfig()) {
 
 // Ubah file jadi halaman-halaman teks.
 // Mengembalikan { pages: [{page, text}], ocrPages, ocrSkipped, ocrMissing }.
-export async function convertFile({ file, ext, tools, cfg, run = defaultRun, onProgress = () => {}, tmpDir }) {
+export async function convertFile({ file, ext, tools, cfg, run = defaultRun, onProgress = () => {}, tmpDir, gate = async () => {} }) {
   if (ext !== "pdf") {
     const text = fs.readFileSync(file, "utf8").replace(/^﻿/, "");
     return { pages: [{ page: null, text }], ocrPages: 0, ocrSkipped: 0, ocrMissing: false };
@@ -148,6 +148,8 @@ export async function convertFile({ file, ext, tools, cfg, run = defaultRun, onP
       let i = 0;
       for (const p of todo) {
         i += 1;
+        // Beri jalan ke Ollama dulu (OCR memakan CPU & memperlambat chat).
+        await gate();
         onProgress(`OCR halaman ${p.page} (${i}/${todo.length})…`);
         const base = path.join(tmpDir, "ocr");
         try {
@@ -186,7 +188,7 @@ export function pagesToText(pages) {
 }
 
 export function createKbIngestWorker(deps, overrides = {}) {
-  const { supabase, index, notify, run = defaultRun, log = console, now = () => Date.now() } = deps;
+  const { supabase, index, notify, run = defaultRun, log = console, now = () => Date.now(), isBusy, waitForIdle } = deps;
   const cfg = { ...readKbConfig(deps.env || process.env, deps.baseDir || process.cwd()), ...overrides };
 
   let timer = null;
@@ -303,6 +305,9 @@ export function createKbIngestWorker(deps, overrides = {}) {
         cfg,
         run,
         tmpDir,
+        gate: async () => {
+          if (typeof waitForIdle === "function") await waitForIdle();
+        },
         onProgress: (t) => {
           progress(t).catch(() => {});
         }
@@ -387,6 +392,8 @@ export function createKbIngestWorker(deps, overrides = {}) {
     busy = true;
     try {
       if (now() - lastReconcile >= cfg.reconcileMs) await reconcile();
+      // Jangan mulai dokumen baru saat Ollama sedang bekerja (menghindari rebutan CPU).
+      if (typeof isBusy === "function" && isBusy()) return;
       const doc = await claimNext();
       if (doc) await processDoc(doc);
     } catch (e) {

@@ -2274,6 +2274,19 @@ async function renderSystemStatus() {
     rows.push(sysRow(w.extra.pausedChats > 0, L("sys_paused"), String(w.extra.pausedChats)));
   }
 
+  const mem = w.extra && w.extra.mem;
+  if (mem && Number(mem.totalMB) > 0) {
+    const gb = (mb) => (Number(mb) / 1024).toFixed(1);
+    const low = Number(mem.availableMB) < 1000;
+    rows.push(
+      sysRow(
+        !low,
+        L("sys_mem"),
+        `${L("sys_mem_avail")} ${gb(mem.availableMB)} / ${gb(mem.totalMB)} GB · ${L("sys_mem_swap")} ${gb(mem.swapUsedMB || 0)} GB${low ? ` · ${L("sys_mem_low")}` : ""}`
+      )
+    );
+  }
+
   const kb = w.extra && w.extra.kb;
   if (kb && typeof kb.docs === "number") {
     const tools = `${kb.pdftotext ? "pdftotext" : L("sys_kb_no_pdftotext")} · ${kb.ocr ? "OCR" : L("sys_kb_no_ocr")}`;
