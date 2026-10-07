@@ -1,9 +1,10 @@
-// Perintah SiMAB lewat WhatsApp (HANYA BACA).
+// Perintah SiMAB lewat WhatsApp: baca (pagu, cek, perjadin, sbm, rpd) dan REKAM kegiatan.
 //
 // Modul ini dipanggil index.js kalau pemilik mengirim pesan berawalan "simab ...".
 // Bot masuk ke Supabase SiMAB (project BERBEDA dari Supabase ringkasan_harian)
 // memakai akun khusus bot yang di database dibatasi baca-saja (lihat
-// simab-bot-readonly.sql). Semua kueri disaring ke satu kantor (SIMAB_KANTOR_ID)
+// simab-bot-readonly.sql). Satu-satunya jalan tulis: perintah "simab rekam <seksi>"
+// (simab-rekam.js) lewat fungsi database bot_rekam_kegiatan (simab-bot-rekam.sql). Semua kueri disaring ke satu kantor (SIMAB_KANTOR_ID)
 // dan satu tahun anggaran. Jawaban disusun kode dengan format tetap -- model
 // bahasa (Ollama) HANYA dipakai menebak aksi dari kalimat bebas, tidak pernah
 // menulis SQL maupun angka.
@@ -15,6 +16,7 @@
 //   RPD       : Realisasi per bulan dari bulan tgl_sp2d, Deviasi = RPD - Realisasi
 
 import { createClient } from "@supabase/supabase-js";
+import { createRekamFlow, SEKSI } from "./simab-rekam.js";
 
 const PAGE_SIZE = 1000;
 const IN_CHUNK = 80;
@@ -26,7 +28,7 @@ const MONTHS_SHORT = ["Jan", "Feb", "Mar", "Apr", "Mei", "Jun", "Jul", "Agu", "S
 
 export const SIMAB_ACTIONS = ["pagu", "cek", "perjadin", "sbm", "rpd", "bantuan"];
 
-export const SIMAB_HELP = `🏛️ *Perintah SiMAB* (hanya baca)
+export const SIMAB_HELP = `🏛️ *Perintah SiMAB*
 
 • *simab pagu <kode / akun / kata>*
   contoh: simab pagu 4701.EBA.994.002.A.521111.10
@@ -38,6 +40,8 @@ export const SIMAB_HELP = `🏛️ *Perintah SiMAB* (hanya baca)
 • *simab perjadin <nama>* — perjalanan dinas seorang pelaksana (akun 524111/524113)
 • *simab sbm <kota>* — tarif SBM
 • *simab rpd* — RPD vs realisasi per bulan (atau: simab rpd oktober)
+• *simab rekam <seksi>* — rekam kegiatan baru (status "Rekam Data"): pilih kelompok POK, pilih kode MAK, lalu kirim uraian, tanggal dokumen, jumlah
+  seksi: ${SEKSI.join(", ")}
 
 Tambahkan tahun di akhir untuk tahun lain, mis. *simab pagu 521111 2025*.
 Kalimat bebas juga boleh (dibaca model lokal, ±1 menit).`;
@@ -75,6 +79,7 @@ const ALIASES = {
   perjadin: "perjadin", pelaksana: "perjadin", dinas: "perjadin",
   sbm: "sbm", tarif: "sbm",
   rpd: "rpd",
+  rekam: "rekam", input: "rekam", catat: "rekam",
   bantuan: "bantuan", help: "bantuan", menu: "bantuan", "?": "bantuan"
 };
 
@@ -137,7 +142,11 @@ export function createSimab({
   timeZone = "Asia/Jakarta",
   makeClient = createClient,
   ollamaParse = null,
-  perjadinAkun = ["524111", "524113"]
+  perjadinAkun = ["524111", "524113"],
+  rekamEnabled = true,
+  rekamUser = "Bot WhatsApp",
+  rekamTtlMs = 10 * 60_000,
+  now = Date.now
 }) {
   const enabled = Boolean(url && anonKey && email && password);
   let client = null;
@@ -209,6 +218,7 @@ export function createSimab({
 
   const scope = (q, tahun) => q.eq("kantor_id", kantorId).eq("tahun", tahun);
   const head = (tahun) => `Tahun ${tahun} • Satker ${kantorId}`;
+  const todayIso = () => new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(now()));
 
   // ---------- pagu / sisa ----------
   async function cmdPagu(arg, tahun) {
@@ -461,8 +471,30 @@ export function createSimab({
     return lines.join("\n");
   }
 
-  async function dispatch(aksi, rawArg, tahunOverride) {
+  const rekamFlow = createRekamFlow({
+    exec,
+    fetchAll,
+    getClient,
+    scope,
+    kantorId,
+    currentTahun,
+    head,
+    rp,
+    cut,
+    fmtDate,
+    today: todayIso,
+    user: rekamUser,
+    ttlMs: rekamTtlMs,
+    now
+  });
+
+  async function dispatch(aksi, rawArg, tahunOverride, sessionKey = null) {
     if (aksi === "bantuan") return SIMAB_HELP;
+    if (aksi === "rekam") {
+      if (!rekamEnabled) return "Perekaman lewat WhatsApp dimatikan (SIMAB_REKAM_ENABLED=false).";
+      if (!sessionKey) return "Perekaman hanya bisa dari chat pemilik.";
+      return rekamFlow.start(sessionKey, rawArg, tahunOverride);
+    }
     const arg = aksi === "rpd" ? rawArg : cleanArg(rawArg);
     if (aksi === "sbm") return cmdSbm(arg);
     const tahun = await currentTahun(tahunOverride);
@@ -474,9 +506,15 @@ export function createSimab({
   }
 
   // Titik masuk: terima teks pesan, kembalikan teks jawaban.
-  async function run(text, { notify = null } = {}) {
+  async function run(text, { notify = null, sessionKey = null } = {}) {
+    // Sesi rekam aktif: balasan pemilik (angka, 3 baris data, ya/batal) dijawab alur rekam.
+    // Perintah baru berawalan "simab" tetap diproses normal (dan menggantikan sesi lama).
+    if (sessionKey && rekamEnabled && rekamFlow.hasSession(sessionKey) && !/^\s*simab\b/i.test(String(text ?? ""))) {
+      const r = await rekamFlow.handle(sessionKey, text);
+      if (r !== null) return r;
+    }
     const cmd = parseCommand(text);
-    if (cmd.aksi) return dispatch(cmd.aksi, cmd.arg, cmd.tahun);
+    if (cmd.aksi) return dispatch(cmd.aksi, cmd.arg, cmd.tahun, sessionKey);
 
     // Kalimat bebas -> bantuan model lokal untuk MENEBAK aksi (bukan angka).
     // Jalan pintas tanpa model (instan): kode berpemisah titik, angka akun 6 digit, atau kata "rpd".
@@ -504,7 +542,7 @@ export function createSimab({
     return `_Dipahami sebagai: simab ${parsed.aksi}${kueri ? ` ${kueri}` : ""}_\n\n${sub}`;
   }
 
-  return { enabled, run };
+  return { enabled, run, hasSession: (key) => rekamEnabled && rekamFlow.hasSession(key) };
 }
 
 // Prompt penafsir untuk Ollama (kalimat bebas -> {aksi, kueri}). SENGAJA singkat:

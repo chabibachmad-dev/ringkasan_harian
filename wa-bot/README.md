@@ -312,7 +312,7 @@ bot minta di-tag lagi), dan ada jeda `WA_GROUP_COOLDOWN_SEC` (20 detik) per oran
 Pesan yang kamu ketik sendiri dari nomor ini tidak memicu bot. Percakapan grup ikut
 masuk ringkasan harian dengan nama grupnya.
 
-**SiMAB lewat WhatsApp (hanya baca).** Kirim pesan berawalan `simab` dari nomor
+**SiMAB lewat WhatsApp (baca + rekam kegiatan).** Kirim pesan berawalan `simab` dari nomor
 pemilik (`WA_OWNER_NUMBER`) ke nomor bot, atau lewat chat ke diri sendiri:
 
 - `simab pagu 4701.EBA.994.002.A.521111.10` -- pagu, blokir, realisasi, sisa satu kode
@@ -322,6 +322,7 @@ pemilik (`WA_OWNER_NUMBER`) ke nomor bot, atau lewat chat ke diri sendiri:
 - `simab perjadin budi` -- perjalanan dinas seorang pelaksana (hanya transaksi dengan MAK akun 524111 atau 524113; ubah lewat `SIMAB_PERJADIN_AKUN`)
 - `simab sbm yogyakarta`, `simab rpd`, `simab rpd oktober`
 - akhiri dengan tahun untuk tahun lain: `simab pagu 521111 2025`
+- `simab rekam <seksi>` -- **rekam kegiatan baru** (lihat bagian "Merekam kegiatan" di bawah)
 - kalimat bebas juga boleh (ditafsirkan Ollama menjadi salah satu perintah di atas, ±1 menit)
 
 Rumus: Sisa = Pagu - Blokir - Realisasi; Realisasi = jumlah `kegiatan.jumlah` per MAK
@@ -333,6 +334,22 @@ Persiapan sekali saja: (1) buat akun bot di Dashboard Supabase SiMAB (Authentica
 Users), (2) jalankan `simab-bot-readonly.sql` di SQL Editor SiMAB agar akun itu tidak bisa
 menulis dan tidak bisa membaca tabel pegawai, (3) isi `SIMAB_*` di `.env`, (4)
 `pm2 restart wa-bot`. Bot selalu menyaring `kantor_id` = `SIMAB_KANTOR_ID`.
+
+### Merekam kegiatan lewat WhatsApp (`simab rekam`)
+
+Hanya dari nomor pemilik. Seksi: Umum, PKN, PN, HI, KI, Lelang, Penilaian.
+
+1. `simab rekam Umum` -> daftar **kelompok POK** milik seksi itu (3 segmen kode, mis. `4701.EBA.002 Kerumahtanggaan`). Balas angkanya.
+2. Daftar **kode MAK paling panjang** (yang tidak punya turunan) di kelompok itu, dengan pagu dan sisa. Balas angkanya. Pindah halaman dengan `lanjut` / `balik`, kembali ke kelompok dengan `kembali`.
+3. Kirim **tiga baris dalam satu pesan**: uraian, tanggal dokumen, jumlah. Tanggal: `5/10/2026`, `5 okt 2026`, `hari ini`. Jumlah: `1.500.000`, `1,5jt`, `500rb`.
+4. Bot menampilkan ringkasan. Kalau jumlah melebihi sisa pagu, ada peringatan. Balas `ya` untuk menyimpan, `ubah` untuk isi ulang, atau `batal`.
+
+Status otomatis **Rekam Data**; kolom `tgl_st` diisi tanggal dokumen, `tgl_rekam` hari ini, `user` dari `SIMAB_REKAM_USER`; id 10 huruf/angka acak dibuat di database. Sesi kedaluwarsa 10 menit tanpa balasan (`SIMAB_REKAM_TTL_MIN`).
+
+**Keamanan.** Akun bot tetap baca-saja di semua tabel. Penulisan hanya lewat fungsi database `bot_rekam_kegiatan` (`simab-bot-rekam.sql`, jalankan di SQL Editor **SiMAB** setelah `simab-bot-readonly.sql`): fungsi itu hanya bisa dipanggil akun bot, hanya menambah satu baris berstatus Rekam Data, memeriksa ulang bahwa kode ada di POK satker+tahun itu dan merupakan kode terpanjang, dan menolak baris identik yang direkam kurang dari 10 menit lalu. Kalimat bebas (model lokal) tidak pernah bisa memulai perekaman; hanya perintah `simab rekam ...` yang tertulis. Matikan fitur dengan `SIMAB_REKAM_ENABLED=false`.
+
+Tes: `node test-simab-rekam.mjs`.
+
 
 **Cadangan lokal saat kuota Gemini habis.** Dengan `WA_AI_ENGINE=gemini`, kalau
 Gemini gagal karena kuota (semua key habis / 429 / 503), pertanyaan yang BUKAN soal

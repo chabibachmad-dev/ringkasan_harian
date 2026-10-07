@@ -2319,7 +2319,10 @@ const simab = createSimab({
   fixedTahun: Number(process.env.SIMAB_TAHUN) || null,
   perjadinAkun: (process.env.SIMAB_PERJADIN_AKUN || "524111,524113").split(",").map((x) => x.trim()).filter((x) => /^\d{6}$/.test(x)),
   timeZone: WA_TIMEZONE,
-  ollamaParse: parseSimabWithOllama
+  ollamaParse: parseSimabWithOllama,
+  rekamEnabled: (process.env.SIMAB_REKAM_ENABLED || "true").toLowerCase() !== "false",
+  rekamUser: (process.env.SIMAB_REKAM_USER || "Bot WhatsApp").trim(),
+  rekamTtlMs: (Number(process.env.SIMAB_REKAM_TTL_MIN) || 10) * 60_000
 });
 
 // Pengirim = pemilik? Nomor bisa datang sbg "@s.whatsapp.net" ATAU "@lid"; untuk "@lid"
@@ -2345,7 +2348,7 @@ async function handleSimabMessage(sock, jid, msg, text) {
   sock.sendPresenceUpdate("composing", jid).catch(() => {});
   const started = Date.now();
   try {
-    const reply = await simab.run(text, { notify: send });
+    const reply = await simab.run(text, { notify: send, sessionKey: jid });
     await send(reply);
     console.log(`🏛️ [SiMAB] dijawab dalam ${Math.round((Date.now() - started) / 100) / 10} detik.`);
   } catch (err) {
@@ -2626,7 +2629,10 @@ async function handleIncoming(msg, sock) {
 
   // Perintah SiMAB dari pemilik: dijawab dari database SiMAB, TIDAK disimpan & TIDAK
   // diteruskan ke auto-reply AI. Dari orang lain, pesan "simab ..." diperlakukan biasa.
-  if (/^\s*simab\b/i.test(text)) {
+  // Selagi sesi "simab rekam" aktif, balasan pemilik (angka / 3 baris data / ya / batal)
+  // juga milik SiMAB -- bukan chat biasa.
+  const inRekamSession = simab.enabled && simab.hasSession(jid) && isOwnerSender(msg, isSelfChat);
+  if (/^\s*simab\b/i.test(text) || inRekamSession) {
     if (!simab.enabled) {
       if (isOwnerSender(msg, isSelfChat)) {
         await sock.sendMessage(jid, { text: "Fitur SiMAB belum aktif: isi SIMAB_SUPABASE_URL, SIMAB_SUPABASE_ANON_KEY, SIMAB_BOT_EMAIL, SIMAB_BOT_PASSWORD di .env lalu restart bot." }).catch(() => {});
