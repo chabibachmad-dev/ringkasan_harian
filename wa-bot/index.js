@@ -2322,7 +2322,10 @@ const simab = createSimab({
   ollamaParse: parseSimabWithOllama,
   rekamEnabled: (process.env.SIMAB_REKAM_ENABLED || "true").toLowerCase() !== "false",
   rekamUser: (process.env.SIMAB_REKAM_USER || "Bot WhatsApp").trim(),
-  rekamTtlMs: (Number(process.env.SIMAB_REKAM_TTL_MIN) || 10) * 60_000
+  rekamTtlMs: (Number(process.env.SIMAB_REKAM_TTL_MIN) || 10) * 60_000,
+  meteraiMak: (process.env.SIMAB_METERAI_MAK || "").split(",").map((x) => x.trim()).filter(Boolean),
+  meteraiKata: (process.env.SIMAB_METERAI_KATA || "meterai,materai").split(",").map((x) => x.trim().toLowerCase()).filter(Boolean),
+  meteraiUraian: (process.env.SIMAB_METERAI_URAIAN || "Pembelian meterai").trim()
 });
 
 // Pengirim = pemilik? Nomor bisa datang sbg "@s.whatsapp.net" ATAU "@lid"; untuk "@lid"

@@ -10,6 +10,8 @@ import {
   ICON_PIN,
   ICON_PIN_FILLED,
   ICON_BOOK_SMALL,
+  ICON_BOOKMARK,
+  ICON_BOOKMARK_FILLED,
   ICON_EDIT,
   ICON_DOWNLOAD,
   ICON_INFO,
@@ -98,6 +100,11 @@ const els = {
   backBtn: document.getElementById("back-btn"),
   detailDateTitle: document.getElementById("detail-date-title"),
   detailKbBadge: document.getElementById("detail-kb-badge"),
+  detailSavedBadge: document.getElementById("detail-saved-badge"),
+  chatListRetentionNote: document.getElementById("chat-list-retention-note"),
+  chatOptionsSaveBtn: document.getElementById("chat-options-save"),
+  chatOptionsSaveIcon: document.getElementById("chat-options-save-icon"),
+  chatOptionsSaveLabel: document.getElementById("chat-options-save-label"),
   // Layar fitur "WhatsApp di dalam aplikasi" -- lihat wa.js & wa-bot/.
   screenWaList: document.getElementById("screen-wa-list"),
   screenWaDetail: document.getElementById("screen-wa-detail"),
@@ -264,6 +271,12 @@ const state = {
   // jalan, dipakai menu titik-3 (lihat openChatOptions). Default (belum ada
   // entry) dianggap false/OFF -- sengaja opt-in, lihat migrations/0010.
   threadUseKb: new Map(),
+  // id obrolan -> boolean, tanda "Saved" (chat_thread_meta.saved) -- obrolan bertanda ini tidak
+  // ikut dihapus otomatis. threadLastAt: waktu pesan terakhir (ISO) dari server, dipakai
+  // menghitung "Dihapus N hari lagi". retention: { days, activeSince } dari server (null = tidak aktif).
+  threadSaved: new Map(),
+  threadLastAt: new Map(),
+  retention: null,
   // id obrolan -> "auto" | "gemini" | "ollama" -- agen AI pilihan tiap obrolan
   // (disimpan di server, chat_thread_meta.agent; default "auto").
   threadAgent: new Map(),
@@ -449,8 +462,10 @@ function clearChatTitle(id) {
 // dari PERANGKAT LAIN (pin/unpin, ubah judul) ikut kebawa ke sini juga --
 // sebelumnya dua-duanya cuma tersimpan di localStorage per perangkat jadi
 // tidak pernah sinkron sama sekali.
-function applyThreadMetaFromServer(id, pinned, title, useKb, agent) {
+function applyThreadMetaFromServer(id, pinned, title, useKb, agent, saved, lastAt) {
   state.threadUseKb.set(id, !!useKb);
+  state.threadSaved.set(id, !!saved);
+  if (lastAt) state.threadLastAt.set(id, lastAt);
   if (agent === "auto" || agent === "gemini" || agent === "ollama") state.threadAgent.set(id, agent);
 
   if (isPinned(id) !== !!pinned) {
@@ -526,8 +541,44 @@ function fillKbBadge(badge) {
   badge.setAttribute("aria-label", t(state.lang, "chat_kb_badge_title"));
 }
 
+// Penanda "Saved": obrolan ini dikecualikan dari hapus otomatis.
+function fillSavedBadge(badge) {
+  badge.innerHTML = `${ICON_BOOKMARK_FILLED}<span>${t(state.lang, "chat_saved_badge")}</span>`;
+  badge.title = t(state.lang, "chat_saved_badge_title");
+  badge.setAttribute("aria-label", t(state.lang, "chat_saved_badge_title"));
+}
+
+function makeSavedBadge() {
+  const badge = document.createElement("span");
+  badge.className = "chat-saved-badge";
+  fillSavedBadge(badge);
+  return badge;
+}
+
+// Sisa hari sebelum obrolan dihapus otomatis; null = tidak akan dihapus (Saved / fitur belum aktif).
+// Dihitung sama dengan purge_old_chats() di server: batas = max(pesan terakhir, saat aturan dipasang) + days.
+function daysUntilAutoDelete(id) {
+  const r = state.retention;
+  if (!r || !(r.days > 0) || state.threadSaved.get(id)) return null;
+  const last = Date.parse(state.threadLastAt.get(id) || "");
+  const since = Date.parse(r.activeSince || "");
+  const base = Math.max(Number.isFinite(last) ? last : 0, Number.isFinite(since) ? since : 0);
+  if (!base) return null;
+  const ms = base + r.days * 86400000 - Date.now();
+  return ms <= 0 ? 0 : Math.ceil(ms / 86400000);
+}
+
+function expireHintText(id) {
+  const left = daysUntilAutoDelete(id);
+  if (left === null || left > 3) return "";
+  return left <= 0 ? t(state.lang, "chat_expire_today") : t(state.lang, "chat_expire_days").replace("{n}", String(left));
+}
+
 // Chip yang sama di header layar obrolan (hanya tampil bila obrolan aktif memakai dokumen).
 function renderDetailKbBadge() {
+  const saved = !!(state.currentDate && state.threadSaved.get(state.currentDate));
+  els.detailSavedBadge.hidden = !saved;
+  if (saved) fillSavedBadge(els.detailSavedBadge);
   const on = !!(state.currentDate && state.threadUseKb.get(state.currentDate));
   els.detailKbBadge.hidden = !on;
   if (on) fillKbBadge(els.detailKbBadge);
@@ -545,9 +596,25 @@ async function renderChatList() {
     // kode aksesnya memang satu untuk semua perangkat, bukan per-perangkat.
     const threadsResult = await listChatThreads(state.chatCode);
     if (threadsResult.ok) {
+      const serverIds = new Set();
       for (const th of threadsResult.threads || []) {
+        serverIds.add(th.id);
         mergeDiscoveredThread(th.id, th.createdAt);
-        applyThreadMetaFromServer(th.id, th.pinned, th.title, th.useKb, th.agent);
+        applyThreadMetaFromServer(th.id, th.pinned, th.title, th.useKb, th.agent, th.saved, th.lastAt);
+      }
+      state.retention = threadsResult.retention && threadsResult.retention.days > 0 ? threadsResult.retention : null;
+      // Obrolan yang sudah dihapus otomatis di server dibuang juga dari daftar lokal perangkat ini
+      // (obrolan lokal yang baru dibuat < 24 jam dan belum ada pesannya dibiarkan).
+      if (state.retention) {
+        const cutoff = Date.now() - 86400000;
+        for (const th of getFreeformThreads()) {
+          if (serverIds.has(th.id)) continue;
+          if (Date.parse(th.createdAt) < cutoff) {
+            unpinChat(th.id);
+            clearChatTitle(th.id);
+            removeFreeformThread(th.id);
+          }
+        }
       }
     } else if (threadsResult.unauthorized) {
       state.chatCode = "";
@@ -651,11 +718,19 @@ async function renderChatList() {
     }
     dateLabel.textContent = labelText;
     labelWrap.appendChild(dateLabel);
+    if (state.threadSaved.get(entry.id)) labelWrap.appendChild(makeSavedBadge());
     if (state.threadUseKb.get(entry.id)) labelWrap.appendChild(makeKbBadge());
     top.appendChild(labelWrap);
     top.appendChild(timeLabel);
     preview.textContent = previewText;
     bottom.appendChild(preview);
+    const hint = expireHintText(entry.id);
+    if (hint) {
+      const hintEl = document.createElement("span");
+      hintEl.className = "chat-expire-hint";
+      hintEl.textContent = hint;
+      bottom.appendChild(hintEl);
+    }
 
     main.appendChild(top);
     main.appendChild(bottom);
@@ -675,7 +750,15 @@ async function renderChatList() {
     item.appendChild(menuBtn);
     item.dataset.search = `${labelText} ${previewText}`.toLowerCase();
     if (state.threadUseKb.get(entry.id)) item.dataset.kb = "1";
+    if (state.threadSaved.get(entry.id)) item.dataset.saved = "1";
     els.chatList.appendChild(item);
+  }
+
+  if (state.retention) {
+    els.chatListRetentionNote.textContent = t(state.lang, "chat_retention_note").replace("{n}", String(state.retention.days));
+    els.chatListRetentionNote.hidden = false;
+  } else {
+    els.chatListRetentionNote.hidden = true;
   }
 
   applyChatListFilter();
@@ -1766,6 +1849,11 @@ function openChatOptions(id) {
   const pinned = isPinned(id);
   els.chatOptionsPinIcon.innerHTML = pinned ? ICON_PIN_FILLED : ICON_PIN;
   els.chatOptionsPinLabel.textContent = t(state.lang, pinned ? "chat_options_unpin" : "chat_options_pin");
+
+  const saved = state.threadSaved.get(id) || false;
+  els.chatOptionsSaveIcon.innerHTML = saved ? ICON_BOOKMARK_FILLED : ICON_BOOKMARK;
+  els.chatOptionsSaveLabel.textContent = t(state.lang, saved ? "chat_options_unsave" : "chat_options_save");
+  els.chatOptionsSaveBtn.classList.toggle("sheet-action--active", saved);
 
   const useKb = state.threadUseKb.get(id) || false;
   els.chatOptionsKbIcon.innerHTML = ICON_DOC;
@@ -2962,6 +3050,34 @@ function wireEvents() {
     }
 
     await refreshAfterChatMutation(id);
+  });
+
+  // Tanda "Saved": wajib tersimpan di server (yang menjalankan hapus otomatis), jadi butuh kode akses.
+  els.chatOptionsSaveBtn.addEventListener("click", async () => {
+    const id = state.activeOptionsId;
+    if (!id) return;
+    if (!requireChatCodeOrPrompt("need_code_saved")) return;
+    closeChatOptions();
+
+    const nextSaved = !(state.threadSaved.get(id) || false);
+    state.threadSaved.set(id, nextSaved);
+    renderDetailKbBadge();
+
+    const result = await setThreadMeta(id, state.chatCode, { saved: nextSaved });
+    if (!result.ok) {
+      state.threadSaved.set(id, !nextSaved);
+      renderDetailKbBadge();
+      if (result.unauthorized) {
+        state.chatCode = "";
+        clearStoredChatCode();
+      }
+      alertWithDetail("saved_sync_error", result);
+      return;
+    }
+
+    if (!els.screenList.hidden) {
+      await renderChatList();
+    }
   });
 
   // Toggle "Pakai Dokumen Pengetahuan" -- beda dari Sematkan/Ubah Judul,

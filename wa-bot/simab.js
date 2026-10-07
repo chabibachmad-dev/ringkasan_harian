@@ -41,7 +41,10 @@ export const SIMAB_HELP = `🏛️ *Perintah SiMAB*
 • *simab sbm <kota>* — tarif SBM
 • *simab rpd* — RPD vs realisasi per bulan (atau: simab rpd oktober)
 • *simab rekam <seksi>* — rekam kegiatan baru (status "Rekam Data"): pilih kelompok POK, pilih kode MAK, lalu kirim uraian, tanggal dokumen, jumlah
-  seksi: ${SEKSI.join(", ")}
+  seksi: ${SEKSI.join(", ")}; saat memilih, ketik *cari <kata>* untuk menyaring (mis. cari listrik)
+• *simab rekam <kata uraian MAK>* — pintasan tanpa pilih seksi: cari kode MAK dari uraian/kode di semua seksi (mis. *simab rekam listrik*); *simab rekam listrik; 1.500.000* langsung ke konfirmasi (opsional: *; uraian; tanggal*)
+• *simab meterai* — tampilkan data MAK meterai lalu rekam; *simab meterai 120.000* langsung ke konfirmasi (opsional: *simab meterai 120rb; uraian; tanggal*)
+• *simab ubah* / *simab hapus* [id] — koreksi atau hapus kegiatan yang direkam lewat bot (selama masih "Rekam Data")
 
 Tambahkan tahun di akhir untuk tahun lain, mis. *simab pagu 521111 2025*.
 Kalimat bebas juga boleh (dibaca model lokal, ±1 menit).`;
@@ -80,6 +83,8 @@ const ALIASES = {
   sbm: "sbm", tarif: "sbm",
   rpd: "rpd",
   rekam: "rekam", input: "rekam", catat: "rekam",
+  meterai: "meterai", materai: "meterai",
+  ubah: "ubah", edit: "ubah", koreksi: "ubah", hapus: "hapus", delete: "hapus",
   bantuan: "bantuan", help: "bantuan", menu: "bantuan", "?": "bantuan"
 };
 
@@ -146,6 +151,9 @@ export function createSimab({
   rekamEnabled = true,
   rekamUser = "Bot WhatsApp",
   rekamTtlMs = 10 * 60_000,
+  meteraiMak = [],
+  meteraiKata = ["meterai", "materai"],
+  meteraiUraian = "Pembelian meterai",
   now = Date.now
 }) {
   const enabled = Boolean(url && anonKey && email && password);
@@ -485,7 +493,10 @@ export function createSimab({
     today: todayIso,
     user: rekamUser,
     ttlMs: rekamTtlMs,
-    now
+    now,
+    meteraiMak,
+    meteraiKata,
+    meteraiUraian
   });
 
   async function dispatch(aksi, rawArg, tahunOverride, sessionKey = null) {
@@ -494,6 +505,16 @@ export function createSimab({
       if (!rekamEnabled) return "Perekaman lewat WhatsApp dimatikan (SIMAB_REKAM_ENABLED=false).";
       if (!sessionKey) return "Perekaman hanya bisa dari chat pemilik.";
       return rekamFlow.start(sessionKey, rawArg, tahunOverride);
+    }
+    if (aksi === "meterai") {
+      if (!rekamEnabled) return "Perekaman lewat WhatsApp dimatikan (SIMAB_REKAM_ENABLED=false).";
+      if (!sessionKey) return "Perekaman hanya bisa dari chat pemilik.";
+      return rekamFlow.startMeterai(sessionKey, rawArg, tahunOverride);
+    }
+    if (aksi === "ubah" || aksi === "hapus") {
+      if (!rekamEnabled) return "Perekaman lewat WhatsApp dimatikan (SIMAB_REKAM_ENABLED=false).";
+      if (!sessionKey) return "Perintah ini hanya bisa dari chat pemilik.";
+      return rekamFlow.startManage(sessionKey, aksi, rawArg, tahunOverride);
     }
     const arg = aksi === "rpd" ? rawArg : cleanArg(rawArg);
     if (aksi === "sbm") return cmdSbm(arg);

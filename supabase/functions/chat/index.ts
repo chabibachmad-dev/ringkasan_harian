@@ -35,7 +35,11 @@
 //     (hapus semua chat_messages buat obrolan ini -- dipakai menu titik-3
 //     "Hapus chat".)
 //   { "code": "...", "action": "list_threads" }
-//     -> { ok: true, threads: [{ id, createdAt, pinned, title, useKb, agent }, ...] }
+//     -> { ok: true, threads: [{ id, createdAt, lastAt, pinned, saved, title, useKb, agent }, ...],
+//          retention: { days, activeSince } }
+//     (saved = tanda "Saved": obrolan tanpa tanda ini dihapus otomatis bila pesan
+//     terakhirnya lebih tua dari retention.days hari -- lihat migrations/0018 &
+//     purgeOldChats() di bawah. Penghapusan juga dijalankan tiap kali action ini dipanggil.)
 //     (semua ID obrolan yang PERNAH punya minimal 1 pesan, diambil dari
 //     server -- bukan dari localStorage perangkat. Dipakai supaya daftar
 //     obrolan ikut muncul walau dibuka dari perangkat lain dengan kode akses
@@ -43,8 +47,8 @@
 //     pinned/title/useKb diambil dari tabel chat_thread_meta supaya status
 //     sematan, judul custom, & toggle Dokumen Pengetahuan ikut sinkron ke
 //     semua perangkat juga.)
-//   { "code": "...", "date": "...", "action": "set_thread_meta", "pinned"?: bool, "title"?: string|null, "useKb"?: bool, "agent"?: "auto"|"gemini"|"ollama" }
-//     -> { ok: true, pinned: bool, title: string|null, useKb: bool, agent: string }
+//   { "code": "...", "date": "...", "action": "set_thread_meta", "pinned"?: bool, "saved"?: bool, "title"?: string|null, "useKb"?: bool, "agent"?: "auto"|"gemini"|"ollama" }
+//     -> { ok: true, pinned: bool, saved: bool, title: string|null, useKb: bool, agent: string }
 //     (simpan status sematan (pin), judul custom, dan/atau toggle "pakai
 //     Dokumen Pengetahuan" satu obrolan ke tabel chat_thread_meta -- kirim
 //     cuma field yang berubah, field yang tidak dikirim tidak akan diubah.
@@ -123,6 +127,22 @@ import {
 const FREEFORM_RE = /^freeform-[0-9a-fA-F-]{36}$/;
 function isValidThreadId(id: string): boolean {
   return FREEFORM_RE.test(id);
+}
+// Hapus otomatis obrolan lama yang tidak bertanda Saved (fungsi SQL purge_old_chats,
+// migrations/0018). Dijalankan paling sering sekali per 10 menit per instance; gagal
+// (mis. migrasi belum dijalankan) tidak boleh mengganggu request.
+let lastPurgeAt = 0;
+// deno-lint-ignore no-explicit-any
+async function purgeOldChats(admin: any) {
+  const nowMs = Date.now();
+  if (nowMs - lastPurgeAt < 10 * 60_000) return;
+  lastPurgeAt = nowMs;
+  try {
+    const { error } = await admin.rpc("purge_old_chats");
+    if (error) console.warn("purge_old_chats gagal:", error.message);
+  } catch (err) {
+    console.warn("purge_old_chats error:", err);
+  }
 }
 const MAX_MESSAGE_LENGTH = 4000;
 // Lampiran file per obrolan (teks hasil ekstrak di browser).
@@ -283,6 +303,7 @@ Deno.serve(async (req) => {
   }
 
   if (body.action === "list_threads") {
+    await purgeOldChats(supabaseAdmin);
     // Ambil chat_date + created_at SEMUA baris, urut dari paling lama --
     // baris pertama yang ditemui per chat_date otomatis jadi "pesan
     // pertama"-nya, dipakai sebagai createdAt thread itu. Dibatasi 5000 baris
@@ -297,8 +318,10 @@ Deno.serve(async (req) => {
     if (error) return json({ ok: false, error: error.message }, 500);
 
     const firstSeen: Record<string, string> = {};
+    const lastSeen: Record<string, string> = {};
     for (const row of data ?? []) {
       if (!firstSeen[row.chat_date]) firstSeen[row.chat_date] = row.created_at;
+      lastSeen[row.chat_date] = row.created_at; // urut menaik: yang terakhir ditemui = terbaru
     }
     const ids = Object.keys(firstSeen).filter((id) => isValidThreadId(id));
 
@@ -306,28 +329,40 @@ Deno.serve(async (req) => {
     // semua thread ini sekaligus -- supaya pin/rename/toggle yang dilakukan
     // dari PERANGKAT LAIN ikut kebawa ke sini juga (sebelumnya cuma
     // tersimpan di localStorage per perangkat).
-    const metaById: Record<string, { pinned: boolean; title: string | null; useKb: boolean; agent: AgentName }> = {};
+    const metaById: Record<string, { pinned: boolean; saved: boolean; title: string | null; useKb: boolean; agent: AgentName }> = {};
     if (ids.length > 0) {
-      const { data: metaRows, error: metaErr } = await supabaseAdmin
+      let { data: metaRows, error: metaErr } = await supabaseAdmin
         .from("chat_thread_meta")
-        .select("id, pinned, title, use_kb, agent")
+        .select("id, pinned, saved, title, use_kb, agent")
         .in("id", ids);
+      if (metaErr && /saved/i.test(metaErr.message)) {
+        // Migrasi 0018 belum dijalankan (kolom `saved` belum ada): tetap tampilkan daftar tanpa tanda Saved.
+        ({ data: metaRows, error: metaErr } = await supabaseAdmin.from("chat_thread_meta").select("id, pinned, title, use_kb, agent").in("id", ids));
+      }
       if (metaErr) return json({ ok: false, error: metaErr.message }, 500);
       for (const row of metaRows ?? []) {
-        metaById[row.id] = { pinned: !!row.pinned, title: row.title ?? null, useKb: !!row.use_kb, agent: parseAgent(row.agent) };
+        metaById[row.id] = { pinned: !!row.pinned, saved: !!row.saved, title: row.title ?? null, useKb: !!row.use_kb, agent: parseAgent(row.agent) };
       }
     }
 
     const threads = ids.map((id) => ({
       id,
       createdAt: firstSeen[id],
+      lastAt: lastSeen[id] ?? firstSeen[id],
       pinned: metaById[id]?.pinned ?? false,
+      saved: metaById[id]?.saved ?? false,
       title: metaById[id]?.title ?? null,
       useKb: metaById[id]?.useKb ?? false,
       agent: metaById[id]?.agent ?? "auto"
     }));
 
-    return json({ ok: true, threads });
+    // Aturan hapus otomatis (tabel opsional: kalau migrasi 0018 belum dijalankan, retention = null
+    // dan aplikasi tidak menampilkan hitung mundur).
+    let retention: { days: number; activeSince: string } | null = null;
+    const { data: retRow } = await supabaseAdmin.from("chat_retention_settings").select("days, active_since").eq("id", "main").maybeSingle();
+    if (retRow) retention = { days: Number(retRow.days), activeSince: retRow.active_since };
+
+    return json({ ok: true, threads, retention });
   }
 
   if (body.action === "set_thread_meta") {
@@ -337,21 +372,23 @@ Deno.serve(async (req) => {
     }
 
     const pinnedProvided = typeof body.pinned === "boolean";
+    const savedProvided = typeof body.saved === "boolean";
     const titleProvided = body.title !== undefined;
     const useKbProvided = typeof body.useKb === "boolean";
     const agentProvided = body.agent === "auto" || body.agent === "gemini" || body.agent === "ollama";
-    if (!pinnedProvided && !titleProvided && !useKbProvided && !agentProvided) {
-      return json({ ok: false, error: "Tidak ada perubahan (pinned/title/useKb/agent) yang dikirim." }, 400);
+    if (!pinnedProvided && !savedProvided && !titleProvided && !useKbProvided && !agentProvided) {
+      return json({ ok: false, error: "Tidak ada perubahan (pinned/saved/title/useKb/agent) yang dikirim." }, 400);
     }
 
     const { data: existing, error: fetchErr } = await supabaseAdmin
       .from("chat_thread_meta")
-      .select("pinned, title, use_kb, agent")
+      .select("pinned, saved, title, use_kb, agent")
       .eq("id", date0)
       .maybeSingle();
     if (fetchErr) return json({ ok: false, error: fetchErr.message }, 500);
 
     const nextPinned = pinnedProvided ? !!body.pinned : existing?.pinned ?? false;
+    const nextSaved = savedProvided ? !!body.saved : existing?.saved ?? false;
     const rawTitle = titleProvided ? body.title : existing?.title ?? null;
     const nextTitle = typeof rawTitle === "string" && rawTitle.trim() ? rawTitle.trim() : null;
     const nextUseKb = useKbProvided ? !!body.useKb : existing?.use_kb ?? false;
@@ -359,10 +396,10 @@ Deno.serve(async (req) => {
 
     const { error: upsertErr } = await supabaseAdmin
       .from("chat_thread_meta")
-      .upsert({ id: date0, pinned: nextPinned, title: nextTitle, use_kb: nextUseKb, agent: nextAgent, updated_at: new Date().toISOString() });
+      .upsert({ id: date0, pinned: nextPinned, saved: nextSaved, title: nextTitle, use_kb: nextUseKb, agent: nextAgent, updated_at: new Date().toISOString() });
     if (upsertErr) return json({ ok: false, error: upsertErr.message }, 500);
 
-    return json({ ok: true, pinned: nextPinned, title: nextTitle, useKb: nextUseKb, agent: nextAgent });
+    return json({ ok: true, pinned: nextPinned, saved: nextSaved, title: nextTitle, useKb: nextUseKb, agent: nextAgent });
   }
 
   if (body.action === "key_status") {

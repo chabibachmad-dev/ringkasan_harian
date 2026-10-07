@@ -240,3 +240,9 @@ Aplikasi ini didesain untuk dipakai sendiri, tanpa sistem login (supaya tetap si
 - **Gemini API free tier**: ada batas jumlah request per hari/menit (cek kuota terbaru di https://ai.google.dev/gemini-api/docs/rate-limits). Untuk 1x panggilan per hari, jauh di bawah batas normal.
 - **Supabase free tier**: Edge Function invocations & pg_cron termasuk gratis dalam batas wajar untuk 1x request/hari.
 - **RSS feed**: gratis, tidak perlu API key, tapi kalau media sumber mengubah struktur RSS mereka, parser sederhana di `rss-parser.ts` mungkin perlu disesuaikan.
+
+## Hapus otomatis obrolan (7 hari) & tanda Saved
+
+Obrolan di *Chat dengan AI* yang **tidak ditandai Saved** dihapus otomatis bila pesan terakhirnya lebih tua dari 7 hari (beserta lampiran, metadata, dan antrean job-nya). Tandai lewat menu titik tiga > **Simpan (Saved)**; obrolan Saved tampil dengan lencana "Saved" dan tidak pernah dihapus otomatis. Obrolan yang akan segera dihapus menampilkan "Dihapus N hari lagi" (3 hari terakhir). Sematan (pin) TIDAK mengecualikan penghapusan; hanya Saved.
+
+Pasang: jalankan `supabase/migrations/0018_chat_saved_retention.sql` di SQL Editor **sebelum** men-deploy Edge Function `chat` yang baru (menambah kolom `saved`, tabel `chat_retention_settings`, dan fungsi `purge_old_chats()`). Penghapusan jalan tiap jam lewat pg_cron bila aktif, dan juga otomatis saat daftar obrolan dibuka. **Masa tenggang:** aturan baru efektif 7 hari setelah migrasi dijalankan, supaya obrolan lama sempat ditandai Saved. Ubah lama simpan: `update public.chat_retention_settings set days = 14 where id = 'main';` — matikan praktis dengan `days = 3650`.

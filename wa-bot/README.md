@@ -335,18 +335,30 @@ Users), (2) jalankan `simab-bot-readonly.sql` di SQL Editor SiMAB agar akun itu 
 menulis dan tidak bisa membaca tabel pegawai, (3) isi `SIMAB_*` di `.env`, (4)
 `pm2 restart wa-bot`. Bot selalu menyaring `kantor_id` = `SIMAB_KANTOR_ID`.
 
-### Merekam kegiatan lewat WhatsApp (`simab rekam`)
+### Merekam, mengubah, dan menghapus kegiatan lewat WhatsApp
 
 Hanya dari nomor pemilik. Seksi: Umum, PKN, PN, HI, KI, Lelang, Penilaian.
 
 1. `simab rekam Umum` -> daftar **kelompok POK** milik seksi itu (3 segmen kode, mis. `4701.EBA.002 Kerumahtanggaan`). Balas angkanya.
 2. Daftar **kode MAK paling panjang** (yang tidak punya turunan) di kelompok itu, dengan pagu dan sisa. Balas angkanya. Pindah halaman dengan `lanjut` / `balik`, kembali ke kelompok dengan `kembali`.
+   **Pencarian cepat:** ketik `cari <kata>` (semua kata harus ada; mencari di kode dan uraian). Dari daftar kelompok, `cari listrik` langsung mencari di seluruh kode MAK seksi itu; di dalam daftar kode, `cari` menyaring daftar dan angka mengikuti hasil saringan. `semua` (atau `cari` saja) menghapus saringan.
 3. Kirim **tiga baris dalam satu pesan**: uraian, tanggal dokumen, jumlah. Tanggal: `5/10/2026`, `5 okt 2026`, `hari ini`. Jumlah: `1.500.000`, `1,5jt`, `500rb`.
 4. Bot menampilkan ringkasan. Kalau jumlah melebihi sisa pagu, ada peringatan. Balas `ya` untuk menyimpan, `ubah` untuk isi ulang, atau `batal`.
 
+**Mengubah / menghapus.** `simab ubah` atau `simab hapus` menampilkan hingga 10 kegiatan terbaru yang **direkam lewat bot** dan masih berstatus Rekam Data (boleh langsung `simab ubah <id>` / `simab hapus <id>`). Pilih angkanya, lalu:
+
+- ubah sebagian: ketik `uraian ...`, `tanggal ...`, atau `jumlah ...` (boleh beberapa baris), atau kirim 3 baris (uraian, tanggal, jumlah) untuk mengganti semuanya. Bot menampilkan sebelum → sesudah (dan peringatan bila jumlah baru melewati sisa pagu); balas `ya` untuk menyimpan.
+- hapus: ketik `hapus` di tahap ubah, atau pilih dari `simab hapus`; konfirmasi harus persis `ya hapus`.
+
+Kegiatan buatan aplikasi web, atau yang statusnya sudah bukan Rekam Data, **tidak bisa** diubah/dihapus dari WhatsApp. Salinan data sebelum diubah/dihapus tersimpan di tabel `bot_rekam_log` (kolom `snapshot`) untuk pemulihan manual. Kegiatan yang direkam bot SEBELUM versi SQL ini dipasang perlu didaftarkan dulu (lihat blok "Opsional" di akhir `simab-bot-rekam.sql`).
+
+**Pintasan semua MAK.** Selain nama seksi, `simab rekam <kata>` mencari kode MAK terpanjang dari kata di **kode atau uraian** di semua seksi (semua kata harus ada), mis. `simab rekam listrik`. Satu hasil langsung menampilkan Pagu/Blokir/Realisasi/Sisa; banyak hasil tampil sebagai daftar bernomor (pagu = gabungan semua seksi). Lalu kirim **jumlah saja** (uraian bawaan = uraian MAK itu, tanggal hari ini) atau 3 baris biasa. Langsung ke konfirmasi: `simab rekam listrik; 1.500.000` atau `simab rekam listrik; 1,5jt; Listrik September; 3/10/2026` (urutan: kata; jumlah; uraian; tanggal; uraian & tanggal opsional). Gunakan `;` untuk memisahkan. Nama seksi tetap mengikuti alur seksi. `simab meterai` adalah pintasan khusus dengan kata kunci dan uraian bawaan sendiri.
+
+**Meterai.** `simab rekam meterai` langsung menampilkan data MAK meterai (pagu, blokir, realisasi, sisa), lalu kirim **jumlah saja** (uraian "Pembelian meterai", tanggal hari ini) atau 3 baris seperti biasa. Pintasan: `simab meterai 120.000` langsung ke konfirmasi; lengkapnya `simab meterai 120rb; uraian; 5/10/2026` (uraian dan tanggal opsional). Kode MAK meterai dideteksi otomatis dari kode terpanjang yang uraiannya memuat "meterai"/"materai"; kalau ada lebih dari satu, bot menampilkan daftar untuk dipilih. Bila deteksi salah, tetapkan `SIMAB_METERAI_MAK=<kode>` (boleh beberapa, pisah koma). Variabel lain: `SIMAB_METERAI_KATA`, `SIMAB_METERAI_URAIAN`. Tidak perlu SQL baru. Catatan: `simab meterai 2000` di akhir perintah bisa terbaca sebagai override tahun anggaran; tulis `2.000` atau `2rb` untuk jumlah.
+
 Status otomatis **Rekam Data**; kolom `tgl_st` diisi tanggal dokumen, `tgl_rekam` hari ini, `user` dari `SIMAB_REKAM_USER`; id 10 huruf/angka acak dibuat di database. Sesi kedaluwarsa 10 menit tanpa balasan (`SIMAB_REKAM_TTL_MIN`).
 
-**Keamanan.** Akun bot tetap baca-saja di semua tabel. Penulisan hanya lewat fungsi database `bot_rekam_kegiatan` (`simab-bot-rekam.sql`, jalankan di SQL Editor **SiMAB** setelah `simab-bot-readonly.sql`): fungsi itu hanya bisa dipanggil akun bot, hanya menambah satu baris berstatus Rekam Data, memeriksa ulang bahwa kode ada di POK satker+tahun itu dan merupakan kode terpanjang, dan menolak baris identik yang direkam kurang dari 10 menit lalu. Kalimat bebas (model lokal) tidak pernah bisa memulai perekaman; hanya perintah `simab rekam ...` yang tertulis. Matikan fitur dengan `SIMAB_REKAM_ENABLED=false`.
+**Keamanan.** Akun bot tetap baca-saja di semua tabel. Penulisan hanya lewat fungsi database `bot_rekam_kegiatan`, `bot_ubah_kegiatan`, `bot_hapus_kegiatan` (+ `bot_daftar_rekam` untuk membaca daftar) di `simab-bot-rekam.sql` (jalankan di SQL Editor **SiMAB** setelah `simab-bot-readonly.sql`; aman diulang, jalankan ulang untuk memperbarui). Fungsi-fungsi itu hanya bisa dipanggil akun bot; rekam hanya menambah satu baris berstatus Rekam Data, memeriksa ulang bahwa kode ada di POK satker+tahun itu dan merupakan kode terpanjang, dan menolak baris identik yang direkam kurang dari 10 menit lalu; ubah/hapus hanya menyentuh baris yang tercatat di `bot_rekam_log` dan masih berstatus Rekam Data. Kalimat bebas (model lokal) tidak pernah bisa memulai perekaman; hanya perintah `simab rekam ...` yang tertulis. Matikan fitur dengan `SIMAB_REKAM_ENABLED=false`.
 
 Tes: `node test-simab-rekam.mjs`.
 

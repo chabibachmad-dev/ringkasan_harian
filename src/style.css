@@ -343,6 +343,56 @@ mark.chat-search-hit--active {
   display: none;
 }
 
+/* Penanda "Saved": outline (beda dari chip "Dokumen" yang solid). */
+.chat-saved-badge {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 8px 1px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--accent);
+  background: transparent;
+  color: var(--text);
+  font-size: 0.66rem;
+  font-weight: 700;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+.chat-saved-badge svg {
+  width: 11px;
+  height: 11px;
+}
+
+.chat-saved-badge[hidden] {
+  display: none;
+}
+
+/* "Dihapus N hari lagi" di baris bawah item daftar. */
+.chat-expire-hint {
+  flex-shrink: 0;
+  margin-left: 8px;
+  font-size: 0.66rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  border: 1px dashed var(--border);
+  border-radius: 999px;
+  padding: 0 7px;
+  white-space: nowrap;
+}
+
+.chat-retention-note {
+  margin: 12px 4px 0;
+  font-size: 0.74rem;
+  color: var(--text-muted);
+  line-height: 1.45;
+}
+
+.chat-retention-note[hidden] {
+  display: none;
+}
+
 .chat-list-pin-icon {
   flex-shrink: 0;
   display: inline-flex;

@@ -111,6 +111,7 @@
           <section class="chat-list-section">
             <div id="chat-list" class="chat-list"></div>
             <div id="chat-list-status" class="status-text" hidden></div>
+            <p id="chat-list-retention-note" class="chat-retention-note" hidden></p>
           </section>
         </main>
 
@@ -134,6 +135,7 @@
           <div class="detail-topbar-row">
             <button id="back-btn" class="icon-btn" title="Kembali" aria-label="Kembali">←</button>
             <h1 id="detail-date-title" class="detail-title"></h1>
+            <span id="detail-saved-badge" class="chat-saved-badge" hidden></span>
             <span id="detail-kb-badge" class="chat-kb-badge" hidden></span>
             <button id="chat-search-toggle" class="icon-btn" title="Cari di obrolan ini" aria-label="Cari di obrolan ini">
               <span id="chat-search-toggle-icon"></span>
@@ -388,6 +390,10 @@
           <button type="button" id="chat-options-pin" class="sheet-action">
             <span id="chat-options-pin-icon" class="sheet-action-icon"></span>
             <span id="chat-options-pin-label"></span>
+          </button>
+          <button type="button" id="chat-options-save" class="sheet-action">
+            <span id="chat-options-save-icon" class="sheet-action-icon"></span>
+            <span id="chat-options-save-label"></span>
           </button>
           <button type="button" id="chat-options-kb" class="sheet-action">
             <span id="chat-options-kb-icon" class="sheet-action-icon"></span>

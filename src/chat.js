@@ -108,9 +108,11 @@ export function listChatThreads(code) {
 // disertakan tidak akan diubah di server. title: null/"" berarti "pakai
 // judul default lagi". useKb default false (opt-in) -- lihat komentar di
 // Edge Function chat/index.ts migrations/0010 kenapa ini sengaja opt-in.
-export function setThreadMeta(id, code, { pinned, title, useKb, agent } = {}) {
+export function setThreadMeta(id, code, { pinned, saved, title, useKb, agent } = {}) {
   const payload = { code, date: id, action: "set_thread_meta" };
   if (typeof pinned === "boolean") payload.pinned = pinned;
+  // saved = tanda "Saved": obrolan bertanda ini tidak ikut dihapus otomatis setelah 7 hari (migrations/0018).
+  if (typeof saved === "boolean") payload.saved = saved;
   if (title !== undefined) payload.title = title;
   if (typeof useKb === "boolean") payload.useKb = useKb;
   if (agent === "auto" || agent === "gemini" || agent === "ollama") payload.agent = agent;
