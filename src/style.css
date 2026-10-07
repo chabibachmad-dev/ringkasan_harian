@@ -322,6 +322,27 @@ mark.chat-search-hit--active {
   background: var(--notify-bg);
 }
 
+/* Penanda "Dokumen": obrolan ini memakai Dokumen Pengetahuan. */
+.chat-kb-badge {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 8px 1px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: var(--accent-contrast);
+  font-size: 0.66rem;
+  font-weight: 700;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+.chat-kb-badge[hidden] {
+  display: none;
+}
+
 .chat-list-pin-icon {
   flex-shrink: 0;
   display: inline-flex;

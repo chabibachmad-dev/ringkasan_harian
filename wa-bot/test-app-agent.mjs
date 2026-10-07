@@ -1,7 +1,7 @@
 // Tes worker agen aplikasi dengan Supabase & Ollama palsu (tanpa jaringan sungguhan).
 //   node test-app-agent.mjs
 import http from "node:http";
-import { createAppAgentWorker, wantsWholeDocument, pickEvenly } from "./app-agent.js";
+import { createAppAgentWorker, wantsWholeDocument, pickEvenly, compactHistory } from "./app-agent.js";
 
 let fails = 0;
 const check = (c, m) => { if (!c) { fails++; console.log("FAIL:", m); } else console.log("ok:", m); };
@@ -124,6 +124,34 @@ check(JSON.stringify(pickEvenly([1,2,3,4,5,6,7,8,9,10], 3)) === "[1,6,10]" && pi
   check(calls.length === 1 && calls[0].messages[0].role === "system" && calls[0].messages.at(-1).content === "pertanyaan baru", "prompt: system + riwayat, pertanyaan terakhir");
   check(!calls[0].messages.at(-1).content.includes("KONTEKS DOKUMEN"), "tanpa KB tidak ada konteks dokumen");
   check(calls[0].opts.numCtx === 8192 && calls[0].opts.maxTokens === 700, "num_ctx 8192 & max output 700 utk chat aplikasi");
+}
+
+
+// 2b. Riwayat dipangkas saat KB aktif + kemajuan penulisan dilaporkan
+{
+  check(JSON.stringify(compactHistory([{role:"user",content:"a"},{role:"assistant",content:"x".repeat(50)},{role:"user",content:"b"}], 2, 10).map((m)=>m.content.length)) === "[10,1]", "compactHistory: ambil N terakhir, balasan lama dipotong, pertanyaan terakhir utuh");
+  const { tables, calls, w } = setup({ cfg: { docHistoryLimit: 4, docHistoryClipChars: 20 } });
+  tables.chat_thread_meta[0].use_kb = true;
+  tables.chat_messages.length = 0;
+  for (let i = 0; i < 10; i += 1) {
+    tables.chat_messages.push({ id: `h${i}`, chat_date: "freeform-x", role: i % 2 ? "assistant" : "user", content: i % 2 ? "J".repeat(500) : `tanya ${i}`, created_at: `2026-01-01T00:00:${String(10 + i).padStart(2, "0")}Z` });
+  }
+  tables.chat_messages.push({ id: "hq", chat_date: "freeform-x", role: "user", content: "pertanyaan baru", created_at: "2026-01-01T00:01:00Z" });
+  await w.tick();
+  const msgs = calls.at(-1).messages;
+  check(tables.agent_jobs[0].status === "done", "KB + riwayat panjang: job selesai");
+  check(msgs.length === 1 + 4, `KB aktif: system + 4 pesan terakhir saja (aktual ${msgs.length})`);
+  check(msgs.slice(1, -1).filter((m) => m.role === "assistant").every((m) => m.content.length <= 20), "KB aktif: balasan lama asisten dipotong");
+  check(msgs.at(-1).content.startsWith("pertanyaan baru"), "KB aktif: pertanyaan terakhir utuh");
+  check(typeof calls.at(-1).opts.onToken === "function", "onToken diteruskan ke Ollama untuk laporan kemajuan");
+}
+{
+  const { tables, calls, w } = setup();
+  tables.chat_messages.length = 0;
+  for (let i = 0; i < 9; i += 1) tables.chat_messages.push({ id: `h${i}`, chat_date: "freeform-x", role: i % 2 ? "assistant" : "user", content: `p${i}`, created_at: `2026-01-01T00:00:${String(10 + i).padStart(2, "0")}Z` });
+  tables.chat_messages.push({ id: "hq", chat_date: "freeform-x", role: "user", content: "pertanyaan baru", created_at: "2026-01-01T00:01:00Z" });
+  await w.tick();
+  check(calls.at(-1).messages.length === 1 + 10, "tanpa KB riwayat tetap penuh (batas historyLimit 12)");
 }
 
 // 3. RAG (KB aktif, pertanyaan spesifik)

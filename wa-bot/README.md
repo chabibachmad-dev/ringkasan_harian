@@ -494,6 +494,15 @@ Pengaman RAM:
 
 Tes: `node test-ollama-queue.mjs`.
 
+### Jawaban dokumen lama / "Gagal hubungi Ollama" setelah 5 menit
+
+Di laptop CPU-only, prompt besar (potongan dokumen + riwayat) butuh waktu: membaca prompt sekitar 20 token/detik dan menulis sekitar 4,5 token/detik. Dua hal sudah ditangani:
+
+- Panggilan ke Ollama kini lewat `ollama-http.js` (node:http + stream), bukan `fetch` bawaan Node yang memutus request setelah **300 detik** dengan pesan "fetch failed". Batas sekarang hanya `OLLAMA_CHAT_TIMEOUT_MS` (default 10 menit). Pesan gagal juga lebih jelas: "tidak merespons (timeout)", "koneksi terputus" (biasanya Ollama berhenti karena RAM), atau "Gagal hubungi Ollama" (server memang mati).
+- Saat Dokumen Pengetahuan atau lampiran aktif, riwayat obrolan dipangkas ke `OLLAMA_DOC_HISTORY_LIMIT` pesan terakhir (default 4) dan balasan lama dipotong ke `OLLAMA_DOC_HISTORY_CLIP_CHARS` karakter (default 700), supaya prompt tidak membengkak. Aplikasi menampilkan kemajuan "Menulis jawaban (N token)".
+
+Tes: `node test-ollama-http.mjs`.
+
 ## Troubleshooting
 
 - **QR tidak muncul / bot langsung error network** -- cek koneksi internet;

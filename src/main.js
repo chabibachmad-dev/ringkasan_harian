@@ -9,6 +9,7 @@ import {
   ICON_DOTS,
   ICON_PIN,
   ICON_PIN_FILLED,
+  ICON_BOOK_SMALL,
   ICON_EDIT,
   ICON_DOWNLOAD,
   ICON_INFO,
@@ -96,6 +97,7 @@ const els = {
   screenDetail: document.getElementById("screen-detail"),
   backBtn: document.getElementById("back-btn"),
   detailDateTitle: document.getElementById("detail-date-title"),
+  detailKbBadge: document.getElementById("detail-kb-badge"),
   // Layar fitur "WhatsApp di dalam aplikasi" -- lihat wa.js & wa-bot/.
   screenWaList: document.getElementById("screen-wa-list"),
   screenWaDetail: document.getElementById("screen-wa-detail"),
@@ -509,6 +511,28 @@ function applyChatListFilter() {
   });
 }
 
+// Penanda kecil "Dokumen" untuk obrolan yang memakai Dokumen Pengetahuan,
+// supaya kelihatan dari luar tanpa membuka menu titik-3.
+function makeKbBadge() {
+  const badge = document.createElement("span");
+  badge.className = "chat-kb-badge";
+  fillKbBadge(badge);
+  return badge;
+}
+
+function fillKbBadge(badge) {
+  badge.innerHTML = `${ICON_BOOK_SMALL}<span>${t(state.lang, "chat_kb_badge")}</span>`;
+  badge.title = t(state.lang, "chat_kb_badge_title");
+  badge.setAttribute("aria-label", t(state.lang, "chat_kb_badge_title"));
+}
+
+// Chip yang sama di header layar obrolan (hanya tampil bila obrolan aktif memakai dokumen).
+function renderDetailKbBadge() {
+  const on = !!(state.currentDate && state.threadUseKb.get(state.currentDate));
+  els.detailKbBadge.hidden = !on;
+  if (on) fillKbBadge(els.detailKbBadge);
+}
+
 async function renderChatList() {
   els.chatListStatus.hidden = false;
   els.chatListStatus.textContent = t(state.lang, "loading");
@@ -627,6 +651,7 @@ async function renderChatList() {
     }
     dateLabel.textContent = labelText;
     labelWrap.appendChild(dateLabel);
+    if (state.threadUseKb.get(entry.id)) labelWrap.appendChild(makeKbBadge());
     top.appendChild(labelWrap);
     top.appendChild(timeLabel);
     preview.textContent = previewText;
@@ -649,6 +674,7 @@ async function renderChatList() {
     item.appendChild(mainBtn);
     item.appendChild(menuBtn);
     item.dataset.search = `${labelText} ${previewText}`.toLowerCase();
+    if (state.threadUseKb.get(entry.id)) item.dataset.kb = "1";
     els.chatList.appendChild(item);
   }
 
@@ -1295,6 +1321,7 @@ async function showDetailScreen(date) {
   resetInChatSearch();
 
   els.detailDateTitle.textContent = getDisplayLabel(date);
+  renderDetailKbBadge();
 
   if (state.chatCode) {
     await loadChatForDate(date);
@@ -2953,10 +2980,12 @@ function wireEvents() {
     // Optimistis dulu di lokal (konsisten sama pola pin), nanti ditimpa lagi
     // kalau ternyata gagal di server.
     state.threadUseKb.set(id, nextUseKb);
+    renderDetailKbBadge();
 
     const result = await setThreadMeta(id, state.chatCode, { useKb: nextUseKb });
     if (!result.ok) {
       state.threadUseKb.set(id, !nextUseKb);
+      renderDetailKbBadge();
       if (result.unauthorized) {
         state.chatCode = "";
         clearStoredChatCode();

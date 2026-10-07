@@ -42,6 +42,7 @@ import { createKhatamReminder } from "./khatam.js";
 import { createPriorityQueue, PRIORITY } from "./ollama-queue.js";
 import { openKbIndex } from "./kb-index.js";
 import { createKbIngestWorker, readKbConfig } from "./kb-ingest.js";
+import { ollamaChatStream } from "./ollama-http.js";
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -764,47 +765,27 @@ function readMemInfo() {
 // mentah). stream:false biar responsnya 1 JSON utuh sekali balik, bukan
 // potongan-potongan (lebih gampang ditangani drpd streaming, auto-reply WA
 // toh baru dikirim setelah teksnya LENGKAP).
-async function callOllamaChat(messages, { timeoutMs = OLLAMA_TIMEOUT_MS, maxTokens = OLLAMA_MAX_OUTPUT_TOKENS, numCtx = OLLAMA_NUM_CTX, format = undefined, temperature = 0.4, model = OLLAMA_MODEL } = {}) {
+async function callOllamaChat(messages, { timeoutMs = OLLAMA_TIMEOUT_MS, maxTokens = OLLAMA_MAX_OUTPUT_TOKENS, numCtx = OLLAMA_NUM_CTX, format = undefined, temperature = 0.4, model = OLLAMA_MODEL, onToken = undefined } = {}) {
   if (lastOllamaModel && lastOllamaModel !== model) await unloadOllamaModel(lastOllamaModel);
   lastOllamaModel = model;
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
-  let res;
-  try {
-    res = await fetch(`${OLLAMA_BASE_URL}/api/chat`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        model,
-        messages,
-        stream: false,
-        // keep_alive "10m" -- minta Ollama tetap nyimpen model ini DIMUAT di
-        // RAM selama 10 menit sejak pemakaian terakhir (default Ollama cuma
-        // 5 menit), supaya pesan WA berikutnya yang masih berdekatan waktu
-        // tidak kena ongkos "load_duration" lagi (~5-8 detik dari hasil tes
-        // user -- lumayan kalau CPU-nya memang sudah pas-pasan).
-        keep_alive: OLLAMA_KEEP_ALIVE,
-        ...(format ? { format } : {}),
-        options: { num_ctx: numCtx, num_predict: maxTokens, temperature }
-      }),
-      signal: controller.signal
-    });
-  } catch (err) {
-    if (err?.name === "AbortError") {
-      throw new Error(`Ollama tidak merespons dalam ${timeoutMs}ms (timeout).`);
+  // Lewat node:http + stream (lihat ollama-http.js): fetch bawaan Node memutus
+  // request yang menunggu > 300 detik ("fetch failed"), padahal di laptop ini
+  // jawaban berbasis dokumen bisa lebih lama dari itu.
+  const { content } = await ollamaChatStream({
+    baseUrl: OLLAMA_BASE_URL,
+    timeoutMs,
+    onToken,
+    body: {
+      model,
+      messages,
+      // keep_alive: berapa lama model dibiarkan di RAM sejak pemakaian terakhir
+      // (lihat OLLAMA_KEEP_ALIVE di atas).
+      keep_alive: OLLAMA_KEEP_ALIVE,
+      ...(format ? { format } : {}),
+      options: { num_ctx: numCtx, num_predict: maxTokens, temperature }
     }
-    throw new Error(`Gagal hubungi Ollama di ${OLLAMA_BASE_URL} -- apakah "ollama serve" jalan? (${err instanceof Error ? err.message : String(err)})`);
-  } finally {
-    clearTimeout(timeout);
-  }
-  if (!res.ok) {
-    const errText = await res.text();
-    throw new Error(`Ollama API error ${res.status}: ${errText.slice(0, 300)}`);
-  }
-  const data = await res.json();
-  const text = data?.message?.content;
-  if (!text) throw new Error(`Respons Ollama tidak berisi teks: ${JSON.stringify(data).slice(0, 300)}`);
-  return text;
+  });
+  return content;
 }
 
 // Versi generateAutoReply KHUSUS mesin "ollama": ambil riwayat (sama persis

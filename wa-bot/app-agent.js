@@ -36,6 +36,10 @@ export function readAppAgentConfig(env = process.env) {
     maxOutputTokens: num(env.OLLAMA_CHAT_MAX_OUTPUT_TOKENS, 700),
     timeoutMs: num(env.OLLAMA_CHAT_TIMEOUT_MS, 600000),
     historyLimit: num(env.OLLAMA_CHAT_HISTORY_LIMIT, 12),
+    // Saat dokumen/lampiran ikut dibaca, prompt sudah besar (prompt-eval di CPU
+    // lambat ~20 token/dtk): riwayat dipangkas supaya jawaban tidak berlama-lama.
+    docHistoryLimit: num(env.OLLAMA_DOC_HISTORY_LIMIT, 4),
+    docHistoryClipChars: num(env.OLLAMA_DOC_HISTORY_CLIP_CHARS, 700),
     ragBudgetChars: num(env.OLLAMA_CHAT_RAG_BUDGET_CHARS, 5000),
     docChunkChars: num(env.OLLAMA_DOC_CHUNK_CHARS, 5000),
     docMaxChunks: num(env.OLLAMA_DOC_MAX_CHUNKS, 6),
@@ -69,6 +73,14 @@ export function pickEvenly(items, max) {
 }
 
 const clip = (s, n) => (typeof s === "string" && s.length > n ? `${s.slice(0, n - 1)}…` : s);
+
+// Riwayat ringkas untuk mode dokumen: hanya `limit` pesan terakhir; balasan lama
+// asisten dipotong (jawaban panjang sebelumnya paling banyak menambah token).
+// Pesan terakhir (pertanyaan sekarang) selalu utuh.
+export function compactHistory(history, limit, clipChars) {
+  const tail = history.slice(-Math.max(1, limit));
+  return tail.map((m, i) => (i < tail.length - 1 && m.role === "assistant" ? { ...m, content: clip(m.content, clipChars) } : m));
+}
 
 export function createAppAgentWorker(deps, overrides = {}) {
   const cfg = { ...readAppAgentConfig(), ...overrides };
@@ -246,9 +258,10 @@ export function createAppAgentWorker(deps, overrides = {}) {
   }
 
   async function answerJob(job) {
-    const history = await loadHistory(job.chat_date, job.question);
+    let history = await loadHistory(job.chat_date, job.question);
     const useKb = await threadUsesKb(job.chat_date);
     const attachments = await loadAttachments(job.chat_date);
+    if (useKb || attachments.length > 0) history = compactHistory(history, cfg.docHistoryLimit, cfg.docHistoryClipChars);
     const system = `${SYSTEM_PROMPT}\n\n${currentDateLine()}`;
     const lastIdx = history.length - 1;
     const addContext = (label, body) => {
@@ -321,7 +334,15 @@ export function createAppAgentWorker(deps, overrides = {}) {
     }
 
     await setProgress(job.id, "Menulis jawaban");
-    const reply = await ollamaCall([{ role: "system", content: system }, ...history], { maxTokens: cfg.maxOutputTokens });
+    // Laporkan kemajuan (maks. tiap 5 dtk) supaya terlihat masih bekerja, bukan macet.
+    let lastPush = 0;
+    const onToken = (n) => {
+      const now = Date.now();
+      if (now - lastPush < 5000) return;
+      lastPush = now;
+      setProgress(job.id, `Menulis jawaban (${n} token)`).catch(() => {});
+    };
+    const reply = await ollamaCall([{ role: "system", content: system }, ...history], { maxTokens: cfg.maxOutputTokens, onToken });
     return `${reply.trim()}${docNote}`;
   }
 

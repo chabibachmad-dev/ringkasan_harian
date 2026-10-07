@@ -9,7 +9,7 @@
   },
   "scripts": {
     "start": "node index.js",
-    "test": "node test-app-agent.mjs && node test-khatam.mjs && node test-kb.mjs && node test-ollama-queue.mjs"
+    "test": "node test-app-agent.mjs && node test-khatam.mjs && node test-kb.mjs && node test-ollama-queue.mjs && node test-ollama-http.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.0",
