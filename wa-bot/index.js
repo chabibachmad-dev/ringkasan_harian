@@ -131,6 +131,9 @@ const OLLAMA_NUM_CTX = Number(process.env.OLLAMA_NUM_CTX) || 4096;
 // Diukur dari tes --verbose user langsung di server: eval rate CUMA ~4.5
 // token/detik (CPU i5-4200M, 2014, tanpa akselerasi khusus) -- 300 token
 // output = sekitar 65 detik generate SAJA, belum prompt eval & load model.
+// Suhu saat jawaban memakai KONTEKS DOKUMEN (balasan WA & chat aplikasi): rendah = patuh pada teks,
+// tidak berimajinasi. 0 sampai 1; bawaan 0.1.
+const OLLAMA_DOC_TEMPERATURE = Number.isFinite(Number(process.env.OLLAMA_DOC_TEMPERATURE)) && process.env.OLLAMA_DOC_TEMPERATURE !== undefined && process.env.OLLAMA_DOC_TEMPERATURE !== "" ? Math.min(1, Math.max(0, Number(process.env.OLLAMA_DOC_TEMPERATURE))) : 0.1;
 const OLLAMA_MAX_OUTPUT_TOKENS = Number(process.env.OLLAMA_MAX_OUTPUT_TOKENS) || 300;
 // Inferensi CPU-only di laptop tua bisa LAMBAT -- dari tes nyata di server
 // user (376 token prompt + 356 token jawaban = total ~104 detik, lihat
@@ -847,7 +850,7 @@ async function generateAutoReplyWithOllama(jid, { timeoutMs } = {}) {
     () =>
       callOllamaChat(
         [{ role: "system", content: `${withGroupNote(WA_OLLAMA_SYSTEM_PROMPT, jid)}\n\n${currentDateLine()}` }, ...messages],
-        timeoutMs ? { timeoutMs } : {}
+        { ...(timeoutMs ? { timeoutMs } : {}), ...(docChunks.length > 0 ? { temperature: OLLAMA_DOC_TEMPERATURE } : {}) }
       ),
     { priority: PRIORITY.WA, label: "wa-reply" }
   );
@@ -1195,7 +1198,7 @@ async function geminiGenerateWithRotation(systemText, contents, { useSearch = tr
     timeZone: WA_TIMEZONE
   }).format(new Date());
   const docNote = hasDocs
-    ? `\n\nKONTEKS DOKUMEN di pesan terakhir berasal dari Dokumen Pengetahuan milik pemilik nomor ini (dokumen resmi/internal) -- itu sumber UTAMA untuk angka, tarif, dan aturan. Kalau dokumen memuat jawabannya, pakai angkanya apa adanya dan sebut judul dokumennya singkat. Hasil pencarian web (kalau ada) hanya pelengkap; kalau bertentangan dengan dokumen, utamakan dokumen dan sebut perbedaannya singkat. Kalau jawabannya tidak ada di dokumen maupun hasil web, katakan terus terang. Jangan mengutip dokumen panjang-panjang -- ambil bagian yang menjawab saja.`
+    ? `\n\nKONTEKS DOKUMEN di pesan terakhir berasal dari Dokumen Pengetahuan milik pemilik nomor ini (dokumen resmi/internal) -- itu sumber UTAMA untuk angka, tarif, dan aturan. Kalau dokumen memuat jawabannya, pakai angkanya apa adanya dan sebut judul dokumennya singkat. Hasil pencarian web (kalau ada) hanya pelengkap; kalau bertentangan dengan dokumen, utamakan dokumen dan sebut perbedaannya singkat. Kalau jawabannya tidak ada di dokumen maupun hasil web, katakan terus terang (untuk pertanyaan tentang isi dokumen: \"Informasi tidak ada di dokumen\") dan JANGAN menebak. Untuk daftar (rukun, syarat, langkah) tuliskan semua butir yang tertulis di dokumen, tidak menambah/mengurangi. Jangan mengutip dokumen panjang-panjang -- ambil bagian yang menjawab saja.`
     : "";
   const systemWithDate =
     `${systemText}\n\nWaktu sekarang: ${nowText} ${WA_TIMEZONE_LABEL}. Anggap ini tanggal hari ini. Jangan mengira tahun ini masih tahun sebelumnya, dan jangan bilang aturan/peraturan tahun ini "belum terbit" atau "akan terbit" kecuali hasil pencarian memastikannya.${docNote}`;
@@ -2878,7 +2881,7 @@ const kbCfg = readKbConfig(process.env, fileURLToPath(new URL(".", import.meta.u
 let kbIngest = null;
 if (kbCfg.enabled) {
   try {
-    kbIndex = await openKbIndex({ file: kbCfg.indexFile });
+    kbIndex = await openKbIndex({ file: kbCfg.indexFile, chunkChars: kbCfg.chunkChars, overlapChars: kbCfg.chunkOverlap, reindex: kbCfg.reindex });
     kbIngest = createKbIngestWorker({
       supabase,
       index: kbIndex,

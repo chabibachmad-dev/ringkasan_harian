@@ -2335,3 +2335,18 @@ mark.chat-search-hit--active {
 .quran-style-sample--hafs {
   font-family: "KFGQPC Hafs", "Amiri Quran", "Scheherazade New", "Noto Naskh Arabic", serif;
 }
+
+/* Catatan mutu dokumen (teks berantakan, halaman dilewati). */
+.kb-doc-note {
+  margin-top: 4px;
+  font-size: 0.72rem;
+  line-height: 1.4;
+  color: var(--text-muted);
+}
+
+.kb-doc-note--warn {
+  color: var(--text);
+  border: 1px dashed var(--accent);
+  border-radius: 8px;
+  padding: 4px 8px;
+}

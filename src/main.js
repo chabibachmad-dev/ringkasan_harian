@@ -2080,6 +2080,18 @@ async function renderKbDocList() {
       info.textContent = extra.join(" • ");
     }
     if (info.textContent) main.appendChild(info);
+    // Catatan mutu dokumen siap pakai (mis. "⚠️ Sebagian teks berantakan: 2 dari 10 halaman"), dari bot di laptop.
+    if (status === "ready" && doc.status_detail) {
+      const notes = String(doc.status_detail)
+        .split(" • ")
+        .filter((p) => p && !/hlm via OCR/.test(p));
+      if (notes.length > 0) {
+        const warn = document.createElement("div");
+        warn.className = `kb-doc-note${notes.some((p) => p.includes("⚠️")) ? " kb-doc-note--warn" : ""}`;
+        warn.textContent = notes.join(" • ");
+        main.appendChild(warn);
+      }
+    }
 
     const delBtn = document.createElement("button");
     delBtn.type = "button";

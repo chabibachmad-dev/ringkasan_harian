@@ -1,7 +1,7 @@
 // Tes worker agen aplikasi dengan Supabase & Ollama palsu (tanpa jaringan sungguhan).
 //   node test-app-agent.mjs
 import http from "node:http";
-import { createAppAgentWorker, wantsWholeDocument, pickEvenly, compactHistory } from "./app-agent.js";
+import { createAppAgentWorker, wantsWholeDocument, pickEvenly, compactHistory, STRICT_DOC_RULES, readAppAgentConfig } from "./app-agent.js";
 
 let fails = 0;
 const check = (c, m) => { if (!c) { fails++; console.log("FAIL:", m); } else console.log("ok:", m); };
@@ -86,7 +86,7 @@ function setup(over = {}) {
       kbIndex: over.kbIndex,
       callOllamaChat: async (messages, opts) => { calls.push({ messages, opts }); if (over.fail) throw new Error("Ollama mati"); return over.reply ? over.reply(messages) : "jawaban lokal"; },
       enqueueOllamaCall: (fn) => fn(),
-      fetchRelevantKnowledgeChunks: async () => [{ title: "Dok A", text: "isi potongan relevan" }],
+      fetchRelevantKnowledgeChunks: async () => over.chunks ?? [{ title: "Dok A", text: "isi potongan relevan" }],
       rankKnowledgeChunks: (docs, q) => {
         const words = q.toLowerCase().split(/\s+/).filter((w) => w.length > 3);
         const out = [];
@@ -152,6 +152,40 @@ check(JSON.stringify(pickEvenly([1,2,3,4,5,6,7,8,9,10], 3)) === "[1,6,10]" && pi
   tables.chat_messages.push({ id: "hq", chat_date: "freeform-x", role: "user", content: "pertanyaan baru", created_at: "2026-01-01T00:01:00Z" });
   await w.tick();
   check(calls.at(-1).messages.length === 1 + 10, "tanpa KB riwayat tetap penuh (batas historyLimit 12)");
+}
+
+// 2c. Anti-halusinasi: aturan ketat + suhu rendah hanya saat dokumen ikut dibaca
+{
+  const plain = setup();
+  await plain.w.tick();
+  check(!plain.calls[0].messages[0].content.includes("ATURAN DOKUMEN") && plain.calls[0].opts.temperature === 0.4, "chat biasa: tanpa aturan dokumen, suhu bawaan (0.4)");
+
+  const kb = setup();
+  kb.tables.chat_thread_meta[0].use_kb = true;
+  await kb.w.tick();
+  const c = kb.calls.at(-1);
+  check(c.messages[0].content.includes("Informasi tidak ada di dokumen.") && c.messages[0].content.includes("ATURAN DOKUMEN (WAJIB)"), "KB aktif: prompt sistem memuat aturan ketat");
+  check(/HANYA berdasarkan teks/.test(c.messages[0].content) && /nomor halaman/.test(c.messages[0].content) && /SEMUA butir/.test(c.messages[0].content), "aturan: hanya dari konteks, sebut halaman, daftar lengkap");
+  check(c.opts.temperature === 0.1, "KB aktif: suhu 0.1");
+  check(c.messages.at(-1).content.includes("isi potongan relevan"), "KB aktif: konteks tetap disisipkan");
+
+  const zero = setup({ cfg: { docTemperature: 0 } });
+  zero.tables.chat_thread_meta[0].use_kb = true;
+  await zero.w.tick();
+  check(zero.calls.at(-1).opts.temperature === 0, "docTemperature 0 dihormati (bukan dianggap kosong)");
+  check(readAppAgentConfig({}).docTemperature === 0.1 && readAppAgentConfig({ OLLAMA_DOC_TEMPERATURE: "0" }).docTemperature === 0 && readAppAgentConfig({ OLLAMA_DOC_TEMPERATURE: "0.25" }).docTemperature === 0.25 && readAppAgentConfig({ OLLAMA_DOC_TEMPERATURE: "9" }).docTemperature === 1, "readAppAgentConfig: OLLAMA_DOC_TEMPERATURE");
+
+  const none = setup({ chunks: [] });
+  none.tables.chat_thread_meta[0].use_kb = true;
+  await none.w.tick();
+  check(none.calls.at(-1).messages.at(-1).content.includes("Tidak ditemukan bagian dokumen yang cocok") && none.calls.at(-1).opts.temperature === 0.1, "KB aktif tanpa potongan cocok: model diberi tahu eksplisit (bukan dibiarkan menebak)");
+
+  const whole = setup();
+  whole.tables.chat_thread_meta[0].use_kb = true;
+  whole.tables.chat_messages.at(-1).content = "tolong ringkas dokumen ini";
+  whole.tables.agent_jobs[0].question = "tolong ringkas dokumen ini";
+  await whole.w.tick();
+  check(whole.calls.length > 1 && whole.calls.slice(0, -1).every((x) => x.opts.temperature === 0.1) && whole.calls.at(-1).opts.temperature === 0.1, "peta-lalu-ringkas: catatan bagian & jawaban akhir bersuhu rendah");
 }
 
 // 3. RAG (KB aktif, pertanyaan spesifik)

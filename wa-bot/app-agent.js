@@ -44,6 +44,8 @@ export function readAppAgentConfig(env = process.env) {
     docChunkChars: num(env.OLLAMA_DOC_CHUNK_CHARS, 5000),
     docMaxChunks: num(env.OLLAMA_DOC_MAX_CHUNKS, 6),
     docNoteTokens: num(env.OLLAMA_DOC_NOTE_TOKENS, 220),
+    // Suhu rendah saat membaca dokumen: jawaban kaku & patuh pada teks, bukan berimajinasi (0 s.d. ~0.3).
+    docTemperature: Number.isFinite(Number(env.OLLAMA_DOC_TEMPERATURE)) && env.OLLAMA_DOC_TEMPERATURE !== undefined && env.OLLAMA_DOC_TEMPERATURE !== "" ? Math.min(1, Math.max(0, Number(env.OLLAMA_DOC_TEMPERATURE))) : 0.1,
     // Lampiran sangat pendek (total karakter <= ini) disisipkan UTUH ke prompt.
     attachInlineChars: num(env.OLLAMA_ATTACH_INLINE_CHARS, 6000),
     // Kirim push ke HP kalau job selesai lebih lama dari ini (detik) -- yang cepat
@@ -55,6 +57,16 @@ export function readAppAgentConfig(env = process.env) {
 const SYSTEM_PROMPT = `Kamu adalah asisten pribadi di dalam aplikasi "Daily Insider" milik satu pengguna saja. Kamu berjalan sebagai model AI LOKAL di laptop pengguna (BUKAN di internet) dan TIDAK punya akses pencarian web.
 Jawab dengan ramah, jelas, dan seringkas mungkin tanpa kehilangan inti jawaban. Gunakan Bahasa Indonesia kecuali pengguna jelas menulis/minta bahasa lain. Boleh memakai format markdown sederhana (daftar, **tebal**, blok kode).
 Kadang di pesan terakhir ada blok "KONTEKS DOKUMEN" yang dicarikan otomatis dari dokumen yang diupload pengguna. Jadikan itu sumber utama bila relevan dan sebut judul dokumennya. Kalau jawabannya tidak ada di konteks itu, katakan terus terang; untuk istilah/aturan/angka resmi yang spesifik dan kamu tidak yakin, JANGAN mengarang -- akui belum bisa memastikan dan sarankan cek sumber resmi.`;
+
+// Aturan ketat anti-halusinasi, ditambahkan ke prompt sistem bila dokumen/lampiran ikut dibaca
+// (toggle "Pakai Dokumen Pengetahuan" aktif atau ada lampiran).
+export const STRICT_DOC_RULES = `ATURAN DOKUMEN (WAJIB):
+- Untuk pertanyaan tentang isi dokumen/lampiran, jawab HANYA berdasarkan teks di blok KONTEKS DOKUMEN / LAMPIRAN. Jangan menebak dan jangan memakai pengetahuan luar untuk fakta, angka, pasal, istilah, atau daftar.
+- Kalau jawabannya tidak ada di teks itu, tulis persis: "Informasi tidak ada di dokumen." Boleh ditambah satu kalimat tentang apa yang ADA di potongan yang ditemukan.
+- Sebut judul dokumen dan nomor halaman ([Halaman n]) untuk setiap fakta yang kamu ambil.
+- Kalau diminta daftar (rukun, wajib, syarat, langkah): tuliskan SEMUA butir yang benar-benar tertulis di teks, jangan menambah dan jangan mengurangi. Bila potongan tampak terpotong atau daftar belum lengkap, katakan "daftar di potongan ini mungkin belum lengkap".
+- Kalau potongan yang ditemukan hanya berupa daftar isi atau judul bab tanpa isinya, katakan isi bagian itu belum terbaca.
+- Sapaan atau obrolan umum yang tidak menyangkut dokumen: jawab seperti biasa.`;
 
 // Permintaan yang menyangkut SELURUH dokumen (bukan satu fakta spesifik).
 const WHOLE_DOC_RE = /\b(ringkas(an)?|rangkum(an)?|simpulkan|kesimpulan|analisis|analisa|menganalisis|review|tinjau|poin[- ]poin utama|isi (dokumen|file|pdf)|seluruh|keseluruhan|semua (isi|bagian|pasal))\b/i;
@@ -249,7 +261,7 @@ export function createAppAgentWorker(deps, overrides = {}) {
           },
           { role: "user", content: `Permintaan pengguna: ${job.question}\n\n=== Bagian dokumen "${part.title}" ===\n${part.text}` }
         ],
-        { maxTokens: cfg.docNoteTokens, temperature: 0.2 }
+        { maxTokens: cfg.docNoteTokens, temperature: cfg.docTemperature }
       );
       const trimmed = note.trim();
       if (trimmed && trimmed !== "-") notes.push(`[${part.title} — bagian ${i + 1}]\n${trimmed}`);
@@ -262,7 +274,8 @@ export function createAppAgentWorker(deps, overrides = {}) {
     const useKb = await threadUsesKb(job.chat_date);
     const attachments = await loadAttachments(job.chat_date);
     if (useKb || attachments.length > 0) history = compactHistory(history, cfg.docHistoryLimit, cfg.docHistoryClipChars);
-    const system = `${SYSTEM_PROMPT}\n\n${currentDateLine()}`;
+    const strictDocs = useKb || attachments.length > 0;
+    const system = `${SYSTEM_PROMPT}${strictDocs ? `\n\n${STRICT_DOC_RULES}` : ""}\n\n${currentDateLine()}`;
     const lastIdx = history.length - 1;
     const addContext = (label, body) => {
       history[lastIdx] = { role: "user", content: `${history[lastIdx].content}\n\n---\n${label}\n${body}` };
@@ -331,6 +344,7 @@ export function createAppAgentWorker(deps, overrides = {}) {
       await setProgress(job.id, "Mencari bagian dokumen yang relevan");
       const chunks = await fetchRelevantKnowledgeChunks(job.question, cfg.ragBudgetChars);
       if (chunks.length > 0) addContext("KONTEKS DOKUMEN (potongan paling relevan dari dokumen yang diupload pengguna; bukan seluruh dokumen):", formatChunks(chunks));
+      else addContext("KONTEKS DOKUMEN:", "(Tidak ditemukan bagian dokumen yang cocok dengan pertanyaan ini.)");
     }
 
     await setProgress(job.id, "Menulis jawaban");
@@ -342,7 +356,11 @@ export function createAppAgentWorker(deps, overrides = {}) {
       lastPush = now;
       setProgress(job.id, `Menulis jawaban (${n} token)`).catch(() => {});
     };
-    const reply = await ollamaCall([{ role: "system", content: system }, ...history], { maxTokens: cfg.maxOutputTokens, onToken });
+    const reply = await ollamaCall([{ role: "system", content: system }, ...history], {
+      maxTokens: cfg.maxOutputTokens,
+      onToken,
+      ...(strictDocs ? { temperature: cfg.docTemperature } : {})
+    });
     return `${reply.trim()}${docNote}`;
   }
 

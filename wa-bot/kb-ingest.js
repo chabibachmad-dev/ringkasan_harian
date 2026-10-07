@@ -36,7 +36,11 @@ export function readKbConfig(env = process.env, baseDir = process.cwd()) {
     pollMs: num(env.KB_POLL_MS, 6000),
     reconcileMs: num(env.KB_RECONCILE_MS, 120000),
     syncMaxChars: num(env.KB_SYNC_MAX_CHARS, 600000),
-    chunkChars: num(env.KB_CHUNK_CHARS, 1200),
+    chunkChars: num(env.KB_CHUNK_CHARS, 1000),
+    chunkOverlap: Number.isFinite(Number(env.KB_CHUNK_OVERLAP)) && env.KB_CHUNK_OVERLAP !== undefined && env.KB_CHUNK_OVERLAP !== "" ? Math.max(0, Number(env.KB_CHUNK_OVERLAP)) : 150,
+    reindex: (env.KB_REINDEX || "").toLowerCase() === "true",
+    // Halaman dengan teks berantakan (PDF font aneh/scan buram) dicoba di-OCR ulang & dilaporkan.
+    qualityCheck: (env.KB_QUALITY_CHECK || "on").toLowerCase() !== "off",
     convertTimeoutMs: num(env.KB_CONVERT_TIMEOUT_MS, 600000),
     ocr: (env.KB_OCR || "auto").toLowerCase() !== "off",
     ocrLang: env.KB_OCR_LANG || "",
@@ -105,12 +109,43 @@ export async function detectTools(run = defaultRun, cfg = readKbConfig()) {
   return tools;
 }
 
+// Penilaian mutu teks satu halaman (hasil pdftotext/OCR): teks berantakan membuat model
+// bingung dan memicu halusinasi. Mengembalikan { bad, score, reason }; score 0 = bersih,
+// makin besar makin berantakan. Halaman pendek (< 60 huruf) tidak dinilai.
+export function assessPageText(text) {
+  const s = String(text || "");
+  const letters = (s.match(/\p{L}/gu) || []).length;
+  if (letters < 60) return { bad: false, score: 0, reason: null };
+  const nonSpace = s.replace(/\s+/g, "");
+  const junk = (s.match(/[\uFFFD\uE000-\uF8FF\u0000-\u0008\u000E-\u001F]/g) || []).length;
+  const odd = (nonSpace.match(/[^\p{L}\p{N}.,;:()\-/%'"?!&@+=\[\]•–—_*#°…]/gu) || []).length;
+  const tokens = s.split(/\s+/).filter(Boolean);
+  const words = tokens.filter((w) => /^\p{L}{4,}$/u.test(w) && w !== w.toUpperCase());
+  const noVowel = words.filter((w) => !/[aeiouáéíóúàèìòùâêîôûäëïöü]/i.test(w)).length;
+  const singles = tokens.filter((w) => /^\p{L}$/u.test(w)).length;
+
+  const junkRatio = junk / Math.max(1, nonSpace.length);
+  const oddRatio = odd / Math.max(1, nonSpace.length);
+  const noVowelRatio = words.length >= 20 ? noVowel / words.length : 0;
+  const singleRatio = tokens.length >= 30 ? singles / tokens.length : 0;
+
+  const parts = [
+    { v: junkRatio / 0.01, why: "karakter rusak" },
+    { v: oddRatio / 0.25, why: "banyak simbol aneh" },
+    { v: noVowelRatio / 0.3, why: "kata tanpa huruf hidup" },
+    { v: singleRatio / 0.4, why: "huruf terpisah-pisah" }
+  ];
+  const worst = parts.reduce((m, p) => (p.v > m.v ? p : m));
+  return { bad: worst.v >= 1, score: Number(worst.v.toFixed(2)), reason: worst.v >= 1 ? worst.why : null };
+}
+
 // Ubah file jadi halaman-halaman teks.
 // Mengembalikan { pages: [{page, text}], ocrPages, ocrSkipped, ocrMissing }.
 export async function convertFile({ file, ext, tools, cfg, run = defaultRun, onProgress = () => {}, tmpDir, gate = async () => {} }) {
   if (ext !== "pdf") {
     const text = fs.readFileSync(file, "utf8").replace(/^﻿/, "");
-    return { pages: [{ page: null, text }], ocrPages: 0, ocrSkipped: 0, ocrMissing: false };
+    const bad = cfg.qualityCheck !== false && assessPageText(text).bad;
+    return { pages: [{ page: null, text }], ocrPages: 0, ocrSkipped: 0, ocrMissing: false, garbledFixed: 0, badPages: bad ? [null] : [], textPages: 1 };
   }
   if (!tools.pdftotext) {
     throw new Error("`pdftotext` belum terpasang di laptop. Jalankan: sudo apt install poppler-utils");
@@ -135,16 +170,21 @@ export async function convertFile({ file, ext, tools, cfg, run = defaultRun, onP
   const pages = parts.map((text, i) => ({ page: i + 1, text, ocr: false }));
 
   const empties = pages.filter((p) => p.text.replace(/\s+/g, "").length < cfg.ocrMinChars);
+  // Halaman yang ADA teksnya tapi berantakan (font tak terbaca, lapisan teks scan yang buruk):
+  // juga dicoba OCR; hasil OCR dipakai hanya bila lebih bersih.
+  const garbled = cfg.qualityCheck === false ? [] : pages.filter((p) => !empties.includes(p) && assessPageText(p.text).bad);
   let ocrPages = 0;
+  let garbledFixed = 0;
   let ocrSkipped = 0;
   let ocrMissing = false;
-  if (empties.length > 0 && cfg.ocr) {
+  if ((empties.length > 0 || garbled.length > 0) && cfg.ocr) {
     if (!tools.tesseract || !tools.pdftoppm) {
-      ocrMissing = true;
+      if (empties.length > 0) ocrMissing = true;
       ocrSkipped = empties.length;
     } else {
-      const todo = empties.slice(0, cfg.ocrMaxPages);
-      ocrSkipped = empties.length - todo.length;
+      const queue = [...empties, ...garbled];
+      const todo = queue.slice(0, cfg.ocrMaxPages);
+      ocrSkipped = Math.max(0, empties.length - todo.filter((p) => empties.includes(p)).length);
       let i = 0;
       for (const p of todo) {
         i += 1;
@@ -162,13 +202,20 @@ export async function convertFile({ file, ext, tools, cfg, run = defaultRun, onP
             timeoutMs: cfg.ocrPageTimeoutMs
           });
           if (stdout && stdout.trim()) {
-            p.text = stdout;
-            p.ocr = true;
-            ocrPages += 1;
+            if (empties.includes(p)) {
+              p.text = stdout;
+              p.ocr = true;
+              ocrPages += 1;
+            } else if (assessPageText(stdout).score < assessPageText(p.text).score) {
+              p.text = stdout; // teks asli berantakan, OCR lebih bersih
+              p.ocr = true;
+              ocrPages += 1;
+              garbledFixed += 1;
+            }
           }
         } catch (_e) {
           // halaman ini gagal di-OCR; lanjut ke halaman berikutnya
-          ocrSkipped += 1;
+          if (empties.includes(p)) ocrSkipped += 1;
         } finally {
           fs.rmSync(`${base}.png`, { force: true });
         }
@@ -177,7 +224,23 @@ export async function convertFile({ file, ext, tools, cfg, run = defaultRun, onP
   } else if (empties.length > 0) {
     ocrSkipped = empties.length;
   }
-  return { pages, ocrPages, ocrSkipped, ocrMissing };
+  // Halaman yang MASIH berantakan sesudah semua upaya -> dilaporkan ke pengguna.
+  const badPages = cfg.qualityCheck === false ? [] : pages.filter((p) => p.text.trim() && assessPageText(p.text).bad).map((p) => p.page);
+  const textPages = pages.filter((p) => p.text.replace(/\s+/g, "").length >= cfg.ocrMinChars).length;
+  return { pages, ocrPages, ocrSkipped, ocrMissing, garbledFixed, badPages, textPages };
+}
+
+// Pesan peringatan mutu untuk ditampilkan di daftar Dokumen Pengetahuan (atau null bila aman).
+// Muncul bila ≥ 10% halaman bertulisan masih berantakan (atau ≥ 1 halaman untuk dokumen pendek).
+export function qualityWarning({ badPages = [], textPages = 0, garbledFixed = 0 } = {}) {
+  const n = badPages.length;
+  if (n === 0 || textPages === 0) return null;
+  const ratio = n / textPages;
+  if (ratio < 0.1 && n >= 2) return null;
+  const nums = badPages.filter((x) => x != null);
+  const list = nums.length > 0 ? ` (hlm ${nums.slice(0, 6).join(", ")}${nums.length > 6 ? ", …" : ""})` : "";
+  const level = ratio >= 0.3 ? "Teks banyak berantakan" : "Sebagian teks berantakan";
+  return `⚠️ ${level}: ${n} dari ${textPages} halaman${list}. Jawaban dari bagian itu bisa meleset; unggah PDF yang lebih jelas / hasil scan lebih tajam.`;
 }
 
 export function pagesToText(pages) {
@@ -328,14 +391,17 @@ export function createKbIngestWorker(deps, overrides = {}) {
         filename: doc.original_filename,
         pages: conv.pages,
         ocrPages: conv.ocrPages,
-        chunkChars: cfg.chunkChars
+        chunkChars: cfg.chunkChars,
+        overlapChars: cfg.chunkOverlap
       });
 
       const truncated = text.length > cfg.syncMaxChars;
       const synced = truncated ? `${text.slice(0, cfg.syncMaxChars)}\n\n[...dipotong untuk Gemini; versi lengkap ada di laptop...]` : text;
       const notes = [];
-      if (conv.ocrPages > 0) notes.push(`${conv.ocrPages} hlm via OCR`);
+      if (conv.garbledFixed > 0) notes.push(`${conv.garbledFixed} hlm berantakan diperbaiki dengan OCR`);
       if (conv.ocrSkipped > 0) notes.push(`${conv.ocrSkipped} hlm tanpa teks dilewati`);
+      const warn = qualityWarning(conv);
+      if (warn) notes.push(warn);
       const ok = await patch(doc.id, {
         content: synced,
         char_count: indexed.chars,
