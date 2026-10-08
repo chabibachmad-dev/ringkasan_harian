@@ -25,6 +25,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFile } from "node:child_process";
+import { despaceLetters } from "./text-clean.js";
 
 const num = (v, d) => (Number.isFinite(Number(v)) && Number(v) > 0 ? Number(v) : d);
 
@@ -123,7 +124,7 @@ const COMMON_WORDS = new Set(
 );
 
 export function assessPageText(text) {
-  const s = String(text || "");
+  const s = despaceLetters(String(text || "")); // "B A N T E N" di sel tabel bukan tanda teks rusak
   const letters = (s.match(/\p{Script=Latin}/gu) || []).length;
   if (letters < 60) return { bad: false, score: 0, reason: null };
   const nonSpace = s.replace(/\s+/g, "");
@@ -262,7 +263,7 @@ export function qualityWarning({ badPages = [], textPages = 0, garbledFixed = 0 
 
 export function pagesToText(pages) {
   return pages
-    .map((p) => `${p.page != null ? `[Halaman ${p.page}]\n` : ""}${p.text.replace(/[ \t]+\n/g, "\n").trim()}`)
+    .map((p) => `${p.page != null ? `[Halaman ${p.page}]\n` : ""}${despaceLetters(p.text).replace(/[ \t]+\n/g, "\n").trim()}`)
     .filter((s) => s.replace(/^\[Halaman \d+\]\s*/, "").length > 0)
     .join("\n\n");
 }

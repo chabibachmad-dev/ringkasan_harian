@@ -400,5 +400,67 @@ check(!looksLikeToc("Rukun wudhu ada enam. Pertama niat... lalu membasuh muka, m
   const english = "The committee shall review the proposal and report to the board of directors with a recommendation that is based on the evidence in the file. ".repeat(4);
   check(!assessPageText(english).bad, "mutu: teks Inggris normal lolos");
 }
+
+// ---------- tabel tarif: huruf terpisah + kepala kolom + fokus baris (kasus "biaya penginapan di Papua") ----------
+{
+  const provs = [
+    ["A C E H", "Rp5.109.000", "Rp3.526.000", "Rp1.578.000", "Rp770.000"],
+    ["SUMATERA UTARA", "Rp4.960.000", "Rp2.195.000", "Rp1.188.000", "Rp699.000"],
+    ["R I A U", "Rp3.820.000", "Rp3.119.000", "Rp1.650.000", "Rp852.000"],
+    ["KEPULAUAN RIAU", "Rp6.177.000", "Rp2.481.000", "Rp1.388.000", "Rp792.000"],
+    ["J A M B I", "Rp5.004.000", "Rp4.102.000", "Rp1.252.000", "Rp580.000"],
+    ["SUMATERA BARAT", "Rp5.603.000", "Rp3.373.000", "Rp1.353.000", "Rp701.000"],
+    ["B A N T E N", "Rp5.725.000", "Rp2.373.000", "Rp1.301.000", "Rp775.000"],
+    ["JAWA BARAT", "Rp5.812.000", "Rp2.755.000", "Rp1.366.000", "Rp735.000"],
+    ["D.K.I. JAKARTA", "Rp9.331.000", "Rp2.084.000", "Rp1.062.000", "Rp730.000"],
+    ["JAWA TENGAH", "Rp6.129.000", "Rp2.138.000", "Rp1.286.000", "Rp810.000"],
+    ["D.I. YOGYAKARTA", "Rp5.100.000", "Rp2.695.000", "Rp1.600.000", "Rp845.000"],
+    ["JAWA TIMUR", "Rp4.449.000", "Rp2.007.000", "Rp1.234.000", "Rp814.000"],
+    ["B A L I", "Rp7.328.000", "Rp2.433.000", "Rp1.754.000", "Rp1.138.000"],
+    ["KALIMANTAN BARAT", "Rp2.654.000", "Rp1.923.000", "Rp1.125.000", "Rp576.000"],
+    ["MALUKU", "Rp3.467.000", "Rp3.240.000", "Rp1.059.000", "Rp667.000"],
+    ["P A P U A", "Rp3.859.000", "Rp3.318.000", "Rp2.521.000", "Rp1.038.000"],
+    ["PAPUA BARAT", "Rp3.872.000", "Rp3.575.000", "Rp2.056.000", "Rp967.000"],
+    ["PAPUA TENGAH", "Rp3.859.000", "Rp3.318.000", "Rp2.521.000", "Rp1.038.000"],
+    ["PAPUA PEGUNUNGAN", "Rp5.711.000", "Rp4.911.000", "Rp3.731.000", "Rp1.536.000"]
+  ];
+  const pad = (v, n) => String(v).padEnd(n);
+  const rows = provs.map((r, i) => `${pad(`${i + 1}.`, 5)}${pad(r[0], 26)}${pad("OH", 10)}${pad(r[1], 17)}${pad(r[2], 17)}${pad(r[3], 17)}${r[4]}`);
+  const header = [
+    "30. SATUAN BIAYA PENGINAPAN PERJALANAN DINAS DALAM NEGERI",
+    "   NO.  PROVINSI                 SATUAN     TARIF HOTEL",
+    "                                            PEJABAT NEGARA/  PEJABAT NEGARA   PEJABAT ESELON III/ PEJABAT ESELON IV/",
+    "                                            WAKIL MENTERI/   LAINNYA/         GOLONGAN IV         GOLONGAN III/II/I",
+    "                                            PEJABAT ESELON I PEJABAT ESELON II",
+    "   (1)  (2)                      (3)        (4)              (5)              (6)                 (7)"
+  ];
+  const noise = Array.from({ length: 30 }, (_, i) => `Ketentuan umum nomor ${i} mengenai perjalanan dinas dan penggantian biaya yang berlaku.`).join("\n");
+  const tix = await openKbIndex({ file: ":memory:", log: silent });
+  tix.upsertDoc({ id: "t", title: "PMK SBM 2025", pages: [{ page: 14, text: `${header.join("\n")}\n${rows.join("\n")}` }, { page: 20, text: noise }] });
+  const st = tix.stats();
+  check(st.chunks >= 3, `tabel terpecah jadi beberapa potongan (${st.chunks})`);
+  check(!/P A P U A|B A N T E N/.test(tix.getDocText("t")) && /PAPUA\s/.test(tix.getDocText("t")) && /BANTEN/.test(tix.getDocText("t")), "huruf terpisah (P A P U A, B A N T E N) disatukan di teks tersimpan");
+
+  const pap = tix.search("berapa biaya penginapan di papua?", { budgetChars: 5000, maxChunks: 6 });
+  const txt = pap.map((b) => b.text).join("\n");
+  check(pap.length > 0 && /PAPUA\s+OH\s+Rp3\.859\.000\s+Rp3\.318\.000\s+Rp2\.521\.000\s+Rp1\.038\.000/.test(txt), "papua: baris PAPUA (huruf terpisah di sumber) sampai ke model");
+  check(!txt.includes("Rp5.109.000"), "papua: baris ACEH (baris lain) disembunyikan dari konteks");
+  check(/TARIF HOTEL/.test(txt) && /\(1\)\s+\(2\)/.test(txt), "papua: judul & kepala kolom tabel ikut disertakan");
+  check(txt.includes("baris tabel lain tidak ditampilkan"), "papua: penanda baris tersembunyi");
+
+  const ban = tix.search("satuan biaya penginapan banten", { budgetChars: 5000, maxChunks: 6 });
+  const bt = ban.map((b) => b.text).join("\n");
+  check(/BANTEN\s+OH\s+Rp5\.725\.000/.test(bt) && !bt.includes("Rp5.109.000"), "banten: barisnya ditemukan (sebelumnya 'tidak ada di dokumen')");
+
+  const jog = tix.search("tarif hotel jogja", { budgetChars: 5000, maxChunks: 6 }).map((b) => b.text).join("\n");
+  check(/YOGYAKARTA\s+OH\s+Rp5\.100\.000/.test(jog), "jogja -> D.I. YOGYAKARTA lewat alias");
+
+  const gen = tix.search("satuan biaya penginapan perjalanan dinas dalam negeri", { budgetChars: 5000, maxChunks: 6 }).map((b) => b.text).join("\n");
+  check(gen.includes("Rp5.109.000") && !gen.includes("baris tabel lain tidak ditampilkan"), "pertanyaan umum tanpa nama baris: tabel tidak dipangkas");
+  const { findTableHead, isDataRow, focusTableRows } = await import("./kb-index.js");
+  check(isDataRow(rows[0]) && !isDataRow("Pasal 5 ayat 2 tentang tarif") && findTableHead(`${header.join("\n")}\n${rows[0]}`)?.includes("TARIF HOTEL"), "isDataRow/findTableHead");
+  check(focusTableRows("a\nb\nc", ["abc"]) === "a\nb\nc", "focusTableRows: teks biasa tak berubah");
+  tix.close();
+}
 console.log(fails ? `\n${fails} GAGAL` : "\nsemua OK");
 process.exit(fails ? 1 : 0);

@@ -20,6 +20,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { stemCandidates, stemText } from "./id-stem.js";
+import { despaceLetters } from "./text-clean.js";
 
 const STOPWORDS = new Set(
   (
@@ -154,6 +155,68 @@ export function looksLikeToc(text) {
   return lines.length >= 4 && entries / lines.length >= 0.6;
 }
 
+// ---------------- Tabel: kepala kolom & fokus baris ----------------
+// Tabel panjang (mis. tarif per provinsi) terpecah jadi banyak potongan, dan potongan ke-2 dst. tak memuat
+// judul/kepala kolomnya -> angka tak bisa dibaca, atau model memilih baris yang salah. Karena itu:
+//   - kepala tabel (judul + baris nomor kolom "(1) (2) (3) ...") disimpan per potongan (kolom `head`) dan
+//     disisipkan di depan blok hasil pencarian;
+//   - bila pertanyaan menyebut nama baris tertentu ("papua"), baris yang tak cocok disembunyikan.
+const AMOUNT_RE = /(?:Rp\.?\s?\d[\d.,]*|\b\d{1,3}(?:[.,]\d{3})+\b)/g;
+export function isDataRow(line) {
+  return (String(line).match(AMOUNT_RE) || []).length >= 2;
+}
+
+const COLNUM_RE = /^\s*\(\s*1\s*\)\s+\(\s*2\s*\)/;
+export function findTableHead(pageText, maxChars = 1600) {
+  const lines = String(pageText || "").split("\n");
+  const idx = lines.findIndex((l, i) => i < 45 && COLNUM_RE.test(l));
+  if (idx < 0) return null;
+  const head = lines.slice(0, idx + 1).filter((l) => l.trim());
+  const indent = Math.min(...head.map((l) => l.match(/^\s*/)[0].length));
+  const out = head.map((l) => l.slice(indent).replace(/\s+$/, "")).join("\n");
+  return out.length > 0 && out.length <= maxChars ? out : null;
+}
+
+function wordsOf(line) {
+  return String(line || "")
+    .toLowerCase()
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .split(/[^a-z0-9]+/)
+    .filter(Boolean);
+}
+
+// Sembunyikan baris data tabel yang tidak menyebut nama/kata kunci pertanyaan. Tak berubah bila tabelnya
+// pendek (< 6 baris), tak ada baris yang cocok, atau hampir semua baris cocok.
+export function focusTableRows(text, tokens) {
+  const lines = String(text).split("\n");
+  const rowIdx = lines.map((l, i) => (isDataRow(l) ? i : -1)).filter((i) => i >= 0);
+  if (rowIdx.length < 6) return text;
+  const rowWords = new Map(rowIdx.map((i) => [i, wordsOf(lines[i])]));
+  const matches = (words, tok) => words.some((w) => w === tok || (tok.length >= 3 && w.startsWith(tok)) || stemCandidates(w).includes(tok));
+  // kata yang cocok ke > 60% baris (mis. "oh", "satuan") tidak membedakan baris
+  const useful = tokens.filter((t) => {
+    const n = rowIdx.filter((i) => matches(rowWords.get(i), t)).length;
+    return n > 0 && n <= rowIdx.length * 0.6;
+  });
+  if (useful.length === 0) return text;
+  const keepRow = new Set(rowIdx.filter((i) => useful.some((t) => matches(rowWords.get(i), t))));
+  if (keepRow.size === 0 || keepRow.size >= rowIdx.length * 0.8) return text;
+  const out = [];
+  let skipping = false;
+  lines.forEach((l, i) => {
+    const isRow = rowWords.has(i);
+    if (isRow && !keepRow.has(i)) {
+      if (!skipping) out.push("[… baris tabel lain tidak ditampilkan …]");
+      skipping = true;
+      return;
+    }
+    skipping = false;
+    out.push(l);
+  });
+  return out.join("\n");
+}
+
 async function loadDriver() {
   try {
     const m = await import("node:sqlite");
@@ -174,7 +237,7 @@ async function loadDriver() {
 }
 
 const TOC_QUERY_RE = /\b(daftar isi|table of contents|daftar (tabel|gambar|lampiran))\b/i;
-const SCHEMA_VERSION = 3; // 2 = potongan beroverlap + penanda daftar isi; 3 = kolom batang kata (stem) + FTS kedua
+const SCHEMA_VERSION = 4; // 2 = potongan beroverlap + penanda daftar isi; 3 = kolom batang kata (stem) + FTS kedua; 4 = huruf terpisah disatukan + kepala tabel per potongan
 
 export async function openKbIndex({ file, log = console, chunkChars = 1000, overlapChars = 150, reindex = false } = {}) {
   const defaults = { chunkChars, overlapChars };
@@ -217,6 +280,7 @@ export async function openKbIndex({ file, log = console, chunkChars = 1000, over
   if (!cols.has("ov")) db.exec("alter table chunks add column ov integer not null default 0");
   if (!cols.has("toc")) db.exec("alter table chunks add column toc integer not null default 0");
   if (!cols.has("stem")) db.exec("alter table chunks add column stem text not null default ''");
+  if (!cols.has("head")) db.exec("alter table chunks add column head text not null default ''");
   // FTS kedua di atas kolom `stem` (kandidat batang kata): menjembatani imbuhan Indonesia
   // ("menyetor" ~ "penyetoran" ~ "setoran"). Teks asli tetap dicari lewat chunks_fts (awalan).
   db.exec(`
@@ -235,21 +299,21 @@ export async function openKbIndex({ file, log = console, chunkChars = 1000, over
   const q = {
     delChunks: db.prepare("delete from chunks where doc_id = ?"),
     delDoc: db.prepare("delete from docs where id = ?"),
-    insChunk: db.prepare("insert into chunks (doc_id, seq, page, text, ov, toc, stem) values (?, ?, ?, ?, ?, ?, ?)"),
+    insChunk: db.prepare("insert into chunks (doc_id, seq, page, text, ov, toc, stem, head) values (?, ?, ?, ?, ?, ?, ?, ?)"),
     insDoc: db.prepare(
       "insert or replace into docs (id, title, filename, pages, chars, chunks, ocr_pages, indexed_at) values (?, ?, ?, ?, ?, ?, ?, ?)"
     ),
     listDocs: db.prepare("select id, title, filename, pages, chars, chunks, ocr_pages, indexed_at from docs order by indexed_at desc"),
     getDoc: db.prepare("select id, title, filename, pages, chars, chunks, ocr_pages from docs where id = ?"),
     docChunks: db.prepare("select page, text, ov from chunks where doc_id = ? order by seq"),
-    neighbor: db.prepare("select c.doc_id as doc_id, d.title as title, c.page as page, c.seq as seq, c.text as text, c.ov as ov, c.toc as toc from chunks c join docs d on d.id = c.doc_id where c.doc_id = ? and c.seq = ?"),
+    neighbor: db.prepare("select c.doc_id as doc_id, d.title as title, c.page as page, c.seq as seq, c.text as text, c.ov as ov, c.toc as toc, c.head as head from chunks c join docs d on d.id = c.doc_id where c.doc_id = ? and c.seq = ?"),
     search: db.prepare(
-      `select c.doc_id as doc_id, d.title as title, c.page as page, c.seq as seq, c.text as text, c.ov as ov, c.toc as toc, bm25(chunks_fts) as score
+      `select c.doc_id as doc_id, d.title as title, c.page as page, c.seq as seq, c.text as text, c.ov as ov, c.toc as toc, c.head as head, bm25(chunks_fts) as score
        from chunks_fts join chunks c on c.id = chunks_fts.rowid join docs d on d.id = c.doc_id
        where chunks_fts match ? order by bm25(chunks_fts) limit ?`
     ),
     searchStem: db.prepare(
-      `select c.doc_id as doc_id, d.title as title, c.page as page, c.seq as seq, c.text as text, c.ov as ov, c.toc as toc, bm25(chunks_stem_fts) as score
+      `select c.doc_id as doc_id, d.title as title, c.page as page, c.seq as seq, c.text as text, c.ov as ov, c.toc as toc, c.head as head, bm25(chunks_stem_fts) as score
        from chunks_stem_fts join chunks c on c.id = chunks_stem_fts.rowid join docs d on d.id = c.doc_id
        where chunks_stem_fts match ? order by bm25(chunks_stem_fts) limit ?`
     ),
@@ -279,9 +343,18 @@ export async function openKbIndex({ file, log = console, chunkChars = 1000, over
       q.delDoc.run(id);
       let seq = 0;
       let chars = 0;
+      let carryHead = null; // kepala tabel yang berlaku untuk halaman lanjutan (tabel bersambung antarhalaman)
       for (const p of pages) {
-        for (const piece of splitPageChunks(p.text, chunkChars, overlapChars)) {
-          q.insChunk.run(id, seq++, p.page ?? null, piece.text, piece.ov, looksLikeToc(piece.text) ? 1 : 0, stemText(piece.text));
+        const pageText = despaceLetters(p.text); // "B A N T E N" -> "BANTEN"
+        const ownHead = findTableHead(pageText);
+        const hasRows = pageText.split("\n").filter(isDataRow).length >= 3;
+        if (ownHead) carryHead = ownHead;
+        else if (!hasRows) carryHead = null;
+        const pageHead = ownHead || (hasRows ? carryHead : null);
+        for (const piece of splitPageChunks(pageText, chunkChars, overlapChars)) {
+          // potongan yang sudah memuat baris nomor kolom tak perlu kepala tambahan
+          const head = pageHead && !piece.text.split("\n").some((l) => COLNUM_RE.test(l)) && piece.text.split("\n").some(isDataRow) ? pageHead : "";
+          q.insChunk.run(id, seq++, p.page ?? null, piece.text, piece.ov, looksLikeToc(piece.text) ? 1 : 0, stemText(`${head}\n${piece.text}`), head);
           chars += piece.text.length - piece.ov;
         }
       }
@@ -428,12 +501,14 @@ export async function openKbIndex({ file, log = console, chunkChars = 1000, over
         if (run.length === 0) return;
         let text = "";
         let lastPage = null;
+        const headSrc = run.some((r) => r.text.split("\n").some((l) => COLNUM_RE.test(l))) ? null : run.find((r) => r.head);
         run.forEach((r, i) => {
           const body = i > 0 && r.ov > 0 ? r.text.slice(r.ov) : r.text;
-          if (i === 0) text = `${r.page != null ? `[Halaman ${r.page}] ` : ""}${body}`;
+          if (i === 0) text = `${r.page != null ? `[Halaman ${r.page}] ` : ""}${headSrc ? `(Judul & kepala kolom tabel ini:)\n${headSrc.head}\n(lanjutan tabel:)\n` : ""}${body}`;
           else text += `${r.page != null && r.page !== lastPage ? `\n[Halaman ${r.page}] ` : "\n"}${body}`;
           lastPage = r.page;
         });
+        text = focusTableRows(text, tokens);
         const hits = run.filter((r) => !r.neighbor);
         const best = (hits.length > 0 ? hits : run).reduce((m, r) => (Number(r.score) < Number(m.score) ? r : m)); // bm25: makin kecil makin baik
         blocks.push({ docId: run[0].doc_id, title: run[0].title, page: best.page, text, score: Number.isFinite(best.bm) ? best.bm : 0, rrf: -Number(best.score) });
