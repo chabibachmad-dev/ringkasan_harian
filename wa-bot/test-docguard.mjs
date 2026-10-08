@@ -46,6 +46,8 @@ for (const [name, m] of [["js", js], ["ts", tsMod]]) {
   check(!none.flagged && none.reply === "Informasi tidak ada di dokumen.", `[${name}] jawaban tanpa rujukan tidak berubah`);
   const noCtx = m.guardDocAnswer("hlm 5 «kalimat apa saja yang panjang»", []);
   check(!noCtx.flagged, `[${name}] tanpa potongan -> tidak memeriksa`);
+  const title = m.guardDocAnswer('Judul dokumen: "Fiqih Sunnah Jilid Satu" dan “Bab Wudhu Lengkap” (hlm 37).', chunks);
+  check(!title.flagged && title.checkedQuotes === 0, `[${name}] judul dalam tanda kutip biasa bukan kutipan`);
   const short = m.checkDocAnswer("«ya tidak»", chunks);
   check(short.checkedQuotes === 0, `[${name}] kutipan terlalu pendek diabaikan`);
 }

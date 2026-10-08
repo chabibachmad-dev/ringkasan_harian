@@ -462,5 +462,32 @@ check(!looksLikeToc("Rukun wudhu ada enam. Pertama niat... lalu membasuh muka, m
   check(focusTableRows("a\nb\nc", ["abc"]) === "a\nb\nc", "focusTableRows: teks biasa tak berubah");
   tix.close();
 }
+
+// ---------- boilerplate, cakupan kata, halaman berantakan, sinonim fikih ----------
+{
+  const { cleanBoilerplate } = await import("./text-clean.js");
+  check(!/jdih|SK No/.test(cleanBoilerplate("PERATURAN http://www.jdih.kemenkeu.go.id/fullText/2012/190~PMK.05~2012Pe...\nPajak SK No 115576 A")) && cleanBoilerplate("tarif 4,5o/o dan 5 o/o") === "tarif 4,5% dan 5%", "cleanBoilerplate: URL penanda air, 'SK No', 'o/o' -> %");
+  const gx = await openKbIndex({ file: ":memory:", log: silent });
+  gx.upsertDoc({ id: "p", title: "PMK 190 2012", pages: [
+    { page: 1, text: "Kedudukan dan tanggung jawab Bendahara Pengeluaran: pejabat yang ditunjuk untuk menerima, menyimpan, membayarkan, dan mempertanggungjawabkan uang untuk keperluan belanja negara pada satuan kerja kementerian." },
+    { page: 2, text: "Pegawai negeri dan pejabat negara dalam kementerian menerima gaji setiap bulan sesuai ketentuan yang berlaku." },
+    { page: 3, text: "Setiap pegawai wajib menjaga disiplin dan mentaati jam kerja yang ditetapkan oleh pimpinan satuan kerja." }
+  ] });
+  check(gx.search("apa saja jenis hukuman disiplin pegawai negeri sipil").length === 0, "pertanyaan panjang yang tak ada jawabannya -> 0 blok (bukan potongan yang kebetulan memuat 1-2 kata)");
+  check(gx.search("bendahara pengeluaran").length > 0 && gx.search("apa kedudukan dan tanggung jawab bendahara pengeluaran")[0]?.page === 1, "pertanyaan relevan tetap menemukan potongannya");
+  check(gx.search("disiplin pegawai").length > 0, "pertanyaan pendek tidak dikenai penyaringan cakupan");
+
+  const clean = "Wudhu adalah bersuci dengan air yang suci dan menyucikan. Fardhu wudhu ada enam perkara yaitu niat, membasuh muka, membasuh kedua tangan sampai siku, mengusap kepala, membasuh kedua kaki, dan tertib. Semua ini harus dikerjakan berurutan sesuai dengan yang telah dijelaskan oleh para ulama dalam kitab-kitab mereka. ".repeat(2);
+  const garbled = "Rukun wudhu acla cnam pcrkara yarg dlwajibkan darn dlkcrjakan scbclum shalal bcrdasarkan kilab yarg dlrawikan olch pcrawi tcrpcrcaya; rukun wudhu nial mcmbasuh muka dcngan alr yarg suci scrla rnengusap kcpala. Rukun wudhu rukun wudhu. ".repeat(4);
+  const filler = "Zakat fitrah dikeluarkan menjelang hari raya dan diberikan kepada orang-orang yang berhak menerimanya sesuai dengan ketentuan yang telah dijelaskan dalam kitab ini dengan rinci dan jelas. ".repeat(3);
+  check(assessPageText(garbled).bad && !assessPageText(clean).bad, "fixture: halaman sampah terdeteksi berantakan, halaman bersih tidak");
+  const fx = await openKbIndex({ file: ":memory:", log: silent });
+  fx.upsertDoc({ id: "f", title: "Fiqih Sunnah", pages: [{ page: 5, text: clean }, { page: 30, text: filler }, { page: 70, text: garbled }] });
+  const r = fx.search("apa saja rukun wudhu", { neighbors: false });
+  check(r.some((b) => /Fardhu wudhu ada enam/.test(b.text)), "sinonim: 'rukun wudhu' menemukan 'fardhu wudhu'");
+  check(r.length >= 2 && r[0].page === 5 && r.at(-1).page === 70, "halaman berantakan diurutkan di belakang halaman bersih walau skornya lebih tinggi");
+  fx.close();
+  gx.close();
+}
 console.log(fails ? `\n${fails} GAGAL` : "\nsemua OK");
 process.exit(fails ? 1 : 0);

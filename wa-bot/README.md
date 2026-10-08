@@ -520,6 +520,9 @@ Bila laptop mati / bot tak menjawab / indeks kosong, Edge Function otomatis mema
 
 Pasang: jalankan `supabase/migrations/0019_kb_retrievals.sql`, deploy ulang function `chat`, salin file bot baru ke laptop (`kb-retrieval.js`, `docguard.js`, `index.js`, `app-agent.js`, `kb-index.js`) dan `pm2 restart wa-bot`. Opsi `.env`: `KB_RETRIEVAL_ENABLED=false` mematikan worker, `KB_RETRIEVAL_POLL_MS`, `KB_RETRIEVAL_MAX_BUDGET_CHARS`.
 
+
+**Penyempurnaan pencarian (hasil audit).** (a) *Cakupan kata*: pertanyaan panjang (≥ 5 kata penting) hanya mengembalikan potongan yang memuat ≥ 50% kata kuncinya (`KB_MIN_COVERAGE`, 0 = mati; naikkan ke 0.7 bila pertanyaan di luar dokumen masih mendapat potongan sampah); bila tak ada yang memenuhi hasilnya kosong sehingga model diberi tahu "tidak ditemukan". (b) *Halaman berantakan* (teks scan rusak) diurutkan di belakang halaman bersih. Halaman tabel/angka tidak dianggap rusak. (c) Pembersihan otomatis: URL penanda air JDIH, "SK No 115576 A" di kaki halaman, dan salah-baca OCR "4,5o/o" → "4,5%". (d) Sinonim fikih: "rukun" ↔ "fardhu/fardu". (e) Pemeriksa jawaban hanya memeriksa kutipan di antara « » — judul dokumen dalam tanda kutip biasa tidak lagi ditandai. Indeks disusun ulang otomatis sekali saat bot dijalankan (versi skema 5). `kb-audit.mjs` mengenal kunci `kosong=ya` (pertanyaan tanpa jawaban), `tidak=`, `jawab=`, `bukan=` dan opsi `--ask`.
+
 ## 10. Antrean Ollama berprioritas & pengaman RAM
 
 Laptop 2 inti / 7,5 GB RAM hanya sanggup satu panggilan Ollama pada satu waktu. Semua panggilan lewat satu antrean (`ollama-queue.js`) dengan tiga tingkat prioritas:

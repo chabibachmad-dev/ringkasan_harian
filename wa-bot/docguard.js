@@ -29,7 +29,8 @@ export function collectPages(chunks) {
   return pages;
 }
 
-const QUOTE_RE = /[«"“]([^«»"“”\n]{12,400})[»"”]/g;
+// Hanya tanda « » (format yang diminta dari model); tanda kutip biasa dipakai untuk judul dokumen & istilah, bukan kutipan.
+const QUOTE_RE = /«([^«»\n]{12,400})»/g;
 const PAGE_RE = /\b(?:hlm\.?|halaman)\s*(\d{1,4})(?:\s*[-–]\s*(\d{1,4}))?/gi;
 
 export function checkDocAnswer(reply, chunks) {
