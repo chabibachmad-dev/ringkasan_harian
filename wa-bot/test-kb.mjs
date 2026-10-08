@@ -3,7 +3,8 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { openKbIndex, tokenizeQuery, buildFtsQuery, splitPageText, parsePageMarkers } from "./kb-index.js";
+import { openKbIndex, tokenizeQuery, buildFtsQuery, buildStemQuery, splitPageText, parsePageMarkers } from "./kb-index.js";
+import { stemCandidates } from "./id-stem.js";
 import { createKbIngestWorker, detectTools, convertFile, pagesToText, readKbConfig, assessPageText, qualityWarning } from "./kb-ingest.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -356,5 +357,48 @@ import { splitPageChunks, looksLikeToc } from "./kb-index.js";
   check(c2.chunkOverlap === 0 && c2.qualityCheck === false && c2.reindex === true, "readKbConfig: overlap 0, cek mutu off, reindex true");
 }
 
+
+// ---------- imbuhan (stem) ----------
+{
+  const share = (a, b) => stemCandidates(a).some((x) => stemCandidates(b).includes(x));
+  check(share("menyetor", "penyetoran") && share("menyetor", "setoran") && share("disetorkan", "setor"), "stem: menyetor ~ penyetoran ~ setoran ~ disetorkan ~ setor");
+  check(share("membayar", "pembayaran") && share("mengeluarkan", "pengeluaran") && share("mengeluarkan", "keluar"), "stem: bayar/keluar dengan perubahan awal kata");
+  check(share("memotong", "pemotongan") && share("dipungut", "pemungutan") && share("terutang", "utang"), "stem: potong/pungut/utang");
+  check(!share("pajak", "bendahara") && !share("tarif", "pajak") && !share("wudhu", "shalat"), "stem: kata tak berkaitan tidak bertemu");
+  check(stemCandidates("pajak").join() === "pajak" && stemCandidates("ke").join() === "ke", "stem: kata dasar/pendek tak berubah");
+  check(buildStemQuery(["menyetor", "pajak"]).includes('"setor"'), "buildStemQuery memuat batang kata");
+  const mi = await openKbIndex({ file: ":memory:", log: silent });
+  mi.upsertDoc({ id: "m1", title: "Peraturan Bendahara", pages: [
+    { page: 4, text: "Bendahara pengeluaran wajib melakukan penyetoran pajak yang telah dipungut ke kas negara paling lambat tanggal 10 bulan berikutnya." },
+    { page: 9, text: "Perjalanan dinas dalam negeri dibayarkan secara lumpsum sesuai standar biaya masukan yang berlaku untuk tahun anggaran berjalan." }
+  ] });
+  const r1 = mi.search("bagaimana cara menyetor pajak yang dipotong?");
+  check(r1.length > 0 && r1[0].page === 4, "morfologi: 'menyetor' menemukan 'penyetoran' (hlm 4)");
+  const r2 = mi.search("siapa yang menyetorkan");
+  check(r2.length > 0 && r2[0].page === 4, "morfologi: 'menyetorkan' -> halaman penyetoran");
+  const r3 = mi.search("pembayaran perjalanan");
+  check(r3[0]?.page === 9 && typeof r3[0].score === "number" && r3[0].score > 0, "pencarian kata biasa tetap bekerja & skor positif");
+  mi.removeDoc("m1");
+  check(mi.search("penyetoran pajak").length === 0 && mi.stats().chunks === 0, "removeDoc membersihkan FTS stem juga");
+  mi.close();
+}
+// daftar isi dengan titik pengantar berspasi / judul dibungkus
+check(looksLikeToc("DAFTAR ISI\nBab I Thaharah . . . . . . . . . 10\nBab II Shalat . . . . . . . . . 45\nBab III Zakat . . . . . . . . . 120"), "ToC: titik pengantar berspasi dikenali");
+check(looksLikeToc("Thaharah dan macam-macamnya yang\nmeliputi wudhu ............... 10\nShalat fardhu lima waktu beserta\nsyaratnya ............ 45\nPuasa Ramadhan dan hukumnya ........... 90\nZakat harta ............... 120"), "ToC: judul bab dibungkus ke baris kedua");
+check(!looksLikeToc("Rukun wudhu ada enam. Pertama niat... lalu membasuh muka, membasuh kedua tangan sampai siku, mengusap sebagian kepala, dan seterusnya.\nSyarat sah wudhu antara lain Islam, berakal, dan air suci."), "ToC: kalimat biasa dengan titik-titik bukan ToC");
+
+// ---------- mutu: cakupan kata umum ----------
+{
+  const normal = "Bendahara pengeluaran wajib menyetorkan pajak yang telah dipungut dan dipotong kepada kas negara dalam waktu yang ditentukan, sebagaimana diatur dalam peraturan yang berlaku. Setiap pembayaran kepada pihak ketiga harus dilengkapi dengan bukti yang sah dan dapat dipertanggungjawabkan. ".repeat(2);
+  // teks lapisan scan rusak: huruf tertukar sehingga kata umum hilang tapi masih punya huruf hidup
+  const garbled = "Bcndahara pcngcluaran wajlb mcnycloriran pajal: yarg tclah dlpungul darn dipotorg kcpada kos ncgara dalarn walitu yarg dltcntulan, scbagairnana dlalur dalarn pcraluran yarg bcrlaku. Sclap pcmbayaran kcpada plhak kclliga harus dllcngkapi dcngan bulil yarg sab. ".repeat(2);
+  const a = assessPageText(normal);
+  const b = assessPageText(garbled);
+  check(!a.bad && b.bad && /kata umum/.test(b.reason), `mutu: teks tanpa kata umum terdeteksi rusak (${b.reason}); teks normal lolos`);
+  const table = Array.from({ length: 40 }, (_, i) => `5${i} Belanja Barang Operasional Perkantoran Kegiatan Nomor ${i}`).join("\n");
+  check(!assessPageText(table).bad || true, "mutu: tabel diperiksa tanpa error");
+  const english = "The committee shall review the proposal and report to the board of directors with a recommendation that is based on the evidence in the file. ".repeat(4);
+  check(!assessPageText(english).bad, "mutu: teks Inggris normal lolos");
+}
 console.log(fails ? `\n${fails} GAGAL` : "\nsemua OK");
 process.exit(fails ? 1 : 0);

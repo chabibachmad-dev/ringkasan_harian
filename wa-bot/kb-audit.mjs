@@ -2,6 +2,7 @@
 // Audit kualitas pencarian & teks Dokumen Pengetahuan di laptop (tidak mengubah isi indeks).
 //
 //   node kb-audit.mjs --docs                         # mutu teks tiap dokumen (halaman berantakan, potongan daftar isi)
+//   node kb-audit.mjs --pages [--dok Fiqih]         # daftar HALAMAN berantakan beserta alasan & cuplikan teksnya
 //   node kb-audit.mjs "apa rukun wudhu" "tarif hotel Jogja"
 //   node kb-audit.mjs --file pertanyaan.txt          # satu pertanyaan per baris
 //        format baris:  pertanyaan | hal=37 | dok=Fiqih | teks=niat
@@ -22,7 +23,7 @@ const opt = (name, d) => {
   const i = args.indexOf(name);
   return i >= 0 && args[i + 1] ? args[i + 1] : d;
 };
-const optNames = new Set(["--budget", "--max", "--file", "--index"]);
+const optNames = new Set(["--budget", "--max", "--file", "--index", "--dok"]);
 const questions = [];
 for (let i = 0; i < args.length; i += 1) {
   if (optNames.has(args[i])) {
@@ -56,7 +57,25 @@ const index = await openKbIndex({ file, chunkChars: cfg.chunkChars, overlapChars
 const st = index.stats();
 console.log(`Indeks: ${file}\n${st.docs} dokumen • ${st.chunks} potongan • ${st.chars.toLocaleString("id-ID")} karakter • driver ${st.driver}\n`);
 
-if (flag("--docs") || (questions.length === 0 && !opt("--file"))) {
+if (flag("--pages")) {
+  const only = (opt("--dok", "") || "").toLowerCase();
+  console.log("== Halaman berantakan (yang tetap rusak setelah OCR) ==");
+  let n = 0;
+  for (const d of index.listDocs()) {
+    if (only && !d.title.toLowerCase().includes(only)) continue;
+    for (const p of parsePageMarkers(index.getDocText(d.id))) {
+      if (p.text.replace(/\s+/g, "").length < 25) continue;
+      const a = assessPageText(p.text);
+      if (!a.bad) continue;
+      n += 1;
+      console.log(`• [${d.title}] hlm ${p.page ?? "?"} — ${a.reason} (skor ${a.score})\n    ${p.text.replace(/\s+/g, " ").trim().slice(0, 200)}…`);
+    }
+  }
+  console.log(n === 0 ? "(tidak ada)" : `\nTotal ${n} halaman. Untuk memperbaiki: hapus dokumennya di aplikasi lalu unggah ulang (agar OCR dicoba ulang), atau unggah PDF yang lebih bersih.`);
+  console.log("");
+}
+
+if (flag("--docs") || (questions.length === 0 && !opt("--file") && !flag("--pages"))) {
   console.log("== Mutu teks per dokumen ==");
   for (const d of index.listDocs()) {
     const pages = parsePageMarkers(index.getDocText(d.id));

@@ -19,6 +19,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { stemCandidates, stemText } from "./id-stem.js";
 
 const STOPWORDS = new Set(
   (
@@ -45,6 +46,16 @@ export function tokenizeQuery(text) {
 // "perjalanan" ~ "perjalanannya", "tarif" ~ "tarifnya".
 export function buildFtsQuery(tokens) {
   return tokens.map((w) => (w.length >= 4 ? `"${w}"*` : `"${w}"`)).join(" OR ");
+}
+
+// Kata -> ekspresi FTS5 atas kolom stem: semua kandidat batang kata tiap kata (kata persis, tanpa awalan).
+export function buildStemQuery(tokens) {
+  const terms = new Set();
+  for (const w of tokens) {
+    if (/^[a-z]+$/.test(w)) for (const c of stemCandidates(w)) terms.add(c);
+    else terms.add(w);
+  }
+  return [...terms].slice(0, 80).map((t) => `"${t}"`).join(" OR ");
 }
 
 // Pecah teks satu halaman jadi potongan <= maxChars, memotong di batas baris.
@@ -110,13 +121,16 @@ export function splitPageChunks(text, maxChars = 1000, overlapChars = 150) {
 
 // Apakah potongan ini tampak seperti DAFTAR ISI / indeks? (baris berpola "judul ..... 12",
 // "judul    12", atau judul bagian "DAFTAR ISI"). Dipakai untuk menurunkan peringkat saat mencari.
-const TOC_ENTRY_RE = /(\.{3,}|…{1,}|\s{3,})\s*(\d{1,4}|[ivxlc]{1,6})\s*$/i;
+const TOC_ENTRY_RE = /(\.{3,}|(?:\.\s){3,}\.?|…{1,}|·{3,}|_{3,}|\s{3,})\s*(\d{1,4}|[ivxlc]{1,6})\s*$/i;
+const TOC_LEADER_RE = /(?:\.\s?){5,}|…{2,}|·{4,}/; // titik pengantar "........" / ". . . . ." di tengah/akhir baris
 export function looksLikeToc(text) {
   const lines = String(text || "").split("\n").map((l) => l.trim()).filter(Boolean);
   if (lines.length === 0) return false;
   const entries = lines.filter((l) => TOC_ENTRY_RE.test(l) && /\p{L}{3,}/u.test(l)).length;
+  const leaders = lines.filter((l) => TOC_LEADER_RE.test(l) && /\p{L}{3,}/u.test(l)).length;
   const heading = /^(daftar\s+isi|table\s+of\s+contents|daftar\s+(tabel|gambar|lampiran))\b/im.test(text);
-  if (heading && entries >= 2) return true;
+  if (heading && Math.max(entries, leaders) >= 2) return true;
+  if (leaders >= 3 && leaders / lines.length >= 0.4) return true; // judul bab yang dibungkus ke baris kedua
   return lines.length >= 4 && entries / lines.length >= 0.6;
 }
 
@@ -140,7 +154,7 @@ async function loadDriver() {
 }
 
 const TOC_QUERY_RE = /\b(daftar isi|table of contents|daftar (tabel|gambar|lampiran))\b/i;
-const SCHEMA_VERSION = 2; // 2 = potongan beroverlap + penanda daftar isi
+const SCHEMA_VERSION = 3; // 2 = potongan beroverlap + penanda daftar isi; 3 = kolom batang kata (stem) + FTS kedua
 
 export async function openKbIndex({ file, log = console, chunkChars = 1000, overlapChars = 150, reindex = false } = {}) {
   const defaults = { chunkChars, overlapChars };
@@ -182,12 +196,26 @@ export async function openKbIndex({ file, log = console, chunkChars = 1000, over
   const cols = new Set(db.prepare("pragma table_info(chunks)").all().map((c) => c.name));
   if (!cols.has("ov")) db.exec("alter table chunks add column ov integer not null default 0");
   if (!cols.has("toc")) db.exec("alter table chunks add column toc integer not null default 0");
+  if (!cols.has("stem")) db.exec("alter table chunks add column stem text not null default ''");
+  // FTS kedua di atas kolom `stem` (kandidat batang kata): menjembatani imbuhan Indonesia
+  // ("menyetor" ~ "penyetoran" ~ "setoran"). Teks asli tetap dicari lewat chunks_fts (awalan).
+  db.exec(`
+    create virtual table if not exists chunks_stem_fts using fts5(
+      stem, content='chunks', content_rowid='id', tokenize='unicode61 remove_diacritics 2'
+    );
+    create trigger if not exists chunks_si after insert on chunks begin
+      insert into chunks_stem_fts(rowid, stem) values (new.id, new.stem);
+    end;
+    create trigger if not exists chunks_sd after delete on chunks begin
+      insert into chunks_stem_fts(chunks_stem_fts, rowid, stem) values ('delete', old.id, old.stem);
+    end;
+  `);
   const schemaVersion = Number(db.prepare("pragma user_version").get().user_version) || 0;
 
   const q = {
     delChunks: db.prepare("delete from chunks where doc_id = ?"),
     delDoc: db.prepare("delete from docs where id = ?"),
-    insChunk: db.prepare("insert into chunks (doc_id, seq, page, text, ov, toc) values (?, ?, ?, ?, ?, ?)"),
+    insChunk: db.prepare("insert into chunks (doc_id, seq, page, text, ov, toc, stem) values (?, ?, ?, ?, ?, ?, ?)"),
     insDoc: db.prepare(
       "insert or replace into docs (id, title, filename, pages, chars, chunks, ocr_pages, indexed_at) values (?, ?, ?, ?, ?, ?, ?, ?)"
     ),
@@ -199,6 +227,11 @@ export async function openKbIndex({ file, log = console, chunkChars = 1000, over
       `select c.doc_id as doc_id, d.title as title, c.page as page, c.seq as seq, c.text as text, c.ov as ov, c.toc as toc, bm25(chunks_fts) as score
        from chunks_fts join chunks c on c.id = chunks_fts.rowid join docs d on d.id = c.doc_id
        where chunks_fts match ? order by bm25(chunks_fts) limit ?`
+    ),
+    searchStem: db.prepare(
+      `select c.doc_id as doc_id, d.title as title, c.page as page, c.seq as seq, c.text as text, c.ov as ov, c.toc as toc, bm25(chunks_stem_fts) as score
+       from chunks_stem_fts join chunks c on c.id = chunks_stem_fts.rowid join docs d on d.id = c.doc_id
+       where chunks_stem_fts match ? order by bm25(chunks_stem_fts) limit ?`
     ),
     totals: db.prepare("select (select count(*) from docs) as docs, (select count(*) from chunks) as chunks, (select coalesce(sum(chars),0) from docs) as chars")
   };
@@ -228,7 +261,7 @@ export async function openKbIndex({ file, log = console, chunkChars = 1000, over
       let chars = 0;
       for (const p of pages) {
         for (const piece of splitPageChunks(p.text, chunkChars, overlapChars)) {
-          q.insChunk.run(id, seq++, p.page ?? null, piece.text, piece.ov, looksLikeToc(piece.text) ? 1 : 0);
+          q.insChunk.run(id, seq++, p.page ?? null, piece.text, piece.ov, looksLikeToc(piece.text) ? 1 : 0, stemText(piece.text));
           chars += piece.text.length - piece.ov;
         }
       }
@@ -288,13 +321,39 @@ export async function openKbIndex({ file, log = console, chunkChars = 1000, over
   function search(question, { budgetChars = 5000, maxChunks = 8, neighbors = true } = {}) {
     const tokens = tokenizeQuery(question);
     if (tokens.length === 0) return [];
-    let rows;
+    // Dua pencarian digabung dengan Reciprocal Rank Fusion:
+    //   A. teks asli (kata persis / awalan) -- tepat untuk istilah, nomor pasal, angka;
+    //   B. batang kata (stem) -- menjembatani imbuhan: menyetor ~ setoran ~ penyetoran.
+    const limit = Math.max(maxChunks * 5, 30);
+    let rowsA = [];
+    let rowsB = [];
     try {
-      rows = q.search.all(buildFtsQuery(tokens), Math.max(maxChunks * 5, 30));
+      rowsA = q.search.all(buildFtsQuery(tokens), limit);
     } catch (e) {
       log.error?.("KB: pencarian FTS gagal:", e.message);
-      return [];
     }
+    try {
+      const stemQ = buildStemQuery(tokens);
+      if (stemQ) rowsB = q.searchStem.all(stemQ, limit);
+    } catch (e) {
+      log.error?.("KB: pencarian stem gagal:", e.message);
+    }
+    const fused = new Map();
+    const fuse = (list, tag) =>
+      list.forEach((r, i) => {
+        const k = `${r.doc_id}#${r.seq}`;
+        const cur = fused.get(k) || { ...r, rrf: 0, bm: -Infinity, inA: false, inB: false };
+        cur.rrf += 1 / (60 + i + 1);
+        cur.bm = Math.max(cur.bm, -Number(r.score));
+        cur[tag] = true;
+        fused.set(k, cur);
+      });
+    fuse(rowsA, "inA");
+    fuse(rowsB, "inB");
+    const rows = [...fused.values()]
+      .map((r) => ({ ...r, score: -r.rrf })) // kecil = baik (dipakai di bawah)
+      .sort((a, b) => a.score - b.score);
+    if (rows.length === 0) return [];
     const wantToc = TOC_QUERY_RE.test(String(question || ""));
     const nonToc = rows.filter((r) => !r.toc);
     const pool = wantToc || nonToc.length === 0 ? rows : nonToc;
@@ -357,7 +416,7 @@ export async function openKbIndex({ file, log = console, chunkChars = 1000, over
         });
         const hits = run.filter((r) => !r.neighbor);
         const best = (hits.length > 0 ? hits : run).reduce((m, r) => (Number(r.score) < Number(m.score) ? r : m)); // bm25: makin kecil makin baik
-        blocks.push({ docId: run[0].doc_id, title: run[0].title, page: best.page, text, score: -Number(best.score) });
+        blocks.push({ docId: run[0].doc_id, title: run[0].title, page: best.page, text, score: Number.isFinite(best.bm) ? best.bm : 0, rrf: -Number(best.score) });
         run = [];
       };
       for (const r of list) {
@@ -366,7 +425,7 @@ export async function openKbIndex({ file, log = console, chunkChars = 1000, over
       }
       flush();
     }
-    blocks.sort((a, b) => b.score - a.score);
+    blocks.sort((a, b) => b.rrf - a.rrf);
     return blocks;
   }
 
@@ -387,8 +446,18 @@ export async function openKbIndex({ file, log = console, chunkChars = 1000, over
   // daftar isi, atau KB_REINDEX=true setelah mengganti ukuran potongan). Tanpa OCR ulang.
   if (reindex || schemaVersion < SCHEMA_VERSION) {
     const docs = q.listDocs.all();
+    // Baris lama belum pernah masuk FTS stem; "delete" atas baris yang tak terindeks merusak FTS5.
+    // Jadi pemicu hapus stem dimatikan selama penyusunan ulang pertama, lalu dipasang lagi.
+    const firstStem = schemaVersion < 3;
+    if (firstStem) db.exec("drop trigger if exists chunks_sd");
     for (const d of docs) {
       upsertDoc({ id: d.id, title: d.title, filename: d.filename, pages: parsePageMarkers(getDocText(d.id)), ocrPages: d.ocr_pages });
+    }
+    if (firstStem) {
+      db.exec("insert into chunks_stem_fts(chunks_stem_fts) values ('rebuild')"); // sapu entri basah bila proses sempat terhenti
+      db.exec(`create trigger if not exists chunks_sd after delete on chunks begin
+        insert into chunks_stem_fts(chunks_stem_fts, rowid, stem) values ('delete', old.id, old.stem);
+      end;`);
     }
     db.exec(`pragma user_version = ${SCHEMA_VERSION}`);
     if (docs.length > 0) log.log?.(`📚 Indeks dokumen disusun ulang (${docs.length} dokumen): potongan ${defaults.chunkChars} karakter + overlap ${defaults.overlapChars}.`);

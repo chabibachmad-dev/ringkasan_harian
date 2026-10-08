@@ -112,6 +112,16 @@ export async function detectTools(run = defaultRun, cfg = readKbConfig()) {
 // Penilaian mutu teks satu halaman (hasil pdftotext/OCR): teks berantakan membuat model
 // bingung dan memicu halusinasi. Mengembalikan { bad, score, reason }; score 0 = bersih,
 // makin besar makin berantakan. Halaman pendek (< 60 huruf) tidak dinilai.
+// Kata fungsi paling umum (Indonesia + Inggris). Teks normal selalu memuat ±20-40% kata seperti ini;
+// lapisan teks hasil scan yang rusak ("yarg", "dar", "unluk"…) hampir tak memuatnya sama sekali.
+const COMMON_WORDS = new Set(
+  (
+    "yang dan di ke dari untuk dengan pada adalah ini itu atau juga dalam akan sudah telah oleh sebagai karena agar " +
+    "bagi para tidak dapat harus tersebut bahwa kepada serta jika maka tentang atas dalam ada bukan lebih setiap " +
+    "the and of to in is are for with on at by be as it this that or not from was were has have an a"
+  ).split(/\s+/)
+);
+
 export function assessPageText(text) {
   const s = String(text || "");
   const letters = (s.match(/\p{Script=Latin}/gu) || []).length;
@@ -130,7 +140,13 @@ export function assessPageText(text) {
   const noVowelRatio = words.length >= 20 ? noVowel / words.length : 0;
   const singleRatio = tokens.length >= 30 ? singles / tokens.length : 0;
 
+  // Cakupan kata umum: hanya dinilai bila ada cukup kata Latin (>= 50) supaya tabel/daftar nama tidak keliru.
+  const alpha = tokens.map((w) => w.toLowerCase().replace(/^[^\p{L}]+|[^\p{L}]+$/gu, "")).filter((w) => /^\p{Script=Latin}{2,}$/u.test(w));
+  const common = alpha.filter((w) => COMMON_WORDS.has(w)).length;
+  const commonRatio = alpha.length >= 50 ? common / alpha.length : 1;
+
   const parts = [
+    { v: 0.05 / Math.max(commonRatio, 0.01), why: "hampir tak ada kata umum (teks tampak rusak)" },
     { v: junkRatio / 0.01, why: "karakter rusak" },
     { v: oddRatio / 0.25, why: "banyak simbol aneh" },
     { v: noVowelRatio / 0.3, why: "kata tanpa huruf hidup" },

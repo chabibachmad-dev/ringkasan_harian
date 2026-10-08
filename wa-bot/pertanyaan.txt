@@ -1,0 +1,7 @@
+# pertanyaan | dok=sebagian judul dokumen yang seharusnya jadi sumber
+apa saja kedudukan dan tanggung jawab bendahara pengeluaran | dok=Bendahara
+kapan bendahara wajib menyetor pajak yang dipungut | dok=Perpajakan
+berapa standar biaya penginapan perjalanan dinas | dok=SBM
+apa saja jenis hukuman disiplin pegawai negeri sipil | dok=Disiplin
+bagaimana tata cara pembayaran dengan uang persediaan | dok=Pembayaran
+apa saja rukun wudhu | dok=Fiqih
