@@ -472,7 +472,28 @@ const KNOWLEDGE_CONTEXT_INTRO = `Pengguna sudah mengupload dokumen referensi ber
 const KB_EXCERPT_NOTE =
   "CATATAN: yang disertakan di bawah hanyalah POTONGAN dokumen yang paling relevan dengan pertanyaan (bukan seluruh dokumen), dan tabel panjang bisa terpotong di tengah. Kalau jawabannya tidak ada di potongan ini, katakan terus terang bahwa potongan yang tersedia belum memuatnya -- JANGAN menyimpulkan bahwa dokumennya tidak memuatnya.";
 
-function buildSystemText(knowledgeContext: { title: string; content: string }[], kbExcerpts = false): string {
+// Mode DOKUMEN KETAT: potongan datang dari indeks laptop (lengkap, ber-halaman). Model hanya boleh
+// menjawab dari potongan itu -- tanpa Google Search, suhu rendah, kutipan wajib bisa diperiksa mesin
+// (lihat _shared/docguard.ts).
+const STRICT_DOC_RULES = `ATURAN DOKUMEN (WAJIB):
+- Untuk pertanyaan tentang isi dokumen, jawab HANYA berdasarkan teks di bawah. Jangan menebak dan jangan memakai pengetahuan luar untuk fakta, angka, pasal, istilah, tarif, atau daftar.
+- Kalau jawabannya tidak ada di teks itu, tulis persis: "Informasi tidak ada di dokumen." Boleh ditambah satu kalimat tentang apa yang ADA di potongan yang ditemukan. JANGAN menyimpulkan bahwa dokumen aslinya tidak memuatnya -- yang kamu lihat hanya potongan.
+- Setiap fakta ditulis dengan rujukan (Judul dokumen, hlm N) memakai nomor dari penanda [Halaman n].
+- Untuk angka, tarif, syarat, pasal, atau definisi, sertakan KUTIPAN PERSIS satu kalimat/frasa penting dari teks di antara tanda « dan » (salin apa adanya, jangan diubah). Jangan membuat kutipan yang tidak ada di teks.
+- Kalau diminta daftar (rukun, wajib, syarat, langkah): tuliskan SEMUA butir yang benar-benar tertulis, tidak menambah dan tidak mengurangi. Bila daftar tampak terpotong di ujung potongan, katakan "daftar di potongan ini mungkin belum lengkap".
+- Kalau potongan hanya berupa daftar isi atau judul bab tanpa isinya, katakan isi bagian itu belum terbaca.
+- Teks bisa berisi salah-baca hasil scan (huruf aneh). Bila angka/kata kunci tampak rusak atau ragu, katakan ragu dan sarankan memeriksa dokumen aslinya.
+- Sapaan atau obrolan umum yang tidak menyangkut dokumen: jawab seperti biasa.`;
+
+// Toggle dokumen aktif, tetapi tidak ada satu pun potongan yang cocok dengan pertanyaan.
+const NO_MATCH_NOTE =
+  "CATATAN: pengguna mengaktifkan Dokumen Pengetahuan, tetapi pencarian di dokumen TIDAK menemukan bagian yang cocok dengan pertanyaan ini. Kalau pertanyaannya menyangkut isi dokumen, jawab: \"Informasi tidak ada di dokumen.\" (jangan menjawab dari ingatan seolah-olah dari dokumen). Kalau pertanyaannya umum / di luar dokumen, jawab seperti biasa dan sebut singkat bahwa jawabannya bukan dari dokumen.";
+
+function buildSystemText(
+  knowledgeContext: { title: string; content: string }[],
+  kbExcerpts = false,
+  mode: { strictDocs?: boolean; docNoMatch?: boolean } = {}
+): string {
   // Model TIDAK tahu tanggal hari ini kecuali diberi tahu -- tanpa ini ia
   // menjawab pakai "kalender" data latihannya. Zona WITA, sama dgn bot WA.
   const nowText = new Intl.DateTimeFormat("id-ID", {
@@ -482,12 +503,13 @@ function buildSystemText(knowledgeContext: { title: string; content: string }[],
   }).format(new Date());
   const base = `${CHAT_SYSTEM_PROMPT}\n\nWaktu sekarang: ${nowText} WITA. Anggap ini tanggal hari ini. Jangan mengira tahun ini masih tahun sebelumnya, dan jangan bilang aturan/peraturan tahun ini "belum terbit" atau "akan terbit" kecuali hasil pencarian memastikannya.`;
 
-  if (knowledgeContext.length === 0) return base;
+  if (knowledgeContext.length === 0) return mode.docNoMatch ? `${base}\n\n${NO_MATCH_NOTE}` : base;
 
   const docsText = knowledgeContext
     .map((doc) => `=== Dokumen: "${doc.title}" ===\n${doc.content}`)
     .join("\n\n");
 
+  if (mode.strictDocs) return `${base}\n\n${STRICT_DOC_RULES}\n\n${docsText}`;
   return `${base}\n\n${KNOWLEDGE_CONTEXT_INTRO}${kbExcerpts ? `\n${KB_EXCERPT_NOTE}` : ""}\n\n${docsText}`;
 }
 
@@ -507,7 +529,7 @@ export async function generateChatReply(
   messages: ChatMessage[],
   apiKeyOrKeys: string | string[],
   knowledgeContext: { title: string; content: string }[] = [],
-  options: { kbExcerpts?: boolean } = {}
+  options: { kbExcerpts?: boolean; strictDocs?: boolean; docNoMatch?: boolean } = {}
 ): Promise<ChatReplyResult> {
   const apiKeys = Array.isArray(apiKeyOrKeys) ? apiKeyOrKeys : [apiKeyOrKeys];
   const primaryModel = Deno.env.get("GEMINI_MODEL") || DEFAULT_MODEL;
@@ -518,7 +540,8 @@ export async function generateChatReply(
     parts: [{ text: m.content }]
   }));
 
-  const systemText = buildSystemText(knowledgeContext, options.kbExcerpts === true);
+  const strict = options.strictDocs === true && knowledgeContext.length > 0;
+  const systemText = buildSystemText(knowledgeContext, options.kbExcerpts === true, { strictDocs: strict, docNoMatch: options.docNoMatch === true });
 
   // Jalur TANPA Google Search (fallback) harus jujur soal itu: prompt dasar
   // bilang model punya akses internet, jadi tanpa catatan ini ia menjawab
@@ -537,7 +560,7 @@ export async function generateChatReply(
       system_instruction: { parts: [{ text: system }] },
       contents: ctn,
       ...(withTools ? { tools: [{ google_search: {} }] } : {}),
-      generationConfig: { temperature: 0.6 }
+      generationConfig: { temperature: strict ? 0.2 : 0.6 }
     });
 
   const buildFallbackPayload = async () => {
@@ -564,21 +587,30 @@ export async function generateChatReply(
   //    tools-nya), pindah ke model lain supaya pesan tidak gagal terkirim.
   let data: GeminiData;
   let modelUsed: string;
-  try {
-    const result = await callGeminiWithModelFallback(apiKeys, () => buildBody(true), [{ model: primaryModel, maxAttempts: 1 }], "chat-tools");
+  if (strict) {
+    // Mode dokumen ketat: tanpa Google Search (jawaban hanya boleh dari potongan dokumen), suhu rendah.
+    const steps = [{ model: primaryModel, maxAttempts: MAX_ATTEMPTS }];
+    if (fallbackModel !== primaryModel) steps.push({ model: fallbackModel, maxAttempts: MAX_ATTEMPTS - 1 });
+    const result = await callGeminiWithModelFallback(apiKeys, () => buildBody(false), steps, "chat-docs");
     data = result.data;
     modelUsed = result.model;
-  } catch (err) {
-    const reason = err instanceof Error ? err.message : String(err);
-    console.warn(`Percobaan chat dengan Google Search grounding gagal (${reason}), lanjut tanpa akses internet...`);
-    const steps = [{ model: primaryModel, maxAttempts: MAX_ATTEMPTS - 1 }];
-    if (fallbackModel !== primaryModel) {
-      steps.push({ model: fallbackModel, maxAttempts: MAX_ATTEMPTS - 1 });
+  } else {
+    try {
+      const result = await callGeminiWithModelFallback(apiKeys, () => buildBody(true), [{ model: primaryModel, maxAttempts: 1 }], "chat-tools");
+      data = result.data;
+      modelUsed = result.model;
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      console.warn(`Percobaan chat dengan Google Search grounding gagal (${reason}), lanjut tanpa akses internet...`);
+      const steps = [{ model: primaryModel, maxAttempts: MAX_ATTEMPTS - 1 }];
+      if (fallbackModel !== primaryModel) {
+        steps.push({ model: fallbackModel, maxAttempts: MAX_ATTEMPTS - 1 });
+      }
+      const fb = await buildFallbackPayload();
+      const result = await callGeminiWithModelFallback(apiKeys, () => buildBody(false, fb.system, fb.ctn), steps, "chat-plain");
+      data = result.data;
+      modelUsed = result.model;
     }
-    const fb = await buildFallbackPayload();
-    const result = await callGeminiWithModelFallback(apiKeys, () => buildBody(false, fb.system, fb.ctn), steps, "chat-plain");
-    data = result.data;
-    modelUsed = result.model;
   }
 
   const rawText = extractGeminiText(data);

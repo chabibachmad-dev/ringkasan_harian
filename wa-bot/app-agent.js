@@ -25,6 +25,8 @@
 //     OLLAMA_DOC_MAX_CHUNKS bagian (dipilih merata) supaya tidak berjam-jam.
 // ================================================================
 
+import { guardDocAnswer } from "./docguard.js";
+
 const num = (v, d) => (Number.isFinite(Number(v)) && Number(v) > 0 ? Number(v) : d);
 
 export function readAppAgentConfig(env = process.env) {
@@ -287,6 +289,7 @@ export function createAppAgentWorker(deps, overrides = {}) {
         .join("\n\n");
     };
     let docNote = "";
+    let guardChunks = []; // potongan yang BENAR-BENAR dikirim ke model (untuk memeriksa kutipan/halaman di jawabannya)
     const whole = wantsWholeDocument(job.question);
     const attChars = attachments.reduce((n, a) => n + a.content.length, 0);
 
@@ -296,7 +299,10 @@ export function createAppAgentWorker(deps, overrides = {}) {
       if (useKb && !whole) {
         await setProgress(job.id, "Mencari bagian dokumen yang relevan");
         const chunks = await fetchRelevantKnowledgeChunks(job.question, cfg.ragBudgetChars);
-        if (chunks.length > 0) addContext("KONTEKS DOKUMEN (potongan relevan dari dokumen pengetahuan):", formatChunks(chunks));
+        if (chunks.length > 0) {
+          guardChunks = chunks;
+          addContext("KONTEKS DOKUMEN (potongan relevan dari dokumen pengetahuan):", formatChunks(chunks));
+        }
       }
     } else if (attachments.length > 0 && whole) {
       // Permintaan menyeluruh atas lampiran panjang: baca per bagian.
@@ -330,6 +336,7 @@ export function createAppAgentWorker(deps, overrides = {}) {
         const kb = await fetchRelevantKnowledgeChunks(job.question, Math.floor(cfg.ragBudgetChars / 2));
         chunks = [...chunks, ...kb];
       }
+      guardChunks = chunks;
       addContext("KONTEKS LAMPIRAN/DOKUMEN (potongan paling relevan; bukan seluruh isi):", formatChunks(chunks));
     } else if (useKb && whole) {
       const mapped = await mapDocuments(job, await loadKbDocs());
@@ -343,7 +350,10 @@ export function createAppAgentWorker(deps, overrides = {}) {
     } else if (useKb) {
       await setProgress(job.id, "Mencari bagian dokumen yang relevan");
       const chunks = await fetchRelevantKnowledgeChunks(job.question, cfg.ragBudgetChars);
-      if (chunks.length > 0) addContext("KONTEKS DOKUMEN (potongan paling relevan dari dokumen yang diupload pengguna; bukan seluruh dokumen):", formatChunks(chunks));
+      if (chunks.length > 0) {
+        guardChunks = chunks;
+        addContext("KONTEKS DOKUMEN (potongan paling relevan dari dokumen yang diupload pengguna; bukan seluruh dokumen):", formatChunks(chunks));
+      }
       else addContext("KONTEKS DOKUMEN:", "(Tidak ditemukan bagian dokumen yang cocok dengan pertanyaan ini.)");
     }
 
@@ -361,7 +371,10 @@ export function createAppAgentWorker(deps, overrides = {}) {
       onToken,
       ...(strictDocs ? { temperature: cfg.docTemperature } : {})
     });
-    return `${reply.trim()}${docNote}`;
+    // Kutipan «…» / nomor halaman yang tak ada di potongan yang dikirim ke model diberi catatan peringatan.
+    const guarded = guardChunks.length > 0 ? guardDocAnswer(reply.trim(), guardChunks) : null;
+    if (guarded?.flagged) log.log(`🛡️ Job ${job.id.slice(0, 8)}: jawaban ditandai (kutipan tak terbukti ${guarded.badQuotes.length}, halaman tak ada ${guarded.badPages.length}).`);
+    return `${guarded ? guarded.reply : reply.trim()}${docNote}`;
   }
 
   // ---------------- pemrosesan job ----------------

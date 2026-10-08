@@ -505,6 +505,21 @@ Hal yang perlu diketahui:
 - OCR di laptop CPU-only lambat (puluhan detik per halaman) dan berjalan berprioritas rendah (`nice`); dibatasi `KB_OCR_MAX_PAGES` halaman per dokumen.
 - Tes: `node test-kb.mjs` (memakai PDF contoh di `test-fixtures/`).
 
+
+### 9b. Gemini membaca dokumen lewat indeks laptop (butuh migration 0019)
+
+Sebelumnya Gemini hanya melihat salinan teks di Supabase yang dipotong di `KB_SYNC_MAX_CHARS` (dokumen besar seperti Fiqih Sunnah ±60% tak terlihat) dan dicari dengan pencari sederhana. Sekarang, bila toggle **Pakai Dokumen Pengetahuan** aktif dan laptop hidup:
+
+1. Edge Function `chat` menaruh pertanyaan (dari beberapa pesan terakhir) di tabel `kb_retrievals`;
+2. bot di laptop (`kb-retrieval.js`, cek antrean tiap 2 dtk) mencari di indeks FTS5 lengkap — dengan pencarian imbuhan, penyingkiran daftar isi, dan potongan tetangga — lalu menulis potongan + nomor halamannya;
+3. Edge Function menunggu hasilnya (maks. ±25 dtk) dan **hanya potongan itu** yang dikirim ke Gemini (±12.000 karakter ≈ 3–4 ribu token, jauh lebih hemat daripada salinan dokumen);
+4. mode **dokumen ketat**: tanpa Google Search, suhu 0.2, wajib menyebut (judul, hlm N) dan menyalin kutipan persis di antara «…», serta menjawab "Informasi tidak ada di dokumen." bila memang tak ada;
+5. **pemeriksa mekanis** (`docguard.js` / `_shared/docguard.ts`): kutipan «…» yang tak ada persis di potongan, atau nomor halaman yang tak ada di potongan, diberi catatan "⚠️ Pemeriksaan otomatis…" di akhir jawaban. Pemeriksa yang sama aktif untuk jawaban Ollama (aplikasi) dan Gemini via WhatsApp.
+
+Bila laptop mati / bot tak menjawab / indeks kosong, Edge Function otomatis memakai jalur lama (salinan cloud) — pesan tetap terjawab. Permintaan "ringkas dokumen ini" juga masih lewat jalur lama. Jawaban dari WhatsApp (mesin Gemini) kini memakai indeks laptop langsung (`GEMINI_RAG_BUDGET_CHARS`, bawaan 10000; `GEMINI_RAG_MAX_CHUNKS`, bawaan 8). Lihat log Edge Function: `indeks laptop -> N blok dalam X ms` atau `indeks laptop tidak dipakai (alasan)`.
+
+Pasang: jalankan `supabase/migrations/0019_kb_retrievals.sql`, deploy ulang function `chat`, salin file bot baru ke laptop (`kb-retrieval.js`, `docguard.js`, `index.js`, `app-agent.js`, `kb-index.js`) dan `pm2 restart wa-bot`. Opsi `.env`: `KB_RETRIEVAL_ENABLED=false` mematikan worker, `KB_RETRIEVAL_POLL_MS`, `KB_RETRIEVAL_MAX_BUDGET_CHARS`.
+
 ## 10. Antrean Ollama berprioritas & pengaman RAM
 
 Laptop 2 inti / 7,5 GB RAM hanya sanggup satu panggilan Ollama pada satu waktu. Semua panggilan lewat satu antrean (`ollama-queue.js`) dengan tiga tingkat prioritas:

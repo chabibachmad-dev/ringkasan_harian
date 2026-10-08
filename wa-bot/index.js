@@ -42,6 +42,8 @@ import { createKhatamReminder } from "./khatam.js";
 import { createPriorityQueue, PRIORITY } from "./ollama-queue.js";
 import { openKbIndex } from "./kb-index.js";
 import { createKbIngestWorker, readKbConfig } from "./kb-ingest.js";
+import { createKbRetrievalWorker } from "./kb-retrieval.js";
+import { guardDocAnswer } from "./docguard.js";
 import { ollamaChatStream } from "./ollama-http.js";
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
@@ -518,8 +520,8 @@ async function fetchRelevantKnowledgeChunks(question, budgetChars) {
 //   - dokumen dipotong & diindeks SEKALI lalu di-cache GEMINI_RAG_CACHE_MS,
 //     supaya tiap pertanyaan tidak menarik ulang & memproses semua dokumen.
 // ----------------------------------------------------------------
-const GEMINI_RAG_BUDGET_CHARS = 7000;
-const GEMINI_RAG_MAX_CHUNKS = 5;
+const GEMINI_RAG_BUDGET_CHARS = Number(process.env.GEMINI_RAG_BUDGET_CHARS) > 0 ? Number(process.env.GEMINI_RAG_BUDGET_CHARS) : 10000;
+const GEMINI_RAG_MAX_CHUNKS = Number(process.env.GEMINI_RAG_MAX_CHUNKS) > 0 ? Number(process.env.GEMINI_RAG_MAX_CHUNKS) : 8;
 const GEMINI_RAG_MAX_CHUNK_CHARS = 2500;
 const GEMINI_RAG_CACHE_MS = 5 * 60_000;
 let knowledgeIndexCache = { at: 0, chunks: [], df: new Map() };
@@ -548,6 +550,13 @@ async function getKnowledgeIndexCached() {
 
 // Return [{ score, distinct, title, text }] terurut skor menurun (bisa kosong).
 async function fetchKnowledgeChunksForGemini(query) {
+  // Indeks lengkap di laptop (FTS5 + imbuhan, seluruh teks, ber-halaman) lebih baik daripada salinan Supabase yang
+  // terpotong; pencari TF-IDF di bawah hanya cadangan bila indeks laptop tidak aktif/kosong.
+  if (kbIndex && kbIndex.hasDocs()) {
+    return kbIndex
+      .search(query, { budgetChars: GEMINI_RAG_BUDGET_CHARS, maxChunks: GEMINI_RAG_MAX_CHUNKS })
+      .map((b) => ({ score: b.score, distinct: 0, title: b.title, text: b.text }));
+  }
   const baseTokens = [...new Set(tokenizeForScoring(query))];
   if (baseTokens.length === 0) return [];
   // Tiap kata pertanyaan = 1 "grup" alternatif (kata itu + perluasannya).
@@ -1358,7 +1367,10 @@ async function generateAutoReplyWithGemini(jid) {
   const ESTIMATED_INPUT_SHARE = 0.7;
   const costUsd = tokensUsed > 0 ? estimateCostUsd(GEMINI_MODEL, tokensUsed * ESTIMATED_INPUT_SHARE, tokensUsed * (1 - ESTIMATED_INPUT_SHARE)) : 0;
 
-  return { reply: rawText.trim(), tokensUsed, costUsd };
+  // Kutipan «…» / nomor halaman yang tidak ada di potongan dokumen yang dikirim diberi catatan peringatan.
+  const guarded = docChunks.length > 0 ? guardDocAnswer(rawText.trim(), docChunks) : null;
+  if (guarded?.flagged) console.log(`🛡️ [Dokumen] jawaban ditandai: kutipan tak terbukti=${guarded.badQuotes.length}, halaman tak ada=${guarded.badPages.length}`);
+  return { reply: guarded ? guarded.reply : rawText.trim(), tokensUsed, costUsd };
 }
 
 // Catat token+biaya auto-reply ke tabel token_usage YANG SAMA dipakai fitur
@@ -2898,6 +2910,10 @@ if (kbCfg.enabled) {
   }
 }
 
+// Gemini (chat aplikasi) membaca dokumen lewat indeks laptop ini: Edge Function menaruh pertanyaan di
+// kb_retrievals, worker ini menjawab dengan potongan teks (lihat kb-retrieval.js, migrations/0019).
+const kbRetrieval = kbIndex ? createKbRetrievalWorker({ supabase, index: kbIndex, env: process.env }) : null;
+
 const appAgent = createAppAgentWorker({
   supabase,
   kbIndex,
@@ -2950,6 +2966,7 @@ setInterval(() => {
 appAgent.start().catch((err) => {
   console.error("Agen Ollama aplikasi gagal start:", err instanceof Error ? err.message : String(err));
 });
+kbRetrieval?.start();
 if (kbIngest) {
   kbIngest.start().catch((err) => {
     console.error("Ingest dokumen gagal start:", err instanceof Error ? err.message : String(err));
@@ -2958,6 +2975,7 @@ if (kbIngest) {
 for (const sig of ["SIGINT", "SIGTERM"]) {
   process.on(sig, () => {
     kbIngest?.stop();
+    kbRetrieval?.stop();
     appAgent
       .stop()
       .catch(() => {})

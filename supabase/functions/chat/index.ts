@@ -115,6 +115,8 @@
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { corsHeaders } from "../_shared/cors.ts";
 import { buildKbQuery, selectKnowledgeChunks, wantsWholeDocument } from "../_shared/knowledge.ts";
+import { requestLaptopChunks } from "../_shared/laptop-kb.ts";
+import { guardDocAnswer } from "../_shared/docguard.ts";
 import {
   generateChatReply,
   geminiKeyHint,
@@ -238,6 +240,8 @@ Deno.serve(async (req) => {
     surah?: number;
     ayah?: number;
     page?: number;
+    saved?: boolean;
+    size?: number;
   };
   try {
     body = await req.json();
@@ -1065,10 +1069,46 @@ Deno.serve(async (req) => {
 
     const knowledgeContext: { title: string; content: string }[] = [];
     let kbExcerpts = false;
+    // Jalur laptop: potongan datang dari indeks lengkap di laptop (bukan salinan cloud yang terpotong).
+    let strictDocs = false;
+    let docNoMatch = false;
+    let guardChunks: { title: string; page: number | null; text: string }[] = [];
+    let laptopHandled = false;
     if (!useKbForThisThread) {
       // Obrolan ini tidak mengaktifkan Dokumen Pengetahuan -- lewati query
       // kb sepenuhnya, knowledgeContext tetap kosong.
     } else {
+      const userTextsAll = history.filter((m) => m.role === "user").map((m) => m.content);
+      const lastUserAll = userTextsAll[userTextsAll.length - 1] ?? "";
+      // Permintaan menyeluruh ("ringkas dokumen ini") tetap lewat jalur lama di bawah.
+      if (!wantsWholeDocument(lastUserAll)) {
+        const kbQuery = buildKbQuery(userTextsAll);
+        const lr = kbQuery
+          ? await requestLaptopChunks(supabaseAdmin, { chatDate: date, query: kbQuery, budgetChars: 12000, maxChunks: 10 })
+          : ({ ok: false, reason: "kueri kosong" } as const);
+        if (lr.ok) {
+          laptopHandled = true;
+          console.log(`chat: indeks laptop -> ${lr.chunks.length} blok dalam ${lr.ms} ms (query: "${kbQuery.slice(0, 80)}")`);
+          if (lr.chunks.length > 0) {
+            const titles = [...new Set(lr.chunks.map((c) => c.title))];
+            for (const title of titles) {
+              knowledgeContext.push({
+                title,
+                content: lr.chunks.filter((c) => c.title === title).map((c) => c.text).join("\n\n---\n\n")
+              });
+            }
+            kbExcerpts = true;
+            strictDocs = true;
+            guardChunks = lr.chunks.map((c) => ({ title: c.title, page: c.page, text: c.text }));
+          } else {
+            docNoMatch = true;
+          }
+        } else {
+          console.log(`chat: indeks laptop tidak dipakai (${lr.reason}), pakai pencarian salinan cloud.`);
+        }
+      }
+    }
+    if (useKbForThisThread && !laptopHandled) {
       // Diurut dari yang PALING BARU diupload supaya kalau harus ada yang
       // dipotong karena kepanjangan, yang kepotong duluan adalah dokumen lama.
       const { data: kbRows, error: kbErr } = await supabaseAdmin
@@ -1140,6 +1180,7 @@ Deno.serve(async (req) => {
         attDocs.push({ title: `Lampiran: ${a.name as string}`, content });
       }
       knowledgeContext.unshift(...attDocs);
+      if (strictDocs) for (const d of attDocs) guardChunks.push({ title: d.title, page: null, text: d.content });
     }
 
     let reply: string;
@@ -1159,7 +1200,7 @@ Deno.serve(async (req) => {
           p_error: event.kind === "exhausted" ? (event.error ?? null) : null
         });
       });
-      const result = await generateChatReply(history, geminiApiKeys, knowledgeContext, { kbExcerpts });
+      const result = await generateChatReply(history, geminiApiKeys, knowledgeContext, { kbExcerpts, strictDocs, docNoMatch });
       reply = result.reply;
       tokensUsed = result.tokensUsed;
       costUsd = result.costUsd;
@@ -1179,6 +1220,15 @@ Deno.serve(async (req) => {
       // juga di respons error ini, supaya bubble yang terlanjur tampil di
       // layar tetap bisa dihapus langsung tanpa perlu reload riwayat dulu.
       return json({ ok: false, error: `Gagal dapat balasan AI: ${msg}`, userMessageId }, 502);
+    }
+
+    // Pemeriksaan mekanis: kutipan «…» / nomor halaman yang tidak ada di potongan yang dikirim ke Gemini diberi catatan.
+    if (strictDocs && guardChunks.length > 0) {
+      const g = guardDocAnswer(reply, guardChunks);
+      if (g.flagged) {
+        console.log(`chat: jawaban ditandai pemeriksa dokumen (kutipan tak terbukti=${g.badQuotes.length}, halaman tak ada=${g.badPages.length})`);
+        reply = g.reply;
+      }
     }
 
     // SATU giliran kirim (satu panggilan Gemini) mencakup prompt (riwayat +

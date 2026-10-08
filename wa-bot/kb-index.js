@@ -31,6 +31,23 @@ const STOPWORDS = new Set(
   ).split(/\s+/)
 );
 
+// Ejaan/singkatan sehari-hari -> istilah resmi di dokumen (sama dengan ID_ALIASES / QUERY_EXPANSIONS
+// di index.js & supabase/functions/_shared/knowledge.ts).
+const QUERY_ALIASES = { jogja: "yogyakarta", jogjakarta: "yogyakarta", yogya: "yogyakarta", jogyakarta: "yogyakarta", diy: "yogyakarta", gol: "golongan" };
+const QUERY_EXPANSIONS = {
+  ppk: ["pejabat", "pembuat", "komitmen"],
+  pptk: ["pejabat", "pelaksana", "teknis", "kegiatan"],
+  kpa: ["kuasa", "pengguna", "anggaran"],
+  bpp: ["bendahara", "pengeluaran", "pembantu"],
+  honor: ["honorarium"],
+  honorer: ["honorarium"],
+  uh: ["uang", "harian"],
+  sbm: ["standar", "biaya", "masukan"],
+  sbk: ["standar", "biaya", "keluaran"],
+  perdin: ["perjalanan", "dinas"],
+  spj: ["pertanggungjawaban"]
+};
+
 export function tokenizeQuery(text) {
   const all = String(text || "")
     .toLowerCase()
@@ -39,7 +56,10 @@ export function tokenizeQuery(text) {
     .split(/[^a-z0-9]+/)
     .filter((w) => w.length >= 2);
   const useful = all.filter((w) => !STOPWORDS.has(w));
-  return [...new Set(useful.length > 0 ? useful : all)].slice(0, 24);
+  const base = (useful.length > 0 ? useful : all).map((w) => QUERY_ALIASES[w] ?? w);
+  const out = [...new Set(base)].slice(0, 20);
+  for (const w of [...out]) for (const e of QUERY_EXPANSIONS[w] ?? []) if (!out.includes(e) && out.length < 26) out.push(e);
+  return out;
 }
 
 // Kata -> ekspresi FTS5. Kata >= 4 huruf dicocokkan sebagai awalan supaya

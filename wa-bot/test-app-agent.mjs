@@ -188,6 +188,21 @@ check(JSON.stringify(pickEvenly([1,2,3,4,5,6,7,8,9,10], 3)) === "[1,6,10]" && pi
   check(whole.calls.length > 1 && whole.calls.slice(0, -1).every((x) => x.opts.temperature === 0.1) && whole.calls.at(-1).opts.temperature === 0.1, "peta-lalu-ringkas: catatan bagian & jawaban akhir bersuhu rendah");
 }
 
+// 2d. Pemeriksa jawaban: rujukan halaman/kutipan karangan diberi catatan; yang benar dibiarkan
+{
+  const chunks = [{ title: "Dok A", text: "[Halaman 12] Tarif uang harian ke Yogyakarta adalah empat ratus ribu rupiah per hari." }];
+  const bad = setup({ chunks, reply: () => 'Tarifnya 400 ribu (Dok A, hlm 77): «dua juta rupiah per hari untuk semua golongan».' });
+  bad.tables.chat_thread_meta[0].use_kb = true;
+  await bad.w.tick();
+  const badReply = bad.tables.chat_messages.find((m) => m.id === bad.tables.agent_jobs[0].assistant_message_id).content;
+  check(badReply.includes("Pemeriksaan otomatis") && badReply.includes("77") && badReply.includes("dua juta rupiah"), "pemeriksa: halaman & kutipan karangan diberi catatan peringatan");
+  const good = setup({ chunks, reply: () => 'Tarifnya empat ratus ribu (Dok A, hlm 12): «uang harian ke Yogyakarta adalah empat ratus ribu rupiah».' });
+  good.tables.chat_thread_meta[0].use_kb = true;
+  await good.w.tick();
+  const goodReply = good.tables.chat_messages.find((m) => m.id === good.tables.agent_jobs[0].assistant_message_id).content;
+  check(!goodReply.includes("Pemeriksaan otomatis"), "pemeriksa: rujukan benar tidak diberi catatan");
+}
+
 // 3. RAG (KB aktif, pertanyaan spesifik)
 {
   const { tables, calls, w } = setup();
