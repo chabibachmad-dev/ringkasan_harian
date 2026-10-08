@@ -307,7 +307,7 @@ pesan penanya, dan kalau pemanggil me-reply sebuah pesan, isi pesan yang dikutip
 ikut dibaca bot. Pesan grup yang tidak memanggil bot TIDAK disimpan. Grup lain
 tidak pernah dijawab; kalau bot dipanggil di grup yang belum diizinkan, log
 menampilkan nama dan id grupnya (`WA_GROUP_ALLOWED_JIDS` untuk mengizinkan lewat id).
-Obrolan santai dijawab langsung; pencarian dokumen/web di grup hanya dipakai kalau pesannya memuat kata seperti harga, berita, cuaca, jadwal, tarif, aturan. Kalau Gemini membalas 503 (sibuk), bot mencoba sekali lagi setelah 12 detik. Template jawaban tidak dipakai di grup, tidak ada antrean ulang (kalau AI gagal,
+Obrolan santai dijawab langsung. Dokumen/web dicari hanya bila pesannya memuat kata seperti harga, berita, cuaca, jadwal, tarif, aturan (`WA_GROUP_DOCS=always` membuat dokumen selalu dicari untuk setiap pertanyaan yang memanggil bot). Agar grup tertentu **berpegang pada satu surat/dokumen saja**, isi `WA_GROUP_DOC_TITLES=Surat Edaran` (potongan judul dokumen seperti di daftar Dokumen Pengetahuan; pisah koma): di grup bot lalu hanya mencari di dokumen itu, mematikan Google/Bing, dan menjawab "tidak ditemukan di dokumen acuan" bila isinya tidak ada. Pengaturan ini berlaku untuk SEMUA grup yang diizinkan. Kalau Gemini membalas 503 (sibuk), bot mencoba sekali lagi setelah 12 detik. Template jawaban tidak dipakai di grup, tidak ada antrean ulang (kalau AI gagal,
 bot minta di-tag lagi), dan ada jeda `WA_GROUP_COOLDOWN_SEC` (20 detik) per orang.
 Pesan yang kamu ketik sendiri dari nomor ini tidak memicu bot. Percakapan grup ikut
 masuk ringkasan harian dengan nama grupnya.
@@ -522,6 +522,26 @@ Pasang: jalankan `supabase/migrations/0019_kb_retrievals.sql`, deploy ulang func
 
 
 **Penyempurnaan pencarian (hasil audit).** (a) *Cakupan kata*: pertanyaan panjang (≥ 5 kata penting) hanya mengembalikan potongan yang memuat ≥ 50% kata kuncinya (`KB_MIN_COVERAGE`, 0 = mati; naikkan ke 0.7 bila pertanyaan di luar dokumen masih mendapat potongan sampah); bila tak ada yang memenuhi hasilnya kosong sehingga model diberi tahu "tidak ditemukan". (b) *Halaman berantakan* (teks scan rusak) diurutkan di belakang halaman bersih. Halaman tabel/angka tidak dianggap rusak. (c) Pembersihan otomatis: URL penanda air JDIH, "SK No 115576 A" di kaki halaman, dan salah-baca OCR "4,5o/o" → "4,5%". (d) Sinonim fikih: "rukun" ↔ "fardhu/fardu". (e) Pemeriksa jawaban hanya memeriksa kutipan di antara « » — judul dokumen dalam tanda kutip biasa tidak lagi ditandai. Indeks disusun ulang otomatis sekali saat bot dijalankan (versi skema 5). `kb-audit.mjs` mengenal kunci `kosong=ya` (pertanyaan tanpa jawaban), `tidak=`, `jawab=`, `bukan=` dan opsi `--ask`.
+
+## 9c. Penyedia cadangan Groq & OpenRouter (rotasi di luar Gemini)
+
+Gemini tetap yang pertama (punya Google Search). Hanya bila SEMUA key Gemini habis kuota/gagal (429, 503, jaringan), permintaan dialihkan ke **Groq**, lalu **OpenRouter**. Keduanya memakai format OpenAI-compatible, tanpa Google Search: bot WA menyisipkan hasil Bing + potongan dokumen seperti jalur "tanpa internet" Gemini, dan Obrolan AI di aplikasi memakai pencarian Bing yang sama. Mode dokumen ketat (suhu 0,2 dan pemeriksa kutipan) tetap berlaku.
+
+1. Buat API key di console.groq.com dan openrouter.ai (boleh lebih dari satu, dipisah koma).
+2. **Bot WA** — tambahkan di `.env`:
+   ```
+   GROQ_API_KEYS=gsk_xxx,gsk_yyy
+   OPENROUTER_API_KEYS=sk-or-xxx
+   ```
+   lalu `pm2 restart wa-bot`. Di log harus muncul `🛟 Penyedia cadangan AI aktif`.
+3. **Obrolan AI di aplikasi** — set secret yang sama di Supabase (tanpa perlu migration), lalu deploy ulang fungsi `chat`:
+   ```
+   npx supabase secrets set GROQ_API_KEYS=gsk_xxx,gsk_yyy OPENROUTER_API_KEYS=sk-or-xxx
+   npx supabase functions deploy chat
+   ```
+4. Opsional: `GROQ_MODEL`, `OPENROUTER_MODEL` (daftar dipisah koma, dicoba berurutan), `LLM_FALLBACK_ORDER` (mis. `openrouter,groq`), `LLM_FALLBACK_MAX_INPUT_CHARS`. Nama model gratis berubah dari waktu ke waktu; kalau log menampilkan `model ... tidak ditemukan`, perbarui nilainya.
+
+Catatan: jawaban cadangan dicatat 0 token/0 dolar (hitungan token di aplikasi tetap hanya Gemini) dan tetap tersimpan sebagai balasan "gemini" di riwayat. Key yang kena 429 diistirahatkan sesuai header `retry-after` (atau 1 menit; 1 jam bila pesan menyebut batas harian). Bila Gemini tidak punya key sama sekali tetapi Groq/OpenRouter ada, bot dan aplikasi langsung memakai cadangan. Ringkasan harian WA juga memakai cadangan bila Gemini gagal. Cek lokal: `node test-llm-fallback.mjs`.
 
 ## 10. Antrean Ollama berprioritas & pengaman RAM
 

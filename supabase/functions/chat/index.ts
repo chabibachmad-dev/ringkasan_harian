@@ -116,6 +116,7 @@ import { createClient } from "jsr:@supabase/supabase-js@2";
 import { corsHeaders } from "../_shared/cors.ts";
 import { buildKbQuery, selectKnowledgeChunks, wantsWholeDocument } from "../_shared/knowledge.ts";
 import { requestLaptopChunks } from "../_shared/laptop-kb.ts";
+import { getFallbackChain } from "../_shared/llm-fallback.ts";
 import { guardDocAnswer } from "../_shared/docguard.ts";
 import {
   generateChatReply,
@@ -1011,7 +1012,8 @@ Deno.serve(async (req) => {
 
     // Agen "ollama" (atau "auto" tanpa API key Gemini sama sekali): langsung
     // ke antrean lokal -- tolak DULU (tanpa menyimpan pesan) kalau laptop mati.
-    if (agent === "ollama" || (agent === "auto" && geminiApiKeys.length === 0)) {
+    const cloudAiAvailable = geminiApiKeys.length > 0 || getFallbackChain().available();
+    if (agent === "ollama" || (agent === "auto" && !cloudAiAvailable)) {
       const w = await getWorkerStatus(supabaseAdmin);
       if (!w.online) {
         return json({ ok: false, error: offlineMessage(w), ollamaOffline: true }, 503);
@@ -1019,7 +1021,7 @@ Deno.serve(async (req) => {
       return await enqueueOllama({});
     }
 
-    if (geminiApiKeys.length === 0) {
+    if (!cloudAiAvailable) {
       return json({ ok: false, error: "GEMINI_API_KEYS (atau GEMINI_API_KEY) belum di-set sebagai Supabase secret." }, 500);
     }
 
@@ -1204,6 +1206,7 @@ Deno.serve(async (req) => {
       reply = result.reply;
       tokensUsed = result.tokensUsed;
       costUsd = result.costUsd;
+      if (result.provider) console.log(`chat: balasan dari penyedia cadangan ${result.provider}`);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error("chat: gagal dapat balasan Gemini:", msg);

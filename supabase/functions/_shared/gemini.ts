@@ -7,6 +7,7 @@
 // perlu ubah kode sama sekali.
 
 import { buildWebGroundedMessage, buildWebQuery, searchBing } from "./knowledge.ts";
+import { getFallbackChain } from "./llm-fallback.ts";
 
 const DEFAULT_MODEL = "gemini-3.6-flash";
 // Model cadangan: dicoba otomatis kalau model utama gagal terus (mis. 503
@@ -523,6 +524,8 @@ export interface ChatReplyResult {
   // Estimasi biaya (USD) request ini -- lihat estimateCostUsd(). 0 kalau
   // usageMetadata tidak ada/tidak lengkap, sama alasannya seperti tokensUsed.
   costUsd: number;
+  // Diisi hanya kalau jawaban datang dari penyedia cadangan ("groq/llama-...", "openrouter/..."), bukan Gemini.
+  provider?: string;
 }
 
 export async function generateChatReply(
@@ -585,6 +588,7 @@ export async function generateChatReply(
   // 3. Model cadangan (GEMINI_MODEL_FALLBACK) tanpa akses internet -- kalau
   //    model utama sendiri yang sedang overloaded total (bukan cuma jalur
   //    tools-nya), pindah ke model lain supaya pesan tidak gagal terkirim.
+  const viaGemini = async (): Promise<ChatReplyResult> => {
   let data: GeminiData;
   let modelUsed: string;
   if (strict) {
@@ -643,4 +647,39 @@ export async function generateChatReply(
       : 0;
 
   return { reply: rawText.trim(), tokensUsed, costUsd };
+  };
+
+  // Penyedia cadangan (Groq, OpenRouter): dipakai hanya setelah Gemini gagal total (semua key habis / 503 / jaringan),
+  // atau bila tidak ada key Gemini sama sekali. Tanpa Google Search (hasil Bing disisipkan bila ada). Token/biaya
+  // dicatat 0 supaya hitungan "token Gemini hari ini" di aplikasi tetap murni Gemini.
+  const chain = getFallbackChain();
+  const viaFallback = async (): Promise<ChatReplyResult> => {
+    const payload = strict ? { system: systemText, ctn: contents } : await buildFallbackPayload();
+    const msgs = payload.ctn
+      .map((c) => ({
+        role: (c.role === "model" ? "assistant" : "user") as "assistant" | "user",
+        content: c.parts.map((x) => x.text ?? "").join("")
+      }))
+      .filter((m) => m.content);
+    const r = await chain.generate({ system: payload.system, messages: msgs, temperature: strict ? 0.2 : 0.4 });
+    return { reply: r.text, tokensUsed: 0, costUsd: 0, provider: `${r.provider}/${r.model}` };
+  };
+
+  if (apiKeys.length === 0) {
+    if (!chain.available()) throw new Error("Tidak ada API key Gemini maupun penyedia cadangan.");
+    return await viaFallback();
+  }
+  if (!chain.available()) return await viaGemini();
+  try {
+    return await viaGemini();
+  } catch (geminiErr) {
+    try {
+      const out = await viaFallback();
+      console.log(`[Cadangan] dijawab ${out.provider} (Gemini gagal: ${String((geminiErr as Error)?.message || geminiErr).slice(0, 120)})`);
+      return out;
+    } catch (fbErr) {
+      console.error(`[Cadangan] juga gagal: ${fbErr instanceof Error ? fbErr.message : String(fbErr)}`);
+      throw geminiErr;
+    }
+  }
 }

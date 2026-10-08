@@ -38,6 +38,7 @@ import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import { createSimab, SIMAB_OLLAMA_SYSTEM } from "./simab.js";
 import { createAppAgentWorker } from "./app-agent.js";
+import { createFallbackChain, readFallbackConfig } from "./llm-fallback.js";
 import { createKhatamReminder } from "./khatam.js";
 import { createPriorityQueue, PRIORITY } from "./ollama-queue.js";
 import { openKbIndex } from "./kb-index.js";
@@ -98,6 +99,12 @@ if (GEMINI_API_KEYS.length > 0 && (process.env.WA_AI_ENGINE || "ollama").trim().
   console.log(
     `🔑 ${GEMINI_API_KEYS.length} API key Gemini terbaca (${GEMINI_API_KEYS.map((k) => "..." + k.slice(-4)).join(", ")}), model ${GEMINI_MODEL}.`
   );
+}
+// Penyedia CADANGAN (Groq, OpenRouter): dipakai hanya setelah semua key Gemini gagal/habis kuota.
+// Diatur lewat GROQ_API_KEYS / OPENROUTER_API_KEYS di .env (lihat llm-fallback.js & .env.example).
+const llmFallback = createFallbackChain({ config: readFallbackConfig(process.env) });
+if (llmFallback.available() && (process.env.WA_AI_ENGINE || "ollama").trim().toLowerCase() === "gemini") {
+  console.log(`🛟 Penyedia cadangan AI aktif (setelah Gemini): ${llmFallback.describe()}`);
 }
 // Berapa pesan terakhir (masuk+keluar) di satu obrolan yang dikasihkan ke
 // AI sebagai konteks -- sengaja lebih pendek drpd riwayat Obrolan AI (yang
@@ -204,7 +211,7 @@ const RETRY_CHECK_INTERVAL_MS = 60_000;
 const RETRY_MAX_ATTEMPTS = 6;
 const RETRY_EXPIRE_HOURS = 24;
 
-if (WA_AUTO_REPLY_ENABLED && WA_AI_ENGINE === "gemini" && GEMINI_API_KEYS.length === 0) {
+if (WA_AUTO_REPLY_ENABLED && WA_AI_ENGINE === "gemini" && GEMINI_API_KEYS.length === 0 && !llmFallback.available()) {
   console.warn(
     "⚠️  WA_AUTO_REPLY_ENABLED=true + WA_AI_ENGINE=gemini tapi GEMINI_API_KEY(S) belum diisi di .env -- auto-reply TIDAK akan jalan sampai diisi."
   );
@@ -212,9 +219,9 @@ if (WA_AUTO_REPLY_ENABLED && WA_AI_ENGINE === "gemini" && GEMINI_API_KEYS.length
 // Auto-reply dianggap "siap jalan" kalau: enabled DAN (pakai ollama -- tidak
 // butuh API key apa pun, cukup Ollama-nya jalan di laptop -- ATAU pakai
 // gemini DAN minimal 1 API key sudah diisi).
-const AUTO_REPLY_ACTIVE = WA_AUTO_REPLY_ENABLED && (WA_AI_ENGINE === "ollama" || GEMINI_API_KEYS.length > 0);
+const AUTO_REPLY_ACTIVE = WA_AUTO_REPLY_ENABLED && (WA_AI_ENGINE === "ollama" || GEMINI_API_KEYS.length > 0 || llmFallback.available());
 console.log(
-  `🤖 Auto-reply AI: ${AUTO_REPLY_ACTIVE ? `AKTIF (mesin: ${WA_AI_ENGINE}${WA_AI_ENGINE === "gemini" ? `, ${GEMINI_API_KEYS.length} API key` : ""})` : "mati"}`
+  `🤖 Auto-reply AI: ${AUTO_REPLY_ACTIVE ? `AKTIF (mesin: ${WA_AI_ENGINE}${WA_AI_ENGINE === "gemini" ? `, ${GEMINI_API_KEYS.length} API key Gemini${llmFallback.available() ? " + cadangan Groq/OpenRouter" : ""}` : ""})` : "mati"}`
 );
 
 // Prompt ini menentukan gaya & batasan balasan otomatis. Dibuat SELENGKAP
@@ -482,12 +489,19 @@ function rankKnowledgeChunks(docs, question, budgetChars) {
 // Diisi saat start; kalau gagal dibuka, RAG kembali ke cara lama (ambil dari Supabase).
 let kbIndex = null;
 
-async function fetchRelevantKnowledgeChunks(question, budgetChars) {
+// Saring dokumen menurut potongan judul (mis. grup yang hanya boleh memakai surat tertentu). titles=null -> semua.
+function titleMatches(title, titles) {
+  if (!titles || titles.length === 0) return true;
+  const t = String(title || "").toLowerCase();
+  return titles.some((x) => t.includes(String(x).toLowerCase()));
+}
+
+async function fetchRelevantKnowledgeChunks(question, budgetChars, titles = null) {
   // Dokumen yang diupload lewat laptop diindeks FULL (tanpa batas ukuran) --
   // cari di indeks itu dulu. Rekonsiliasi berkala menjamin isinya sama dengan
   // tabel knowledge_documents, jadi kalau indeks ada isinya, tak perlu ke Supabase.
   if (kbIndex && kbIndex.hasDocs()) {
-    return kbIndex.search(question, { budgetChars, maxChunks: 8 }).map(({ title, text }) => ({ title, text }));
+    return kbIndex.search(question, { budgetChars, maxChunks: 8, titles }).map(({ title, text }) => ({ title, text }));
   }
   const qWords = new Set(tokenizeForScoring(question));
   if (qWords.size === 0) return [];
@@ -497,8 +511,9 @@ async function fetchRelevantKnowledgeChunks(question, budgetChars) {
     console.error("RAG: gagal ambil Dokumen Pengetahuan, lanjut tanpa konteks dokumen:", error.message);
     return [];
   }
-  if (!data || data.length === 0) return [];
-  return rankKnowledgeChunks(data, question, budgetChars);
+  const docs = (data ?? []).filter((d) => titleMatches(d.title, titles));
+  if (docs.length === 0) return [];
+  return rankKnowledgeChunks(docs, question, budgetChars);
 }
 
 // ----------------------------------------------------------------
@@ -549,12 +564,12 @@ async function getKnowledgeIndexCached() {
 }
 
 // Return [{ score, distinct, title, text }] terurut skor menurun (bisa kosong).
-async function fetchKnowledgeChunksForGemini(query) {
+async function fetchKnowledgeChunksForGemini(query, titles = null) {
   // Indeks lengkap di laptop (FTS5 + imbuhan, seluruh teks, ber-halaman) lebih baik daripada salinan Supabase yang
   // terpotong; pencari TF-IDF di bawah hanya cadangan bila indeks laptop tidak aktif/kosong.
   if (kbIndex && kbIndex.hasDocs()) {
     return kbIndex
-      .search(query, { budgetChars: GEMINI_RAG_BUDGET_CHARS, maxChunks: GEMINI_RAG_MAX_CHUNKS })
+      .search(query, { budgetChars: GEMINI_RAG_BUDGET_CHARS, maxChunks: GEMINI_RAG_MAX_CHUNKS, titles })
       .map((b) => ({ score: b.score, distinct: 0, title: b.title, text: b.text }));
   }
   const baseTokens = [...new Set(tokenizeForScoring(query))];
@@ -568,6 +583,7 @@ async function fetchKnowledgeChunksForGemini(query) {
 
   const scored = [];
   for (const ch of chunks) {
+    if (!titleMatches(ch.title, titles)) continue;
     let distinct = 0;
     let score = 0;
     for (const group of groups) {
@@ -830,10 +846,13 @@ async function generateAutoReplyWithOllama(jid, { timeoutMs } = {}) {
   const searchQuestion = stripGroupMeta(jid, question);
 
   // Grup: obrolan santai tidak perlu dokumen/web (lihat GROUP_LOOKUP_RE).
+  // Dokumen (pencarian lokal, murah) boleh selalu dicari di grup (WA_GROUP_DOCS); web (Bing) tetap hanya bila ada kata kunci.
   const lookupAllowed = !isGroupJid(jid) || GROUP_LOOKUP_RE.test(searchQuestion);
-  const docChunks = lookupAllowed ? await fetchRelevantKnowledgeChunks(searchQuestion, RAG_CONTEXT_BUDGET_CHARS) : [];
+  const docsAllowed = lookupAllowed || (GROUP_DOCS_ALWAYS && searchQuestion.trim().split(/\s+/).length >= 3);
+  const pinnedTitles = docTitlesFor(jid);
+  const docChunks = docsAllowed ? await fetchRelevantKnowledgeChunks(searchQuestion, RAG_CONTEXT_BUDGET_CHARS, pinnedTitles) : [];
   const topScore = docChunks[0]?.score ?? 0;
-  const webResults = !lookupAllowed || topScore >= RAG_STRONG_MATCH_SCORE ? [] : await webSearchBing(searchQuestion, WEB_SEARCH_MAX_RESULTS);
+  const webResults = !lookupAllowed || pinnedTitles || topScore >= RAG_STRONG_MATCH_SCORE ? [] : await webSearchBing(searchQuestion, WEB_SEARCH_MAX_RESULTS);
 
   // Log diagnostik ringan (BUKAN isi lengkap dokumen/pertanyaan, cuma
   // judul+skor) -- biar kalau jawabannya aneh/salah sasaran lagi, langsung
@@ -1060,9 +1079,11 @@ async function notifyOwnerAllKeysExhausted() {
     await currentSock.sendMessage(OWNER_JID, {
       text:
         `⚠️ *Semua API key Gemini habis kuota harian* (${GEMINI_API_KEYS.length} key).\n\n` +
-        `Auto-reply WA & chat di aplikasi tidak bisa memakai AI sampai kuota reset, ${resetText}. ` +
-        `Pesan WA yang masuk selama itu akan dibalas otomatis begitu kuota kembali.\n\n` +
-        `Tambah API key baru di GEMINI_API_KEYS (bot WA) dan secret Supabase kalau mau tetap jalan sebelum itu.`
+        `Gemini tidak bisa dipakai sampai kuota reset, ${resetText}. ` +
+        (llmFallback.available() ? "" : `Pesan WA yang masuk selama itu akan dibalas otomatis begitu kuota kembali.`) + `\n\n` +
+        (llmFallback.available()
+          ? `Bot WA beralih otomatis ke penyedia cadangan (${llmFallback.describe()}), jadi balasan tetap jalan tanpa Google Search.`
+          : `Tambah API key baru di GEMINI_API_KEYS (bot WA) dan secret Supabase kalau mau tetap jalan sebelum itu.`)
     });
     await supabase.from("bot_state").upsert({ key: "all_keys_alert_date", value: today, updated_at: new Date().toISOString() });
     console.log("📣 Peringatan 'semua key habis' dikirim ke nomor pemilik.");
@@ -1188,8 +1209,14 @@ function buildWebQuery(userTexts) {
   return (wordCount(last) < 8 && prevUsable ? `${prev} ${last}` : last).slice(0, 200);
 }
 
-async function geminiGenerateWithRotation(systemText, contents, { useSearch = true, webQuery = "", docChunks = [] } = {}) {
+async function geminiGenerateWithRotation(
+  systemText,
+  contents,
+  { useSearch = true, webQuery = "", docChunks = [], pinnedDocs = false, docMiss = false } = {}
+) {
   let attemptsLeft = Math.max(GEMINI_API_KEYS.length, 1);
+  // Dokumen "dikunci" untuk grup ini: tanpa Google Search/Bing, jawab hanya dari dokumen.
+  if (pinnedDocs) useSearch = false;
   const hasDocs = docChunks.length > 0;
   // Isi giliran "user" terakhir dgn KONTEKS DOKUMEN (kalau ada) -- dipakai di
   // SEMUA jalur (dgn/tanpa Google Search). Hasil web (Bing) ditambahkan di atasnya
@@ -1206,9 +1233,16 @@ async function geminiGenerateWithRotation(systemText, contents, { useSearch = tr
     timeStyle: "short",
     timeZone: WA_TIMEZONE
   }).format(new Date());
-  const docNote = hasDocs
-    ? `\n\nKONTEKS DOKUMEN di pesan terakhir berasal dari Dokumen Pengetahuan milik pemilik nomor ini (dokumen resmi/internal) -- itu sumber UTAMA untuk angka, tarif, dan aturan. Kalau dokumen memuat jawabannya, pakai angkanya apa adanya dan sebut judul dokumennya singkat. Hasil pencarian web (kalau ada) hanya pelengkap; kalau bertentangan dengan dokumen, utamakan dokumen dan sebut perbedaannya singkat. Kalau jawabannya tidak ada di dokumen maupun hasil web, katakan terus terang (untuk pertanyaan tentang isi dokumen: \"Informasi tidak ada di dokumen\") dan JANGAN menebak. Untuk daftar (rukun, syarat, langkah) tuliskan semua butir yang tertulis di dokumen, tidak menambah/mengurangi. Jangan mengutip dokumen panjang-panjang -- ambil bagian yang menjawab saja.`
+  const pinnedNote = pinnedDocs
+    ? hasDocs
+      ? `\n\nGRUP INI MEMAKAI DOKUMEN TERTENTU SEBAGAI ACUAN. Jawab HANYA dari KONTEKS DOKUMEN di pesan terakhir; jangan memakai pengetahuan umum, ingatan, atau internet untuk isi surat/aturan. Sebut judul dokumen dan nomor halaman bila ada. Kutipan kalimat ditulis persis dalam tanda « ». Kalau jawabannya tidak tertulis di potongan dokumen, jawab: "Informasi itu tidak ditemukan di dokumen acuan" dan jangan menebak.`
+      : docMiss
+        ? `\n\nGRUP INI MEMAKAI DOKUMEN TERTENTU SEBAGAI ACUAN, tetapi tidak ada bagian dokumen yang cocok dengan pertanyaan ini. Jawab singkat: "Informasi itu tidak ditemukan di dokumen acuan" dan sarankan menanyakan dengan kata kunci yang ada di dokumen. Jangan menjawab dari pengetahuan umum atau menebak isi dokumen.`
+        : ""
     : "";
+  const docNote = pinnedNote || (hasDocs
+    ? `\n\nKONTEKS DOKUMEN di pesan terakhir berasal dari Dokumen Pengetahuan milik pemilik nomor ini (dokumen resmi/internal) -- itu sumber UTAMA untuk angka, tarif, dan aturan. Kalau dokumen memuat jawabannya, pakai angkanya apa adanya dan sebut judul dokumennya singkat. Hasil pencarian web (kalau ada) hanya pelengkap; kalau bertentangan dengan dokumen, utamakan dokumen dan sebut perbedaannya singkat. Kalau jawabannya tidak ada di dokumen maupun hasil web, katakan terus terang (untuk pertanyaan tentang isi dokumen: \"Informasi tidak ada di dokumen\") dan JANGAN menebak. Untuk daftar (rukun, syarat, langkah) tuliskan semua butir yang tertulis di dokumen, tidak menambah/mengurangi. Jangan mengutip dokumen panjang-panjang -- ambil bagian yang menjawab saja.`
+    : "");
   const systemWithDate =
     `${systemText}\n\nWaktu sekarang: ${nowText} ${WA_TIMEZONE_LABEL}. Anggap ini tanggal hari ini. Jangan mengira tahun ini masih tahun sebelumnya, dan jangan bilang aturan/peraturan tahun ini "belum terbit" atau "akan terbit" kecuali hasil pencarian memastikannya.${docNote}`;
   // Dipakai HANYA kalau jalur dengan internet gagal & jatuh ke jalur tanpa
@@ -1241,10 +1275,11 @@ async function geminiGenerateWithRotation(systemText, contents, { useSearch = tr
     }
     return noSearchPayload;
   };
+  const runGemini = async () => {
   for (;;) {
     const apiKey = pickAvailableGeminiKey();
     if (!apiKey) {
-      notifyOwnerAllKeysExhausted().catch(() => {});
+      if (GEMINI_API_KEYS.length > 0) notifyOwnerAllKeysExhausted().catch(() => {});
       const err = new Error(
         `Semua API key Gemini (${GEMINI_API_KEYS.length}) kena kuota harian, coba lagi setelah tengah malam (Pacific Time).`
       );
@@ -1280,7 +1315,7 @@ async function geminiGenerateWithRotation(systemText, contents, { useSearch = tr
           }
         }
       } else {
-        data = await callGeminiWithRetry(systemWithDate, contents, false, 2, apiKey);
+        data = await callGeminiWithRetry(systemWithDate, withDocsContents, false, 2, apiKey);
       }
       reportKeyEvent(apiKey, { requestsInc: 1 });
       return data;
@@ -1292,6 +1327,28 @@ async function geminiGenerateWithRotation(systemText, contents, { useSearch = tr
       }
       if (err.status === 429) markGeminiKeyExhausted(apiKey, err); // key terakhir: tetap catat habis
       throw err; // bukan soal kuota (atau semua key sudah dicoba) -- lempar ke pemanggil spt biasa
+    }
+  }
+  };
+
+  // Gemini gagal total (semua key habis / 503 / jaringan) -> coba penyedia cadangan (Groq, OpenRouter) dengan
+  // prompt TANPA Google Search (+ hasil Bing bila ada). Hasilnya dibungkus agar bentuknya sama dgn respons Gemini.
+  if (!llmFallback.available()) return await runGemini();
+  try {
+    if (GEMINI_API_KEYS.length === 0) throw Object.assign(new Error("Tidak ada API key Gemini."), { allKeysExhausted: true });
+    return await runGemini();
+  } catch (geminiErr) {
+    try {
+      const p = await getNoSearchPayload();
+      const messages = p.contents
+        .map((c) => ({ role: c.role === "model" ? "assistant" : "user", content: c.parts?.map((x) => x.text ?? "").join("") ?? "" }))
+        .filter((m) => m.content);
+      const r = await llmFallback.generate({ system: p.system, messages, temperature: pinnedDocs ? 0.2 : 0.4 });
+      console.log(`🛟 [Cadangan] dijawab ${r.provider}/${r.model} (Gemini gagal: ${String(geminiErr?.message || geminiErr).slice(0, 120)})`);
+      return { candidates: [{ content: { parts: [{ text: r.text }] } }], usageMetadata: { totalTokenCount: 0 }, _provider: `${r.provider}/${r.model}` };
+    } catch (fbErr) {
+      console.error(`🛟 [Cadangan] juga gagal: ${fbErr instanceof Error ? fbErr.message : String(fbErr)}`);
+      throw geminiErr; // pemanggil menangani error Gemini aslinya spt biasa (antrean ulang, dll)
     }
   }
 }
@@ -1339,20 +1396,29 @@ async function generateAutoReplyWithGemini(jid) {
   const webQueryRaw = buildWebQuery(contents.filter((c) => c.role === "user").map((c) => stripGroupMeta(jid, c.parts?.[0]?.text ?? "")));
   // Di grup, obrolan santai ("Mas mau mie instan?") tidak perlu cari dokumen/web --
   // hanya dicari kalau pesannya jelas butuh data (lihat GROUP_LOOKUP_RE).
-  const webQuery = !isGroupJid(jid) || GROUP_LOOKUP_RE.test(webQueryRaw) ? webQueryRaw : "";
+  const pinnedTitles = docTitlesFor(jid);
+  // Grup dengan dokumen "dikunci" (WA_GROUP_DOC_TITLES): jawaban HANYA dari dokumen itu, tanpa internet.
+  const webQuery = pinnedTitles ? "" : !isGroupJid(jid) || GROUP_LOOKUP_RE.test(webQueryRaw) ? webQueryRaw : "";
+  // Dokumen: di grup selalu dicari (pencarian lokal, murah) kecuali WA_GROUP_DOCS=keywords.
+  const docQuery = !isGroupJid(jid) || GROUP_DOCS_ALWAYS ? webQueryRaw : webQuery;
   // Dokumen Pengetahuan dicek untuk pertanyaan yang sama (bukan sapaan) --
   // hasilnya dibatasi budget, bukan baca seluruh dokumen. Gagal = lanjut tanpa.
   let docChunks = [];
-  if (webQuery) {
+  if (docQuery) {
     try {
-      docChunks = await fetchKnowledgeChunksForGemini(webQuery);
+      docChunks = await fetchKnowledgeChunksForGemini(docQuery, pinnedTitles);
     } catch (err) {
       console.error("RAG (Gemini): gagal cari di Dokumen Pengetahuan, lanjut tanpa:", err instanceof Error ? err.message : String(err));
     }
     const titles = docChunks.map((c) => `"${c.title}"(skor ${c.score.toFixed(1)})`).join(", ") || "-";
     console.log(`📚 [Dokumen] ${docChunks.length} potongan dipakai: ${titles}`);
   }
-  const data = await geminiGenerateWithRotation(withGroupNote(WA_BASE_SYSTEM_PROMPT, jid), contents, { webQuery, docChunks });
+  const data = await geminiGenerateWithRotation(withGroupNote(WA_BASE_SYSTEM_PROMPT, jid), contents, {
+    webQuery,
+    docChunks,
+    pinnedDocs: Boolean(pinnedTitles),
+    docMiss: Boolean(pinnedTitles) && docChunks.length === 0 && Boolean(docQuery)
+  });
 
   const rawText = extractGeminiText(data);
   if (!rawText.trim()) {
@@ -1900,13 +1966,13 @@ async function buildDailySummaryText(dateStr, { allowAi = true } = {}) {
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         console.error(`Ringkasan lokal (Ollama) gagal: ${msg}`);
-        if (!WA_SUMMARY_GEMINI_FALLBACK || GEMINI_API_KEYS.length === 0) throw err;
+        if (!WA_SUMMARY_GEMINI_FALLBACK || (GEMINI_API_KEYS.length === 0 && !llmFallback.available())) throw err;
         console.log("📋 Ringkasan harian: jatuh ke Gemini (WA_SUMMARY_GEMINI_FALLBACK=true).");
       }
     }
 
     // 2) Gemini (mesin utama kalau WA_SUMMARY_ENGINE=gemini, atau cadangan).
-    if (GEMINI_API_KEYS.length > 0) {
+    if (GEMINI_API_KEYS.length > 0 || llmFallback.available()) {
       const data = await geminiGenerateWithRotation(
         SUMMARY_SYSTEM_PROMPT,
         [{ role: "user", parts: [{ text: fitTranscript(14000) }] }],
@@ -2410,6 +2476,14 @@ const GROUP_QUOTE_MAX_CHARS = 400;
 // butuh data (berita, harga, aturan, dll). Selain itu dijawab langsung tanpa lookup.
 const GROUP_LOOKUP_RE =
   /\b(berita|terbaru|terkini|hari ini|harga|kurs|cuaca|jadwal|skor|link|tarif|biaya|honor|honorarium|aturan|peraturan|pmk|sbm|sbk|perdin|anggaran|pagu|uu|perpres|alamat|jam buka|buka jam|nomor telepon)\b/i;
+// Dokumen Pengetahuan di grup: "keywords" (bawaan) = hanya bila pesan mengandung kata di GROUP_LOOKUP_RE;
+// "always" = tiap pertanyaan yang memanggil bot dicarikan di dokumen (pencarian lokal, murah).
+const GROUP_DOCS_ALWAYS = (process.env.WA_GROUP_DOCS || "keywords").trim().toLowerCase() === "always";
+// Opsional: di grup HANYA dokumen yang judulnya memuat salah satu potongan ini yang dijadikan acuan (pisah koma).
+const GROUP_DOC_TITLES = (process.env.WA_GROUP_DOC_TITLES || "").split(",").map((x) => x.trim()).filter(Boolean);
+function docTitlesFor(jid) {
+  return isGroupJid(jid) && GROUP_DOC_TITLES.length > 0 ? GROUP_DOC_TITLES : null;
+}
 // Gemini kadang 503 ("high demand") beberapa detik; di grup coba sekali lagi dulu.
 const GROUP_RETRY_503_DELAY_MS = 12_000;
 const GROUP_BUSY_TEXT = "Maaf, sistem lagi penuh. Coba tag aku lagi sebentar lagi ya 🙏";
