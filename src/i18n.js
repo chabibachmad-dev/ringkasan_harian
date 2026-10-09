@@ -1,6 +1,6 @@
 export const STRINGS = {
   id: {
-    brand: "Daily Insider",
+    brand: "Ayyubi",
     loading: "Memuat…",
     footer_note: "Asisten AI pribadi kamu.",
     load_error: "Gagal memuat data dari server. Cek koneksi internet kamu.",
@@ -406,7 +406,7 @@ export const STRINGS = {
     about_code_locked: "Terkunci"
   },
   en: {
-    brand: "Daily Insider",
+    brand: "Ayyubi",
     loading: "Loading…",
     footer_note: "Your personal AI assistant.",
     load_error: "Couldn't load data from the server. Check your internet connection.",

@@ -1,7 +1,7 @@
 // Service worker: (1) bikin PWA bisa di-install & jalan offline-ish (app shell caching),
 // (2) menerima & menampilkan Web Push notification, (3) buka app saat notifikasi diklik.
 
-const CACHE_NAME = "ringkasan-harian-v5";
+const CACHE_NAME = "ringkasan-harian-v6";
 const APP_SHELL = ["./", "./index.html", "./manifest.webmanifest"];
 
 self.addEventListener("install", (event) => {
@@ -63,7 +63,7 @@ self.addEventListener("fetch", (event) => {
 });
 
 self.addEventListener("push", (event) => {
-  let data = { title: "Ringkasan Harian", body: "Ada pembaruan baru.", url: "./" };
+  let data = { title: "Ayyubi", body: "Ada pembaruan baru.", url: "./" };
   try {
     if (event.data) data = { ...data, ...event.data.json() };
   } catch (_err) {

@@ -6,7 +6,7 @@
 //     -H "Authorization: Bearer <ANON_ATAU_SERVICE_ROLE_KEY>" \
 //     -H "x-cron-secret: <CRON_SECRET_KAMU>" \
 //     -H "Content-Type: application/json" \
-//     -d '{"title":"Tes notifikasi","body":"Halo dari Ringkasan Harian!"}'
+//     -d '{"title":"Tes notifikasi","body":"Halo dari Ayyubi!"}'
 
 import { corsHeaders } from "../_shared/cors.ts";
 import { sendPushToAllSubscribers } from "../_shared/send-push.ts";
@@ -27,7 +27,7 @@ Deno.serve(async (req) => {
 
   try {
     const body = req.method === "POST" ? await req.json().catch(() => ({})) : {};
-    const title = body.title || "Tes notifikasi Ringkasan Harian";
+    const title = body.title || "Tes notifikasi Ayyubi";
     const bodyText = body.body || "Kalau kamu terima ini, push notification-nya berfungsi 🎉";
 
     // url opsional (dipakai bot saat jawaban Ollama selesai -> buka obrolannya).

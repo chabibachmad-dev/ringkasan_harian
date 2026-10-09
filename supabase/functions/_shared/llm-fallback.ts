@@ -139,7 +139,7 @@ async function callOpenAiCompatible(args: {
   const headers: Record<string, string> = { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` };
   if (name === "openrouter") {
     headers["HTTP-Referer"] = "https://github.com/ringkasan-harian";
-    headers["X-Title"] = "Ringkasan Harian";
+    headers["X-Title"] = "Ayyubi";
   }
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);

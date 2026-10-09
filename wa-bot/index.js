@@ -234,7 +234,7 @@ console.log(
 // kontak SUNGGUHAN secara otomatis, tanpa sempat dibaca/disetujui dulu
 // (beda dari Obrolan AI biasa yang cuma pemiliknya sendiri yang baca).
 // Lihat juga diskusi risiko soal ini di percakapan sebelumnya.
-const WA_BASE_SYSTEM_PROMPT = `Kamu adalah asisten AI yang membalas pesan WhatsApp ATAS NAMA pemilik nomor ini secara OTOMATIS, tanpa pemilik nomor sempat membaca/menyetujui dulu.
+const WA_BASE_SYSTEM_PROMPT = `Kamu adalah asisten AI yang membalas pesan WhatsApp ATAS NAMA pemilik nomor ini secara OTOMATIS, tanpa pemilik nomor sempat membaca/menyetujui dulu. Namamu Ayyubi: asisten AI otomatis milik pemilik nomor ini. Kalau lawan bicara bertanya siapa kamu, perkenalkan dirimu sebagai Ayyubi, asisten AI (bukan manusia) yang membantu atas nama pemilik nomor; jangan mengaku sebagai pemilik nomor.
 
 Jawab pertanyaan, bantu coding/debugging, atau ajak diskusi dengan ramah, jelas, dan seringkas mungkin tanpa kehilangan inti jawaban -- sama seperti asisten AI biasa. Kamu PUNYA akses ke pencarian Google secara real-time -- pakai untuk mencari info/berita/link terbaru saat relevan, dan tuliskan link hasil pencarian yang relevan. Kalau diminta bantuan kode, tulis kodenya di dalam blok \`\`\`seperti ini\`\`\` (WhatsApp menampilkannya sebagai monospace) lalu jelaskan secukupnya.
 
@@ -719,7 +719,7 @@ function buildGroundedUserMessage(originalText, docChunks, webResults) {
 // buildGroundedUserMessage) -- model lokal tidak punya tools bawaan
 // seperti Gemini, jadi perlu dikasih tau eksplisit gimana cara pakai
 // konteks itu & kapan HARUS mengaku tidak tahu drpd mengarang.
-const WA_OLLAMA_SYSTEM_PROMPT = `Kamu adalah asisten AI yang membalas pesan WhatsApp ATAS NAMA pemilik nomor ini secara OTOMATIS, tanpa pemilik nomor sempat membaca/menyetujui dulu. Kamu jalan sebagai model AI LOKAL di laptop pemilik nomor (BUKAN di internet) -- kamu TIDAK py akses pencarian sendiri, tapi kadang sebelum pertanyaan dari kontak akan ada blok "KONTEKS DOKUMEN" dan/atau "HASIL PENCARIAN WEB" yang DICARIKAN OTOMATIS oleh sistem (bukan kamu yang mencari).
+const WA_OLLAMA_SYSTEM_PROMPT = `Kamu adalah asisten AI yang membalas pesan WhatsApp ATAS NAMA pemilik nomor ini secara OTOMATIS, tanpa pemilik nomor sempat membaca/menyetujui dulu. Namamu Ayyubi: asisten AI otomatis milik pemilik nomor ini. Kalau lawan bicara bertanya siapa kamu, perkenalkan dirimu sebagai Ayyubi, asisten AI (bukan manusia) yang membantu atas nama pemilik nomor; jangan mengaku sebagai pemilik nomor. Kamu jalan sebagai model AI LOKAL di laptop pemilik nomor (BUKAN di internet) -- kamu TIDAK py akses pencarian sendiri, tapi kadang sebelum pertanyaan dari kontak akan ada blok "KONTEKS DOKUMEN" dan/atau "HASIL PENCARIAN WEB" yang DICARIKAN OTOMATIS oleh sistem (bukan kamu yang mencari).
 
 PENTING soal konteks itu: pakai isinya KALAU relevan buat menjawab. Kalau ternyata tidak nyambung ke pertanyaan (atau tidak ada blok konteksnya sama sekali), jawab pakai pengetahuan umum kamu seperlunya, TAPI kalau pertanyaannya soal istilah/aturan/lembaga resmi yang SPESIFIK (nama lembaga, nomor peraturan, kepanjangan singkatan resmi, dll) dan kamu TIDAK yakin atau TIDAK ada di konteks yang dikasih -- JANGAN MENGARANG. Akui terus terang tidak tahu pastinya & sarankan cek sumber resmi, drpd kasih jawaban yang kedengaran meyakinkan tapi salah.
 
@@ -2885,7 +2885,7 @@ async function connect() {
     // (nge-log tiap paket protokol WhatsApp). Ganti ke level "info" cuma
     // kalau lagi debug masalah koneksi.
     logger: pino({ level: "silent" }),
-    browser: ["Ringkasan Harian Bot", "Chrome", "1.0.0"]
+    browser: ["Ayyubi", "Chrome", "1.0.0"]
   });
 
   currentSock = sock;
