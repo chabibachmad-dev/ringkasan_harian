@@ -524,6 +524,7 @@ mark.chat-search-hit--active {
    PENUH (aktif) vs titik KOSONG/berongga (tidak aktif), bukan warna. */
 .chat-agent-bar {
   display: flex;
+  flex-wrap: wrap;
   gap: 6px;
   align-items: center;
 }

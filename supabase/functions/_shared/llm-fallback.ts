@@ -218,15 +218,18 @@ export function createFallbackChain(
   };
 
   const available = () => config.providers.length > 0;
+  const has = (name: string) => config.providers.some((p) => p.name === name);
   const describe = () => config.providers.map((p) => `${p.name}: ${p.keys.length} key, model ${p.models.join(" > ")}`).join(" | ");
 
-  async function generate(input: { system: string; messages: FallbackMessage[]; temperature?: number }): Promise<FallbackResult> {
+  async function generate(input: { system: string; messages: FallbackMessage[]; temperature?: number; only?: string }): Promise<FallbackResult> {
     if (!available()) throw new Error("Tidak ada penyedia cadangan yang dikonfigurasi.");
+    const chosen = input.only ? config.providers.filter((p) => p.name === input.only) : config.providers;
+    if (chosen.length === 0) throw new Error(`Penyedia "${input.only}" tidak dikonfigurasi.`);
     const temperature = input.temperature ?? 0.4;
     const fitted = fitMessages(input.system, input.messages, config.maxInputChars);
     const reasons: string[] = [];
     let tries = 0;
-    for (const p of config.providers) {
+    for (const p of chosen) {
       for (const model of p.models) {
         const start = cursor.get(p.name) || 0;
         for (let i = 0; i < p.keys.length; i++) {
@@ -279,7 +282,7 @@ export function createFallbackChain(
     throw new Error(`Semua penyedia cadangan gagal (${reasons.length ? reasons.join(" ; ").slice(0, 700) : "semua key sedang istirahat"}).`);
   }
 
-  return { available, describe, generate };
+  return { available, has, describe, generate };
 }
 
 // Satu rantai bersama untuk Edge Function (dibangun malas supaya secret terbaca saat dipakai).

@@ -184,11 +184,17 @@
           </div>
 
           <div id="chat-agent-bar" class="chat-agent-bar" role="radiogroup" data-i18n-aria-label="agent_label" aria-label="Agen AI" hidden>
-            <button type="button" class="chat-agent-pill" data-agent="auto" role="radio" aria-checked="true" data-i18n-title="agent_auto_hint" title="Gemini dulu; kalau gagal otomatis pakai Ollama">
+            <button type="button" class="chat-agent-pill" data-agent="auto" role="radio" aria-checked="true" data-i18n-title="agent_auto_hint" title="Gemini dulu; kalau gagal otomatis pakai Groq/OpenRouter, lalu Ollama">
               <span data-i18n="agent_auto">Auto</span>
             </button>
             <button type="button" class="chat-agent-pill" data-agent="gemini" role="radio" aria-checked="false" data-i18n-title="agent_gemini_hint" title="Gemini (cloud, pakai API key)">
               <span data-i18n="agent_gemini">Gemini</span>
+            </button>
+            <button type="button" class="chat-agent-pill" data-agent="groq" role="radio" aria-checked="false" data-i18n-title="agent_groq_hint" title="Groq (cloud, cepat, jatah gratis)">
+              <span data-i18n="agent_groq">Groq</span>
+            </button>
+            <button type="button" class="chat-agent-pill" data-agent="openrouter" role="radio" aria-checked="false" data-i18n-title="agent_openrouter_hint" title="OpenRouter (cloud, model gratis)">
+              <span data-i18n="agent_openrouter">OpenRouter</span>
             </button>
             <button type="button" class="chat-agent-pill" data-agent="ollama" role="radio" aria-checked="false" data-i18n-title="agent_ollama_hint" title="Ollama (model lokal di laptop, cocok untuk analisis dokumen)">
               <span class="chat-agent-dot" aria-hidden="true"></span>

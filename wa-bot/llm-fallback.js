@@ -163,18 +163,21 @@ export function createFallbackChain({ config = readFallbackConfig(), fetchImpl =
   function available() {
     return config.providers.length > 0;
   }
+  const has = (name) => config.providers.some((p) => p.name === name);
   function describe() {
     return config.providers.map((p) => `${p.name}: ${p.keys.length} key, model ${p.models.join(" > ")}`).join(" | ");
   }
 
   // system: string; messages: [{role:"user"|"assistant", content}]. Return { text, provider, model, tokens }
   // atau melempar Error (gabungan alasan semua percobaan).
-  async function generate({ system, messages, temperature = 0.4 }) {
+  async function generate({ system, messages, temperature = 0.4, only = "" }) {
     if (!available()) throw new Error("Tidak ada penyedia cadangan yang dikonfigurasi.");
+    const chosen = only ? config.providers.filter((p) => p.name === only) : config.providers;
+    if (chosen.length === 0) throw new Error(`Penyedia "${only}" tidak dikonfigurasi.`);
     const fitted = fitMessages(system, messages, config.maxInputChars);
     const reasons = [];
     let tries = 0;
-    for (const p of config.providers) {
+    for (const p of chosen) {
       for (const model of p.models) {
         const start = cursor.get(p.name) || 0;
         for (let i = 0; i < p.keys.length; i++) {
@@ -226,5 +229,5 @@ export function createFallbackChain({ config = readFallbackConfig(), fetchImpl =
     throw new Error(`Semua penyedia cadangan gagal (${reasons.length ? reasons.join(" ; ").slice(0, 700) : "semua key sedang istirahat"}).`);
   }
 
-  return { available, describe, generate };
+  return { available, has, describe, generate };
 }

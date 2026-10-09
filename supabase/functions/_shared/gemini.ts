@@ -8,6 +8,7 @@
 
 import { buildWebGroundedMessage, buildWebQuery, searchBing } from "./knowledge.ts";
 import { getFallbackChain } from "./llm-fallback.ts";
+import { getWebSearch } from "./web-search.ts";
 
 const DEFAULT_MODEL = "gemini-3.6-flash";
 // Model cadangan: dicoba otomatis kalau model utama gagal terus (mis. 503
@@ -532,7 +533,14 @@ export async function generateChatReply(
   messages: ChatMessage[],
   apiKeyOrKeys: string | string[],
   knowledgeContext: { title: string; content: string }[] = [],
-  options: { kbExcerpts?: boolean; strictDocs?: boolean; docNoMatch?: boolean } = {}
+  options: {
+    kbExcerpts?: boolean;
+    strictDocs?: boolean;
+    docNoMatch?: boolean;
+    // Pilihan agent dari aplikasi: "auto" (Gemini lalu cadangan, bawaan) atau satu penyedia saja
+    // ("gemini" | "groq" | "openrouter") TANPA pindah ke penyedia lain kalau gagal.
+    engine?: "auto" | "gemini" | "groq" | "openrouter";
+  } = {}
 ): Promise<ChatReplyResult> {
   const apiKeys = Array.isArray(apiKeyOrKeys) ? apiKeyOrKeys : [apiKeyOrKeys];
   const primaryModel = Deno.env.get("GEMINI_MODEL") || DEFAULT_MODEL;
@@ -556,7 +564,7 @@ export async function generateChatReply(
   // coba cari lewat Bing & sisipkan hasilnya ke pertanyaan terakhir (lihat
   // buildFallbackPayload) -- sama seperti bot WA.
   const webNote =
-    "\n\nCATATAN: Google Search sedang tidak tersedia, jadi sistem mencarikan HASIL PENCARIAN WEB (judul + cuplikan dari Bing) dan melampirkannya di pesan terakhir. Jadikan itu acuan untuk fakta/angka/aturan terbaru dan sebut sumbernya singkat (nama situs/judul) kalau relevan. Cuplikan sering terpotong: kalau belum cukup untuk memastikan angka atau aturan resmi, katakan terus terang dan sarankan cek sumber resmi. Jangan mengarang link/URL. Kalau ada dokumen referensi di atas yang memuat jawabannya, dokumen itu tetap sumber utama.";
+    "\n\nCATATAN: Google Search sedang tidak tersedia, jadi sistem mencarikan HASIL PENCARIAN WEB (judul + cuplikan, sebagian dengan baris 'Sumber: URL') dan melampirkannya di pesan terakhir. Jadikan itu acuan untuk fakta/angka/aturan terbaru dan sebut sumbernya singkat (nama situs/judul) kalau relevan. Cuplikan sering terpotong: kalau belum cukup untuk memastikan angka atau aturan resmi, katakan terus terang dan sarankan cek sumber resmi. Boleh menyebut URL HANYA yang tertulis persis di baris 'Sumber:'; jangan mengarang link/URL. Kalau ada dokumen referensi di atas yang memuat jawabannya, dokumen itu tetap sumber utama.";
 
   const buildBody = (withTools: boolean, system = systemText, ctn = contents) =>
     JSON.stringify({
@@ -569,8 +577,8 @@ export async function generateChatReply(
   const buildFallbackPayload = async () => {
     const webQuery = buildWebQuery(messages.filter((m) => m.role === "user").map((m) => m.content));
     if (!webQuery) return { system: systemText + noInternetNote, ctn: contents };
-    const results = await searchBing(webQuery, 5);
-    console.log(`[Bing] ${results.length} hasil web disisipkan ke prompt chat (query: "${webQuery.slice(0, 80)}")`);
+    const results = await getWebSearch(searchBing).search(webQuery, 5);
+    console.log(`[Web] ${results.length} hasil web disisipkan ke prompt chat (query: "${webQuery.slice(0, 80)}")`);
     if (results.length === 0) return { system: systemText + noInternetNote, ctn: contents };
     const lastText = contents[contents.length - 1]?.parts?.[0]?.text ?? "";
     return {
@@ -653,7 +661,8 @@ export async function generateChatReply(
   // atau bila tidak ada key Gemini sama sekali. Tanpa Google Search (hasil Bing disisipkan bila ada). Token/biaya
   // dicatat 0 supaya hitungan "token Gemini hari ini" di aplikasi tetap murni Gemini.
   const chain = getFallbackChain();
-  const viaFallback = async (): Promise<ChatReplyResult> => {
+  const engine = options.engine ?? "auto";
+  const viaFallback = async (only?: string): Promise<ChatReplyResult> => {
     const payload = strict ? { system: systemText, ctn: contents } : await buildFallbackPayload();
     const msgs = payload.ctn
       .map((c) => ({
@@ -661,9 +670,19 @@ export async function generateChatReply(
         content: c.parts.map((x) => x.text ?? "").join("")
       }))
       .filter((m) => m.content);
-    const r = await chain.generate({ system: payload.system, messages: msgs, temperature: strict ? 0.2 : 0.4 });
+    const r = await chain.generate({ system: payload.system, messages: msgs, temperature: strict ? 0.2 : 0.4, only });
     return { reply: r.text, tokensUsed: 0, costUsd: 0, provider: `${r.provider}/${r.model}` };
   };
+
+  // Agent dipilih eksplisit: hanya penyedia itu, tidak pindah ke yang lain bila gagal.
+  if (engine === "gemini") {
+    if (apiKeys.length === 0) throw new Error("Agent Gemini dipilih tetapi tidak ada API key Gemini.");
+    return await viaGemini();
+  }
+  if (engine === "groq" || engine === "openrouter") {
+    if (!chain.has(engine)) throw new Error(`Agent ${engine === "groq" ? "Groq" : "OpenRouter"} dipilih tetapi API key-nya belum diatur di server.`);
+    return await viaFallback(engine);
+  }
 
   if (apiKeys.length === 0) {
     if (!chain.available()) throw new Error("Tidak ada API key Gemini maupun penyedia cadangan.");

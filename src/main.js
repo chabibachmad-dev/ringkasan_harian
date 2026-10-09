@@ -68,7 +68,8 @@ import {
   fetchKeyStatus,
   addChatAttachment,
   deleteChatAttachment,
-  fetchSystemStatus
+  fetchSystemStatus,
+  isAgentName
 } from "./chat.js";
 import {
   listWaChats,
@@ -282,7 +283,7 @@ const state = {
   threadSaved: new Map(),
   threadLastAt: new Map(),
   retention: null,
-  // id obrolan -> "auto" | "gemini" | "ollama" -- agen AI pilihan tiap obrolan
+  // id obrolan -> "auto" | "gemini" | "groq" | "openrouter" | "ollama" -- agen AI pilihan tiap obrolan
   // (disimpan di server, chat_thread_meta.agent; default "auto").
   threadAgent: new Map(),
   // Job Ollama yang sedang ditunggu (id job) + status laptop (true/false/null=belum tahu).
@@ -471,7 +472,7 @@ function applyThreadMetaFromServer(id, pinned, title, useKb, agent, saved, lastA
   state.threadUseKb.set(id, !!useKb);
   state.threadSaved.set(id, !!saved);
   if (lastAt) state.threadLastAt.set(id, lastAt);
-  if (agent === "auto" || agent === "gemini" || agent === "ollama") state.threadAgent.set(id, agent);
+  if (isAgentName(agent)) state.threadAgent.set(id, agent);
 
   if (isPinned(id) !== !!pinned) {
     const set = getPinnedChats();
@@ -952,11 +953,11 @@ function appendChatBubble(role, content, timestamp, id, tokensUsed, costUsd, age
 
   // Label agen penjawab ("Gemini"/"Ollama") -- hanya untuk balasan AI yang
   // tercatat agennya (pesan lama tidak punya info ini, jadi tidak diberi label).
-  if (role === "assistant" && (agent === "gemini" || agent === "ollama")) {
+  if (role === "assistant" && isAgentName(agent) && agent !== "auto") {
     const agentEl = document.createElement("span");
     agentEl.className = "chat-bubble-agent";
-    agentEl.textContent = `· ${t(state.lang, agent === "ollama" ? "agent_ollama" : "agent_gemini")}`;
-    agentEl.title = `${t(state.lang, "agent_answered_by")} ${t(state.lang, agent === "ollama" ? "agent_ollama" : "agent_gemini")}`;
+    agentEl.textContent = `· ${t(state.lang, `agent_${agent}`)}`;
+    agentEl.title = `${t(state.lang, "agent_answered_by")} ${t(state.lang, `agent_${agent}`)}`;
     meta.appendChild(agentEl);
   }
 
@@ -1363,7 +1364,7 @@ async function loadChatForDate(date) {
   }
   setChatStatus("");
   renderChatMessages(result.messages);
-  if (result.agent === "auto" || result.agent === "gemini" || result.agent === "ollama") {
+  if (isAgentName(result.agent)) {
     state.threadAgent.set(date, result.agent);
   }
   state.threadAttachments = Array.isArray(result.attachments) ? result.attachments : [];
@@ -2842,7 +2843,7 @@ function wireEvents() {
 
     // Ollama dipilih tapi laptop/bot/Ollama tidak hidup: server MENOLAK tanpa
     // menyimpan pesan -- buang bubble sementara & kembalikan teks ke kolom ketik.
-    if (!result.ok && result.ollamaOffline) {
+    if (!result.ok && (result.ollamaOffline || result.agentUnavailable)) {
       userBubble.remove();
       if (!els.chatThread.querySelector(".chat-bubble")) {
         const p = document.createElement("p");
@@ -2853,9 +2854,13 @@ function wireEvents() {
       els.chatInput.value = text;
       els.chatInput.style.height = "auto";
       els.chatInput.style.height = `${els.chatInput.scrollHeight}px`;
-      state.ollamaOnline = false;
-      renderAgentBar();
-      setChatStatus(`${t(state.lang, "agent_offline")} ${result.message || ""}`.trim());
+      if (result.ollamaOffline) {
+        state.ollamaOnline = false;
+        renderAgentBar();
+        setChatStatus(`${t(state.lang, "agent_offline")} ${result.message || ""}`.trim());
+      } else {
+        setChatStatus(result.message || t(state.lang, "chat_error"));
+      }
       return;
     }
 
@@ -2880,7 +2885,10 @@ function wireEvents() {
         showChatLocked(t(state.lang, "chat_code_wrong"));
         return;
       }
-      setChatStatus(t(state.lang, "chat_error"));
+      // Alasan dari server (mis. "OPENROUTER_API_KEYS belum di-set", "Semua penyedia gagal") ikut ditampilkan
+      // supaya jelas apa yang perlu dibenahi; pesan teknis "HTTP 500" saja dilewati.
+      const why = result.message && !/^HTTP \d+$/.test(result.message) ? ` (${String(result.message).slice(0, 220)})` : "";
+      setChatStatus(`${t(state.lang, "chat_error")}${why}`);
       return;
     }
 

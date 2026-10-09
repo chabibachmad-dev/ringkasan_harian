@@ -163,6 +163,30 @@ for (const [label, rel] of targets) {
     const r3 = await ch3.generate({ system: "S", messages: msgs });
     check(r2.text === "ok" && r3.text === "ok", "onEvent yang melempar error (sinkron/async) tidak menggagalkan jawaban");
   }
+
+  // 10) has() dan generate({ only }): agent dipilih eksplisit di aplikasi, tanpa pindah penyedia lain
+  {
+    const ch = mod.createFallbackChain({ config: cfg, fetchImpl: makeFake({}).fetchImpl, log: silent });
+    check(ch.has("groq") && ch.has("openrouter") && !ch.has("gemini"), "has(): tahu penyedia mana yang dikonfigurasi");
+    const onlyGroq = mod.readFallbackConfig((n) => ({ GROQ_API_KEYS: "g1" })[n]);
+    const c2 = mod.createFallbackChain({ config: onlyGroq, fetchImpl: makeFake({}).fetchImpl, log: silent });
+    check(c2.has("groq") && !c2.has("openrouter"), "has(): openrouter tanpa key -> false");
+
+    const f = makeFake({ openrouter: [{ ok: "dari OR" }], groq: [{ ok: "dari groq" }] });
+    const c3 = mod.createFallbackChain({ config: cfg, fetchImpl: f.fetchImpl, log: silent });
+    const r = await c3.generate({ system: "S", messages: msgs, only: "openrouter" });
+    check(r.provider === "openrouter" && r.text === "dari OR" && f.calls.every((c) => c.provider === "openrouter"), "only=openrouter: groq tidak disentuh sama sekali");
+
+    const f2 = makeFake({ groq: [{ status: 500 }], openrouter: [{ ok: "dari OR" }] });
+    const c4 = mod.createFallbackChain({ config: cfg, fetchImpl: f2.fetchImpl, log: silent });
+    let msg = "";
+    try { await c4.generate({ system: "S", messages: msgs, only: "groq" }); } catch (e) { msg = String(e.message); }
+    check(msg.includes("gagal") && f2.calls.every((c) => c.provider === "groq"), "only=groq gagal -> error, TIDAK pindah ke openrouter");
+
+    let msg2 = "";
+    try { await c2.generate({ system: "S", messages: msgs, only: "openrouter" }); } catch (e) { msg2 = String(e.message); }
+    check(msg2.includes("tidak dikonfigurasi"), "only=penyedia tanpa key -> error jelas");
+  }
 }
 
 if (fails) {

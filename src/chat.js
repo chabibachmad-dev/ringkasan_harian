@@ -4,6 +4,12 @@
 
 import { supabase } from "./supabaseClient.js";
 
+// Pilihan agent AI di obrolan: Auto = Gemini dulu, lalu cadangan; sisanya = hanya penyedia itu.
+export const AGENT_NAMES = ["auto", "gemini", "groq", "openrouter", "ollama"];
+export function isAgentName(v) {
+  return typeof v === "string" && AGENT_NAMES.includes(v);
+}
+
 const CODE_STORAGE_KEY = "rh_chat_code";
 
 export function getStoredChatCode() {
@@ -53,6 +59,8 @@ async function callChatFunction(payload) {
         // Ollama dipilih tapi laptop/bot/Ollama tidak hidup (server menolak
         // tanpa menyimpan pesan) -- lihat Edge Function action "send".
         ollamaOffline: data.ollamaOffline === true,
+        // Agent Gemini/Groq/OpenRouter dipilih tetapi key-nya belum diatur di server (pesan TIDAK disimpan).
+        agentUnavailable: data.agentUnavailable === true,
         message: data.error || `HTTP ${res.status}`,
         userMessageId: data.userMessageId
       };
@@ -70,7 +78,7 @@ export function fetchChatHistory(date, code) {
 
 export function sendChatMessage(date, code, message, agent) {
   const payload = { code, date, action: "send", message };
-  if (agent === "auto" || agent === "gemini" || agent === "ollama") payload.agent = agent;
+  if (isAgentName(agent)) payload.agent = agent;
   return callChatFunction(payload);
 }
 
@@ -115,7 +123,7 @@ export function setThreadMeta(id, code, { pinned, saved, title, useKb, agent } =
   if (typeof saved === "boolean") payload.saved = saved;
   if (title !== undefined) payload.title = title;
   if (typeof useKb === "boolean") payload.useKb = useKb;
-  if (agent === "auto" || agent === "gemini" || agent === "ollama") payload.agent = agent;
+  if (isAgentName(agent)) payload.agent = agent;
   return callChatFunction(payload);
 }
 

@@ -316,8 +316,8 @@ export async function searchBing(query: string, maxResults = 5, timeoutMs = 7000
 }
 
 // Sisipkan potongan hasil web ke teks pertanyaan terakhir.
-export function buildWebGroundedMessage(originalText: string, results: { title: string; snippet: string }[]): string {
+export function buildWebGroundedMessage(originalText: string, results: { title: string; snippet: string; url?: string }[]): string {
   if (results.length === 0) return originalText;
-  const webBlock = results.map((r, i) => `${i + 1}. ${r.title} -- ${r.snippet}`).join("\n");
+  const webBlock = results.map((r, i) => `${i + 1}. ${r.title} -- ${r.snippet}${r.url ? `\n   Sumber: ${r.url}` : ""}`).join("\n");
   return `HASIL PENCARIAN WEB (dicarikan otomatis, mungkin relevan -- kalau tidak relevan, abaikan):\n${webBlock}\n\nPertanyaan dari pengguna: ${originalText}`;
 }

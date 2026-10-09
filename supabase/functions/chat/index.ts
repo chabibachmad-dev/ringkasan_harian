@@ -11,11 +11,12 @@
 // main.js), formatnya selalu "freeform-<uuid>":
 //   { "code": "...", "date": "freeform-<uuid>", "action": "history" }
 //     -> { ok: true, messages: [{ role, content, created_at }, ...] }
-//   { "code": "...", "date": "...", "action": "send", "message": "...", "agent"?: "auto"|"gemini"|"ollama" }
-//     -> { ok: true, reply: "...", agent: "gemini" }                      (dijawab Gemini langsung)
+//   { "code": "...", "date": "...", "action": "send", "message": "...", "agent"?: "auto"|"gemini"|"groq"|"openrouter"|"ollama" }
+//     -> { ok: true, reply: "...", agent: "gemini"|"groq"|"openrouter" }  (dijawab langsung oleh agent itu)
 //     -> { ok: true, pending: true, jobId, userMessageId, agent: "ollama" } (diantrekan ke Ollama di laptop;
 //        klien lalu polling action "agent_job" sampai status "done")
 //     agent "auto" (default) = Gemini dulu, kalau Gemini gagal & Ollama hidup -> otomatis diantrekan ke Ollama.
+//     agent "gemini" / "groq" / "openrouter" = hanya penyedia itu, TANPA pindah ke yang lain bila gagal (400 bila key-nya belum diatur).
 //     agent "ollama" ditolak (503, ollamaOffline: true) kalau laptop/bot/Ollama sedang tidak hidup.
 //   { "code": "...", "action": "agent_job", "jobId": "<uuid>" }
 //     -> { ok: true, status: "pending"|"running"|"done"|"failed", progress, error, reply?, assistantMessageId?, agent, fallbackFrom }
@@ -47,7 +48,7 @@
 //     pinned/title/useKb diambil dari tabel chat_thread_meta supaya status
 //     sematan, judul custom, & toggle Dokumen Pengetahuan ikut sinkron ke
 //     semua perangkat juga.)
-//   { "code": "...", "date": "...", "action": "set_thread_meta", "pinned"?: bool, "saved"?: bool, "title"?: string|null, "useKb"?: bool, "agent"?: "auto"|"gemini"|"ollama" }
+//   { "code": "...", "date": "...", "action": "set_thread_meta", "pinned"?: bool, "saved"?: bool, "title"?: string|null, "useKb"?: bool, "agent"?: "auto"|"gemini"|"groq"|"openrouter"|"ollama" }
 //     -> { ok: true, pinned: bool, saved: bool, title: string|null, useKb: bool, agent: string }
 //     (simpan status sematan (pin), judul custom, dan/atau toggle "pakai
 //     Dokumen Pengetahuan" satu obrolan ke tabel chat_thread_meta -- kirim
@@ -171,9 +172,10 @@ function json(body: unknown, status = 200): Response {
 }
 
 // ---------------- Agen lokal (Ollama di laptop) ----------------
-type AgentName = "auto" | "gemini" | "ollama";
+type AgentName = "auto" | "gemini" | "groq" | "openrouter" | "ollama";
+const AGENT_NAMES: readonly string[] = ["auto", "gemini", "groq", "openrouter", "ollama"];
 function parseAgent(v: unknown): AgentName {
-  return v === "gemini" || v === "ollama" || v === "auto" ? v : "auto";
+  return typeof v === "string" && AGENT_NAMES.includes(v) ? (v as AgentName) : "auto";
 }
 const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 // Worker dianggap hidup kalau denyutnya < 60 detik lalu (bot kirim tiap ~15 dtk).
@@ -382,7 +384,7 @@ Deno.serve(async (req) => {
     const savedProvided = typeof body.saved === "boolean";
     const titleProvided = body.title !== undefined;
     const useKbProvided = typeof body.useKb === "boolean";
-    const agentProvided = body.agent === "auto" || body.agent === "gemini" || body.agent === "ollama";
+    const agentProvided = typeof body.agent === "string" && AGENT_NAMES.includes(body.agent);
     if (!pinnedProvided && !savedProvided && !titleProvided && !useKbProvided && !agentProvided) {
       return json({ ok: false, error: "Tidak ada perubahan (pinned/saved/title/useKb/agent) yang dikirim." }, 400);
     }
@@ -1066,7 +1068,8 @@ Deno.serve(async (req) => {
 
     // Agen "ollama" (atau "auto" tanpa API key Gemini sama sekali): langsung
     // ke antrean lokal -- tolak DULU (tanpa menyimpan pesan) kalau laptop mati.
-    const cloudAiAvailable = geminiApiKeys.length > 0 || getFallbackChain().available();
+    const fallbackChain = getFallbackChain();
+    const cloudAiAvailable = geminiApiKeys.length > 0 || fallbackChain.available();
     if (agent === "ollama" || (agent === "auto" && !cloudAiAvailable)) {
       const w = await getWorkerStatus(supabaseAdmin);
       if (!w.online) {
@@ -1077,6 +1080,14 @@ Deno.serve(async (req) => {
 
     if (!cloudAiAvailable) {
       return json({ ok: false, error: "GEMINI_API_KEYS (atau GEMINI_API_KEY) belum di-set sebagai Supabase secret." }, 500);
+    }
+    // Agent dipilih eksplisit (Gemini / Groq / OpenRouter): tolak DULU (tanpa menyimpan pesan) kalau key-nya belum ada.
+    if (agent === "gemini" && geminiApiKeys.length === 0) {
+      return json({ ok: false, error: "Agent Gemini dipilih, tetapi GEMINI_API_KEYS belum di-set. Pilih agent lain atau Auto.", agentUnavailable: true }, 400);
+    }
+    if ((agent === "groq" || agent === "openrouter") && !fallbackChain.has(agent)) {
+      const secret = agent === "groq" ? "GROQ_API_KEYS" : "OPENROUTER_API_KEYS";
+      return json({ ok: false, error: `Agent ${agent === "groq" ? "Groq" : "OpenRouter"} dipilih, tetapi ${secret} belum di-set di Supabase secret. Pilih agent lain atau Auto.`, agentUnavailable: true }, 400);
     }
 
     // Ambil riwayat hari ini dulu buat konteks percakapan.
@@ -1240,6 +1251,7 @@ Deno.serve(async (req) => {
     }
 
     let reply: string;
+    let answeredBy = "gemini"; // agent yang benar-benar menjawab (jadi "groq"/"openrouter" bila lewat penyedia cadangan)
     let tokensUsed = 0;
     let costUsd = 0;
     try {
@@ -1270,11 +1282,19 @@ Deno.serve(async (req) => {
           p_clear_exhausted: e.kind === "success"
         });
       });
-      const result = await generateChatReply(history, geminiApiKeys, knowledgeContext, { kbExcerpts, strictDocs, docNoMatch });
+      const result = await generateChatReply(history, geminiApiKeys, knowledgeContext, {
+        kbExcerpts,
+        strictDocs,
+        docNoMatch,
+        engine: agent === "gemini" || agent === "groq" || agent === "openrouter" ? agent : "auto"
+      });
       reply = result.reply;
       tokensUsed = result.tokensUsed;
       costUsd = result.costUsd;
-      if (result.provider) console.log(`chat: balasan dari penyedia cadangan ${result.provider}`);
+      if (result.provider) {
+        console.log(`chat: balasan dari penyedia cadangan ${result.provider}`);
+        answeredBy = result.provider.split("/")[0]; // "groq" | "openrouter"
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error("chat: gagal dapat balasan Gemini:", msg);
@@ -1319,7 +1339,7 @@ Deno.serve(async (req) => {
         chat_date: date,
         role: "assistant",
         content: reply,
-        agent: "gemini",
+        agent: answeredBy,
         tokens_used: tokensUsed || null,
         cost_usd: costUsd || null
       })
@@ -1373,7 +1393,7 @@ Deno.serve(async (req) => {
     return json({
       ok: true,
       reply,
-      agent: "gemini",
+      agent: answeredBy,
       userMessageId,
       assistantMessageId: assistantRow?.id,
       // Angka giliran INI SAJA -- dipakai klien buat langsung menampilkan

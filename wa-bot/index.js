@@ -39,6 +39,7 @@ import { fileURLToPath } from "node:url";
 import { createSimab, SIMAB_OLLAMA_SYSTEM } from "./simab.js";
 import { createAppAgentWorker } from "./app-agent.js";
 import { createFallbackChain, readFallbackConfig } from "./llm-fallback.js";
+import { createWebSearch, readSearchConfig } from "./web-search.js";
 import { createKhatamReminder } from "./khatam.js";
 import { createPriorityQueue, PRIORITY } from "./ollama-queue.js";
 import { openKbIndex } from "./kb-index.js";
@@ -684,6 +685,11 @@ async function webSearchBing(query, maxResults) {
 // kecepatan di RAG_CONTEXT_BUDGET_CHARS).
 const WEB_SEARCH_MAX_RESULTS = 3;
 
+// Pencarian web: API (Tavily/Serper/Brave, kalau key-nya diisi di .env) dengan rotasi key, lalu Bing
+// (scraping di atas) sebagai cadangan terakhir. Hasil API membawa URL sumber. Lihat web-search.js.
+const webSearch = createWebSearch({ config: readSearchConfig(process.env), bing: webSearchBing });
+if (webSearch.available()) console.log(`🔎 Pencarian web: ${webSearch.describe()}`);
+
 // Gabung potongan dokumen + hasil web (kalau ada) jadi 1 blok teks yang
 // ditaruh SEBELUM pertanyaan asli di giliran "user" terakhir -- pola ini
 // (konteks + pertanyaan dalam 1 pesan yang sama) PERSIS yang terbukti
@@ -698,7 +704,7 @@ function buildGroundedUserMessage(originalText, docChunks, webResults) {
     parts.push(`KONTEKS DOKUMEN (dari Dokumen Pengetahuan, dicarikan otomatis, mungkin relevan -- kalau tidak relevan, abaikan):\n${docBlock}`);
   }
   if (webResults.length > 0) {
-    const webBlock = webResults.map((r, i) => `${i + 1}. ${r.title} -- ${r.snippet}`).join("\n");
+    const webBlock = webResults.map((r, i) => `${i + 1}. ${r.title} -- ${r.snippet}${r.url ? `\n   Sumber: ${r.url}` : ""}`).join("\n");
     parts.push(`HASIL PENCARIAN WEB (dicarikan otomatis, mungkin relevan -- kalau tidak relevan, abaikan):\n${webBlock}`);
   }
   if (parts.length === 0) return originalText;
@@ -852,7 +858,7 @@ async function generateAutoReplyWithOllama(jid, { timeoutMs } = {}) {
   const pinnedTitles = docTitlesFor(jid);
   const docChunks = docsAllowed ? await fetchRelevantKnowledgeChunks(searchQuestion, RAG_CONTEXT_BUDGET_CHARS, pinnedTitles) : [];
   const topScore = docChunks[0]?.score ?? 0;
-  const webResults = !lookupAllowed || pinnedTitles || topScore >= RAG_STRONG_MATCH_SCORE ? [] : await webSearchBing(searchQuestion, WEB_SEARCH_MAX_RESULTS);
+  const webResults = !lookupAllowed || pinnedTitles || topScore >= RAG_STRONG_MATCH_SCORE ? [] : await webSearch.search(searchQuestion, WEB_SEARCH_MAX_RESULTS, { snippetChars: 220 });
 
   // Log diagnostik ringan (BUKAN isi lengkap dokumen/pertanyaan, cuma
   // judul+skor) -- biar kalau jawabannya aneh/salah sasaran lagi, langsung
@@ -1280,7 +1286,7 @@ async function geminiGenerateWithRotation(
   const systemNoSearch =
     `${systemWithDate}\n\nCATATAN: untuk balasan ini akses pencarian internet SEDANG TIDAK TERSEDIA. Untuk peraturan, tarif, angka resmi, atau hal lain yang bisa sudah berubah, JANGAN menyebut angka/aturan dengan yakin dari ingatan (angka yang tertulis di KONTEKS DOKUMEN boleh dipakai) -- katakan terus terang kamu belum bisa memastikan versi terbarunya dan sarankan cek sumber resmi (mis. PMK/situs Kemenkeu).`;
   const systemWithWeb =
-    `${systemWithDate}\n\nCATATAN: Google Search sedang tidak tersedia, jadi sistem mencarikan HASIL PENCARIAN WEB (judul + cuplikan dari Bing) dan melampirkannya di pesan terakhir. Jadikan itu acuan utama untuk fakta/angka/aturan terbaru dan sebut sumbernya singkat (nama situs/judul) kalau relevan. Cuplikan sering terpotong: kalau belum cukup untuk memastikan angka atau aturan resmi, katakan terus terang dan sarankan cek sumber resmi. Jangan mengarang link/URL.`;
+    `${systemWithDate}\n\nCATATAN: Google Search sedang tidak tersedia, jadi sistem mencarikan HASIL PENCARIAN WEB (judul + cuplikan, sebagian dengan baris "Sumber: URL") dan melampirkannya di pesan terakhir. Jadikan itu acuan utama untuk fakta/angka/aturan terbaru dan sebut sumbernya singkat (nama situs/judul) kalau relevan. Cuplikan sering terpotong: kalau belum cukup untuk memastikan angka atau aturan resmi, katakan terus terang dan sarankan cek sumber resmi. Boleh menyebut URL HANYA yang tertulis persis di baris "Sumber:"; jangan mengarang link/URL.`;
   // Payload jalur tanpa Google Search: dihitung malas & maksimal 1x per
   // panggilan (kalau rotasi key mengulang, Bing tidak dicari ulang).
   let noSearchPayload = null;
@@ -1288,10 +1294,10 @@ async function geminiGenerateWithRotation(
     if (noSearchPayload) return noSearchPayload;
     noSearchPayload = { system: systemNoSearch, contents: withDocsContents };
     if (!webQuery) {
-      console.log("🌐 [Bing] dilewati (pesan terakhir tidak terlihat seperti pertanyaan yang butuh internet).");
+      console.log("🌐 [Web] dilewati (pesan terakhir tidak terlihat seperti pertanyaan yang butuh internet).");
     } else {
-      const results = await webSearchBing(webQuery, GEMINI_WEB_MAX_RESULTS);
-      console.log(`🌐 [Bing] ${results.length} hasil web disisipkan ke prompt Gemini (query: "${webQuery.slice(0, 80)}")`);
+      const results = await webSearch.search(webQuery, GEMINI_WEB_MAX_RESULTS);
+      console.log(`🌐 [Web] ${results.length} hasil web disisipkan ke prompt Gemini (query: "${webQuery.slice(0, 80)}")`);
       if (results.length > 0) {
         noSearchPayload = {
           system: systemWithWeb,
