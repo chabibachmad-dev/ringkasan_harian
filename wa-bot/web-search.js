@@ -63,7 +63,10 @@ function clip(text, max) {
 }
 
 // Satu panggilan ke satu API pencarian -> [{ title, snippet, url }]
-async function callProvider({ name, apiKey, query, maxResults, snippetChars, timeoutMs, fetchImpl }) {
+// recent: "week" | "month" | "year" (opsional) = hanya hasil dengan tanggal terbaru -- dipakai pemantau peraturan.
+const RECENT_TBS = { week: "qdr:w", month: "qdr:m", year: "qdr:y" };
+const RECENT_BRAVE = { week: "pw", month: "pm", year: "py" };
+async function callProvider({ name, apiKey, query, maxResults, snippetChars, timeoutMs, fetchImpl, recent = "" }) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
@@ -72,14 +75,14 @@ async function callProvider({ name, apiKey, query, maxResults, snippetChars, tim
       res = await fetchImpl("https://api.tavily.com/search", {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
-        body: JSON.stringify({ query, max_results: maxResults, search_depth: "basic", include_answer: false }),
+        body: JSON.stringify({ query, max_results: maxResults, search_depth: "basic", include_answer: false, ...(RECENT_TBS[recent] ? { time_range: recent } : {}) }),
         signal: ctrl.signal
       });
     } else if (name === "serper") {
       res = await fetchImpl("https://google.serper.dev/search", {
         method: "POST",
         headers: { "Content-Type": "application/json", "X-API-KEY": apiKey },
-        body: JSON.stringify({ q: query, gl: "id", hl: "id", num: maxResults }),
+        body: JSON.stringify({ q: query, gl: "id", hl: "id", num: maxResults, ...(RECENT_TBS[recent] ? { tbs: RECENT_TBS[recent] } : {}) }),
         signal: ctrl.signal
       });
     } else {
@@ -88,6 +91,7 @@ async function callProvider({ name, apiKey, query, maxResults, snippetChars, tim
       u.searchParams.set("count", String(maxResults));
       u.searchParams.set("country", "ID");
       u.searchParams.set("search_lang", "id");
+      if (RECENT_BRAVE[recent]) u.searchParams.set("freshness", RECENT_BRAVE[recent]);
       res = await fetchImpl(u.toString(), { headers: { Accept: "application/json", "X-Subscription-Token": apiKey }, signal: ctrl.signal });
     }
     const text = await res.text();
@@ -135,7 +139,7 @@ export function createWebSearch({ config = readSearchConfig(), fetchImpl = globa
     [...config.providers.map((p) => `${p.name} (${p.keys.length} key)`), ...(config.bingFallback && bing ? ["bing"] : [])].join(" > ") || "bing";
 
   // Return [{ title, snippet, url? }] (kosong = tidak ada hasil / semua gagal; tidak pernah melempar error).
-  async function search(query, maxResults = 5, { snippetChars = 320 } = {}) {
+  async function search(query, maxResults = 5, { snippetChars = 320, recent = "" } = {}) {
     const q = String(query || "").trim();
     if (!q) return [];
     for (const p of config.providers) {
@@ -145,7 +149,7 @@ export function createWebSearch({ config = readSearchConfig(), fetchImpl = globa
         const id = `${p.name}|${key}`;
         if (now() < (restUntil.get(id) || 0)) continue;
         try {
-          const rows = await callProvider({ name: p.name, apiKey: key, query: q, maxResults, snippetChars, timeoutMs: config.timeoutMs, fetchImpl });
+          const rows = await callProvider({ name: p.name, apiKey: key, query: q, maxResults, snippetChars, timeoutMs: config.timeoutMs, fetchImpl, recent });
           cursor.set(p.name, p.keys.indexOf(key));
           emit({ provider: p.name, keyHint: key.slice(-4), kind: "success" });
           if (rows.length > 0) return rows;
@@ -169,7 +173,8 @@ export function createWebSearch({ config = readSearchConfig(), fetchImpl = globa
         }
       }
     }
-    if (config.bingFallback && bing) {
+    // Bing (scraping) tidak bisa menyaring tanggal: kalau diminta hasil terbaru, jangan pakai Bing.
+    if (config.bingFallback && bing && !recent) {
       try {
         return await bing(q, maxResults);
       } catch (e) {

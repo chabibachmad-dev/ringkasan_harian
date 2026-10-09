@@ -40,6 +40,7 @@ import { createSimab, SIMAB_OLLAMA_SYSTEM } from "./simab.js";
 import { createAppAgentWorker } from "./app-agent.js";
 import { createFallbackChain, readFallbackConfig } from "./llm-fallback.js";
 import { createWebSearch, readSearchConfig } from "./web-search.js";
+import { createRegMonitor, readRegMonitorConfig } from "./reg-monitor.js";
 import { createKhatamReminder } from "./khatam.js";
 import { createPriorityQueue, PRIORITY } from "./ollama-queue.js";
 import { openKbIndex } from "./kb-index.js";
@@ -2802,6 +2803,12 @@ async function handleIncoming(msg, sock) {
     sendSummaryNow("perintah /ringkasan").catch(() => {});
     return;
   }
+  // "/peraturan" = jalankan pantauan peraturan sekarang (hanya yang belum pernah dilaporkan);
+  // "/peraturan semua" = tampilkan semua hasil terbaru lagi (buat tes, tidak mengubah riwayat).
+  if (isOwnerSender(msg, isSelfChat) && /^\/peraturan(\s+semua)?$/i.test(text.trim())) {
+    regMonitor.runNow({ all: /semua/i.test(text) }).catch(() => {});
+    return;
+  }
 
   // Chat-ke-diri-sendiri TIDAK PERNAH memicu auto-reply (tidak masuk akal
   // bot membalas catatan kita sendiri) -- baru lanjut cek toggle AKTIF/MATI
@@ -2936,6 +2943,56 @@ async function connect() {
   });
 }
 
+// ----------------------------------------------------------------
+// Pemantau perubahan peraturan (mingguan, ke WhatsApp pemilik). Logika ada di reg-monitor.js; di sini hanya
+// penyambung: AI (Ollama/Gemini seperti ringkasan harian), penyimpanan (tabel bot_state), dan pengiriman.
+// ----------------------------------------------------------------
+async function regMonitorAi(system, user) {
+  if (WA_SUMMARY_ENGINE === "ollama") {
+    try {
+      const out = await enqueueOllamaCall(
+        () =>
+          callOllamaChat(
+            [
+              { role: "system", content: system },
+              { role: "user", content: user.slice(0, 9000) }
+            ],
+            { timeoutMs: WA_SUMMARY_OLLAMA_TIMEOUT_MS, maxTokens: 900, numCtx: Math.max(OLLAMA_NUM_CTX, 4096), format: "json", temperature: 0.1 }
+          ),
+        { priority: PRIORITY.BACKGROUND, label: "reg-monitor" }
+      );
+      if (String(out || "").trim()) return out;
+      throw new Error("balasan Ollama kosong");
+    } catch (err) {
+      if (!WA_SUMMARY_GEMINI_FALLBACK || (GEMINI_API_KEYS.length === 0 && !llmFallback.available())) throw err;
+      console.log("📜 Pantauan peraturan: Ollama gagal, jatuh ke Gemini/cadangan.");
+    }
+  }
+  const data = await geminiGenerateWithRotation(system, [{ role: "user", parts: [{ text: user.slice(0, 14000) }] }], { useSearch: false });
+  return extractGeminiText(data);
+}
+const regMonitor = createRegMonitor({
+  config: { ...readRegMonitorConfig(process.env), enabled: readRegMonitorConfig(process.env).enabled && OWNER_JID !== null },
+  search: (q, max, opts) => webSearch.search(q, max, opts),
+  searchAvailable: () => webSearch.available(),
+  ai: regMonitorAi,
+  state: {
+    get: async (key) => {
+      const { data } = await supabase.from("bot_state").select("value").eq("key", key).maybeSingle();
+      return data?.value ?? null;
+    },
+    set: async (key, value) => {
+      const { error } = await supabase.from("bot_state").upsert({ key, value, updated_at: new Date().toISOString() });
+      if (error) throw new Error(`gagal simpan ${key}: ${error.message}`);
+    }
+  },
+  send: async (text) => {
+    if (!OWNER_JID || !currentSock) throw new Error("WhatsApp belum tersambung / WA_OWNER_NUMBER kosong");
+    await currentSock.sendMessage(OWNER_JID, { text });
+  },
+  timeZone: WA_TIMEZONE
+});
+
 connect().catch((err) => {
   console.error("Gagal mulai koneksi WhatsApp:", err);
   process.exit(1);
@@ -2961,9 +3018,15 @@ setInterval(() => {
 setInterval(() => {
   checkSummaryFlagFile().catch(() => {});
 }, 5_000);
+setInterval(() => {
+  if (currentSock) regMonitor.check().catch(() => {});
+}, 60_000);
 primeExhaustedKeysFromDb().catch(() => {});
 console.log(
   `📋 Ringkasan harian ke pemilik: ${WA_DAILY_SUMMARY_ENABLED ? `AKTIF (tiap hari setelah ${String(WA_DAILY_SUMMARY_HOUR).padStart(2, "0")}:00 ${WA_TIMEZONE_LABEL}, mesin: ${WA_SUMMARY_ENGINE}${WA_SUMMARY_ENGINE === "ollama" ? `, cadangan Gemini: ${WA_SUMMARY_GEMINI_FALLBACK ? "ya" : "tidak"}` : ""})` : "mati (isi WA_OWNER_NUMBER di .env buat menyalakan)"}`
+);
+console.log(
+  `📜 Pantauan peraturan mingguan ke pemilik: ${regMonitor.describe()}${regMonitor.describe() !== "mati" && !webSearch.available() ? " -- TAPI belum ada key API pencarian (TAVILY_API_KEYS dst.), jadi dilewati" : ""}. Perintah: /peraturan (atau "/peraturan semua").`
 );
 console.log(
   `🏛️ SiMAB lewat WhatsApp (hanya baca): ${simab.enabled && OWNER_NUMBER ? `AKTIF (satker ${(process.env.SIMAB_KANTOR_ID || "538065").trim()}, awali pesan dengan "simab")` : "mati (isi SIMAB_* di .env buat menyalakan)"}`

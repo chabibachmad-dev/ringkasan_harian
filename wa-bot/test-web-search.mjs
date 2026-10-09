@@ -150,6 +150,26 @@ for (const [label, rel] of targets) {
     const s4 = mod.createWebSearch({ config: cfg, fetchImpl: f3.fetchImpl, log: silent, onEvent: async () => { throw new Error("async rusak"); } });
     check((await s3.search("q", 1)).length === 1 && (await s4.search("q", 1)).length === 1, "onEvent yang melempar error (sinkron/async) tidak menggagalkan pencarian");
   }
+  // 10) recent: parameter tanggal per penyedia; Bing tidak dipakai bila diminta hasil terbaru
+  {
+    const f = makeFake({ tavily: [tav(1)] });
+    await mod.createWebSearch({ config: cfg, fetchImpl: f.fetchImpl, log: silent }).search("q", 2, { recent: "month" });
+    check(JSON.parse(f.calls[0].init.body).time_range === "month", "recent: Tavily time_range=month");
+    const f2 = makeFake({ serper: [ser] });
+    await mod.createWebSearch({ config: mod.readSearchConfig((n) => ({ SERPER_API_KEYS: "sk1" })[n]), fetchImpl: f2.fetchImpl, log: silent }).search("q", 2, { recent: "week" });
+    check(JSON.parse(f2.calls[0].init.body).tbs === "qdr:w", "recent: Serper tbs=qdr:w");
+    const f3 = makeFake({ brave: [bra] });
+    await mod.createWebSearch({ config: mod.readSearchConfig((n) => ({ BRAVE_API_KEYS: "bk1" })[n]), fetchImpl: f3.fetchImpl, log: silent }).search("q", 2, { recent: "month" });
+    check(f3.calls[0].url.includes("freshness=pm"), "recent: Brave freshness=pm");
+    const f4 = makeFake({ tavily: [tav(1)] });
+    await mod.createWebSearch({ config: cfg, fetchImpl: f4.fetchImpl, log: silent }).search("q", 2);
+    check(!("time_range" in JSON.parse(f4.calls[0].init.body)), "tanpa recent: tidak ada filter tanggal (perilaku lama)");
+    let bingCalls = 0;
+    const down = makeFake({ tavily: [{ status: 500 }], serper: [{ status: 500 }], brave: [{ status: 500 }] });
+    const s = mod.createWebSearch({ config: cfg, fetchImpl: down.fetchImpl, bing: async () => { bingCalls++; return [{ title: "B", snippet: "x" }]; }, log: silent });
+    const rows = await s.search("q", 2, { recent: "month" });
+    check(rows.length === 0 && bingCalls === 0, "recent + semua API gagal: Bing TIDAK dipakai (tak bisa menyaring tanggal)");
+  }
   check((await mod.createWebSearch({ config: cfg, fetchImpl: async () => { throw new Error("x"); }, log: silent }).search("   ")).length === 0, "query kosong -> []");
 }
 
