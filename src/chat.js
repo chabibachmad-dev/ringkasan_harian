@@ -198,8 +198,9 @@ export function deleteKnowledgeDoc(code, id) {
 // kapan reset) -- dipakai dialog Pengaturan > Status API Gemini. Server cuma
 // mengirim 4 karakter TERAKHIR tiap key (hint), key aslinya tidak pernah
 // sampai ke browser.
-export function fetchKeyStatus(code) {
-  return callChatFunction({ code, action: "key_status" });
+// provider: "gemini" (bawaan) | "openrouter" | "groq" -- tiga tombol di layar Status Sistem.
+export function fetchKeyStatus(code, provider = "gemini") {
+  return callChatFunction({ code, action: "key_status", provider });
 }
 
 // ================================================================

@@ -292,6 +292,24 @@ export const STRINGS = {
     keys_intro:
       "Pemakaian tiap API key hari ini, dihitung dari panggilan yang tercatat di sistem ini (bot WhatsApp + chat di aplikasi). Angkanya perkiraan -- pemakaian di luar aplikasi ini tidak ikut terhitung.",
     keys_need_code: "Masukkan kode akses dulu untuk melihat status API.",
+    keys_tab_gemini: "Gemini",
+    keys_tab_openrouter: "OpenRouter",
+    keys_tab_groq: "Groq",
+    keys_title_gemini: "Kuota API Gemini",
+    keys_title_openrouter: "API OpenRouter (cadangan)",
+    keys_title_groq: "API Groq (cadangan)",
+    keys_intro_gemini:
+      "Pemakaian tiap API key hari ini, dihitung dari panggilan yang tercatat di sistem ini (bot WhatsApp + chat di aplikasi). Angkanya perkiraan -- pemakaian di luar aplikasi ini tidak ikut terhitung.",
+    keys_intro_openrouter:
+      "Cadangan terakhir setelah Gemini dan Groq. Tercatat dari bot WhatsApp dan chat di aplikasi saat Gemini gagal. Model gratis OpenRouter dibatasi sekitar 50 permintaan per hari (reset tengah malam UTC).",
+    keys_intro_groq:
+      "Cadangan pertama setelah Gemini. Tercatat dari bot WhatsApp dan chat di aplikasi saat Gemini gagal. Jatah Groq dihitung per model dan per menit, jadi tidak ada satu batas harian tunggal (hitungan harian reset tengah malam UTC).",
+    keys_empty_gemini: "Belum ada API key yang terdeteksi. Isi GEMINI_API_KEYS di Supabase & bot WA.",
+    keys_empty_openrouter: "Belum ada key OpenRouter. Isi OPENROUTER_API_KEYS di Supabase (secret) dan .env bot WA.",
+    keys_empty_groq: "Belum ada key Groq. Isi GROQ_API_KEYS di Supabase (secret) dan .env bot WA.",
+    keys_rejected: "Key ditolak",
+    keys_last_model: "Model terakhir:",
+    keys_models_label: "Model:",
     keys_load_error: "Gagal memuat status API. Pastikan migration 0013 & Edge Function chat sudah di-deploy.",
     keys_empty: "Belum ada API key yang terdeteksi. Isi GEMINI_API_KEYS di Supabase & bot WA.",
     keys_refresh: "Muat ulang",
@@ -659,6 +677,24 @@ export const STRINGS = {
     keys_intro:
       "Today's usage per API key, counted from calls recorded by this system (WhatsApp bot + in-app chat). Numbers are estimates -- usage outside this app isn't counted.",
     keys_need_code: "Enter the access code first to see the API status.",
+    keys_tab_gemini: "Gemini",
+    keys_tab_openrouter: "OpenRouter",
+    keys_tab_groq: "Groq",
+    keys_title_gemini: "Gemini API quota",
+    keys_title_openrouter: "OpenRouter API (backup)",
+    keys_title_groq: "Groq API (backup)",
+    keys_intro_gemini:
+      "Today's usage per API key, counted from calls recorded by this system (WhatsApp bot + in-app chat). Numbers are estimates -- usage outside this app isn't counted.",
+    keys_intro_openrouter:
+      "Last-resort backup after Gemini and Groq. Recorded from the WhatsApp bot and in-app chat when Gemini fails. OpenRouter free models are limited to about 50 requests per day (resets at midnight UTC).",
+    keys_intro_groq:
+      "First backup after Gemini. Recorded from the WhatsApp bot and in-app chat when Gemini fails. Groq limits are per model and per minute, so there is no single daily cap (daily count resets at midnight UTC).",
+    keys_empty_gemini: "No API keys detected yet. Set GEMINI_API_KEYS in Supabase and the WA bot.",
+    keys_empty_openrouter: "No OpenRouter key yet. Set OPENROUTER_API_KEYS in Supabase (secret) and the WA bot .env.",
+    keys_empty_groq: "No Groq key yet. Set GROQ_API_KEYS in Supabase (secret) and the WA bot .env.",
+    keys_rejected: "Key rejected",
+    keys_last_model: "Last model:",
+    keys_models_label: "Models:",
     keys_load_error: "Couldn't load the API status. Make sure migration 0013 and the chat Edge Function are deployed.",
     keys_empty: "No API keys detected yet. Set GEMINI_API_KEYS in Supabase and the WA bot.",
     keys_refresh: "Refresh",

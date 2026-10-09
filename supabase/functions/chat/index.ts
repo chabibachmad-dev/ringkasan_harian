@@ -116,7 +116,7 @@ import { createClient } from "jsr:@supabase/supabase-js@2";
 import { corsHeaders } from "../_shared/cors.ts";
 import { buildKbQuery, selectKnowledgeChunks, wantsWholeDocument } from "../_shared/knowledge.ts";
 import { requestLaptopChunks } from "../_shared/laptop-kb.ts";
-import { getFallbackChain } from "../_shared/llm-fallback.ts";
+import { getFallbackChain, readFallbackConfig, setFallbackReporter } from "../_shared/llm-fallback.ts";
 import { guardDocAnswer } from "../_shared/docguard.ts";
 import {
   generateChatReply,
@@ -243,6 +243,8 @@ Deno.serve(async (req) => {
     page?: number;
     saved?: boolean;
     size?: number;
+    // key_status: penyedia yang dipantau ("gemini" bawaan | "groq" | "openrouter").
+    provider?: string;
   };
   try {
     body = await req.json();
@@ -408,25 +410,47 @@ Deno.serve(async (req) => {
   }
 
   if (body.action === "key_status") {
-    const today = getPacificDateString();
-    const { data, error } = await supabaseAdmin
-      .from("gemini_key_usage")
-      .select("key_hint, source, requests, exhausted_until, last_error")
-      .eq("usage_date", today);
-    if (error) return json({ ok: false, error: error.message }, 500);
-
-    // Daftar key yang DIKONFIGURASI di Supabase selalu tampil (walau belum
-    // ada pemakaian = 0 request), digabung dgn hint dari tabel (mis. key yang
-    // cuma dipakai bot WA).
+    // provider: "gemini" (bawaan) | "groq" | "openrouter" -- tiga tombol di layar Status Sistem.
+    const provider: "gemini" | "groq" | "openrouter" = body.provider === "groq" || body.provider === "openrouter" ? body.provider : "gemini";
+    // Gemini: hari Pasifik (reset tengah malam Pasifik). Groq/OpenRouter: hari UTC (reset tengah malam UTC).
+    const usageDay = provider === "gemini" ? getPacificDateString() : new Date().toISOString().slice(0, 10);
     type KeyUsageRow = {
       key_hint: string;
       source: string;
       requests: number | null;
       exhausted_until: string | null;
       last_error: string | null;
+      last_model?: string | null;
+      last_used_at?: string | null;
     };
-    const usageRows = (data ?? []) as KeyUsageRow[];
-    const hints = new Set<string>(getGeminiApiKeys().map(geminiKeyHint));
+    // Kolom provider/last_model dari migration 0020; untuk Gemini tetap jalan walau migration itu belum dijalankan.
+    let usageRows: KeyUsageRow[] = [];
+    {
+      const r = await supabaseAdmin
+        .from("gemini_key_usage")
+        .select("key_hint, source, requests, exhausted_until, last_error, last_model, last_used_at")
+        .eq("usage_date", usageDay)
+        .eq("provider", provider);
+      if (!r.error) {
+        usageRows = (r.data ?? []) as KeyUsageRow[];
+      } else if (provider === "gemini") {
+        const old = await supabaseAdmin
+          .from("gemini_key_usage")
+          .select("key_hint, source, requests, exhausted_until, last_error")
+          .eq("usage_date", usageDay);
+        if (old.error) return json({ ok: false, error: old.error.message }, 500);
+        usageRows = (old.data ?? []) as KeyUsageRow[];
+      } else {
+        return json({ ok: false, error: `${r.error.message} (sudah jalankan migration 0020?)` }, 500);
+      }
+    }
+
+    // Daftar key yang DIKONFIGURASI di Supabase selalu tampil (walau belum
+    // ada pemakaian = 0 request), digabung dgn hint dari tabel (mis. key yang
+    // cuma dipakai bot WA).
+    const fbProvider = provider === "gemini" ? null : readFallbackConfig().providers.find((p) => p.name === provider) ?? null;
+    const configuredHints = provider === "gemini" ? getGeminiApiKeys().map(geminiKeyHint) : (fbProvider?.keys ?? []).map((k) => k.slice(-4));
+    const hints = new Set<string>(configuredHints);
     for (const row of usageRows) hints.add(row.key_hint);
 
     const nowMs = Date.now();
@@ -436,6 +460,8 @@ Deno.serve(async (req) => {
       let exhaustedUntilMs = 0;
       let lastError: string | null = null;
       let lastErrorUntil = 0;
+      let lastModel: string | null = null;
+      let lastUsedMs = 0;
       for (const r of rows) {
         const until = r.exhausted_until ? new Date(r.exhausted_until).getTime() : 0;
         if (until > exhaustedUntilMs) exhaustedUntilMs = until;
@@ -443,11 +469,18 @@ Deno.serve(async (req) => {
           lastErrorUntil = until;
           lastError = r.last_error;
         }
+        const used = r.last_used_at ? new Date(r.last_used_at).getTime() : 0;
+        if (used > lastUsedMs) {
+          lastUsedMs = used;
+          lastModel = r.last_model ?? null;
+        }
       }
       const exhausted = exhaustedUntilMs > nowMs;
       // "daily" = jatah harian habis (masa istirahat panjang sampai reset);
       // "temporary" = rate-limit sementara (istirahat ~1 menit).
-      const exhaustedKind = exhausted ? (exhaustedUntilMs - nowMs > 10 * 60_000 ? "daily" : "temporary") : null;
+      // "rejected" = key ditolak penyedia (401/403, salah/dicabut), bukan kehabisan kuota.
+      const rejected = exhausted && /\b(401|403)\b|ditolak|invalid api key/i.test(lastError ?? "");
+      const exhaustedKind = exhausted ? (rejected ? "rejected" : exhaustedUntilMs - nowMs > 10 * 60_000 ? "daily" : "temporary") : null;
       return {
         hint,
         requests,
@@ -456,17 +489,38 @@ Deno.serve(async (req) => {
         exhaustedUntilMs: exhausted ? exhaustedUntilMs : null,
         // Pesan error terakhir disertakan juga saat sudah tidak habis (buat
         // diagnosis), diambil dari baris yang paling baru diperbarui.
-        lastError
+        lastError,
+        lastModel,
+        lastUsedMs: lastUsedMs || null
       };
     });
 
-    // Tengah malam Pasifik berikutnya (ms epoch) = jadwal reset kuota harian.
-    const pacificNow = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Los_Angeles" }));
-    const nextMidnight = new Date(pacificNow);
-    nextMidnight.setHours(24, 0, 0, 0);
-    const resetAtMs = nowMs + (nextMidnight.getTime() - pacificNow.getTime());
+    // Reset kuota harian: tengah malam Pasifik (Gemini) atau UTC (Groq/OpenRouter).
+    let resetAtMs: number;
+    if (provider === "gemini") {
+      const pacificNow = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Los_Angeles" }));
+      const nextMidnight = new Date(pacificNow);
+      nextMidnight.setHours(24, 0, 0, 0);
+      resetAtMs = nowMs + (nextMidnight.getTime() - pacificNow.getTime());
+    } else {
+      const d = new Date(nowMs);
+      resetAtMs = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1);
+    }
 
-    return json({ ok: true, dailyLimit: Number(Deno.env.get("GEMINI_DAILY_LIMIT")) || 20, resetAtMs, keys });
+    // Batas harian untuk garis kemajuan: Gemini 20 (GEMINI_DAILY_LIMIT), OpenRouter model gratis 50
+    // (OPENROUTER_DAILY_LIMIT), Groq tidak punya satu angka harian (null = tanpa garis; GROQ_DAILY_LIMIT bisa mengisinya).
+    const envLimit = (name: string, fallback: number | null) => (Number(Deno.env.get(name)) > 0 ? Number(Deno.env.get(name)) : fallback);
+    const dailyLimit = provider === "gemini" ? envLimit("GEMINI_DAILY_LIMIT", 20) : provider === "openrouter" ? envLimit("OPENROUTER_DAILY_LIMIT", 50) : envLimit("GROQ_DAILY_LIMIT", null);
+
+    return json({
+      ok: true,
+      provider,
+      configured: configuredHints.length > 0,
+      models: fbProvider?.models ?? null,
+      dailyLimit,
+      resetAtMs,
+      keys
+    });
   }
 
   // --- Dokumen Pengetahuan (lihat migrations/0007 + 0017) ---
@@ -1200,6 +1254,20 @@ Deno.serve(async (req) => {
           p_requests_inc: event.kind === "success" ? 1 : 0,
           p_exhausted_until: event.kind === "exhausted" && event.exhaustedUntilMs ? new Date(event.exhaustedUntilMs).toISOString() : null,
           p_error: event.kind === "exhausted" ? (event.error ?? null) : null
+        });
+      });
+      // Pemakaian Groq/OpenRouter (cadangan) dicatat ke tabel yang sama (kolom provider, migration 0020).
+      setFallbackReporter(async (e) => {
+        await supabaseAdmin.rpc("report_llm_key_event", {
+          p_provider: e.provider,
+          p_usage_date: new Date().toISOString().slice(0, 10),
+          p_key_hint: e.keyHint,
+          p_source: "chat",
+          p_requests_inc: e.kind === "success" ? 1 : 0,
+          p_exhausted_until: e.untilMs ? new Date(e.untilMs).toISOString() : null,
+          p_error: e.kind === "success" ? null : (e.error ?? null),
+          p_model: e.kind === "success" ? e.model : null,
+          p_clear_exhausted: e.kind === "success"
         });
       });
       const result = await generateChatReply(history, geminiApiKeys, knowledgeContext, { kbExcerpts, strictDocs, docNoMatch });

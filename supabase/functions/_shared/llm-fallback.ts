@@ -29,6 +29,14 @@ export interface FallbackMessage {
   role: "user" | "assistant";
   content: string;
 }
+export interface FallbackEvent {
+  provider: string;
+  model: string;
+  keyHint: string; // 4 karakter terakhir key -- key asli tidak pernah keluar dari sini
+  kind: "success" | "exhausted" | "rejected" | "error";
+  untilMs?: number;
+  error?: string;
+}
 export interface FallbackResult {
   text: string;
   provider: string;
@@ -170,13 +178,28 @@ async function callOpenAiCompatible(args: {
   return { text, tokens: json?.usage?.total_tokens ?? 0 };
 }
 
+// Pelapor bersama untuk rantai milik Edge Function (diisi chat/index.ts per permintaan, seperti
+// setGeminiKeyReporter di gemini.ts).
+let reporter: ((e: FallbackEvent) => Promise<void> | void) | null = null;
+export function setFallbackReporter(fn: ((e: FallbackEvent) => Promise<void> | void) | null): void {
+  reporter = fn;
+}
+
 interface Logger {
   warn?: (...a: unknown[]) => void;
 }
 
 // State (key mana lagi istirahat, giliran key) hidup selama isolate Edge Function masih "hangat".
 export function createFallbackChain(
-  opts: { config?: FallbackConfig; fetchImpl?: typeof fetch; log?: Logger; now?: () => number } = {}
+  opts: {
+    config?: FallbackConfig;
+    fetchImpl?: typeof fetch;
+    log?: Logger;
+    now?: () => number;
+    // Dipanggil tiap ada kejadian penting untuk monitoring (tanpa key asli). Kegagalannya tidak pernah
+    // menggagalkan jawaban.
+    onEvent?: ((e: FallbackEvent) => Promise<void> | void) | null;
+  } = {}
 ) {
   const config = opts.config ?? readFallbackConfig();
   const fetchImpl = opts.fetchImpl ?? fetch;
@@ -185,6 +208,14 @@ export function createFallbackChain(
   const restUntil = new Map<string, number>();
   const cursor = new Map<string, number>();
   const id = (p: string, m: string, k: string) => `${p}|${m}|${k}`;
+  const emit = (e: FallbackEvent) => {
+    try {
+      const r = (opts.onEvent ?? reporter)?.(e);
+      if (r && typeof (r as Promise<void>).catch === "function") (r as Promise<void>).catch(() => {});
+    } catch {
+      /* pelaporan tidak boleh menggagalkan jawaban */
+    }
+  };
 
   const available = () => config.providers.length > 0;
   const describe = () => config.providers.map((p) => `${p.name}: ${p.keys.length} key, model ${p.models.join(" > ")}`).join(" | ");
@@ -215,6 +246,7 @@ export function createFallbackChain(
               fetchImpl
             });
             cursor.set(p.name, p.keys.indexOf(key));
+            emit({ provider: p.name, model, keyHint: key.slice(-4), kind: "success" });
             return { text: r.text, provider: p.name, model, tokens: r.tokens };
           } catch (e) {
             const err = e as FallbackHttpError;
@@ -225,15 +257,19 @@ export function createFallbackChain(
               const rest = err.retryAfterMs || 60_000;
               restUntil.set(id(p.name, model, key), now() + rest);
               cursor.set(p.name, (p.keys.indexOf(key) + 1) % p.keys.length);
+              emit({ provider: p.name, model, keyHint: key.slice(-4), kind: "exhausted", untilMs: now() + rest, error: String(err.message).slice(0, 300) });
               log.warn?.(`Cadangan ${hint} kena batas (429), diistirahatkan ${Math.round(rest / 1000)} dtk.`);
             } else if (status === 401 || status === 403) {
               restUntil.set(id(p.name, model, key), now() + 3600_000);
+              emit({ provider: p.name, model, keyHint: key.slice(-4), kind: "rejected", untilMs: now() + 3600_000, error: String(err.message).slice(0, 300) });
               log.warn?.(`Cadangan ${hint} ditolak (${status}) -- key salah/dicabut? Dilewati 1 jam.`);
             } else if (status === 404) {
               for (const k of p.keys) restUntil.set(id(p.name, model, k), now() + 3600_000);
+              emit({ provider: p.name, model, keyHint: key.slice(-4), kind: "error", error: `model "${model}" tidak ditemukan` });
               log.warn?.(`Cadangan ${p.name}: model "${model}" tidak ditemukan -- cek ${p.name.toUpperCase()}_MODEL.`);
               break;
             } else {
+              emit({ provider: p.name, model, keyHint: key.slice(-4), kind: "error", error: String(err?.message || e).slice(0, 300) });
               log.warn?.(`Cadangan ${hint} gagal: ${err?.message || e}`);
             }
           }

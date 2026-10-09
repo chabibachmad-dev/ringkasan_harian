@@ -618,11 +618,14 @@
           <p class="kb-intro" data-i18n="sys_intro">Kondisi bot di laptop, WhatsApp, Ollama, dan antreannya.</p>
           <div id="sys-status" class="sys-status"></div>
 
-          <h3 class="sys-subtitle" data-i18n="sys_gemini">Kuota API Gemini</h3>
-          <p class="kb-intro" data-i18n="keys_intro">
-            Pemakaian tiap API key hari ini, dihitung dari panggilan yang tercatat di sistem ini (bot WhatsApp + chat di
-            aplikasi). Angkanya perkiraan -- pemakaian di luar aplikasi ini tidak ikut terhitung.
-          </p>
+          <!-- Tiga tombol penyedia AI: klik untuk melihat monitoring key-nya (Gemini utama; Groq & OpenRouter cadangan). -->
+          <div id="keys-tabs" class="keys-tabs" role="tablist">
+            <button type="button" class="keys-tab" role="tab" data-provider="gemini" aria-selected="true" data-i18n="keys_tab_gemini">Gemini</button>
+            <button type="button" class="keys-tab" role="tab" data-provider="openrouter" aria-selected="false" data-i18n="keys_tab_openrouter">OpenRouter</button>
+            <button type="button" class="keys-tab" role="tab" data-provider="groq" aria-selected="false" data-i18n="keys_tab_groq">Groq</button>
+          </div>
+          <h3 id="keys-title" class="sys-subtitle">Kuota API Gemini</h3>
+          <p id="keys-intro" class="kb-intro"></p>
 
           <div id="keys-list" class="kb-doc-list keys-list"></div>
           <p id="keys-status" class="status-text" hidden></p>

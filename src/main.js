@@ -239,6 +239,9 @@ const els = {
   qrCloseBtn: document.getElementById("qr-close-btn"),
   keysDialog: document.getElementById("keys-dialog"),
   keysList: document.getElementById("keys-list"),
+  keysTabs: document.getElementById("keys-tabs"),
+  keysTitle: document.getElementById("keys-title"),
+  keysIntro: document.getElementById("keys-intro"),
   keysStatus: document.getElementById("keys-status"),
   keysResetNote: document.getElementById("keys-reset-note"),
   keysRefreshBtn: document.getElementById("keys-refresh-btn"),
@@ -261,6 +264,8 @@ const state = {
   lang: localStorage.getItem("rh_lang") || "id",
   theme: localStorage.getItem("rh_theme") || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"),
   currentDate: null,
+  // Penyedia yang sedang dilihat di layar Status Sistem: "gemini" | "openrouter" | "groq".
+  keysProvider: "gemini",
   chatCode: "",
   // id obrolan -> { defaultLabel } -- diisi ulang tiap kali renderChatList()
   // jalan, dipakai menu titik-3 buat tahu judul default chat yang lagi
@@ -2302,6 +2307,7 @@ async function renderQrList() {
 
 async function openKeysDialog() {
   closeSettingsDialog();
+  state.keysProvider = "gemini";
   openDialogEl(els.keysDialog);
   stopSystemStatusTimer();
   // Status sistem (bot/WA/Ollama/antrean) diperbarui tiap 10 detik selama dialog terbuka.
@@ -2460,7 +2466,21 @@ async function renderSystemStatus() {
   box.replaceChildren(frag);
 }
 
+const KEYS_PROVIDERS = ["gemini", "openrouter", "groq"];
+
+// Tombol penyedia (aktif = disorot) + judul & penjelasan sesuai penyedia yang dipilih.
+function renderKeysHeader() {
+  const provider = state.keysProvider;
+  for (const btn of els.keysTabs.querySelectorAll(".keys-tab")) {
+    btn.setAttribute("aria-selected", btn.dataset.provider === provider ? "true" : "false");
+  }
+  els.keysTitle.textContent = t(state.lang, `keys_title_${provider}`);
+  els.keysIntro.textContent = t(state.lang, `keys_intro_${provider}`);
+}
+
 async function renderKeysList() {
+  const provider = KEYS_PROVIDERS.includes(state.keysProvider) ? state.keysProvider : "gemini";
+  renderKeysHeader();
   els.keysList.innerHTML = "";
   els.keysResetNote.textContent = "";
 
@@ -2473,7 +2493,9 @@ async function renderKeysList() {
   els.keysStatus.hidden = false;
   els.keysStatus.textContent = t(state.lang, "loading");
 
-  const result = await fetchKeyStatus(state.chatCode);
+  const result = await fetchKeyStatus(state.chatCode, provider);
+  // Pengguna keburu pindah tombol saat data masih dimuat: abaikan hasil yang sudah usang.
+  if (provider !== state.keysProvider) return;
   if (!result.ok) {
     dropChatCodeIfUnauthorized(result);
     els.keysStatus.textContent = t(state.lang, "keys_load_error");
@@ -2482,12 +2504,13 @@ async function renderKeysList() {
 
   const keys = result.keys || [];
   if (keys.length === 0) {
-    els.keysStatus.textContent = t(state.lang, "keys_empty");
+    els.keysStatus.textContent = t(state.lang, `keys_empty_${provider}`);
     return;
   }
   els.keysStatus.hidden = true;
 
-  const limit = Number(result.dailyLimit) > 0 ? Number(result.dailyLimit) : 20;
+  // Batas harian: Gemini 20, OpenRouter (model gratis) 50; Groq tidak punya satu angka harian -> tanpa garis.
+  const limit = Number(result.dailyLimit) > 0 ? Number(result.dailyLimit) : null;
 
   for (const k of keys) {
     const row = document.createElement("div");
@@ -2501,34 +2524,43 @@ async function renderKeysList() {
     const nameEl = document.createElement("span");
     nameEl.className = "kb-doc-title";
     nameEl.textContent = `${t(state.lang, "keys_key_label")} …${k.hint}`;
+    const isRejected = k.exhausted && k.exhaustedKind === "rejected";
     const isDaily = k.exhausted && k.exhaustedKind !== "temporary";
     const chip = document.createElement("span");
     chip.className = `keys-chip ${isDaily ? "keys-chip--exhausted" : "keys-chip--active"}`;
-    chip.textContent = t(state.lang, isDaily ? "keys_exhausted" : k.exhausted ? "keys_limited" : "keys_active");
+    chip.textContent = t(state.lang, isRejected ? "keys_rejected" : isDaily ? "keys_exhausted" : k.exhausted ? "keys_limited" : "keys_active");
     head.appendChild(nameEl);
     head.appendChild(chip);
 
-    const bar = document.createElement("div");
-    bar.className = "keys-bar";
-    const fill = document.createElement("div");
-    const pct = isDaily ? 100 : Math.min(100, Math.round((k.requests / limit) * 100));
-    fill.className = "keys-bar-fill";
-    if (isDaily) fill.classList.add("keys-bar-fill--exhausted");
-    else if (pct >= 80) fill.classList.add("keys-bar-fill--warn");
-    fill.style.width = `${pct}%`;
-    bar.appendChild(fill);
-
     const meta = document.createElement("div");
     meta.className = "kb-doc-meta";
-    meta.textContent = `${k.requests} / ${limit} ${t(state.lang, "keys_requests_unit")}`;
+    meta.textContent = limit ? `${k.requests} / ${limit} ${t(state.lang, "keys_requests_unit")}` : `${k.requests} ${t(state.lang, "keys_requests_unit")}`;
 
     main.appendChild(head);
-    main.appendChild(bar);
+    if (limit) {
+      const bar = document.createElement("div");
+      bar.className = "keys-bar";
+      const fill = document.createElement("div");
+      const pct = isRejected ? 0 : isDaily ? 100 : Math.min(100, Math.round((k.requests / limit) * 100));
+      fill.className = "keys-bar-fill";
+      if (isDaily && !isRejected) fill.classList.add("keys-bar-fill--exhausted");
+      else if (pct >= 80) fill.classList.add("keys-bar-fill--warn");
+      fill.style.width = `${pct}%`;
+      bar.appendChild(fill);
+      main.appendChild(bar);
+    }
     main.appendChild(meta);
+    // Model terakhir yang berhasil menjawab lewat key ini (Groq/OpenRouter mencatatnya).
+    if (k.lastModel) {
+      const modelEl = document.createElement("div");
+      modelEl.className = "kb-doc-meta";
+      modelEl.textContent = `${t(state.lang, "keys_last_model")} ${k.lastModel}${k.lastUsedMs ? ` · ${formatFullDateTime(k.lastUsedMs)}` : ""}`;
+      main.appendChild(modelEl);
+    }
     if (k.exhausted && k.exhaustedUntilMs) {
       const until = document.createElement("div");
       until.className = "kb-doc-meta";
-      until.textContent = `${t(state.lang, isDaily ? "keys_exhausted_until" : "keys_limited_until")} ${formatFullDateTime(k.exhaustedUntilMs)}`;
+      until.textContent = `${t(state.lang, isDaily && !isRejected ? "keys_exhausted_until" : "keys_limited_until")} ${formatFullDateTime(k.exhaustedUntilMs)}`;
       main.appendChild(until);
     }
     // Pesan error terakhir dari Google (dipotong) -- buat tahu PENYEBAB
@@ -2544,9 +2576,10 @@ async function renderKeysList() {
     els.keysList.appendChild(row);
   }
 
-  if (result.resetAtMs) {
-    els.keysResetNote.textContent = `${t(state.lang, "keys_reset_note")} ${formatFullDateTime(result.resetAtMs)}`;
-  }
+  const noteLines = [];
+  if (result.resetAtMs) noteLines.push(`${t(state.lang, "keys_reset_note")} ${formatFullDateTime(result.resetAtMs)}`);
+  if (Array.isArray(result.models) && result.models.length > 0) noteLines.push(`${t(state.lang, "keys_models_label")} ${result.models.join(" > ")}`);
+  els.keysResetNote.textContent = noteLines.join("\n");
 }
 
 function wireEvents() {
@@ -3374,6 +3407,13 @@ function wireEvents() {
     if (e.target === els.keysDialog) closeDialogEl(els.keysDialog);
   });
   els.keysRefreshBtn.addEventListener("click", () => Promise.all([renderSystemStatus(), renderKeysList()]));
+  // Tiga tombol penyedia: Gemini / OpenRouter / Groq.
+  els.keysTabs.addEventListener("click", (e) => {
+    const btn = e.target.closest(".keys-tab");
+    if (!btn || !btn.dataset.provider || btn.dataset.provider === state.keysProvider) return;
+    state.keysProvider = btn.dataset.provider;
+    renderKeysList();
+  });
 
   els.aboutCloseBtn.addEventListener("click", () => closeDialogEl(els.aboutDialog));
 

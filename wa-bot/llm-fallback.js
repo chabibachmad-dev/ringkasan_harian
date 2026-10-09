@@ -144,10 +144,21 @@ async function callOpenAiCompatible({ name, apiKey, model, system, messages, tem
 }
 
 // Fabrik: state (key mana lagi istirahat, giliran key) hidup selama proses.
-export function createFallbackChain({ config = readFallbackConfig(), fetchImpl = globalThis.fetch, log = console, now = () => Date.now() } = {}) {
+// onEvent(e) (opsional): dipanggil tiap ada kejadian penting untuk monitoring, TANPA key asli:
+//   { provider, model, keyHint, kind: "success"|"exhausted"|"rejected"|"error", untilMs?, error? }
+// Kegagalan onEvent tidak pernah menggagalkan jawaban.
+export function createFallbackChain({ config = readFallbackConfig(), fetchImpl = globalThis.fetch, log = console, now = () => Date.now(), onEvent = null } = {}) {
   const restUntil = new Map(); // "provider|model|key" -> ms
   const cursor = new Map(); // "provider" -> indeks key berikutnya
   const id = (p, m, k) => `${p}|${m}|${k}`;
+  const emit = (e) => {
+    try {
+      const r = onEvent?.(e);
+      if (r && typeof r.catch === "function") r.catch(() => {});
+    } catch {
+      /* pelaporan tidak boleh menggagalkan jawaban */
+    }
+  };
 
   function available() {
     return config.providers.length > 0;
@@ -182,7 +193,8 @@ export function createFallbackChain({ config = readFallbackConfig(), fetchImpl =
               timeoutMs: config.timeoutMs,
               fetchImpl
             });
-            cursor.set(p.name, (p.keys.indexOf(key) + 0) % p.keys.length); // key yang berhasil dipakai lagi
+            cursor.set(p.name, p.keys.indexOf(key)); // key yang berhasil dipakai lagi
+            emit({ provider: p.name, model, keyHint: key.slice(-4), kind: "success" });
             return { text: r.text, provider: p.name, model, tokens: r.tokens };
           } catch (e) {
             const status = e?.status ?? 0;
@@ -191,16 +203,20 @@ export function createFallbackChain({ config = readFallbackConfig(), fetchImpl =
             if (status === 429) {
               restUntil.set(id(p.name, model, key), now() + (e.retryAfterMs || 60_000));
               cursor.set(p.name, (p.keys.indexOf(key) + 1) % p.keys.length);
+              emit({ provider: p.name, model, keyHint: key.slice(-4), kind: "exhausted", untilMs: now() + (e.retryAfterMs || 60_000), error: String(e.message).slice(0, 300) });
               log.warn?.(`⚠️  Cadangan ${hint} kena batas (429), diistirahatkan ${Math.round((e.retryAfterMs || 60_000) / 1000)} dtk.`);
             } else if (status === 401 || status === 403) {
               restUntil.set(id(p.name, model, key), now() + 3600_000);
+              emit({ provider: p.name, model, keyHint: key.slice(-4), kind: "rejected", untilMs: now() + 3600_000, error: String(e.message).slice(0, 300) });
               log.warn?.(`⚠️  Cadangan ${hint} ditolak (${status}) -- key salah/dicabut? Dilewati 1 jam.`);
             } else if (status === 404) {
               // model tidak ada: lewati model ini untuk SEMUA key di penyedia ini
               for (const k of p.keys) restUntil.set(id(p.name, model, k), now() + 3600_000);
+              emit({ provider: p.name, model, keyHint: key.slice(-4), kind: "error", error: `model "${model}" tidak ditemukan` });
               log.warn?.(`⚠️  Cadangan ${p.name}: model "${model}" tidak ditemukan -- cek ${p.name.toUpperCase()}_MODEL.`);
               break;
             } else {
+              emit({ provider: p.name, model, keyHint: key.slice(-4), kind: "error", error: String(e?.message || e).slice(0, 300) });
               log.warn?.(`⚠️  Cadangan ${hint} gagal: ${e?.message || e}`);
             }
           }

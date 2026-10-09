@@ -1189,6 +1189,36 @@ mark.chat-search-hit--active {
   background: var(--text);
 }
 
+/* Tiga tombol penyedia di layar Status Sistem (Gemini / OpenRouter / Groq). Tema monokrom: yang terpilih
+   dibalik warnanya, sama seperti pil agen AI di atas kolom ketik. */
+.keys-tabs {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin: 4px 0 10px;
+}
+
+.keys-tab {
+  padding: 5px 14px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg-card);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.8rem;
+  line-height: 1.3;
+  cursor: pointer;
+}
+
+.keys-tab[aria-selected="true"] {
+  background: var(--accent);
+  color: var(--accent-contrast);
+}
+
+#keys-reset-note {
+  white-space: pre-line;
+}
+
 .footer {
   text-align: center;
   /* Padding bawah ekstra supaya teks footer tidak ketiban tombol "+"

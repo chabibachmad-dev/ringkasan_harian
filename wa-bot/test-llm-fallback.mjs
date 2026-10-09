@@ -141,6 +141,28 @@ for (const [label, rel] of targets) {
     const r = await ch.generate({ system: "S", messages: msgs });
     check(r.provider === "openrouter" || r.text === "isi", "balasan kosong -> coba berikutnya");
   }
+  // 8) Hook onEvent: sukses / 429 / 401 / 404 dilaporkan tanpa key asli; hook yang error tidak mengganggu
+  {
+    const events = [];
+    const f = makeFake({
+      "groq|gk1": [{ status: 429, text: "rate", headers: { "retry-after": "20" } }],
+      "groq|gk2|m-big": [{ status: 401, text: "bad" }],
+      "groq|gk2|m-small": [{ status: 404, text: "x" }],
+      openrouter: [{ ok: "dari or" }]
+    });
+    const ch = mod.createFallbackChain({ config: cfg, fetchImpl: f.fetchImpl, log: silent, onEvent: (e) => events.push(e) });
+    const r = await ch.generate({ system: "S", messages: msgs });
+    const kinds = events.map((e) => `${e.provider}:${e.kind}`).join(",");
+    check(r.provider === "openrouter" && kinds === "groq:exhausted,groq:rejected,groq:error,openrouter:success", `event berurutan: ${kinds}`);
+    check(events[0].keyHint === "gk1".slice(-4) && events[0].untilMs > 0 && !JSON.stringify(events).includes("Bearer"), "event membawa 4 karakter terakhir key + waktu istirahat, tanpa header/key");
+    check(events.at(-1).model === cfg.providers[1].models[0] && events.at(-1).keyHint === "ok1".slice(-4), "event sukses membawa model & hint key");
+    const g = makeFake({ groq: [{ ok: "ok" }] });
+    const ch2 = mod.createFallbackChain({ config: cfg, fetchImpl: g.fetchImpl, log: silent, onEvent: () => { throw new Error("pelapor rusak"); } });
+    const r2 = await ch2.generate({ system: "S", messages: msgs });
+    const ch3 = mod.createFallbackChain({ config: cfg, fetchImpl: g.fetchImpl, log: silent, onEvent: async () => { throw new Error("async rusak"); } });
+    const r3 = await ch3.generate({ system: "S", messages: msgs });
+    check(r2.text === "ok" && r3.text === "ok", "onEvent yang melempar error (sinkron/async) tidak menggagalkan jawaban");
+  }
 }
 
 if (fails) {

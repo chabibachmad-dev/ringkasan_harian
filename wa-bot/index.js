@@ -102,7 +102,7 @@ if (GEMINI_API_KEYS.length > 0 && (process.env.WA_AI_ENGINE || "ollama").trim().
 }
 // Penyedia CADANGAN (Groq, OpenRouter): dipakai hanya setelah semua key Gemini gagal/habis kuota.
 // Diatur lewat GROQ_API_KEYS / OPENROUTER_API_KEYS di .env (lihat llm-fallback.js & .env.example).
-const llmFallback = createFallbackChain({ config: readFallbackConfig(process.env) });
+const llmFallback = createFallbackChain({ config: readFallbackConfig(process.env), onEvent: (e) => reportLlmEvent(e) });
 if (llmFallback.available() && (process.env.WA_AI_ENGINE || "ollama").trim().toLowerCase() === "gemini") {
   console.log(`🛟 Penyedia cadangan AI aktif (setelah Gemini): ${llmFallback.describe()}`);
 }
@@ -1022,6 +1022,31 @@ function reportKeyEvent(key, { requestsInc = 0, exhaustedUntilMs = null, error =
     .catch(() => {});
 }
 
+// Catat pemakaian penyedia cadangan (Groq/OpenRouter) untuk layar "Status Sistem" di aplikasi
+// (tabel gemini_key_usage, kolom provider -- migration 0020). Hanya 4 karakter terakhir key.
+let llmReportWarned = false;
+function reportLlmEvent(e) {
+  supabase
+    .rpc("report_llm_key_event", {
+      p_provider: e.provider,
+      p_usage_date: new Date().toISOString().slice(0, 10),
+      p_key_hint: e.keyHint,
+      p_source: "wa-bot",
+      p_requests_inc: e.kind === "success" ? 1 : 0,
+      p_exhausted_until: e.untilMs ? new Date(e.untilMs).toISOString() : null,
+      p_error: e.kind === "success" ? null : e.error ?? null,
+      p_model: e.kind === "success" ? e.model : null,
+      p_clear_exhausted: e.kind === "success"
+    })
+    .then(({ error }) => {
+      if (error && !llmReportWarned) {
+        llmReportWarned = true;
+        console.warn(`Gagal catat pemakaian penyedia cadangan (sudah jalankan migration 0020?): ${error.message}`);
+      }
+    })
+    .catch(() => {});
+}
+
 // Waktu start/restart bot: ingat key yang SUDAH habis hari ini (dicatat bot
 // ini sendiri sebelumnya), supaya habis restart bot tidak buang-buang request
 // mencoba key yang sudah pasti ditolak lagi. Hanya baris source='wa-bot' yang
@@ -1029,12 +1054,16 @@ function reportKeyEvent(key, { requestsInc = 0, exhaustedUntilMs = null, error =
 async function primeExhaustedKeysFromDb() {
   if (WA_AI_ENGINE !== "gemini" || GEMINI_API_KEYS.length === 0) return;
   try {
-    const { data, error } = await supabase
-      .from("gemini_key_usage")
-      .select("key_hint, exhausted_until")
-      .eq("usage_date", pacificDateString())
-      .eq("source", "wa-bot")
-      .gt("exhausted_until", new Date().toISOString());
+    const baseQuery = () =>
+      supabase
+        .from("gemini_key_usage")
+        .select("key_hint, exhausted_until")
+        .eq("usage_date", pacificDateString())
+        .eq("source", "wa-bot")
+        .gt("exhausted_until", new Date().toISOString());
+    // Hanya baris Gemini (kolom provider ada sejak migration 0020; sebelum itu semua baris memang Gemini).
+    let { data, error } = await baseQuery().eq("provider", "gemini");
+    if (error) ({ data, error } = await baseQuery());
     if (error) return; // tabel belum ada / error lain: abaikan, bot tetap jalan normal
     for (const row of data ?? []) {
       const matches = GEMINI_API_KEYS.filter((k) => geminiKeyHint(k) === row.key_hint);
