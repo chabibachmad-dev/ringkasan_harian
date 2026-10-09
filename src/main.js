@@ -2467,7 +2467,7 @@ async function renderSystemStatus() {
   box.replaceChildren(frag);
 }
 
-const KEYS_PROVIDERS = ["gemini", "openrouter", "groq"];
+const KEYS_PROVIDERS = ["gemini", "openrouter", "groq", "tavily", "serper", "brave"];
 
 // Tombol penyedia (aktif = disorot) + judul & penjelasan sesuai penyedia yang dipilih.
 function renderKeysHeader() {
@@ -2510,8 +2510,12 @@ async function renderKeysList() {
   }
   els.keysStatus.hidden = true;
 
-  // Batas harian: Gemini 20, OpenRouter (model gratis) 50; Groq tidak punya satu angka harian -> tanpa garis.
-  const limit = Number(result.dailyLimit) > 0 ? Number(result.dailyLimit) : null;
+  // Batas: Gemini 20/hari, OpenRouter (model gratis) 50/hari, Tavily/Brave sekitar 1.000/bulan (penyedia pencarian
+  // dihitung BULANAN); Groq dan Serper tidak punya satu angka bawaan -> tanpa garis.
+  const monthly = result.period === "month";
+  const limitRaw = result.limit ?? result.dailyLimit;
+  const limit = Number(limitRaw) > 0 ? Number(limitRaw) : null;
+  const unitKey = monthly ? "keys_requests_unit_month" : "keys_requests_unit";
 
   for (const k of keys) {
     const row = document.createElement("div");
@@ -2535,7 +2539,7 @@ async function renderKeysList() {
 
     const meta = document.createElement("div");
     meta.className = "kb-doc-meta";
-    meta.textContent = limit ? `${k.requests} / ${limit} ${t(state.lang, "keys_requests_unit")}` : `${k.requests} ${t(state.lang, "keys_requests_unit")}`;
+    meta.textContent = limit ? `${k.requests} / ${limit} ${t(state.lang, unitKey)}` : `${k.requests} ${t(state.lang, unitKey)}`;
 
     main.appendChild(head);
     if (limit) {
@@ -2578,7 +2582,7 @@ async function renderKeysList() {
   }
 
   const noteLines = [];
-  if (result.resetAtMs) noteLines.push(`${t(state.lang, "keys_reset_note")} ${formatFullDateTime(result.resetAtMs)}`);
+  if (result.resetAtMs) noteLines.push(`${t(state.lang, monthly ? "keys_reset_note_month" : "keys_reset_note")} ${formatFullDateTime(result.resetAtMs)}`);
   if (Array.isArray(result.models) && result.models.length > 0) noteLines.push(`${t(state.lang, "keys_models_label")} ${result.models.join(" > ")}`);
   els.keysResetNote.textContent = noteLines.join("\n");
 }

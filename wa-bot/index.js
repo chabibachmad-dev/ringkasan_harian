@@ -687,7 +687,7 @@ const WEB_SEARCH_MAX_RESULTS = 3;
 
 // Pencarian web: API (Tavily/Serper/Brave, kalau key-nya diisi di .env) dengan rotasi key, lalu Bing
 // (scraping di atas) sebagai cadangan terakhir. Hasil API membawa URL sumber. Lihat web-search.js.
-const webSearch = createWebSearch({ config: readSearchConfig(process.env), bing: webSearchBing });
+const webSearch = createWebSearch({ config: readSearchConfig(process.env), bing: webSearchBing, onEvent: (e) => reportLlmEvent(e) });
 if (webSearch.available()) console.log(`🔎 Pencarian web: ${webSearch.describe()}`);
 
 // Gabung potongan dokumen + hasil web (kalau ada) jadi 1 blok teks yang
@@ -1041,13 +1041,13 @@ function reportLlmEvent(e) {
       p_requests_inc: e.kind === "success" ? 1 : 0,
       p_exhausted_until: e.untilMs ? new Date(e.untilMs).toISOString() : null,
       p_error: e.kind === "success" ? null : e.error ?? null,
-      p_model: e.kind === "success" ? e.model : null,
+      p_model: e.kind === "success" ? e.model || null : null,
       p_clear_exhausted: e.kind === "success"
     })
     .then(({ error }) => {
       if (error && !llmReportWarned) {
         llmReportWarned = true;
-        console.warn(`Gagal catat pemakaian penyedia cadangan (sudah jalankan migration 0020?): ${error.message}`);
+        console.warn(`Gagal catat pemakaian penyedia cadangan/pencarian (sudah jalankan migration 0020 dan 0022?): ${error.message}`);
       }
     })
     .catch(() => {});

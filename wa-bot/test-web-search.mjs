@@ -129,6 +129,27 @@ for (const [label, rel] of targets) {
     const rows = await s.search("q", 5);
     check(rows[0].title === "B0" && Date.now() - t0 < 2000, "Tavily menggantung + Serper bukan JSON -> Brave menjawab, tanpa menunggu lama");
   }
+  // 9) onEvent untuk monitoring: sukses (+ hasil kosong tetap terhitung), 429 = exhausted, 401 = rejected, 500 = error; tanpa key asli
+  {
+    const events = [];
+    const f = makeFake({ "tavily|tk1": [{ status: 429, text: "limit" }], "tavily|tk2": [tav(1)], serper: [{ json: { organic: [] } }], brave: [{ status: 401, text: "bad" }] });
+    const s = mod.createWebSearch({ config: cfg, fetchImpl: f.fetchImpl, log: silent, now: () => 5_000, onEvent: (e) => events.push(e) });
+    await s.search("q", 2);
+    check(events[0].provider === "tavily" && events[0].keyHint === "tk1" && events[0].kind === "exhausted" && events[0].untilMs === 5_000 + 3600_000, "event: 429 -> exhausted + untilMs 1 jam");
+    check(events[1].kind === "success" && events[1].keyHint === "tk2" && events[1].error === undefined, "event: sukses membawa hint key (4 karakter terakhir)");
+    check(!JSON.stringify(events).includes("tvly") && events.every((e) => String(e.keyHint).length <= 4), "event: key asli tidak pernah ikut");
+    const ev2 = [];
+    const f2 = makeFake({ tavily: [{ json: { results: [] } }], serper: [{ status: 401, text: "bad" }], brave: [{ status: 500 }] });
+    const s2 = mod.createWebSearch({ config: cfg, fetchImpl: f2.fetchImpl, log: silent, onEvent: (e) => ev2.push(e) });
+    await s2.search("q", 2);
+    const kinds = ev2.map((e) => `${e.provider}:${e.kind}`).join();
+    check(kinds === "tavily:success,serper:rejected,brave:error", "event: hasil kosong tetap 'success' (permintaan terpakai); 401 rejected; 500 error");
+    check(ev2[2].untilMs === undefined && ev2[1].untilMs > 0, "event: error biasa tanpa masa istirahat di DB, rejected punya");
+    const f3 = makeFake({ tavily: [tav(1)] });
+    const s3 = mod.createWebSearch({ config: cfg, fetchImpl: f3.fetchImpl, log: silent, onEvent: () => { throw new Error("pelapor rusak"); } });
+    const s4 = mod.createWebSearch({ config: cfg, fetchImpl: f3.fetchImpl, log: silent, onEvent: async () => { throw new Error("async rusak"); } });
+    check((await s3.search("q", 1)).length === 1 && (await s4.search("q", 1)).length === 1, "onEvent yang melempar error (sinkron/async) tidak menggagalkan pencarian");
+  }
   check((await mod.createWebSearch({ config: cfg, fetchImpl: async () => { throw new Error("x"); }, log: silent }).search("   ")).length === 0, "query kosong -> []");
 }
 

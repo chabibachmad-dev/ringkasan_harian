@@ -145,6 +145,22 @@ interface Logger {
   warn?: (...a: unknown[]) => void;
 }
 
+// Kejadian untuk monitoring (tanpa key asli). "success" = satu permintaan terpakai (walau hasilnya kosong).
+export interface SearchEvent {
+  provider: string;
+  model?: string;
+  keyHint: string;
+  kind: "success" | "exhausted" | "rejected" | "error";
+  untilMs?: number;
+  error?: string;
+}
+
+// Pelapor bersama untuk pencari milik Edge Function (diisi chat/index.ts per permintaan, seperti setFallbackReporter).
+let reporter: ((e: SearchEvent) => Promise<void> | void) | null = null;
+export function setSearchReporter(fn: ((e: SearchEvent) => Promise<void> | void) | null): void {
+  reporter = fn;
+}
+
 // bing(query, maxResults) -> [{title, snippet}] : fungsi cadangan (scraping Bing) dari pemanggil.
 export function createWebSearch(
   opts: {
@@ -153,6 +169,7 @@ export function createWebSearch(
     bing?: ((q: string, max: number) => Promise<SearchRow[]>) | null;
     log?: Logger;
     now?: () => number;
+    onEvent?: ((e: SearchEvent) => Promise<void> | void) | null;
   } = {}
 ) {
   const config = opts.config ?? readSearchConfig();
@@ -162,6 +179,14 @@ export function createWebSearch(
   const now = opts.now ?? (() => Date.now());
   const restUntil = new Map<string, number>(); // "provider|key" -> ms
   const cursor = new Map<string, number>();
+  const emit = (e: SearchEvent) => {
+    try {
+      const r = (opts.onEvent ?? reporter)?.(e);
+      if (r && typeof (r as Promise<void>).catch === "function") (r as Promise<void>).catch(() => {});
+    } catch {
+      /* pelaporan tidak boleh menggagalkan pencarian */
+    }
+  };
 
   const available = () => config.providers.length > 0;
   const describe = () =>
@@ -181,6 +206,7 @@ export function createWebSearch(
         try {
           const rows = await callProvider({ name: p.name, apiKey: key, query: q, maxResults, snippetChars, timeoutMs: config.timeoutMs, fetchImpl });
           cursor.set(p.name, p.keys.indexOf(key));
+          emit({ provider: p.name, keyHint: key.slice(-4), kind: "success" });
           if (rows.length > 0) return rows;
           break; // hasil kosong dari penyedia ini: coba penyedia berikutnya, key tidak dihukum
         } catch (e) {
@@ -192,6 +218,13 @@ export function createWebSearch(
           const bad = status === 401 || status === 403;
           restUntil.set(id, now() + (quota || bad ? 3600_000 : 60_000));
           if (quota || bad) cursor.set(p.name, (p.keys.indexOf(key) + 1) % p.keys.length);
+          emit({
+            provider: p.name,
+            keyHint: key.slice(-4),
+            kind: quota ? "exhausted" : bad ? "rejected" : "error",
+            untilMs: quota || bad ? now() + 3600_000 : undefined,
+            error: String(err?.message || e).slice(0, 300)
+          });
           log.warn?.(`Pencarian ${hint} gagal (${quota ? "jatah habis" : bad ? "key ditolak" : "error"}): ${String(err?.message || e).slice(0, 160)}`);
         }
       }

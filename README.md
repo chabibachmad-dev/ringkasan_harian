@@ -169,6 +169,7 @@ Kalau sukses, cek tabel `summaries` di Supabase Table Editor — harus ada baris
 - **Agent di Chat AI** (tombol di atas kolom ketik): Auto (Gemini dulu, lalu Groq/OpenRouter, lalu Ollama), Gemini, Groq, OpenRouter, Ollama. Memilih satu penyedia = hanya penyedia itu, tidak pindah diam-diam ke yang lain. Jalankan migrasi `0021_chat_agent_groq_openrouter.sql`, lalu deploy ulang fungsi `chat`.
 - **Key penyedia**: `npx supabase secrets set GROQ_API_KEYS=gsk_xxx OPENROUTER_API_KEYS=sk-or-xxx` (model lewat `GROQ_MODEL` / `OPENROUTER_MODEL`).
 - **Pencarian web via API** (hasil membawa URL sumber): `npx supabase secrets set TAVILY_API_KEYS=tvly-xxx SERPER_API_KEYS=xxx BRAVE_API_KEYS=xxx` (semua opsional, boleh beberapa key dipisah koma). Tanpa key, dipakai Bing seperti sebelumnya. Untuk bot WA, isi variabel yang sama di `wa-bot/.env` lalu `pm2 restart wa-bot --update-env`.
+- **Monitoring key pencarian** (tombol Tavily / Serper / Brave di Pengaturan > Status Sistem, hitungan per bulan): jalankan migrasi `0022_search_provider_usage.sql` (butuh 0020) dan deploy ulang fungsi `chat`. Batas bulanan bisa diubah lewat secret `TAVILY_MONTHLY_LIMIT`, `SERPER_MONTHLY_LIMIT`, `BRAVE_MONTHLY_LIMIT`.
 
 ## 9. Push ke GitHub & deploy ke GitHub Pages
 

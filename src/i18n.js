@@ -299,15 +299,30 @@ export const STRINGS = {
     keys_tab_gemini: "Gemini",
     keys_tab_openrouter: "OpenRouter",
     keys_tab_groq: "Groq",
+    keys_tab_tavily: "Tavily",
+    keys_tab_serper: "Serper",
+    keys_tab_brave: "Brave",
     keys_title_gemini: "Kuota API Gemini",
     keys_title_openrouter: "API OpenRouter (cadangan)",
     keys_title_groq: "API Groq (cadangan)",
+    keys_title_tavily: "API pencarian Tavily",
+    keys_title_serper: "API pencarian Serper",
+    keys_title_brave: "API pencarian Brave",
     keys_intro_gemini:
       "Pemakaian tiap API key hari ini, dihitung dari panggilan yang tercatat di sistem ini (bot WhatsApp + chat di aplikasi). Angkanya perkiraan -- pemakaian di luar aplikasi ini tidak ikut terhitung.",
     keys_intro_openrouter:
       "Cadangan terakhir setelah Gemini dan Groq. Tercatat dari bot WhatsApp dan chat di aplikasi saat Gemini gagal. Model gratis OpenRouter dibatasi sekitar 50 permintaan per hari (reset tengah malam UTC).",
     keys_intro_groq:
       "Cadangan pertama setelah Gemini. Tercatat dari bot WhatsApp dan chat di aplikasi saat Gemini gagal. Jatah Groq dihitung per model dan per menit, jadi tidak ada satu batas harian tunggal (hitungan harian reset tengah malam UTC).",
+    keys_intro_tavily:
+      "Pencarian web untuk jawaban AI (urutan pertama, hasil membawa URL sumber). Dicatat dari bot WhatsApp dan chat di aplikasi. Jatah gratis Tavily sekitar 1.000 kredit per bulan; satu pencarian dasar = 1 kredit. Hitungan dijumlahkan per bulan kalender UTC, jadi tanggal resetnya perkiraan.",
+    keys_intro_serper:
+      "Pencarian web cadangan setelah Tavily (hasil Google). Dicatat dari bot WhatsApp dan chat di aplikasi. Jatah gratis Serper berupa uji coba sekali pakai yang tidak diperbarui; cek sisa kreditnya di dashboard serper.dev.",
+    keys_intro_brave:
+      "Pencarian web cadangan setelah Serper. Dicatat dari bot WhatsApp dan chat di aplikasi. Brave memberi kredit sekitar $5 per bulan (kira-kira 1.000 query) dan menagih kartu kalau terlampaui.",
+    keys_empty_tavily: "Belum ada key Tavily. Isi TAVILY_API_KEYS di Supabase (secret) dan .env bot WA.",
+    keys_empty_serper: "Belum ada key Serper. Isi SERPER_API_KEYS di Supabase (secret) dan .env bot WA.",
+    keys_empty_brave: "Belum ada key Brave. Isi BRAVE_API_KEYS di Supabase (secret) dan .env bot WA.",
     keys_empty_gemini: "Belum ada API key yang terdeteksi. Isi GEMINI_API_KEYS di Supabase & bot WA.",
     keys_empty_openrouter: "Belum ada key OpenRouter. Isi OPENROUTER_API_KEYS di Supabase (secret) dan .env bot WA.",
     keys_empty_groq: "Belum ada key Groq. Isi GROQ_API_KEYS di Supabase (secret) dan .env bot WA.",
@@ -324,8 +339,10 @@ export const STRINGS = {
     keys_last_error_prefix: "Error terakhir:",
     keys_limited_until: "Coba lagi sekitar",
     keys_requests_unit: "request hari ini",
+    keys_requests_unit_month: "request bulan ini",
     keys_exhausted_until: "Aktif lagi sekitar",
     keys_reset_note: "Kuota harian reset sekitar",
+    keys_reset_note_month: "Kuota bulanan reset sekitar",
     keys_limit_note: "batas harian",
     change_code_hint: "Masukkan kode akses yang baru.",
     wa_list_title: "WhatsApp",
@@ -688,15 +705,30 @@ export const STRINGS = {
     keys_tab_gemini: "Gemini",
     keys_tab_openrouter: "OpenRouter",
     keys_tab_groq: "Groq",
+    keys_tab_tavily: "Tavily",
+    keys_tab_serper: "Serper",
+    keys_tab_brave: "Brave",
     keys_title_gemini: "Gemini API quota",
     keys_title_openrouter: "OpenRouter API (backup)",
     keys_title_groq: "Groq API (backup)",
+    keys_title_tavily: "Tavily search API",
+    keys_title_serper: "Serper search API",
+    keys_title_brave: "Brave search API",
     keys_intro_gemini:
       "Today's usage per API key, counted from calls recorded by this system (WhatsApp bot + in-app chat). Numbers are estimates -- usage outside this app isn't counted.",
     keys_intro_openrouter:
       "Last-resort backup after Gemini and Groq. Recorded from the WhatsApp bot and in-app chat when Gemini fails. OpenRouter free models are limited to about 50 requests per day (resets at midnight UTC).",
     keys_intro_groq:
       "First backup after Gemini. Recorded from the WhatsApp bot and in-app chat when Gemini fails. Groq limits are per model and per minute, so there is no single daily cap (daily count resets at midnight UTC).",
+    keys_intro_tavily:
+      "Web search for AI answers (first in line, results carry source URLs). Recorded from the WhatsApp bot and in-app chat. Tavily's free tier is about 1,000 credits per month; one basic search = 1 credit. Counts are summed per UTC calendar month, so the reset date is approximate.",
+    keys_intro_serper:
+      "Backup web search after Tavily (Google results). Recorded from the WhatsApp bot and in-app chat. Serper's free allowance is a one-time trial that doesn't renew; check the remaining credit in your serper.dev dashboard.",
+    keys_intro_brave:
+      "Backup web search after Serper. Recorded from the WhatsApp bot and in-app chat. Brave gives about $5 of credit per month (roughly 1,000 queries) and bills your card beyond that.",
+    keys_empty_tavily: "No Tavily key yet. Set TAVILY_API_KEYS in Supabase (secret) and the WA bot .env.",
+    keys_empty_serper: "No Serper key yet. Set SERPER_API_KEYS in Supabase (secret) and the WA bot .env.",
+    keys_empty_brave: "No Brave key yet. Set BRAVE_API_KEYS in Supabase (secret) and the WA bot .env.",
     keys_empty_gemini: "No API keys detected yet. Set GEMINI_API_KEYS in Supabase and the WA bot.",
     keys_empty_openrouter: "No OpenRouter key yet. Set OPENROUTER_API_KEYS in Supabase (secret) and the WA bot .env.",
     keys_empty_groq: "No Groq key yet. Set GROQ_API_KEYS in Supabase (secret) and the WA bot .env.",
@@ -713,8 +745,10 @@ export const STRINGS = {
     keys_last_error_prefix: "Last error:",
     keys_limited_until: "Retry around",
     keys_requests_unit: "requests today",
+    keys_requests_unit_month: "requests this month",
     keys_exhausted_until: "Active again around",
     keys_reset_note: "Daily quota resets around",
+    keys_reset_note_month: "Monthly quota resets around",
     keys_limit_note: "daily limit",
     change_code_hint: "Enter the new access code.",
     wa_list_title: "WhatsApp",

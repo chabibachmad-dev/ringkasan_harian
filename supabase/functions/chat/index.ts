@@ -118,6 +118,7 @@ import { corsHeaders } from "../_shared/cors.ts";
 import { buildKbQuery, selectKnowledgeChunks, wantsWholeDocument } from "../_shared/knowledge.ts";
 import { requestLaptopChunks } from "../_shared/laptop-kb.ts";
 import { getFallbackChain, readFallbackConfig, setFallbackReporter } from "../_shared/llm-fallback.ts";
+import { readSearchConfig, setSearchReporter } from "../_shared/web-search.ts";
 import { guardDocAnswer } from "../_shared/docguard.ts";
 import {
   generateChatReply,
@@ -245,7 +246,7 @@ Deno.serve(async (req) => {
     page?: number;
     saved?: boolean;
     size?: number;
-    // key_status: penyedia yang dipantau ("gemini" bawaan | "groq" | "openrouter").
+    // key_status: penyedia yang dipantau ("gemini" bawaan | "groq" | "openrouter" | "tavily" | "serper" | "brave").
     provider?: string;
   };
   try {
@@ -412,10 +413,15 @@ Deno.serve(async (req) => {
   }
 
   if (body.action === "key_status") {
-    // provider: "gemini" (bawaan) | "groq" | "openrouter" -- tiga tombol di layar Status Sistem.
-    const provider: "gemini" | "groq" | "openrouter" = body.provider === "groq" || body.provider === "openrouter" ? body.provider : "gemini";
-    // Gemini: hari Pasifik (reset tengah malam Pasifik). Groq/OpenRouter: hari UTC (reset tengah malam UTC).
+    // provider: "gemini" (bawaan) | "groq" | "openrouter" | "tavily" | "serper" | "brave" -- tombol di layar Status Sistem.
+    type KeyProvider = "gemini" | "groq" | "openrouter" | "tavily" | "serper" | "brave";
+    const KEY_PROVIDERS: KeyProvider[] = ["gemini", "groq", "openrouter", "tavily", "serper", "brave"];
+    const provider: KeyProvider = KEY_PROVIDERS.includes(body.provider as KeyProvider) ? (body.provider as KeyProvider) : "gemini";
+    // Penyedia pencarian web: jatahnya BULANAN (dijumlahkan sejak tanggal 1 bulan UTC).
+    const isSearch = provider === "tavily" || provider === "serper" || provider === "brave";
+    // Gemini: hari Pasifik (reset tengah malam Pasifik). Lainnya: hari/bulan UTC.
     const usageDay = provider === "gemini" ? getPacificDateString() : new Date().toISOString().slice(0, 10);
+    const monthStart = `${usageDay.slice(0, 7)}-01`;
     type KeyUsageRow = {
       key_hint: string;
       source: string;
@@ -424,15 +430,18 @@ Deno.serve(async (req) => {
       last_error: string | null;
       last_model?: string | null;
       last_used_at?: string | null;
+      usage_date?: string;
     };
     // Kolom provider/last_model dari migration 0020; untuk Gemini tetap jalan walau migration itu belum dijalankan.
     let usageRows: KeyUsageRow[] = [];
     {
-      const r = await supabaseAdmin
+      let q = supabaseAdmin
         .from("gemini_key_usage")
-        .select("key_hint, source, requests, exhausted_until, last_error, last_model, last_used_at")
-        .eq("usage_date", usageDay)
+        .select("usage_date, key_hint, source, requests, exhausted_until, last_error, last_model, last_used_at")
         .eq("provider", provider);
+      // Bulanan: semua hari sejak tanggal 1 (urut lama -> baru, supaya error terakhir diambil dari hari terbaru).
+      q = isSearch ? q.gte("usage_date", monthStart).lte("usage_date", usageDay).order("usage_date", { ascending: true }) : q.eq("usage_date", usageDay);
+      const r = await q;
       if (!r.error) {
         usageRows = (r.data ?? []) as KeyUsageRow[];
       } else if (provider === "gemini") {
@@ -450,8 +459,10 @@ Deno.serve(async (req) => {
     // Daftar key yang DIKONFIGURASI di Supabase selalu tampil (walau belum
     // ada pemakaian = 0 request), digabung dgn hint dari tabel (mis. key yang
     // cuma dipakai bot WA).
-    const fbProvider = provider === "gemini" ? null : readFallbackConfig().providers.find((p) => p.name === provider) ?? null;
-    const configuredHints = provider === "gemini" ? getGeminiApiKeys().map(geminiKeyHint) : (fbProvider?.keys ?? []).map((k) => k.slice(-4));
+    const fbProvider = provider === "groq" || provider === "openrouter" ? readFallbackConfig().providers.find((p) => p.name === provider) ?? null : null;
+    const searchProvider = isSearch ? readSearchConfig().providers.find((p) => p.name === provider) ?? null : null;
+    const configuredHints =
+      provider === "gemini" ? getGeminiApiKeys().map(geminiKeyHint) : (fbProvider?.keys ?? searchProvider?.keys ?? []).map((k) => k.slice(-4));
     const hints = new Set<string>(configuredHints);
     for (const row of usageRows) hints.add(row.key_hint);
 
@@ -467,7 +478,8 @@ Deno.serve(async (req) => {
       for (const r of rows) {
         const until = r.exhausted_until ? new Date(r.exhausted_until).getTime() : 0;
         if (until > exhaustedUntilMs) exhaustedUntilMs = until;
-        if (r.last_error && until >= lastErrorUntil) {
+        // Bulanan: error lama (hari-hari sebelumnya) tidak ditampilkan terus-menerus; hanya yang dari hari ini.
+        if (r.last_error && until >= lastErrorUntil && (!isSearch || r.usage_date === usageDay)) {
           lastErrorUntil = until;
           lastError = r.last_error;
         }
@@ -497,9 +509,13 @@ Deno.serve(async (req) => {
       };
     });
 
-    // Reset kuota harian: tengah malam Pasifik (Gemini) atau UTC (Groq/OpenRouter).
+    // Reset kuota: tengah malam Pasifik (Gemini), tengah malam UTC (Groq/OpenRouter), atau awal bulan UTC
+    // (penyedia pencarian; jatah sebenarnya mengikuti tanggal tagihan akun, jadi ini perkiraan).
     let resetAtMs: number;
-    if (provider === "gemini") {
+    if (isSearch) {
+      const d = new Date(nowMs);
+      resetAtMs = Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1);
+    } else if (provider === "gemini") {
       const pacificNow = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Los_Angeles" }));
       const nextMidnight = new Date(pacificNow);
       nextMidnight.setHours(24, 0, 0, 0);
@@ -512,13 +528,27 @@ Deno.serve(async (req) => {
     // Batas harian untuk garis kemajuan: Gemini 20 (GEMINI_DAILY_LIMIT), OpenRouter model gratis 50
     // (OPENROUTER_DAILY_LIMIT), Groq tidak punya satu angka harian (null = tanpa garis; GROQ_DAILY_LIMIT bisa mengisinya).
     const envLimit = (name: string, fallback: number | null) => (Number(Deno.env.get(name)) > 0 ? Number(Deno.env.get(name)) : fallback);
-    const dailyLimit = provider === "gemini" ? envLimit("GEMINI_DAILY_LIMIT", 20) : provider === "openrouter" ? envLimit("OPENROUTER_DAILY_LIMIT", 50) : envLimit("GROQ_DAILY_LIMIT", null);
+    // Penyedia pencarian: batas BULANAN -- Tavily gratis 1.000 kredit/bulan, Brave kredit $5 (~1.000 query); Serper
+    // tanpa angka bawaan (uji coba sekali pakai). Semua bisa diubah lewat TAVILY_MONTHLY_LIMIT dst.
+    const dailyLimit = provider === "gemini"
+      ? envLimit("GEMINI_DAILY_LIMIT", 20)
+      : provider === "openrouter"
+      ? envLimit("OPENROUTER_DAILY_LIMIT", 50)
+      : provider === "groq"
+      ? envLimit("GROQ_DAILY_LIMIT", null)
+      : provider === "tavily"
+      ? envLimit("TAVILY_MONTHLY_LIMIT", 1000)
+      : provider === "brave"
+      ? envLimit("BRAVE_MONTHLY_LIMIT", 1000)
+      : envLimit("SERPER_MONTHLY_LIMIT", null);
 
     return json({
       ok: true,
       provider,
       configured: configuredHints.length > 0,
       models: fbProvider?.models ?? null,
+      period: isSearch ? "month" : "day",
+      limit: dailyLimit,
       dailyLimit,
       resetAtMs,
       keys
@@ -1269,7 +1299,7 @@ Deno.serve(async (req) => {
         });
       });
       // Pemakaian Groq/OpenRouter (cadangan) dicatat ke tabel yang sama (kolom provider, migration 0020).
-      setFallbackReporter(async (e) => {
+      const reportLlm = async (e: { provider: string; keyHint: string; kind: string; untilMs?: number; error?: string; model?: string }) => {
         await supabaseAdmin.rpc("report_llm_key_event", {
           p_provider: e.provider,
           p_usage_date: new Date().toISOString().slice(0, 10),
@@ -1278,10 +1308,13 @@ Deno.serve(async (req) => {
           p_requests_inc: e.kind === "success" ? 1 : 0,
           p_exhausted_until: e.untilMs ? new Date(e.untilMs).toISOString() : null,
           p_error: e.kind === "success" ? null : (e.error ?? null),
-          p_model: e.kind === "success" ? e.model : null,
+          p_model: e.kind === "success" ? (e.model || null) : null,
           p_clear_exhausted: e.kind === "success"
         });
-      });
+      };
+      setFallbackReporter(reportLlm);
+      // Pemakaian API pencarian web (Tavily/Serper/Brave) dicatat ke tabel yang sama (migration 0022).
+      setSearchReporter(reportLlm);
       const result = await generateChatReply(history, geminiApiKeys, knowledgeContext, {
         kbExcerpts,
         strictDocs,
