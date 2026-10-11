@@ -1,6 +1,6 @@
 import { jsPDF } from "jspdf";
 import { applyStaticI18n, t } from "./i18n.js";
-import { renderChatMarkdown } from "./markdown.js";
+import { renderChatMarkdown, renderAiMarkdown, typesetMath } from "./markdown.js";
 import {
   ICON_MOON,
   ICON_SUN,
@@ -880,6 +880,8 @@ function applyInChatSearch(query) {
     let n;
     while ((n = walker.nextNode())) nodes.push(n);
     for (const node of nodes) {
+      // Jangan sorot di dalam rumus (hasil KaTeX berlapis-lapis; menyorotnya merusak tampilan rumus).
+      if (node.parentElement?.closest(".katex, .math-pending")) continue;
       marks.push(...highlightTextNode(node, regex));
     }
   });
@@ -937,7 +939,15 @@ function appendChatBubble(role, content, timestamp, id, tokensUsed, costUsd, age
 
   const textEl = document.createElement("div");
   textEl.className = "chat-bubble-text";
-  textEl.innerHTML = renderChatMarkdown(content);
+  if (role === "assistant") {
+    // Balasan AI: markdown lengkap (daftar, judul, kode, tabel) + rumus LaTeX lewat KaTeX (dimuat malas).
+    textEl.classList.add("chat-md");
+    textEl.innerHTML = renderAiMarkdown(content);
+    typesetMath(textEl).catch(() => {});
+  } else {
+    // Pesan pengguna: sangat minimal supaya teks yang diketik (mis. 2*3*4, kode) tidak berubah bentuk.
+    textEl.innerHTML = renderChatMarkdown(content);
+  }
   bubble.appendChild(textEl);
 
   // Baris jam + estimasi token/biaya + tombol titik-3 (opsi: salin/hapus
