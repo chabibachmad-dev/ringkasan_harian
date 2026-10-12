@@ -258,22 +258,24 @@ export function createRegMonitor({ config, search, searchAvailable, ai = null, s
   }
 
   // Perintah manual dari pemilik. all=true: abaikan "sudah pernah dilaporkan" dan jangan menandai (buat tes).
-  async function runNow({ all = false } = {}) {
+  async function runNow({ all = false, sendTo = null } = {}) {
+    // sendTo: kirim hasilnya ke pemanggil (mis. Telegram) alih-alih ke saluran bawaan.
+    const out = typeof sendTo === "function" ? sendTo : send;
     if (running) return { ok: false, reason: "sedang berjalan" };
     if (!searchAvailable()) {
-      await send("📜 Pantauan peraturan butuh key API pencarian (TAVILY_API_KEYS / SERPER_API_KEYS / BRAVE_API_KEYS di .env bot). Bing saja tidak cukup karena tak bisa menyaring tanggal.");
+      await out("📜 Pantauan peraturan butuh key API pencarian (TAVILY_API_KEYS / SERPER_API_KEYS / BRAVE_API_KEYS di .env bot). Bing saja tidak cukup karena tak bisa menyaring tanggal.");
       return { ok: false, reason: "tanpa key" };
     }
     running = true;
     try {
-      await send("⏳ Mencari kabar peraturan terbaru…");
+      await out("⏳ Mencari kabar peraturan terbaru…");
       const r = await build({ ignoreSeen: all });
-      for (const part of splitMessage(r.text)) await send(part);
+      for (const part of splitMessage(r.text)) await out(part);
       if (!all) await markSeen(r.candidates);
       return { ok: true, count: r.kept.length };
     } catch (e) {
       log.error?.(`📜 Pantauan peraturan (manual) gagal: ${e?.message || e}`);
-      await send(`⚠️ Pantauan peraturan gagal: ${String(e?.message || e).slice(0, 200)}`).catch(() => {});
+      await out(`⚠️ Pantauan peraturan gagal: ${String(e?.message || e).slice(0, 200)}`).catch(() => {});
       return { ok: false, reason: String(e?.message || e) };
     } finally {
       running = false;

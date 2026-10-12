@@ -37,6 +37,7 @@ import * as cheerio from "cheerio";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import { createSimab, SIMAB_OLLAMA_SYSTEM } from "./simab.js";
+import { createTelegram, readTelegramConfig } from "./telegram.js";
 import { createAppAgentWorker } from "./app-agent.js";
 import { createFallbackChain, readFallbackConfig } from "./llm-fallback.js";
 import { createWebSearch, readSearchConfig } from "./web-search.js";
@@ -1103,7 +1104,8 @@ function formatClockInTimezone(ms) {
 // jadi aman walau bot di-restart) supaya tidak spam.
 let allKeysAlertInFlight = false;
 async function notifyOwnerAllKeysExhausted() {
-  if (!OWNER_JID || !currentSock || allKeysAlertInFlight || !allGeminiKeysExhaustedForLong()) return;
+  const waReady = Boolean(OWNER_JID && currentSock);
+  if ((!waReady && !telegramCanNotify()) || allKeysAlertInFlight || !allGeminiKeysExhaustedForLong()) return;
   allKeysAlertInFlight = true;
   try {
     const today = pacificDateString();
@@ -1112,15 +1114,15 @@ async function notifyOwnerAllKeysExhausted() {
 
     const resetMs = Math.min(...GEMINI_API_KEYS.map((k) => geminiKeyExhaustedUntil.get(k) || Infinity));
     const resetText = Number.isFinite(resetMs) ? `sekitar pukul ${formatClockInTimezone(resetMs)} ${WA_TIMEZONE_LABEL}` : "besok";
-    await currentSock.sendMessage(OWNER_JID, {
-      text:
+    const alertText =
         `⚠️ *Semua API key Gemini habis kuota harian* (${GEMINI_API_KEYS.length} key).\n\n` +
         `Gemini tidak bisa dipakai sampai kuota reset, ${resetText}. ` +
         (llmFallback.available() ? "" : `Pesan WA yang masuk selama itu akan dibalas otomatis begitu kuota kembali.`) + `\n\n` +
         (llmFallback.available()
           ? `Bot WA beralih otomatis ke penyedia cadangan (${llmFallback.describe()}), jadi balasan tetap jalan tanpa Google Search.`
-          : `Tambah API key baru di GEMINI_API_KEYS (bot WA) dan secret Supabase kalau mau tetap jalan sebelum itu.`)
-    });
+          : `Tambah API key baru di GEMINI_API_KEYS (bot WA) dan secret Supabase kalau mau tetap jalan sebelum itu.`);
+    if (waReady) await currentSock.sendMessage(OWNER_JID, { text: alertText });
+    await mirrorToTelegram(alertText);
     await supabase.from("bot_state").upsert({ key: "all_keys_alert_date", value: today, updated_at: new Date().toISOString() });
     console.log("📣 Peringatan 'semua key habis' dikirim ke nomor pemilik.");
   } catch (err) {
@@ -2073,6 +2075,7 @@ async function checkDailySummary() {
     }
 
     await currentSock.sendMessage(OWNER_JID, { text });
+    await mirrorToTelegram(text);
     await supabase.from("bot_state").upsert({ key: "daily_summary_date", value: local.dateStr, updated_at: new Date().toISOString() });
     summarySentDate = local.dateStr;
     console.log("📋 Ringkasan harian terkirim ke nomor pemilik.");
@@ -2987,11 +2990,88 @@ const regMonitor = createRegMonitor({
     }
   },
   send: async (text) => {
-    if (!OWNER_JID || !currentSock) throw new Error("WhatsApp belum tersambung / WA_OWNER_NUMBER kosong");
-    await currentSock.sendMessage(OWNER_JID, { text });
+    // WhatsApp dulu (perilaku lama); Telegram ikut bila aktif. Gagal hanya bila KEDUA saluran tidak bisa menerima.
+    let delivered = 0;
+    let waError = null;
+    if (OWNER_JID && currentSock) {
+      try {
+        await currentSock.sendMessage(OWNER_JID, { text });
+        delivered += 1;
+      } catch (err) {
+        waError = err;
+      }
+    }
+    if (await mirrorToTelegram(text)) delivered += 1;
+    if (delivered === 0) throw waError || new Error("WhatsApp belum tersambung / WA_OWNER_NUMBER kosong (dan Telegram tidak aktif)");
   },
   timeZone: WA_TIMEZONE
 });
+
+// ---------------- Telegram (tambahan; mati selama TELEGRAM_BOT_TOKEN kosong) ----------------
+// Pemilik bisa memakai perintah (simab, /ringkasan, /peraturan) dan ngobrol dengan AI lewat Telegram, dan notifikasi
+// (ringkasan harian, pantauan peraturan, peringatan key habis) ikut dikirim ke sana. Lihat telegram.js.
+const TELEGRAM_SYSTEM_PROMPT = `Kamu adalah Ayyubi, asisten AI pribadi milik pemilik bot ini. Kamu sedang mengobrol LANGSUNG dengan pemilik lewat Telegram (bukan dengan orang lain), jadi tidak perlu aturan "membalas atas nama pemilik" atau menolak berbagi informasi dengannya.
+
+Jawab pertanyaan, bantu menulis/coding/debugging, atau ajak diskusi dengan jelas dan seringkas mungkin tanpa kehilangan inti jawaban. Kamu punya akses pencarian web bila tersedia -- pakai untuk info/berita/aturan terbaru dan tuliskan link yang relevan. Kalau memakai KONTEKS DOKUMEN, utamakan isinya untuk angka/aturan dan sebut judul dokumennya singkat; kalau jawabannya tidak ada, katakan terus terang dan jangan menebak.
+
+Gunakan Bahasa Indonesia kecuali pemilik menulis/meminta bahasa lain. Format yang tampil rapi di Telegram: *tebal*, _miring_, ~coret~, \`kode\`, dan blok kode \`\`\`...\`\`\`. JANGAN pakai heading (#), tabel, atau markdown lain.`;
+
+async function generateTelegramReply(history) {
+  if (GEMINI_API_KEYS.length === 0 && !llmFallback.available()) {
+    throw new Error("AI belum diatur: isi GEMINI_API_KEYS di .env bot lalu restart.");
+  }
+  const contents = history.map((h) => ({ role: h.role === "model" ? "model" : "user", parts: [{ text: h.text }] }));
+  while (contents.length > 0 && contents[contents.length - 1].role === "model") contents.pop();
+  if (contents.length === 0) throw new Error("tidak ada pesan untuk dijawab");
+  const query = buildWebQuery(contents.filter((c) => c.role === "user").map((c) => c.parts[0].text));
+  let docChunks = [];
+  if (query) {
+    try {
+      docChunks = await fetchKnowledgeChunksForGemini(query, null);
+    } catch (err) {
+      console.error("✈️ [Telegram] gagal cari di Dokumen Pengetahuan, lanjut tanpa:", err instanceof Error ? err.message : String(err));
+    }
+  }
+  const data = await geminiGenerateWithRotation(TELEGRAM_SYSTEM_PROMPT, contents, { webQuery: query, docChunks });
+  const raw = extractGeminiText(data).trim();
+  if (!raw) throw new Error("Respons AI tidak berisi teks.");
+  const guarded = docChunks.length > 0 ? guardDocAnswer(raw, docChunks) : null;
+  return guarded ? guarded.reply : raw;
+}
+
+const telegram = createTelegram({
+  config: readTelegramConfig(process.env),
+  deps: {
+    chat: (history) => generateTelegramReply(history),
+    simab,
+    summary: () => buildDailySummaryText(zonedParts(Date.now(), WA_TIMEZONE).dateStr, { allowAi: true }),
+    regNow: (opts) => regMonitor.runNow(opts),
+    state: {
+      get: async (key) => {
+        const { data } = await supabase.from("bot_state").select("value").eq("key", key).maybeSingle();
+        return data?.value ?? null;
+      },
+      set: async (key, value) => {
+        const { error } = await supabase.from("bot_state").upsert({ key, value, updated_at: new Date().toISOString() });
+        if (error) throw new Error(error.message);
+      }
+    }
+  }
+});
+function telegramCanNotify() {
+  return telegram.enabled && telegram.mirror && telegram.hasOwners();
+}
+/** Salin notifikasi ke Telegram (best effort). true = sampai ke minimal satu pemilik. */
+async function mirrorToTelegram(text) {
+  if (!telegramCanNotify()) return false;
+  try {
+    return (await telegram.sendOwner(text)) > 0;
+  } catch {
+    return false;
+  }
+}
+telegram.start().catch((err) => console.error("✈️ [Telegram] gagal mulai:", err instanceof Error ? err.message : String(err)));
+console.log(`✈️ Telegram untuk pemilik: ${telegram.describe()}`);
 
 connect().catch((err) => {
   console.error("Gagal mulai koneksi WhatsApp:", err);

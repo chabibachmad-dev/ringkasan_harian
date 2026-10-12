@@ -543,6 +543,29 @@ Gemini tetap yang pertama (punya Google Search). Hanya bila SEMUA key Gemini hab
 
 Catatan: jawaban cadangan dicatat 0 token/0 dolar (hitungan token di aplikasi tetap hanya Gemini) dan tetap tersimpan sebagai balasan "gemini" di riwayat. Key yang kena 429 diistirahatkan sesuai header `retry-after` (atau 1 menit; 1 jam bila pesan menyebut batas harian). Bila Gemini tidak punya key sama sekali tetapi Groq/OpenRouter ada, bot dan aplikasi langsung memakai cadangan. Ringkasan harian WA juga memakai cadangan bila Gemini gagal. **Monitoring di aplikasi (butuh migration 0020).** Di menu Status (Status Sistem) ada tiga tombol: **Gemini**, **OpenRouter**, dan **Groq**. Klik salah satu untuk melihat key-nya: 4 karakter terakhir, jumlah permintaan hari ini (OpenRouter dengan garis batas 50/hari, Groq tanpa garis karena jatahnya per model dan per menit), model terakhir yang berhasil menjawab, status Aktif / Dibatasi sementara / Habis kuota / Key ditolak, serta pesan error terakhir. Bot WA dan fungsi `chat` mencatatnya otomatis setiap Groq atau OpenRouter dipakai. Jalankan `supabase/migrations/0020_llm_provider_usage.sql` di SQL Editor (aman diulang), deploy ulang `chat`, `pm2 restart wa-bot`, lalu build ulang aplikasinya seperti biasa. Batas harian bisa diubah lewat secret `OPENROUTER_DAILY_LIMIT` atau `GROQ_DAILY_LIMIT` (opsional). Cek lokal: `node test-llm-fallback.mjs`.
 
+## 9d. Telegram untuk pemilik (opsional, default MATI)
+
+Tambahan, bukan pengganti: bot WhatsApp tetap berjalan seperti biasa. Selama `TELEGRAM_BOT_TOKEN` kosong, tidak ada yang berubah. Bot memakai **Bot API resmi Telegram lewat long polling** dari proses yang sama (tanpa webhook, tanpa port terbuka), jadi laptop/pm2 yang menjalankan bot WA yang juga menjalankan Telegram.
+
+Yang bisa dilakukan lewat Telegram (hanya dari chat pribadi pemilik):
+
+- **Ngobrol dengan AI**: ketik biasa. Memakai Gemini (rotasi key + cadangan Groq/OpenRouter), pencarian web, dan Dokumen Pengetahuan, dengan riwayat singkat per chat. `/baru` melupakan konteks.
+- **SiMAB**: `/simab pagu ...`, `/simab cek ...`, `/simab rekam <seksi>`, dst. (atau tulis `simab ...` tanpa garis miring). Perintahnya persis sama dengan di WhatsApp; sesi rekam berjalan per chat.
+- **`/ringkasan`**: ringkasan percakapan WhatsApp hari ini, dikirim ke Telegram.
+- **`/peraturan`** dan **`/peraturan semua`**: pantauan peraturan, hasilnya dikirim ke Telegram.
+- **Notifikasi ikut dikirim ke Telegram**: ringkasan harian, laporan pantauan peraturan mingguan, dan peringatan "semua key Gemini habis". Pantauan peraturan kini gagal hanya bila WhatsApp **dan** Telegram sama-sama tidak bisa menerima. Matikan dengan `TELEGRAM_MIRROR_NOTIFICATIONS=false`.
+
+Pasang:
+
+1. Di Telegram buka **@BotFather** > `/newbot` > beri nama > salin token.
+2. Isi `.env` bot: `TELEGRAM_BOT_TOKEN=<token>` lalu `pm2 restart wa-bot --update-env`. Di log muncul "Telegram: AKTIF tapi mode pairing".
+3. Kirim pesan apa saja ke bot barumu. Ia membalas **id chat-mu** dan belum menjalankan perintah apa pun.
+4. Isi `TELEGRAM_OWNER_IDS=<id itu>` (boleh beberapa, pisah koma) lalu restart lagi. Kirim `/start` untuk melihat bantuan.
+
+Keamanan: pesan dari chat yang id-nya tidak ada di `TELEGRAM_OWNER_IDS`, dan semua pesan grup, diabaikan diam-diam (hanya dicatat di log). Siapa pun yang menemukan nama bot-mu tidak bisa memakainya. Token bot adalah rahasia seperti password: jangan dibagikan atau di-commit; kalau bocor, buat ulang lewat @BotFather (`/revoke`). Pesan lewat Telegram tersimpan di server Telegram (tidak terenkripsi ujung ke ujung), jadi untuk data yang sangat sensitif tetap pertimbangkan.
+
+Catatan: hanya pesan teks yang dibaca (foto/berkas/voice belum). Jangan menjalankan dua salinan bot dengan token yang sama: Telegram menolak polling ganda (galat 409, tercatat di log). Tes tanpa jaringan: `node test-telegram.mjs`.
+
 ## 10. Antrean Ollama berprioritas & pengaman RAM
 
 Laptop 2 inti / 7,5 GB RAM hanya sanggup satu panggilan Ollama pada satu waktu. Semua panggilan lewat satu antrean (`ollama-queue.js`) dengan tiga tingkat prioritas:
