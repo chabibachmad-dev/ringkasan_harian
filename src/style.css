@@ -3938,3 +3938,138 @@ button.study-trow:active {
   border-radius: 50%;
   background: var(--accent);
 }
+
+/* ---------------------------------------------------------------- Study: Speaking (obrolan bahasa Inggris dengan tutor AI) */
+.study-speak-head {
+  gap: 2px;
+}
+
+.study-speak-log {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin: 0 0 10px;
+  min-height: 120px;
+}
+
+.study-speak-msg {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  max-width: 88%;
+}
+
+.study-speak-msg.is-ai {
+  align-self: flex-start;
+}
+
+.study-speak-msg.is-user {
+  align-self: flex-end;
+  align-items: flex-end;
+}
+
+.study-speak-who {
+  font-size: 0.7rem;
+  font-weight: 700;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.study-speak-bubble {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1.5px solid var(--border);
+  border-radius: 14px;
+  font-size: 0.95rem;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.study-speak-msg.is-user .study-speak-bubble {
+  background: var(--accent);
+  color: var(--accent-contrast);
+}
+
+.study-speak-msg.is-thinking .study-speak-bubble {
+  border-style: dashed;
+  color: var(--text-muted);
+}
+
+.study-speak-replay {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1.5px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.study-speak-fix {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  border: 1.5px dashed var(--border);
+  border-radius: 10px;
+  font-size: 0.82rem;
+  text-align: left;
+}
+
+.study-speak-fix small {
+  color: var(--text-muted);
+  font-size: 0.75rem;
+}
+
+.study-speak-composer {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+  margin: 6px 0 8px;
+}
+
+.study-speak-composer input[type="text"] {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1.5px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+}
+
+.study-speak-composer .secondary-btn,
+.study-speak-composer .primary-btn {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.study-speak-mic.is-on {
+  background: var(--accent);
+  color: var(--accent-contrast);
+}
+
+.study-speak-opts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  margin: 0 0 6px;
+  font-size: 0.8rem;
+}
+
+.study-speak-opts label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}

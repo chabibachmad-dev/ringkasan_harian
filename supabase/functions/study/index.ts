@@ -69,6 +69,14 @@
 //   room_state          { roomId, playerId, pin }                            -> { state:{room, players, me, questions|null, results|null} }   (dipanggil berkala saat di lobi / menunggu hasil)
 //   room_submit         { roomId, playerId, pin, answers:[0..3|null] }       -> { state }
 //   room_result         { roomId }                                           -> { room, results:[{rank,name,grade,classLevel,correct,seconds,points,bonus,timedOut}] }   (publik, hanya room selesai)
+//   -- SPEAKING (migrasi 0035): mengobrol bahasa Inggris dengan tutor AI (suara/ketik di peramban). Tanpa poin. Riwayat disimpan 7 hari. Butuh PIN/token pemain.
+//   speak_start         { playerId, pin, scenario, topic?, lang?, engine? }   -> { session, turns:[pembuka tutor] }   (scenario: free|intro|school|restaurant|shopping|travel|hobbies|interview|custom (+topic); lang "id"|"en" = bahasa tip koreksi)
+//   speak_turn          { playerId, pin, sessionId, text, lang?, engine? }    -> { userTurn:{idx,body,correction,tip}, aiTurn:{idx,body}, userTurns, full }   (maks 30 giliran/sesi, 80/hari/pemain)
+//   speak_end           { playerId, pin, sessionId }                          -> { ok }
+//   speak_delete        { playerId, pin, sessionId }                          -> { ok }
+//   speak_list          { playerId, pin }                                     -> { sessions:[{id,scenario,topic,title,userTurns,createdAt,updatedAt,endedAt,expiresAt}], keepDays }
+//   speak_get           { playerId, pin, sessionId }                          -> { session, turns:[{idx,role,body,correction,tip,at}] }
+//                         overview.speak = false bila migrasi belum dijalankan; aksi speak_* lalu menjawab { ok:true, unavailable:true }.
 //   -- materi pelajaran buatan AI (tab "Materi"); DAFTAR & ISI bisa dibaca semua orang tanpa PIN, membuat butuh PIN pemain
 //   material_list       { before? }                                          -> { items:[{id,title,subject,grade,detail,creatorName,createdAt}], hasMore }
 //   material_get        { materialId }                                       -> { material:{...,content} }
@@ -109,6 +117,16 @@ import {
   newDeviceToken,
   parseAvatarImage,
   PRACTICE_QUESTIONS,
+  SPEAK_GLOBAL_DAY,
+  SPEAK_KEEP_DAYS,
+  SPEAK_MAX_ACTIVE,
+  SPEAK_MAX_TURNS,
+  SPEAK_PER_PLAYER_DAY,
+  buildSpeakSystemPrompt,
+  buildSpeakUserPrompt,
+  cleanSpeakText,
+  parseSpeakReply,
+  validSpeakScenario,
   validCount,
   validPin,
   verifyPin
@@ -673,6 +691,81 @@ async function roomState(admin: Admin, room: Row, me: string | null) {
   };
 }
 
+// ---------------------------------------------------------------- speaking: bantu
+const SPEAK_SESSIONS_PER_DAY = 20; // sesi baru per pemain per 24 jam (mencegah memboroskan kuota AI dengan buka-tutup sesi)
+const SPEAK_LIST_MAX = 30;
+const speakSince = () => new Date(Date.now() - SPEAK_KEEP_DAYS * 24 * 3600 * 1000).toISOString();
+// Tabel speaking belum ada (migrasi 0035 belum dijalankan): fitur dianggap belum tersedia, bukan galat.
+const speakMissing = (e: { code?: string; message?: string } | null | undefined) =>
+  !!e && (e.code === "42P01" || e.code === "PGRST205" || e.code === "PGRST202" || /study_speak/i.test(e.message ?? ""));
+const speakUnavailable = () => json({ ok: true, unavailable: true, sessions: [], turns: [] });
+
+const speakSessionRow = (s: Row) => ({
+  id: s.id,
+  scenario: s.scenario,
+  topic: s.topic ?? "",
+  title: s.title,
+  userTurns: s.user_turns ?? 0,
+  maxTurns: SPEAK_MAX_TURNS,
+  createdAt: s.created_at,
+  updatedAt: s.updated_at,
+  endedAt: s.ended_at ?? null,
+  expiresAt: new Date(new Date(s.updated_at).getTime() + SPEAK_KEEP_DAYS * 24 * 3600 * 1000).toISOString()
+});
+const speakTurnRow = (t: Row) => ({ idx: t.idx, role: t.role, body: t.body, correction: t.correction ?? null, tip: t.tip ?? null, at: t.created_at });
+
+async function loadSpeakSession(admin: Admin, sessionId: unknown, playerId: string): Promise<{ session: Row } | Response> {
+  if (!isUuid(sessionId)) return fail("Percakapan tidak valid.");
+  const { data, error } = await admin.from("study_speak_sessions").select("*").eq("id", sessionId).eq("player_id", playerId).gte("updated_at", speakSince()).maybeSingle();
+  if (error) return speakMissing(error) ? speakUnavailable() : fail(error.message, 500);
+  if (!data) return fail("Percakapan itu tidak ditemukan atau sudah dihapus (riwayat hanya disimpan 7 hari).", 404);
+  return { session: data };
+}
+
+// Giliran pemain 24 jam terakhir: per pemain & global. null = lolos.
+async function checkSpeakLimits(admin: Admin, playerId: string): Promise<Response | null> {
+  const { data, error } = await admin.rpc("study_speak_usage", { p_player: playerId });
+  if (error) return null;
+  const u = (Array.isArray(data) ? data[0] : data) as Row | null;
+  if (Number(u?.mine ?? 0) >= SPEAK_PER_PLAYER_DAY) return fail(`Batas harian tercapai: maksimal ${SPEAK_PER_PLAYER_DAY} giliran bicara per pemain dalam 24 jam. Coba lagi nanti.`, 429, { dailyLimit: true });
+  if (Number(u?.total ?? 0) >= SPEAK_GLOBAL_DAY) return fail("Batas harian latihan speaking untuk seluruh pemain sudah tercapai. Coba lagi besok.", 429, { dailyLimit: true });
+  return null;
+}
+
+// Satu panggilan AI untuk tutor speaking. Mengulang sekali bila keluaran tak bisa dipakai.
+async function askSpeakTutor(
+  admin: Admin,
+  p: Row,
+  spec: { scenario: string; topic: string; lang: "id" | "en" },
+  history: { role: "user" | "ai"; body: string }[],
+  userText: string | null,
+  engine: Engine
+): Promise<{ reply: string; correction: string; tip: string; provider: string } | { error: string }> {
+  wireReporters(admin);
+  const keys = getGeminiApiKeys();
+  const system = buildSpeakSystemPrompt({ scenario: spec.scenario, topic: spec.topic, grade: p.grade, classLevel: p.class_level ?? null, lang: spec.lang });
+  const user = buildSpeakUserPrompt(history, userText);
+  let lastError = "";
+  let tokens = 0;
+  let cost = 0;
+  let out: { reply: string; correction: string; tip: string; provider: string } | null = null;
+  for (let attempt = 0; attempt < 2 && !out; attempt++) {
+    try {
+      const r = await generateJsonText(system, user, keys, { temperature: 0.8, engine });
+      tokens += r.tokensUsed;
+      cost += r.costUsd;
+      const parsed = parseSpeakReply(r.text, userText ?? undefined);
+      if (parsed) out = { ...parsed, provider: r.provider || "gemini" };
+      else lastError = "AI mengembalikan balasan yang tidak bisa dipakai.";
+    } catch (err) {
+      lastError = err instanceof Error ? err.message : String(err);
+      console.error("study speak:", lastError);
+    }
+  }
+  await recordTokens(admin, tokens, cost);
+  return out ?? { error: lastError || "Tutor AI tidak menjawab." };
+}
+
 // ================================================================ handler
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
@@ -691,7 +784,7 @@ Deno.serve(async (req) => {
   try {
     // ------------------------------------------------------------ overview
     if (action === "overview") {
-      const [{ data: board, error }, settings, items, av, today] = await Promise.all([admin.rpc("study_leaderboard"), loadSettings(admin), loadItems(admin), admin.from("study_players").select("id,avatar_ver"), admin.rpc("study_today_points")]);
+      const [{ data: board, error }, settings, items, av, today, speakProbe] = await Promise.all([admin.rpc("study_leaderboard"), loadSettings(admin), loadItems(admin), admin.from("study_players").select("id,avatar_ver"), admin.rpc("study_today_points"), admin.from("study_speak_sessions").select("id", { count: "exact", head: true })]);
       if (error) return fail(error.message, 500);
       // avatar_ver ada setelah migrasi 0031; sebelum itu kueri ini gagal dan foto dianggap tidak ada
       const avById = new Map<string, unknown>((av.error ? [] : av.data ?? []).map((r: Row) => [r.id as string, r.avatar_ver] as [string, unknown]));
@@ -702,7 +795,8 @@ Deno.serve(async (req) => {
         ok: true,
         players: (board ?? []).map((p: Row) => ({ id: p.id, name: p.name, grade: p.grade, classLevel: p.class_level ?? null, sessionsDone: p.sessions_done, competitions: p.competitions ?? 0, wins: p.wins ?? 0, totalPoints: p.total_points, balance: p.balance, todayPoints: todayById.get(p.id) ?? 0, avatarUrl: avatarUrl(p.id, avById.get(p.id)) })),
         settings: publicSettings(settings, items),
-        grades: GRADES
+        grades: GRADES,
+        speak: !speakProbe.error // latihan speaking (migrasi 0035); false = belum dijalankan, tombol disembunyikan
       });
     }
 
@@ -1441,6 +1535,114 @@ Deno.serve(async (req) => {
       if (!room || room.status !== "finished") return fail("Hasil kompetisi itu tidak ditemukan.", 404);
       const results = await roomResults(admin, room);
       return json({ ok: true, room: roomRow(room, results.length), results });
+    }
+
+    // ------------------------------------------------------------ speaking: mulai percakapan baru
+    if (action === "speak_start") {
+      const auth = await checkPlayerPin(admin, body.playerId, body.pin);
+      if (auth instanceof Response) return auth;
+      const p = auth.player;
+      if (!validSpeakScenario(body.scenario)) return fail("Pilih skenario percakapan.");
+      const scenario: string = body.scenario;
+      const topic = scenario === "custom" ? cleanLine(body.topic, 100) : "";
+      if (scenario === "custom" && topic.length < 3) return fail("Tulis topik percakapan (minimal 3 karakter).");
+      const lang = body.lang === "en" ? "en" : "id";
+      const since = speakSince();
+      const day = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
+      const [recent, active] = await Promise.all([
+        admin.from("study_speak_sessions").select("id", { count: "exact", head: true }).eq("player_id", p.id).gte("created_at", day),
+        admin.from("study_speak_sessions").select("id").eq("player_id", p.id).is("ended_at", null).gte("updated_at", since).order("updated_at", { ascending: true })
+      ]);
+      if (recent.error || active.error) return speakMissing(recent.error ?? active.error) ? speakUnavailable() : fail((recent.error ?? active.error)!.message, 500);
+      if ((recent.count ?? 0) >= SPEAK_SESSIONS_PER_DAY) return fail(`Batas harian tercapai: maksimal ${SPEAK_SESSIONS_PER_DAY} percakapan baru per pemain dalam 24 jam.`, 429, { dailyLimit: true });
+      const limit = await checkSpeakLimits(admin, p.id);
+      if (limit) return limit;
+      const made = await askSpeakTutor(admin, p, { scenario, topic, lang }, [], null, parseEngine(body.engine));
+      if ("error" in made) return fail(`Tutor AI belum bisa memulai. ${made.error}`.trim(), 502, { generationFailed: true });
+      // sesi berjalan melebihi batas: yang paling lama diakhiri otomatis
+      const running = (active.data ?? []) as Row[];
+      if (running.length >= SPEAK_MAX_ACTIVE) {
+        const old = running.slice(0, running.length - SPEAK_MAX_ACTIVE + 1).map((r) => r.id);
+        await admin.from("study_speak_sessions").update({ ended_at: new Date().toISOString() }).in("id", old);
+      }
+      const { data: s, error } = await admin
+        .from("study_speak_sessions")
+        .insert({ player_id: p.id, scenario, topic, title: scenario === "custom" ? topic : scenario, grade: p.grade, class_level: p.class_level ?? null, provider: made.provider })
+        .select("*")
+        .single();
+      if (error || !s) return speakMissing(error) ? speakUnavailable() : fail(error?.message || "Gagal membuat percakapan.", 500);
+      const { data: t, error: terr } = await admin.from("study_speak_turns").insert({ session_id: s.id, idx: 0, role: "ai", body: made.reply }).select("*").single();
+      if (terr || !t) return fail(terr?.message || "Gagal menyimpan percakapan.", 500);
+      if (Math.random() < 0.05) await admin.rpc("study_speak_purge", { p_days: SPEAK_KEEP_DAYS });
+      return json({ ok: true, session: speakSessionRow(s), turns: [speakTurnRow(t)] });
+    }
+
+    // ------------------------------------------------------------ speaking: satu giliran (ucapan pemain -> balasan tutor + koreksi)
+    if (action === "speak_turn") {
+      const auth = await checkPlayerPin(admin, body.playerId, body.pin);
+      if (auth instanceof Response) return auth;
+      const p = auth.player;
+      const loaded = await loadSpeakSession(admin, body.sessionId, p.id);
+      if (loaded instanceof Response) return loaded;
+      const sess = loaded.session;
+      if (sess.ended_at) return fail("Percakapan ini sudah diakhiri.", 409, { ended: true });
+      if ((sess.user_turns ?? 0) >= SPEAK_MAX_TURNS) return fail(`Percakapan ini sudah mencapai ${SPEAK_MAX_TURNS} giliran. Mulai percakapan baru.`, 409, { sessionFull: true });
+      const text = cleanSpeakText(body.text);
+      if (text.length < 1) return fail("Ucapan kosong. Bicara atau ketik dulu.");
+      const limit = await checkSpeakLimits(admin, p.id);
+      if (limit) return limit;
+      const { data: rows, error: herr } = await admin.from("study_speak_turns").select("idx,role,body").eq("session_id", sess.id).order("idx", { ascending: true });
+      if (herr) return speakMissing(herr) ? speakUnavailable() : fail(herr.message, 500);
+      const history = ((rows ?? []) as Row[]).map((r) => ({ role: r.role as "user" | "ai", body: String(r.body) }));
+      const nextIdx = ((rows ?? []) as Row[]).reduce((m, r) => Math.max(m, r.idx), -1) + 1;
+      const lang = body.lang === "en" ? "en" : "id";
+      const made = await askSpeakTutor(admin, p, { scenario: sess.scenario, topic: sess.topic ?? "", lang }, history, text, parseEngine(body.engine));
+      if ("error" in made) return fail(`Tutor AI belum menjawab. ${made.error}`.trim(), 502, { generationFailed: true });
+      const { error: ierr } = await admin.from("study_speak_turns").insert([
+        { session_id: sess.id, idx: nextIdx, role: "user", body: text, correction: made.correction || null, tip: made.tip || null },
+        { session_id: sess.id, idx: nextIdx + 1, role: "ai", body: made.reply }
+      ]);
+      if (ierr) return fail(ierr.code === "23505" ? "Ada ucapan lain yang sedang diproses. Coba lagi." : ierr.message, ierr.code === "23505" ? 409 : 500);
+      const userTurns = (sess.user_turns ?? 0) + 1;
+      await admin.from("study_speak_sessions").update({ user_turns: userTurns, updated_at: new Date().toISOString(), provider: made.provider }).eq("id", sess.id);
+      return json({
+        ok: true,
+        userTurn: { idx: nextIdx, role: "user", body: text, correction: made.correction || null, tip: made.tip || null },
+        aiTurn: { idx: nextIdx + 1, role: "ai", body: made.reply, correction: null, tip: null },
+        userTurns,
+        full: userTurns >= SPEAK_MAX_TURNS
+      });
+    }
+
+    // ------------------------------------------------------------ speaking: akhiri / hapus / daftar / buka
+    if (action === "speak_end" || action === "speak_delete") {
+      const auth = await checkPlayerPin(admin, body.playerId, body.pin);
+      if (auth instanceof Response) return auth;
+      const loaded = await loadSpeakSession(admin, body.sessionId, auth.player.id);
+      if (loaded instanceof Response) return loaded;
+      const q = admin.from("study_speak_sessions");
+      const { error } = action === "speak_delete" ? await q.delete().eq("id", loaded.session.id) : await q.update({ ended_at: loaded.session.ended_at ?? new Date().toISOString() }).eq("id", loaded.session.id);
+      if (error) return fail(error.message, 500);
+      return json({ ok: true });
+    }
+
+    if (action === "speak_list") {
+      const auth = await checkPlayerPin(admin, body.playerId, body.pin);
+      if (auth instanceof Response) return auth;
+      if (Math.random() < 0.1) await admin.rpc("study_speak_purge", { p_days: SPEAK_KEEP_DAYS });
+      const { data, error } = await admin.from("study_speak_sessions").select("*").eq("player_id", auth.player.id).gte("updated_at", speakSince()).order("updated_at", { ascending: false }).limit(SPEAK_LIST_MAX);
+      if (error) return speakMissing(error) ? speakUnavailable() : fail(error.message, 500);
+      return json({ ok: true, sessions: ((data ?? []) as Row[]).map(speakSessionRow), keepDays: SPEAK_KEEP_DAYS });
+    }
+
+    if (action === "speak_get") {
+      const auth = await checkPlayerPin(admin, body.playerId, body.pin);
+      if (auth instanceof Response) return auth;
+      const loaded = await loadSpeakSession(admin, body.sessionId, auth.player.id);
+      if (loaded instanceof Response) return loaded;
+      const { data, error } = await admin.from("study_speak_turns").select("*").eq("session_id", loaded.session.id).order("idx", { ascending: true });
+      if (error) return fail(error.message, 500);
+      return json({ ok: true, session: speakSessionRow(loaded.session), turns: ((data ?? []) as Row[]).map(speakTurnRow) });
     }
 
     return fail("action tidak dikenal.", 400);

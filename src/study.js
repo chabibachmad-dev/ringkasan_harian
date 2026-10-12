@@ -10,6 +10,7 @@ import { fileToAvatarBase64 } from "./study-avatar.js";
 import { renderAiMarkdown, typesetMath } from "./markdown.js";
 import { buildStudyPdf, shareOrSaveStudyPdf, buildMaterialPdf, shareOrSaveMaterialPdf, buildRoomPdf, shareOrSaveRoomPdf } from "./study-pdf.js";
 import { pointsFormula, studyCardFileName } from "./study-text.js";
+import { recognitionSupported, synthSupported, startListening, speakText, stopSpeaking } from "./study-voice.js";
 import { renderLessonCard, renderRoomCard, shareOrSaveCard } from "./study-card.js";
 import { allowedClasses, allowedMaterialGrades, classesOf, computePoints, formatClock, gradeText, PRACTICE_QUESTIONS as PRACTICE_COUNT, timeLimitSeconds } from "../supabase/functions/_shared/study-core.ts";
 
@@ -111,6 +112,7 @@ const CUSTOM = "__custom";
 // view: "home" | "profile" | "quiz" | "result". PIN hanya hidup di memori (hilang saat layar Study ditinggalkan).
 const S = {
   notif: { unread: 0, items: [], loading: false, error: "", available: true, forId: "" }, // notifikasi suka & komentar (migrasi 0034)
+  speak: null, // latihan speaking: { player, creds, list, session, turns, ... } (migrasi 0035)
   boardMode: "total", // papan leaderboard: "total" | "today" (poin didapat hari ini)
   avatarBusy: false,
   avatarMsg: "",
@@ -192,6 +194,12 @@ export function initStudy(context) {
   $("study-body")?.addEventListener("click", onBodyClick);
   $("study-body")?.addEventListener("change", onBodyChange);
   $("study-body")?.addEventListener("input", onBodyInput);
+  $("study-body")?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.isComposing && e.target?.id === "study-speak-input") {
+      e.preventDefault();
+      speakSend();
+    }
+  });
   // foto yang gagal dimuat (file hilang / offline): kembali ke huruf awal
   $("study-body")?.addEventListener(
     "error",
@@ -220,6 +228,8 @@ export function hideStudyScreen() {
   S.quiz = null;
   S.stack = [];
   S.view = "home";
+  stopSpeakIO();
+  S.speak = null;
   stopPoll();
   syncQuizTimer();
   syncNotif();
@@ -236,6 +246,7 @@ export function showStudyScreen() {
   S.pub = null;
   S.rr = null;
   S.room = null;
+  S.speak = null;
   S.stack = [];
   S.material = null;
   S.feed = newFeed(null, null);
@@ -277,6 +288,23 @@ function onBack() {
     return;
   }
   if (S.view === "room") return leaveRoomView();
+  if (S.view === "speak") {
+    stopSpeakIO();
+    if (!popView()) {
+      S.view = "home";
+      render();
+    } else if (S.view === "speaklist") loadSpeakList();
+    return;
+  }
+  if (S.view === "speaklist") {
+    stopSpeakIO();
+    S.speak = null;
+    if (!popView()) {
+      S.view = "home";
+      render();
+    }
+    return;
+  }
   if (["material", "public", "roomresult", "rooms", "notif"].includes(S.view)) {
     if (!popView()) {
       S.view = "home";
@@ -350,7 +378,9 @@ function setTopbar() {
       rooms: L("study_rooms_title"),
       room: L("study_room_title"),
       roomresult: L("study_room_result_title"),
-      notif: L("study_notif_title")
+      notif: L("study_notif_title"),
+      speaklist: L("study_speak_title"),
+      speak: L("study_speak_title")
     };
     title.textContent = titles[S.view] || L("study_title");
   }
@@ -371,6 +401,8 @@ function render() {
   else if (S.view === "room") renderRoom(body);
   else if (S.view === "roomresult") renderRoomResult(body);
   else if (S.view === "notif") renderNotif(body);
+  else if (S.view === "speaklist") renderSpeakList(body);
+  else if (S.view === "speak") renderSpeakChat(body);
   typesetMath(body).catch(() => {});
   syncQuizTimer();
   syncPoll();
@@ -483,6 +515,7 @@ function renderHome(body) {
       <button type="button" class="secondary-btn" data-act="new-player">${esc(L("study_new_player"))}</button>
       <button type="button" class="secondary-btn" data-act="new-lesson">${esc(L("study_new_lesson"))}</button>
       <button type="button" class="secondary-btn" data-act="rooms">${esc(L("study_rooms_btn"))}</button>
+      ${S.overview?.speak ? `<button type="button" class="secondary-btn" data-act="speak">${esc(L("study_speak_btn"))}</button>` : ""}
     </div>
     <div class="study-tabs" role="tablist">${tab("timeline", L("study_tab_timeline"))}${tab("board", L("study_tab_board"))}${tab("materi", L("study_tab_materi"))}</div>
     ${S.loading && S.tab === "board" ? `<p class="status-text">${esc(L("study_loading"))}</p>` : ""}
@@ -694,6 +727,8 @@ function renderResult(body) {
 
 // ---------------------------------------------------------------- aksi di halaman
 function onBodyChange(e) {
+  const pref = e.target.closest?.("input[data-speak-pref]");
+  if (pref) return onSpeakPref(pref);
   const input = e.target.closest?.('input[type="radio"][data-q]');
   if (!input || !S.quiz) return;
   const idx = Number(input.dataset.q);
@@ -723,6 +758,15 @@ async function onBodyClick(e) {
     S.boardMode = btn.dataset.mode === "today" ? "today" : "total";
     return render();
   }
+  if (act === "speak") return openSpeak();
+  if (act === "speak-new") return openSpeakNew();
+  if (act === "speak-open") return openSpeakSession(id);
+  if (act === "speak-del") return deleteSpeakSession(id);
+  if (act === "speak-reload") return loadSpeakList();
+  if (act === "speak-mic") return speakMic();
+  if (act === "speak-send") return speakSend();
+  if (act === "speak-replay") return speakReplay(btn.dataset.i);
+  if (act === "speak-end") return endSpeakSession();
   if (act === "rooms") return openRooms();
   if (act === "rooms-refresh") return loadRooms();
   if (act === "room-new") return openRoomCreate();
@@ -2052,6 +2096,10 @@ async function toggleComments(key) {
 }
 
 function onBodyInput(e) {
+  if (e.target?.id === "study-speak-input" && S.speak) {
+    S.speak.draft = e.target.value;
+    return;
+  }
   const ta = e.target.closest?.("textarea[data-draft]");
   const feed = shownFeed();
   if (ta && feed) feed.drafts[ta.dataset.draft] = ta.value;
@@ -3381,4 +3429,419 @@ async function onSettingsClick(e) {
       reloadSettings();
     }
   }
+}
+
+// ================================================================ Speaking (latihan mengobrol bahasa Inggris dengan tutor AI)
+// Suara memakai fitur peramban (study-voice.js); tutor = aksi speak_* di Edge Function. Tanpa poin, riwayat 7 hari.
+const SPEAK_SCENARIOS = ["free", "intro", "school", "restaurant", "shopping", "travel", "hobbies", "interview"];
+const SPEAK_KEEP_DAYS = 7;
+const SPEAK_PREF_KEY = "study_speak_prefs_v1";
+const SPEAKER_SVG = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 5 6 9H3v6h3l5 4V5z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M18.5 5.5a9 9 0 0 1 0 13"/></svg>';
+const MIC_SVG = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0"/><path d="M12 18v3"/></svg>';
+
+function readSpeakPrefs() {
+  try {
+    const p = JSON.parse(localStorage.getItem(SPEAK_PREF_KEY) || "{}");
+    return { voice: p.voice !== false, auto: p.auto !== false };
+  } catch (_e) {
+    return { voice: true, auto: true };
+  }
+}
+function saveSpeakPrefs(prefs) {
+  try {
+    localStorage.setItem(SPEAK_PREF_KEY, JSON.stringify(prefs));
+  } catch (_e) {
+    /* penyimpanan tidak tersedia: abaikan */
+  }
+}
+
+const speakLabel = (s) => (s.scenario === "custom" ? s.topic || L("study_speak_sc_custom") : L(`study_speak_sc_${s.scenario}`));
+const speakLang = () => (ctx.getLang() === "id" ? "id" : "en");
+
+function stopSpeakIO() {
+  const sp = S.speak;
+  if (sp?.recog) {
+    try {
+      sp.recog.stop();
+    } catch (_e) {
+      /* abaikan */
+    }
+    sp.recog = null;
+    sp.listening = false;
+  }
+  stopSpeaking();
+}
+
+// Panggil aksi speak_* dengan kredensial pemain yang sedang berlatih.
+function speakCall(action, extra = {}) {
+  const sp = S.speak;
+  return studyCall(action, { playerId: sp.player.id, pin: sp.creds.pin, ...extra });
+}
+
+function speakAuthFailed(res) {
+  if (!(res.pinWrong || res.locked)) return false;
+  stopSpeakIO();
+  S.viewer = null;
+  S.speak = null;
+  S.stack = [];
+  S.view = "home";
+  window.alert(errText(res));
+  render();
+  loadOverview();
+  return true;
+}
+
+// ---- masuk: pemain yang sudah login langsung, selain itu pilih pemain + PIN
+async function openSpeak() {
+  const players = S.overview?.players || [];
+  if (!players.length) return window.alert(L("study_no_players"));
+  const me = loggedIn(players);
+  if (me) return enterSpeak(me, S.viewer, null);
+  const first = players[0];
+  const out = await openFormDialog({
+    title: L("study_speak_title"),
+    intro: L("study_speak_intro", { d: SPEAK_KEEP_DAYS }),
+    okLabel: L("study_speak_open"),
+    cancelLabel: L("study_cancel"),
+    busyLabel: L("study_loading"),
+    fields: [
+      { key: "playerId", label: L("study_player"), type: "select", value: first.id, options: players.map((p) => ({ value: p.id, label: `${p.name} (${gradeText(p.grade, p.classLevel)})` })) },
+      { key: "pin", label: L("study_pin"), type: "pin" }
+    ],
+    extra: [
+      {
+        label: L("study_forgot_pin"),
+        onClick: (v) => {
+          const pl = players.find((p) => p.id === v.playerId);
+          if (pl) openResetPin(pl);
+        }
+      }
+    ],
+    onSubmit: async (v) => {
+      if (!validCred(v.pin)) return { ok: false, error: L("study_pin_invalid") };
+      const res = await studyCall("speak_list", { playerId: v.playerId, pin: v.pin });
+      if (!res.ok) return { ok: false, error: errText(res) };
+      return { ok: true, value: { res, player: players.find((p) => p.id === v.playerId), pin: v.pin } };
+    }
+  });
+  if (!out) return;
+  await adoptLogin(out.player, out.pin);
+  enterSpeak(out.player, S.viewer, out.res);
+}
+
+function enterSpeak(player, creds, firstList) {
+  pushView();
+  S.speak = { player, creds, list: [], loaded: false, loading: false, error: "", unavailable: false, session: null, turns: [], busy: false, pending: null, listening: false, heard: "", draft: "", status: "", recog: null, prefs: readSpeakPrefs() };
+  S.view = "speaklist";
+  render();
+  window.scrollTo(0, 0);
+  if (firstList) applySpeakList(firstList);
+  else loadSpeakList();
+}
+
+function applySpeakList(res) {
+  const sp = S.speak;
+  sp.loading = false;
+  sp.loaded = true;
+  sp.error = "";
+  sp.unavailable = !!res.unavailable;
+  sp.list = res.sessions || [];
+  if (S.view === "speaklist") render();
+}
+
+async function loadSpeakList() {
+  const sp = S.speak;
+  if (!sp || sp.loading) return;
+  sp.loading = true;
+  if (!sp.loaded) render();
+  const res = await speakCall("speak_list");
+  if (S.speak !== sp) return;
+  if (!res.ok) {
+    if (speakAuthFailed(res)) return;
+    sp.loading = false;
+    sp.error = errText(res);
+    if (S.view === "speaklist") render();
+    return;
+  }
+  applySpeakList(res);
+}
+
+function renderSpeakList(body) {
+  const sp = S.speak;
+  if (!sp) return;
+  const day = 24 * 3600 * 1000;
+  const rows = sp.list
+    .map((s) => {
+      const left = Math.max(0, Math.ceil((new Date(s.expiresAt).getTime() - Date.now()) / day));
+      return `<div class="study-card study-speak-row" data-sid="${esc(s.id)}">
+        <div class="study-row-title">${esc(speakLabel(s))}${s.endedAt ? ` <small class="study-badge">${esc(L("study_speak_ended"))}</small>` : ""}</div>
+        <div class="study-row-meta">${esc(L("study_speak_turns", { n: s.userTurns, m: s.maxTurns }))} · ${esc(fmtDateTime(s.updatedAt))} · ${esc(left <= 1 ? L("study_speak_expires_today") : L("study_speak_expires", { d: left }))}</div>
+        <div class="study-actions">
+          <button type="button" class="primary-btn" data-act="speak-open" data-id="${esc(s.id)}">${esc(L("study_speak_open"))}</button>
+          <button type="button" class="secondary-btn" data-act="speak-del" data-id="${esc(s.id)}">${esc(L("study_speak_delete"))}</button>
+        </div>
+      </div>`;
+    })
+    .join("");
+  body.innerHTML = `
+    <p class="study-hint study-hint--top">${esc(L("study_speak_intro", { d: SPEAK_KEEP_DAYS }))}</p>
+    ${sp.unavailable ? `<div class="study-warn" role="status">${esc(L("study_speak_unavailable"))}</div>` : `<div class="study-actions"><button type="button" class="primary-btn" data-act="speak-new">${esc(L("study_speak_new"))}</button></div>`}
+    ${sp.loading && !sp.loaded ? `<p class="status-text">${esc(L("study_loading"))}</p>` : ""}
+    ${sp.error ? `<p class="status-text">${esc(sp.error)} <button type="button" class="secondary-btn" data-act="speak-reload">${esc(L("study_reload"))}</button></p>` : ""}
+    ${sp.loaded && !sp.unavailable ? (sp.list.length ? `<h3 class="study-h">${esc(L("study_speak_history", { d: SPEAK_KEEP_DAYS }))}</h3>${rows}` : `<p class="status-text">${esc(L("study_speak_empty"))}</p>`) : ""}`;
+}
+
+// ---- percakapan baru
+function openSpeakNew() {
+  const sp = S.speak;
+  if (!sp) return;
+  return openFormDialog({
+    title: L("study_speak_new_title"),
+    okLabel: L("study_speak_new_ok"),
+    cancelLabel: L("study_cancel"),
+    busyLabel: L("study_speak_starting"),
+    fields: [
+      {
+        key: "scenario",
+        label: L("study_speak_scenario"),
+        type: "select",
+        value: "free",
+        options: [...SPEAK_SCENARIOS.map((id) => ({ value: id, label: L(`study_speak_sc_${id}`) })), { value: "custom", label: L("study_speak_sc_custom") }]
+      },
+      { key: "topic", label: L("study_speak_topic_label"), type: "text", maxlength: 100, placeholder: L("study_speak_topic_ph"), show: (v) => v.scenario === "custom" }
+    ],
+    onSubmit: async (v) => {
+      const topic = String(v.topic || "").trim();
+      if (v.scenario === "custom" && topic.length < 3) return { ok: false, error: L("study_speak_topic_required") };
+      const res = await speakCall("speak_start", { scenario: v.scenario, topic, lang: speakLang(), engine: "auto" });
+      if (!res.ok) return { ok: false, error: errText(res) };
+      return { ok: true, value: res };
+    }
+  }).then((out) => {
+    if (!out || S.speak !== sp) return;
+    showSpeakChat(out.session, out.turns);
+    if (sp.prefs.voice && out.turns.length) speakText(out.turns[out.turns.length - 1].body);
+  });
+}
+
+function showSpeakChat(session, turns) {
+  const sp = S.speak;
+  pushView();
+  sp.session = session;
+  sp.turns = turns;
+  sp.busy = false;
+  sp.pending = null;
+  sp.listening = false;
+  sp.heard = "";
+  sp.draft = "";
+  sp.status = "";
+  S.view = "speak";
+  render();
+  window.scrollTo(0, 0);
+}
+
+async function openSpeakSession(id) {
+  const sp = S.speak;
+  if (!sp) return;
+  const res = await speakCall("speak_get", { sessionId: id });
+  if (S.speak !== sp) return;
+  if (!res.ok) {
+    if (speakAuthFailed(res)) return;
+    window.alert(errText(res));
+    if (res.status === 404) loadSpeakList();
+    return;
+  }
+  showSpeakChat(res.session, res.turns);
+}
+
+async function deleteSpeakSession(id) {
+  const sp = S.speak;
+  if (!sp || !window.confirm(L("study_speak_delete_confirm"))) return;
+  const res = await speakCall("speak_delete", { sessionId: id });
+  if (S.speak !== sp) return;
+  if (!res.ok && res.status !== 404) {
+    if (speakAuthFailed(res)) return;
+    return window.alert(errText(res));
+  }
+  sp.list = sp.list.filter((s) => s.id !== id);
+  if (S.view === "speaklist") render();
+}
+
+// ---- layar percakapan. Kerangka dibangun sekali; isi diperbarui lewat paintSpeak() supaya kotak ketik tidak kehilangan fokus.
+function renderSpeakChat(body) {
+  const sp = S.speak;
+  if (!sp?.session) return;
+  const micOk = recognitionSupported();
+  body.innerHTML = `
+    <div class="study-card study-speak-head">
+      <div class="study-row-title">${esc(speakLabel(sp.session))}</div>
+      <div class="study-row-meta" id="study-speak-count"></div>
+    </div>
+    <div id="study-speak-log" class="study-speak-log" role="log" aria-live="polite"></div>
+    <p id="study-speak-status" class="study-hint" role="status"></p>
+    <div id="study-speak-composer" class="study-speak-composer">
+      <input id="study-speak-input" type="text" maxlength="300" autocomplete="off" autocapitalize="sentences" spellcheck="false" lang="en" placeholder="${esc(L("study_speak_input_ph"))}" aria-label="${esc(L("study_speak_input_ph"))}">
+      ${micOk ? `<button type="button" class="secondary-btn study-speak-mic" id="study-speak-mic" data-act="speak-mic" aria-pressed="false">${MIC_SVG}<span>${esc(L("study_speak_mic"))}</span></button>` : ""}
+      <button type="button" class="primary-btn" id="study-speak-send" data-act="speak-send">${esc(L("study_speak_send"))}</button>
+    </div>
+    <div class="study-speak-opts">
+      ${synthSupported() ? `<label><input type="checkbox" data-speak-pref="voice" ${sp.prefs.voice ? "checked" : ""}> ${esc(L("study_speak_voice"))}</label>` : ""}
+      ${micOk ? `<label><input type="checkbox" data-speak-pref="auto" ${sp.prefs.auto ? "checked" : ""}> ${esc(L("study_speak_auto"))}</label>` : ""}
+    </div>
+    ${micOk ? "" : `<p class="study-hint">${esc(L("study_speak_mic_unsupported"))}</p>`}
+    <p class="study-hint">${esc(L("study_speak_tip"))}</p>
+    <div class="study-actions"><button type="button" class="secondary-btn" id="study-speak-end" data-act="speak-end">${esc(L("study_speak_end"))}</button></div>`;
+  const input = $("study-speak-input");
+  if (input) input.value = sp.draft || "";
+  paintSpeak();
+}
+
+function bubbleHtml(t) {
+  if (t.role === "ai") {
+    return `<div class="study-speak-msg is-ai"><div class="study-speak-who">${esc(L("study_speak_tutor"))}</div>
+      <div class="study-speak-bubble"><span>${esc(t.body)}</span>${synthSupported() ? `<button type="button" class="study-speak-replay" data-act="speak-replay" data-i="${t.idx}" aria-label="${esc(L("study_speak_replay"))}">${SPEAKER_SVG}</button>` : ""}</div></div>`;
+  }
+  const fix = t.correction ? `<div class="study-speak-fix"><strong>${esc(L("study_speak_better"))}</strong> ${esc(t.correction)}${t.tip ? `<small>${esc(t.tip)}</small>` : ""}</div>` : "";
+  return `<div class="study-speak-msg is-user"><div class="study-speak-who">${esc(L("study_speak_you"))}</div><div class="study-speak-bubble"><span>${esc(t.body)}</span></div>${fix}</div>`;
+}
+
+function paintSpeak() {
+  const sp = S.speak;
+  const log = $("study-speak-log");
+  if (!sp?.session || !log) return;
+  const ended = !!sp.session.endedAt;
+  const full = (sp.session.userTurns ?? 0) >= (sp.session.maxTurns ?? 30);
+  let html = sp.turns.map(bubbleHtml).join("");
+  if (sp.pending) html += bubbleHtml({ role: "user", body: sp.pending });
+  if (sp.busy) html += `<div class="study-speak-msg is-ai is-thinking"><div class="study-speak-bubble"><span>${esc(L("study_speak_thinking"))}</span></div></div>`;
+  log.innerHTML = html;
+  const cnt = $("study-speak-count");
+  if (cnt) cnt.textContent = L("study_speak_turns", { n: sp.session.userTurns ?? 0, m: sp.session.maxTurns ?? 30 });
+  const status = $("study-speak-status");
+  if (status) status.textContent = sp.listening ? L("study_speak_listening") : sp.status || (ended ? L("study_speak_view_only") : full ? L("study_speak_full", { m: sp.session.maxTurns ?? 30 }) : "");
+  const locked = ended || full;
+  const input = $("study-speak-input");
+  const send = $("study-speak-send");
+  const mic = $("study-speak-mic");
+  if (input) input.disabled = locked || sp.busy;
+  if (send) send.disabled = locked || sp.busy;
+  if (mic) {
+    mic.disabled = locked || sp.busy;
+    mic.setAttribute("aria-pressed", sp.listening ? "true" : "false");
+    mic.classList.toggle("is-on", !!sp.listening);
+    const label = mic.querySelector("span");
+    if (label) label.textContent = sp.listening ? L("study_speak_mic_stop") : L("study_speak_mic");
+  }
+  const endBtn = $("study-speak-end");
+  if (endBtn) endBtn.hidden = ended;
+  const comp = $("study-speak-composer");
+  if (comp) comp.hidden = ended;
+  const last = log.lastElementChild;
+  if (last && last.scrollIntoView) last.scrollIntoView({ block: "nearest" });
+}
+
+async function speakSend() {
+  const sp = S.speak;
+  const input = $("study-speak-input");
+  if (!sp?.session || sp.busy || sp.session.endedAt || !input) return;
+  if (sp.recog) {
+    try {
+      sp.recog.stop();
+    } catch (_e) {
+      /* abaikan */
+    }
+  }
+  stopSpeaking();
+  const text = String(input.value || "").replace(/\s+/g, " ").trim();
+  if (!text) return;
+  const sid = sp.session.id;
+  sp.busy = true;
+  sp.pending = text;
+  sp.status = "";
+  paintSpeak();
+  const res = await speakCall("speak_turn", { sessionId: sid, text, lang: speakLang(), engine: "auto" });
+  if (S.speak !== sp || sp.session?.id !== sid) return;
+  sp.busy = false;
+  sp.pending = null;
+  if (!res.ok) {
+    if (speakAuthFailed(res)) return;
+    if (res.ended) sp.session.endedAt = sp.session.endedAt || new Date().toISOString();
+    if (res.sessionFull) sp.session.userTurns = sp.session.maxTurns;
+    sp.status = L("study_speak_failed", { e: errText(res) });
+    return S.view === "speak" ? paintSpeak() : undefined;
+  }
+  sp.turns.push(res.userTurn, res.aiTurn);
+  sp.session.userTurns = res.userTurns;
+  sp.status = "";
+  sp.draft = "";
+  const box = $("study-speak-input");
+  if (box) box.value = "";
+  if (S.view === "speak") paintSpeak();
+  if (sp.prefs.voice) speakText(res.aiTurn.body);
+}
+
+function speakMic() {
+  const sp = S.speak;
+  if (!sp?.session || sp.busy || sp.session.endedAt) return;
+  if (sp.listening) {
+    sp.recog?.stop();
+    return;
+  }
+  if (!recognitionSupported()) {
+    sp.status = L("study_speak_mic_unsupported");
+    return paintSpeak();
+  }
+  stopSpeaking();
+  sp.status = "";
+  sp.heard = "";
+  sp.listening = true;
+  paintSpeak();
+  sp.recog = startListening({
+    lang: "en-US",
+    onText: (txt) => {
+      if (S.speak !== sp) return;
+      sp.heard = txt;
+      sp.draft = txt;
+      const box = $("study-speak-input");
+      if (box) box.value = txt;
+    },
+    onError: (code) => {
+      if (S.speak !== sp) return;
+      sp.status = code === "denied" ? L("study_speak_mic_denied") : code === "nospeech" ? L("study_speak_mic_nospeech") : code === "unsupported" ? L("study_speak_mic_unsupported") : L("study_speak_mic_error", { e: code });
+    },
+    onEnd: () => {
+      if (S.speak !== sp) return;
+      sp.listening = false;
+      sp.recog = null;
+      if (S.view === "speak") paintSpeak();
+      if (sp.heard && sp.prefs.auto) speakSend();
+    }
+  });
+}
+
+function speakReplay(i) {
+  const t = S.speak?.turns.find((x) => x.idx === Number(i));
+  if (t) speakText(t.body);
+}
+
+async function endSpeakSession() {
+  const sp = S.speak;
+  if (!sp?.session || sp.session.endedAt || !window.confirm(L("study_speak_end_confirm"))) return;
+  stopSpeakIO();
+  const res = await speakCall("speak_end", { sessionId: sp.session.id });
+  if (S.speak !== sp) return;
+  if (!res.ok) {
+    if (speakAuthFailed(res)) return;
+    return window.alert(errText(res));
+  }
+  sp.session.endedAt = new Date().toISOString();
+  if (S.view === "speak") paintSpeak();
+}
+
+function onSpeakPref(input) {
+  const sp = S.speak;
+  if (!sp) return;
+  sp.prefs[input.dataset.speakPref] = input.checked;
+  saveSpeakPrefs(sp.prefs);
+  if (input.dataset.speakPref === "voice" && !input.checked) stopSpeaking();
 }
