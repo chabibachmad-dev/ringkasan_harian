@@ -431,23 +431,34 @@ export async function openKbIndex({ file, log = console, chunkChars = 1000, over
   //   2. hasil teratas mengisi ±65% anggaran, lalu potongan SESUDAH/SEBELUM 3 hasil teratas
   //      (dan 2 potongan sesudah hasil #1) ikut disertakan (daftar yang berlanjut ke potongan berikutnya tidak terpotong);
   //   3. potongan yang bersebelahan digabung jadi satu blok berurutan (awalan overlap dibuang).
-  function search(question, { budgetChars = 5000, maxChunks = 8, neighbors = true, minCoverage = defaults.minCoverage } = {}) {
+  function search(question, { budgetChars = 5000, maxChunks = 8, neighbors = true, minCoverage = defaults.minCoverage, titles = null } = {}) {
     const tokens = tokenizeQuery(question);
     if (tokens.length === 0) return [];
     // Dua pencarian digabung dengan Reciprocal Rank Fusion:
     //   A. teks asli (kata persis / awalan) -- tepat untuk istilah, nomor pasal, angka;
     //   B. batang kata (stem) -- menjembatani imbuhan: menyetor ~ setoran ~ penyetoran.
     const limit = Math.max(maxChunks * 5, 30);
+    // Batasi ke dokumen tertentu (potongan judul, tanpa peduli huruf besar/kecil), mis. dokumen acuan sebuah grup.
+    const titleLike = (Array.isArray(titles) ? titles : []).map((t) => String(t).trim().toLowerCase()).filter(Boolean).map((t) => `%${t}%`);
+    const filtered = (ftsTable, prep) => {
+      if (titleLike.length === 0) return prep;
+      const cond = titleLike.map(() => "lower(d.title) like ?").join(" or ");
+      const sql = `select c.doc_id as doc_id, d.title as title, c.page as page, c.seq as seq, c.text as text, c.ov as ov, c.toc as toc, c.head as head, c.bad as bad, bm25(${ftsTable}) as score
+       from ${ftsTable} join chunks c on c.id = ${ftsTable}.rowid join docs d on d.id = c.doc_id
+       where ${ftsTable} match ? and (${cond}) order by bm25(${ftsTable}) limit ?`;
+      const stmt = db.prepare(sql);
+      return { all: (match, lim) => stmt.all(match, ...titleLike, lim) };
+    };
     let rowsA = [];
     let rowsB = [];
     try {
-      rowsA = q.search.all(buildFtsQuery(tokens), limit);
+      rowsA = filtered("chunks_fts", q.search).all(buildFtsQuery(tokens), limit);
     } catch (e) {
       log.error?.("KB: pencarian FTS gagal:", e.message);
     }
     try {
       const stemQ = buildStemQuery(tokens);
-      if (stemQ) rowsB = q.searchStem.all(stemQ, limit);
+      if (stemQ) rowsB = filtered("chunks_stem_fts", q.searchStem).all(stemQ, limit);
     } catch (e) {
       log.error?.("KB: pencarian stem gagal:", e.message);
     }

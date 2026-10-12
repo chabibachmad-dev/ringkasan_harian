@@ -20,7 +20,14 @@ import {
   cleanMaterial,
   MATERIAL_MAX_CHARS,
   cleanLine,
-  MAX_QUESTIONS
+  MAX_QUESTIONS,
+  classesOf,
+  validClass,
+  levelRank,
+  allowedClasses,
+  isLevelAllowed,
+  gradeText,
+  gradeLong
 } from "../supabase/functions/_shared/study-core.ts";
 
 let fails = 0;
@@ -169,6 +176,32 @@ const sample = {
   check(huge && huge.content.length <= MATERIAL_MAX_CHARS, "materi dipotong sampai batas");
   check(cleanMaterial("# **Judul `tebal`**\n\n" + body, "f")?.title === "Judul tebal", "penanda markdown di judul dibuang");
   check(cleanMaterial("# " + "J".repeat(300) + "\n\n" + body, "f")?.title.length === 120, "judul dibatasi 120 karakter");
+}
+
+// ---------------------------------------------------------------- kelas
+check(eq(classesOf("SD"), [1, 2, 3, 4, 5, 6]) && eq(classesOf("SMP"), [7, 8, 9]) && eq(classesOf("SMA"), [10, 11, 12]), "kelas: SD 1-6, SMP 7-9, SMA 10-12");
+check(eq(classesOf("TK"), []) && eq(classesOf("S1"), []) && eq(classesOf("Umum"), []), "kelas: TK/S1/Umum tanpa kelas");
+check(validClass("SD", 6) && !validClass("SD", 7) && !validClass("SD", 0) && !validClass("SMP", 6) && validClass("SMP", 9) && validClass("SMA", 12) && !validClass("SMA", 13), "validClass: sesuai rentang tingkat");
+check(!validClass("SD", null) && !validClass("SD", "5") && !validClass("SD", 5.5) && validClass("TK", null) && validClass("Umum", undefined) && !validClass("S1", 1), "validClass: sekolah wajib kelas, lainnya harus tanpa kelas");
+check(levelRank("TK") === 0 && levelRank("SD", 1) === 1 && levelRank("SMA", 12) === 12 && levelRank("S1") === 13 && levelRank("S3") === 15 && levelRank("Umum") === -1, "levelRank: TK=0, kelas 1-12, S1-S3 = 13-15");
+check(eq(allowedClasses("SD", 5, "SD"), [5, 6]), "pemain SD 5: SD hanya kelas 5-6");
+check(eq(allowedClasses("SD", 5, "SMP"), [7, 8, 9]) && eq(allowedClasses("SD", 5, "SMA"), [10, 11, 12]), "pemain SD 5: SMP dan SMA semua kelas");
+check(eq(allowedClasses("SMP", 8, "SMP"), [8, 9]) && eq(allowedClasses("SMP", 8, "SD"), []), "pemain SMP 8: SMP 8-9, SD tidak boleh");
+check(eq(allowedClasses("SMA", 10, "SMA"), [10, 11, 12]), "pemain SMA 10: semua kelas SMA");
+check(eq(allowedClasses("SD", null, "SD"), [1, 2, 3, 4, 5, 6]) && eq(allowedClasses("Umum", null, "SD"), [1, 2, 3, 4, 5, 6]), "pemain tanpa kelas/Umum: hanya aturan tingkat");
+check(eq(allowedClasses("S1", null, "SMA"), []) && eq(allowedClasses("TK", null, "S1"), []), "tingkat tanpa kelas atau tak diizinkan -> daftar kosong");
+check(isLevelAllowed("SD", 5, "SD", 5) && isLevelAllowed("SD", 5, "SD", 6) && !isLevelAllowed("SD", 5, "SD", 4), "isLevelAllowed: SD 5 -> SD 5,6 ya; SD 4 tidak");
+check(isLevelAllowed("SD", 5, "SMP", 7) && !isLevelAllowed("SMP", 8, "SMP", 7) && isLevelAllowed("SMP", 8, "SMP", 9), "isLevelAllowed: antar kelas SMP");
+check(!isLevelAllowed("SD", 5, "SMP", null) && !isLevelAllowed("SD", 5, "SD", 8) && !isLevelAllowed("SD", 5, "TK", null), "isLevelAllowed: kelas wajib & harus cocok, TK ditolak");
+check(isLevelAllowed("SMA", 11, "Umum", null) && !isLevelAllowed("SMA", 11, "Umum", 3) && isLevelAllowed("SMA", 11, "S1", null) && !isLevelAllowed("SMA", 11, "S1", 1), "isLevelAllowed: Umum/S1 tanpa kelas");
+check(isLevelAllowed("Umum", null, "SD", 1) && isLevelAllowed("SD", null, "SD", 1), "isLevelAllowed: pemain tanpa kelas boleh kelas mana pun di tingkat yang boleh");
+check(gradeText("SD", 5) === "SD 5" && gradeText("TK", null) === "TK" && gradeLong("SMP", 8) === "SMP kelas 8" && gradeLong("Umum") === "Umum", "gradeText & gradeLong");
+{
+  const q = buildQuestionPrompt({ subject: "IPA", grade: "SD", classLevel: 5, level: "normal", count: 5 });
+  check(q.user.includes("SD kelas 5"), "prompt soal menyebut kelas");
+  check(!buildQuestionPrompt({ subject: "IPA", grade: "TK", level: "normal", count: 5 }).user.includes("kelas"), "prompt soal tanpa kelas tidak menyebut kelas");
+  const m = buildMaterialPrompt({ subject: "IPA", grade: "SMP", classLevel: 8, detail: "cahaya" });
+  check(m.user.includes("SMP kelas 8"), "prompt materi menyebut kelas");
 }
 
 // ---------------------------------------------------------------- poin (cermin fungsi SQL)

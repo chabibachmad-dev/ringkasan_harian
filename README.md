@@ -264,7 +264,7 @@ Menu **Study** di beranda: pemain mendaftar (nama, grade TK–S3/Umum, PIN), mem
 
 **Pasang (sekali saja):**
 
-1. Jalankan migrasi `0023_study.sql`, `0024_study_social.sql` (timeline: suka & komentar), dan `0025_study_materials.sql` (materi pelajaran + pencatat pemakaian AI), berurutan. Lewat SQL Editor, atau `npx supabase db push` untuk semuanya.
+1. Jalankan migrasi `0023_study.sql`, `0024_study_social.sql` (timeline: suka & komentar), `0025_study_materials.sql` (materi pelajaran + pencatat pemakaian AI), dan `0026_study_class.sql` (kelas SD/SMP/SMA), berurutan. Lewat SQL Editor, atau `npx supabase db push` untuk semuanya.
 2. Deploy fungsi baru: `npx supabase functions deploy study` (sama seperti fungsi lain).
 3. Deploy ulang fungsi `chat` (`npx supabase functions deploy chat`) karena `_shared/gemini.ts` ikut berubah, lalu push frontend ke GitHub seperti biasa.
 
@@ -277,6 +277,7 @@ Tidak ada secret baru. Fungsi `study` memakai kunci AI yang sudah ada (urutan: G
 - Poin dihitung oleh database, bukan AI: `poin dasar x (benar / jumlah soal) x bobot level`, dibulatkan. Contoh 15/15 di Easy = 100 x 80% = 80; Hard = 120. AI hanya membuat soal dan menulis pembahasan. Kunci jawaban tidak dikirim ke layar sebelum dikumpulkan.
 - Peringkat memakai **total poin yang pernah didapat** (tidak turun saat ditukar atau kena hukuman). Saldo yang bisa ditukar ditampilkan di profil pemain.
 - Grade materi: tidak boleh lebih rendah dari grade pemain (urutan TK < SD < SMP < SMA < S1 < S2 < S3). Pemain "Umum" boleh semua tingkat; materi "Umum" selalu boleh.
+- **Kelas**: SD, SMP, dan SMA punya pilihan kelas (SD 1-6, SMP 7-9, SMA 10-12; tingkat lain tanpa kelas). Dipilih saat membuat pemain baru, saat memulai pelajaran, dan saat membuat materi, lalu tampil sebagai "SD 5" di leaderboard, profil, timeline, komentar, materi, dan PDF; juga dikirim ke AI agar soal/materi pas dengan kelasnya. Untuk **pelajaran**, kelas juga tidak boleh lebih rendah dari kelas pemain (pemain SD 5 boleh SD 5-6, SMP 7-9, SMA 10-12, tapi bukan SD 1-4); **materi** bebas semua kelas. Salah pilih atau naik kelas: tombol **Ubah kelas** di profil (butuh PIN orang tua bila sudah dibuat, karena menurunkan kelas membuka materi yang lebih rendah). Pemain lama belum punya kelas sampai mereka mengaturnya lewat **Ubah kelas**; selama itu hanya aturan tingkat yang berlaku.
 - Tukar hadiah: poin langsung berkurang, status **Menunggu** sampai orang tua menandai **Sudah diberikan** (di Setting).
 - Hukuman: orang tua mengisi nama pemain, jumlah poin, dan alasan. Saldo tidak pernah turun di bawah 0 (bila diminta lebih besar, yang terpotong hanya sebesar saldo dan itu dijelaskan).
 - **Setting** (ikon roda gigi di halaman Study): poin dasar, bobot Easy/Normal/Hard, daftar mata pelajaran, tambah/ubah/hapus hadiah beserta ambang poinnya, hukuman, tandai hadiah diberikan, dan PIN orang tua.
@@ -293,4 +294,4 @@ Tidak ada secret baru. Fungsi `study` memakai kunci AI yang sudah ada (urutan: G
   - Materi dibuat AI, jadi periksa isinya sebelum dipakai belajar (ada pengingat di layar dan di PDF).
 - PDF hasil memakai font standar: teks Arab diganti `[teks Arab]` dan rumus ditulis sebagai teks biasa.
 
-**Uji:** `cd wa-bot && npm test` (logika murni), dan untuk database (pada DB kosong): `psql -d <db> -f supabase/migrations/0023_study.sql -f supabase/migrations/0024_study_social.sql -f supabase/migrations/0025_study_materials.sql -f supabase/tests/study_points.sql -f supabase/tests/study_social.sql -f supabase/tests/study_materials.sql` (kolom `gagal` harus 0 di ketiga tes).
+**Uji:** `cd wa-bot && npm test` (logika murni), dan untuk database (pada DB kosong): `psql -d <db> -f supabase/migrations/0023_study.sql -f supabase/migrations/0024_study_social.sql -f supabase/migrations/0025_study_materials.sql -f supabase/migrations/0026_study_class.sql -f supabase/tests/study_points.sql -f supabase/tests/study_social.sql -f supabase/tests/study_materials.sql -f supabase/tests/study_class.sql` (kolom `gagal` harus 0 di keempat tes).

@@ -11,11 +11,12 @@
 // (fungsi study_submit_session), BUKAN oleh AI; AI hanya membuat soal dan menulis pembahasan.
 //
 // Body request (semua: { "action": "...", ... }); respons selalu { ok: boolean, ... }:
-//   overview            -> { players: [{id,name,grade,sessionsDone,totalPoints,balance}], settings, grades }
-//   player_create       { name, grade, pin }                                 -> { player }
+//   overview            -> { players: [{id,name,grade,classLevel,sessionsDone,totalPoints,balance}], settings, grades }
+//   player_create       { name, grade, classLevel?, pin }                    -> { player }   (classLevel wajib untuk SD/SMP/SMA: SD 1-6, SMP 7-9, SMA 10-12)
+//   player_update_level { playerId, pin, grade, classLevel?, parentPin? }    -> { player }   (naik kelas / ralat; PIN orang tua bila sudah dibuat)
 //   player_profile      { playerId, pin }                                    -> { player, balance, totalEarned, sessions, redemptions, penalties, allowedGrades }
 //   pin_reset           { playerId, newPin, parentPin? }                     -> { ok }
-//   session_start       { playerId, pin, subject, topic?, materialGrade, level, count, engine? }
+//   session_start       { playerId, pin, subject, topic?, materialGrade, materialClass?, level, count, engine? }
 //                                                                            -> { sessionId, questions:[{idx,question,options}], provider, requested, shortfall }
 //   session_get         { playerId, pin, sessionId }                         -> { status, questions } | { status:"submitted", result }
 //   session_submit      { playerId, pin, sessionId, answers:[0..3|null], engine? } -> { result, explainFailed }
@@ -41,7 +42,7 @@
 //   -- materi pelajaran buatan AI (tab "Materi"); DAFTAR & ISI bisa dibaca semua orang tanpa PIN, membuat butuh PIN pemain
 //   material_list       { before? }                                          -> { items:[{id,title,subject,grade,detail,creatorName,createdAt}], hasMore }
 //   material_get        { materialId }                                       -> { material:{...,content} }
-//   material_create     { playerId, pin, subject, grade, detail, engine? }   -> { material:{...,content} }
+//   material_create     { playerId, pin, subject, grade, classLevel?, detail, engine? }   -> { material:{...,content} }
 //   material_delete     { materialId, playerId?, pin? | parentPin }          -> { ok }   (pembuatnya dengan PIN, atau orang tua bila PIN-nya sudah dibuat)
 
 import { createClient } from "jsr:@supabase/supabase-js@2";
@@ -56,6 +57,10 @@ import {
   PIN_MAX_FAILURES,
   QUESTION_BATCH,
   allowedMaterialGrades,
+  classesOf,
+  gradeLong,
+  isLevelAllowed,
+  validClass,
   MATERIAL_DETAIL_MAX,
   buildExplainPrompt,
   buildMaterialPrompt,
@@ -166,11 +171,18 @@ async function loadSettings(admin: Admin): Promise<Row | null> {
   return data ?? null;
 }
 
+// Kelas dari klien: bilangan bulat atau kosong (null). Nilai lain -> NaN supaya ditolak validClass.
+function classOf(v: unknown): number | null {
+  if (v === null || v === undefined || v === "") return null;
+  return typeof v === "number" && Number.isInteger(v) ? v : Number.NaN;
+}
+
 const sessionRow = (s: Row) => ({
   id: s.id,
   subject: s.subject,
   topic: s.topic,
   materialGrade: s.material_grade,
+  materialClass: s.material_class ?? null,
   level: s.level,
   numQuestions: s.num_questions,
   status: s.status,
@@ -197,7 +209,7 @@ async function loadResult(admin: Admin, session: Row, player: Row) {
   }));
   return {
     session: sessionRow(session),
-    player: { id: player.id, name: player.name, grade: player.grade },
+    player: { id: player.id, name: player.name, grade: player.grade, classLevel: player.class_level ?? null },
     total: items.length,
     correct: session.correct_count ?? 0,
     basePoints: session.base_points,
@@ -256,7 +268,7 @@ const parseEngine = (v: unknown): Engine => (v === "gemini" || v === "groq" || v
 // Minta soal per kelompok (maks QUESTION_BATCH) sampai jumlah terpenuhi; soal tak sah/kembar dibuang & diminta lagi.
 async function makeQuestions(
   admin: Admin,
-  spec: { subject: string; topic?: string; grade: string; level: string; count: number },
+  spec: { subject: string; topic?: string; grade: string; classLevel?: number | null; level: string; count: number },
   engine: Engine
 ): Promise<{ questions: ParsedQuestion[]; provider: string; lastError: string }> {
   const keys = getGeminiApiKeys();
@@ -309,7 +321,7 @@ async function explainQuestions(admin: Admin, session: Row, engine: Engine): Pro
         correctIndex: q.correct_index,
         userAnswer: q.user_answer
       }));
-      const p = buildExplainPrompt(session.subject, session.material_grade, items);
+      const p = buildExplainPrompt(session.subject, gradeLong(session.material_grade, session.material_class), items);
       try {
         const r = await generateJsonText(p.system, p.user, keys, { temperature: 0.3, engine });
         tokens += r.tokensUsed;
@@ -388,6 +400,7 @@ const materialRow = (m: Row, withContent = false) => ({
   title: m.title,
   subject: m.subject,
   grade: m.grade,
+  classLevel: m.class_level ?? null,
   detail: m.detail,
   creatorName: m.creator_name,
   createdAt: m.created_at,
@@ -438,7 +451,7 @@ Deno.serve(async (req) => {
       if (!settings) return fail("Setting Study belum ada. Jalankan migrasi 0023_study.sql.", 500);
       return json({
         ok: true,
-        players: (board ?? []).map((p: Row) => ({ id: p.id, name: p.name, grade: p.grade, sessionsDone: p.sessions_done, totalPoints: p.total_points, balance: p.balance })),
+        players: (board ?? []).map((p: Row) => ({ id: p.id, name: p.name, grade: p.grade, classLevel: p.class_level ?? null, sessionsDone: p.sessions_done, totalPoints: p.total_points, balance: p.balance })),
         settings: publicSettings(settings, items),
         grades: GRADES
       });
@@ -449,13 +462,32 @@ Deno.serve(async (req) => {
       const name = cleanLine(body.name, 30);
       if (!name) return fail("Nama wajib diisi.");
       if (typeof body.grade !== "string" || !GRADES.includes(body.grade)) return fail("Grade tidak valid.");
+      const cls = classOf(body.classLevel);
+      if (classesOf(body.grade).length > 0 && cls === null) return fail("Pilih kelasnya.");
+      if (!validClass(body.grade, cls)) return fail("Kelas tidak sesuai dengan grade.");
       if (!validPin(body.pin)) return fail("PIN harus 4-6 angka.");
       const { count: nPlayers } = await admin.from("study_players").select("id", { count: "exact", head: true });
       if ((nPlayers ?? 0) >= MAX_PLAYERS) return fail(`Jumlah pemain sudah mencapai batas (${MAX_PLAYERS}).`, 429);
       const { salt, hash } = await hashPin(body.pin as string);
-      const { data, error } = await admin.from("study_players").insert({ name, grade: body.grade, pin_salt: salt, pin_hash: hash }).select("id,name,grade").single();
+      const { data, error } = await admin.from("study_players").insert({ name, grade: body.grade, class_level: cls, pin_salt: salt, pin_hash: hash }).select("id,name,grade,class_level").single();
       if (error) return error.code === "23505" ? fail("Nama itu sudah dipakai pemain lain.", 409) : fail(error.message, 500);
-      return json({ ok: true, player: data });
+      return json({ ok: true, player: { id: data.id, name: data.name, grade: data.grade, classLevel: data.class_level ?? null } });
+    }
+
+    // ------------------------------------------------------------ naik kelas / ralat grade & kelas
+    if (action === "player_update_level") {
+      const auth = await checkPlayerPin(admin, body.playerId, body.pin);
+      if (auth instanceof Response) return auth;
+      if (typeof body.grade !== "string" || !GRADES.includes(body.grade)) return fail("Grade tidak valid.");
+      const cls = classOf(body.classLevel);
+      if (classesOf(body.grade).length > 0 && cls === null) return fail("Pilih kelasnya.");
+      if (!validClass(body.grade, cls)) return fail("Kelas tidak sesuai dengan grade.");
+      // Menurunkan tingkat membuka materi yang lebih rendah, jadi bila PIN orang tua sudah dibuat, ia wajib.
+      const par = await checkParentPin(admin, body.parentPin);
+      if (par instanceof Response) return par;
+      const { data, error } = await admin.from("study_players").update({ grade: body.grade, class_level: cls }).eq("id", auth.player.id).select("id,name,grade,class_level").single();
+      if (error || !data) return fail(error?.message || "Gagal menyimpan.", 500);
+      return json({ ok: true, player: { id: data.id, name: data.name, grade: data.grade, classLevel: data.class_level ?? null } });
     }
 
     // ------------------------------------------------------------ profil pemain
@@ -474,14 +506,15 @@ Deno.serve(async (req) => {
       const totalEarned = ledgerRows.filter((l) => l.kind === "session").reduce((a, l) => a + l.points, 0);
       return json({
         ok: true,
-        player: { id: p.id, name: p.name, grade: p.grade },
+        player: { id: p.id, name: p.name, grade: p.grade, classLevel: p.class_level ?? null },
         balance: bal.data ?? 0,
         totalEarned,
         sessions: (sessions.data ?? []).map(sessionRow),
         redemptions: (reds.data ?? []).map((r: Row) => ({ id: r.id, itemName: r.item_name, cost: r.cost, status: r.status, createdAt: r.created_at, givenAt: r.given_at })),
         penalties: ledgerRows.filter((l) => l.kind === "penalty").slice(0, 50).map((l) => ({ points: -l.points, requested: l.meta?.requested ?? -l.points, reason: l.note, createdAt: l.created_at })),
         redeemItems: items,
-        allowedGrades: allowedMaterialGrades(p.grade)
+        allowedGrades: allowedMaterialGrades(p.grade),
+        classRanges: Object.fromEntries(["SD", "SMP", "SMA"].map((g) => [g, classesOf(g)]))
       });
     }
 
@@ -514,6 +547,11 @@ Deno.serve(async (req) => {
       if (typeof body.materialGrade !== "string" || !isMaterialGradeAllowed(p.grade, body.materialGrade)) {
         return fail("Tingkat materi tidak boleh lebih rendah dari grade pemain.");
       }
+      const materialClass = classOf(body.materialClass);
+      if (classesOf(body.materialGrade).length > 0 && materialClass === null) return fail("Pilih kelasnya.");
+      if (!isLevelAllowed(p.grade, p.class_level, body.materialGrade, materialClass)) {
+        return fail("Kelas materi tidak boleh lebih rendah dari kelas pemain.");
+      }
       if (typeof body.level !== "string" || !LEVELS.includes(body.level)) return fail("Level tidak valid.");
       if (!validCount(body.count)) return fail(`Jumlah soal harus 1-${MAX_QUESTIONS}.`);
       const count = body.count as number;
@@ -527,7 +565,7 @@ Deno.serve(async (req) => {
       if (slot) return slot;
       const engine = parseEngine(body.engine);
       wireReporters(admin);
-      const made = await makeQuestions(admin, { subject, topic: topic || undefined, grade: body.materialGrade, level: body.level, count }, engine);
+      const made = await makeQuestions(admin, { subject, topic: topic || undefined, grade: body.materialGrade, classLevel: materialClass, level: body.level, count }, engine);
       const minOk = Math.max(1, Math.ceil(count * 0.8));
       if (made.questions.length < minOk) {
         return fail(`Gagal membuat soal (${made.questions.length} dari ${count} yang layak). ${made.lastError}`.trim(), 502, { generationFailed: true });
@@ -535,7 +573,7 @@ Deno.serve(async (req) => {
 
       const { data: s, error: e1 } = await admin
         .from("study_sessions")
-        .insert({ player_id: p.id, subject, topic: topic || null, material_grade: body.materialGrade, level: body.level, num_questions: made.questions.length, provider: made.provider })
+        .insert({ player_id: p.id, subject, topic: topic || null, material_grade: body.materialGrade, material_class: materialClass, level: body.level, num_questions: made.questions.length, provider: made.provider })
         .select("*")
         .single();
       if (e1 || !s) return fail(e1?.message || "Gagal menyimpan pelajaran.", 500);
@@ -626,14 +664,14 @@ Deno.serve(async (req) => {
       const [items, pending, players] = await Promise.all([
         loadItems(admin),
         admin.from("study_redemptions").select("id,player_id,item_name,cost,created_at").eq("status", "pending").order("created_at", { ascending: true }).limit(200),
-        admin.from("study_players").select("id,name,grade").order("name", { ascending: true })
+        admin.from("study_players").select("id,name,grade,class_level").order("name", { ascending: true })
       ]);
       const names = new Map<string, string>((players.data ?? []).map((x: Row) => [x.id, x.name]));
       return json({
         ok: true,
         settings: publicSettings(par.settings, items),
         pendingRedemptions: (pending.data ?? []).map((r: Row) => ({ id: r.id, playerName: names.get(r.player_id) ?? "?", itemName: r.item_name, cost: r.cost, createdAt: r.created_at })),
-        players: (players.data ?? []).map((x: Row) => ({ id: x.id, name: x.name, grade: x.grade }))
+        players: (players.data ?? []).map((x: Row) => ({ id: x.id, name: x.name, grade: x.grade, classLevel: x.class_level ?? null }))
       });
     }
 
@@ -722,7 +760,7 @@ Deno.serve(async (req) => {
     if (action === "player_verify") {
       const auth = await checkPlayerPin(admin, body.playerId, body.pin);
       if (auth instanceof Response) return auth;
-      return json({ ok: true, player: { id: auth.player.id, name: auth.player.name, grade: auth.player.grade } });
+      return json({ ok: true, player: { id: auth.player.id, name: auth.player.name, grade: auth.player.grade, classLevel: auth.player.class_level ?? null } });
     }
 
     // ------------------------------------------------------------ timeline: daftar kegiatan satu pemain
@@ -756,12 +794,13 @@ Deno.serve(async (req) => {
       const page = all.slice(0, TIMELINE_PAGE);
       return json({
         ok: true,
-        owner: { id: owner.id, name: owner.name, grade: owner.grade, rank: at + 1, sessionsDone: owner.sessions_done, totalPoints: owner.total_points },
+        owner: { id: owner.id, name: owner.name, grade: owner.grade, classLevel: owner.class_level ?? null, rank: at + 1, sessionsDone: owner.sessions_done, totalPoints: owner.total_points },
         items: page.map((r) => ({
           sessionId: r.session_id,
           subject: r.subject,
           topic: r.topic,
           materialGrade: r.material_grade,
+          materialClass: r.material_class ?? null,
           level: r.level,
           total: r.num_questions,
           correct: r.correct_count,
@@ -793,7 +832,7 @@ Deno.serve(async (req) => {
       const { data: cs, error } = await admin.from("study_comments").select("id,player_id,body,created_at").eq("session_id", ss.session.id).order("created_at", { ascending: true }).limit(200);
       if (error) return fail(error.message, 500);
       const ids = [...new Set((cs ?? []).map((c: Row) => c.player_id))];
-      const { data: ps } = ids.length ? await admin.from("study_players").select("id,name,grade").in("id", ids) : { data: [] as Row[] };
+      const { data: ps } = ids.length ? await admin.from("study_players").select("id,name,grade,class_level").in("id", ids) : { data: [] as Row[] };
       const byId = new Map<string, Row>((ps ?? []).map((p: Row) => [p.id as string, p] as [string, Row]));
       return json({
         ok: true,
@@ -802,6 +841,7 @@ Deno.serve(async (req) => {
           playerId: c.player_id,
           name: byId.get(c.player_id)?.name ?? "?",
           grade: byId.get(c.player_id)?.grade ?? "",
+          classLevel: byId.get(c.player_id)?.class_level ?? null,
           body: c.body,
           createdAt: c.created_at
         }))
@@ -820,7 +860,7 @@ Deno.serve(async (req) => {
       return json({
         ok: true,
         count: r.count,
-        comment: { id: r.id, playerId: r.playerId, name: v.player.name, grade: v.player.grade, body: r.body, createdAt: r.createdAt }
+        comment: { id: r.id, playerId: r.playerId, name: v.player.name, grade: v.player.grade, classLevel: v.player.class_level ?? null, body: r.body, createdAt: r.createdAt }
       });
     }
 
@@ -852,7 +892,7 @@ Deno.serve(async (req) => {
       if (v instanceof Response) return v;
       const ss = await loadSubmittedSession(admin, body.sessionId);
       if (ss instanceof Response) return ss;
-      const { data: owner } = await admin.from("study_players").select("id,name,grade").eq("id", ss.session.player_id).maybeSingle();
+      const { data: owner } = await admin.from("study_players").select("id,name,grade,class_level").eq("id", ss.session.player_id).maybeSingle();
       if (!owner) return fail("Pemain tidak ditemukan.", 404);
       return json({ ok: true, result: await loadResult(admin, ss.session, owner) });
     }
@@ -866,7 +906,7 @@ Deno.serve(async (req) => {
         }
         before = body.before;
       }
-      let q = admin.from("study_materials").select("id,title,subject,grade,detail,creator_name,created_at").order("created_at", { ascending: false }).limit(MATERIAL_PAGE + 1);
+      let q = admin.from("study_materials").select("id,title,subject,grade,class_level,detail,creator_name,created_at").order("created_at", { ascending: false }).limit(MATERIAL_PAGE + 1);
       if (before) q = q.lt("created_at", before);
       const { data, error } = await q;
       if (error) return fail(error.message, 500);
@@ -892,6 +932,9 @@ Deno.serve(async (req) => {
       const detail = cleanLine(body.detail, MATERIAL_DETAIL_MAX + 1);
       if (!subject) return fail("Pilih atau ketik mata pelajaran.");
       if (typeof body.grade !== "string" || !GRADES.includes(body.grade)) return fail("Grade tidak valid.");
+      const cls = classOf(body.classLevel);
+      if (classesOf(body.grade).length > 0 && cls === null) return fail("Pilih kelasnya.");
+      if (!validClass(body.grade, cls)) return fail("Kelas tidak sesuai dengan grade.");
       if (detail.length < 3) return fail("Tulis detail materi yang diinginkan (minimal 3 karakter).");
       if (detail.length > MATERIAL_DETAIL_MAX) return fail(`Detail materi maksimal ${MATERIAL_DETAIL_MAX} karakter.`);
 
@@ -900,7 +943,7 @@ Deno.serve(async (req) => {
       const engine = parseEngine(body.engine);
       wireReporters(admin);
       const keys = getGeminiApiKeys();
-      const prompt = buildMaterialPrompt({ subject, grade: body.grade, detail });
+      const prompt = buildMaterialPrompt({ subject, grade: body.grade, classLevel: cls, detail });
       let made: { title: string; content: string } | null = null;
       let provider = "gemini";
       let lastError = "";
@@ -923,7 +966,7 @@ Deno.serve(async (req) => {
       if (!made) return fail(`Gagal membuat materi. ${lastError}`.trim(), 502, { generationFailed: true });
       const { data: m, error } = await admin
         .from("study_materials")
-        .insert({ creator_id: p.id, creator_name: p.name, subject, grade: body.grade, detail, title: made.title, content: made.content, provider })
+        .insert({ creator_id: p.id, creator_name: p.name, subject, grade: body.grade, class_level: cls, detail, title: made.title, content: made.content, provider })
         .select("*")
         .single();
       if (error || !m) return fail(error?.message || "Gagal menyimpan materi.", 500);

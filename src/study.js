@@ -8,7 +8,7 @@ import { studyCall } from "./study-client.js";
 import { openFormDialog } from "./study-form.js";
 import { renderAiMarkdown, typesetMath } from "./markdown.js";
 import { buildStudyPdf, shareOrSaveStudyPdf, buildMaterialPdf, shareOrSaveMaterialPdf } from "./study-pdf.js";
-import { allowedMaterialGrades } from "../supabase/functions/_shared/study-core.ts";
+import { allowedClasses, allowedMaterialGrades, classesOf, gradeText } from "../supabase/functions/_shared/study-core.ts";
 
 const $ = (id) => document.getElementById(id);
 let ctx = { getLang: () => "id" };
@@ -266,7 +266,7 @@ function renderHome(body) {
       <button type="button" class="study-board-row" data-act="open-timeline" data-id="${esc(p.id)}">
         <span class="study-rank">${i + 1}</span>
         <span class="study-name">${esc(p.name)}</span>
-        <span>${esc(p.grade)}</span>
+        <span>${esc(gradeText(p.grade, p.classLevel))}</span>
         <span>${fmt(p.sessionsDone)}</span>
         <span class="study-pts">${fmt(p.totalPoints)}</span>
       </button>`
@@ -342,7 +342,7 @@ function renderProfile(body) {
   const lessons = (p.sessions || []).length
     ? p.sessions
         .map((s) => {
-          const lvl = `${esc(L(`study_level_${s.level}`))} · ${esc(s.materialGrade)}`;
+          const lvl = `${esc(L(`study_level_${s.level}`))} · ${esc(gradeText(s.materialGrade, s.materialClass))}`;
           if (s.status === "submitted") {
             return `
           <div class="study-row">
@@ -366,11 +366,12 @@ function renderProfile(body) {
     <div class="study-card study-balance">
       <div class="study-balance-label">${esc(L("study_balance"))}</div>
       <div class="study-balance-value">${fmt(p.balance)}</div>
-      <div class="study-row-meta">${esc(p.player.grade)} · ${esc(L("study_total_earned"))}: ${fmt(p.totalEarned)}</div>
+      <div class="study-row-meta">${esc(gradeText(p.player.grade, p.player.classLevel))} · ${esc(L("study_total_earned"))}: ${fmt(p.totalEarned)}</div>
     </div>
     <div class="study-actions">
       <button type="button" class="primary-btn" data-act="new-lesson-me">${esc(L("study_new_lesson"))}</button>
       <button type="button" class="secondary-btn" data-act="my-timeline">${esc(L("study_tl_my"))}</button>
+      <button type="button" class="secondary-btn" data-act="edit-level">${esc(L("study_edit_level"))}</button>
     </div>
     <h2 class="study-h">${esc(L("study_redeem"))}</h2>
     ${redeem}
@@ -406,7 +407,7 @@ function renderQuiz(body) {
   body.innerHTML = `
     <div class="study-card">
       <div class="study-row-title">${esc(q.session.subject)}${q.session.topic ? ` · ${esc(q.session.topic)}` : ""}</div>
-      <div class="study-row-meta">${esc(q.session.materialGrade)} · ${esc(levelLabel(q.session.level, S.overview?.settings))} · ${q.questions.length} ${esc(L("study_questions_unit"))}</div>
+      <div class="study-row-meta">${esc(gradeText(q.session.materialGrade, q.session.materialClass))} · ${esc(levelLabel(q.session.level, S.overview?.settings))} · ${q.questions.length} ${esc(L("study_questions_unit"))}</div>
       ${q.shortfall ? `<div class="study-row-meta">${esc(L("study_shortfall", { got: q.questions.length, want: q.questions.length + q.shortfall }))}</div>` : ""}
     </div>
     ${cards}
@@ -454,7 +455,7 @@ function renderResult(body) {
   body.innerHTML = `
     <div class="study-card study-score">
       <div class="study-row-title">${esc(r.session.subject)}${r.session.topic ? ` · ${esc(r.session.topic)}` : ""}</div>
-      <div class="study-row-meta">${esc(r.player.name)} · ${esc(r.session.materialGrade)} · ${esc(L(`study_level_${r.session.level}`))} (${r.weightPercent}%)</div>
+      <div class="study-row-meta">${esc(r.player.name)} · ${esc(gradeText(r.session.materialGrade, r.session.materialClass))} · ${esc(L(`study_level_${r.session.level}`))} (${r.weightPercent}%)</div>
       <div class="study-score-main">${esc(L("study_score", { c: r.correct, n: r.total }))}</div>
       <div class="study-score-points">+${fmt(r.points)} <small>${esc(L("study_pts"))}</small></div>
       <div class="study-row-meta">${esc(L("study_pdf_formula", { base: r.basePoints, correct: r.correct, total: r.total, weight: r.weightPercent }))}</div>
@@ -501,6 +502,7 @@ async function onBodyClick(e) {
   if (act === "mat-more") return loadMaterials(false);
   if (act === "open-timeline") return openTimeline(id);
   if (act === "my-timeline") return openTimeline(S.player?.id);
+  if (act === "edit-level") return openEditLevel();
   if (act === "tl-profile") return openProfileFromTimeline();
   if (act === "tl-more") return loadMoreTimeline();
   if (act === "tl-signin") return signInViewer();
@@ -526,6 +528,23 @@ async function onBodyClick(e) {
 }
 
 // ---------------------------------------------------------------- pemain
+// Field "Kelas" untuk form: tampil hanya bila tingkatnya punya kelas (SD/SMP/SMA). gradeOf(v) = tingkat terpilih,
+// classesFor(v) = daftar kelas yang boleh, preferred(v) = kelas anjuran saat daftar berubah (kosong = yang terendah).
+function classField(gradeOf, classesFor, preferred, initial) {
+  return {
+    key: "classLevel",
+    label: L("study_class"),
+    type: "select",
+    value: initial === undefined || initial === null ? undefined : String(initial),
+    show: (v) => classesFor(v).length > 0,
+    options: (v) => classesFor(v).map((c) => ({ value: String(c), label: gradeText(gradeOf(v), c) })),
+    onOptionsChange: preferred ? (v) => preferred(v) : undefined
+  };
+}
+
+// Nilai kelas untuk dikirim ke server: angka bila tingkat itu punya kelas, selain itu null.
+const classValue = (grade, raw) => (classesOf(grade).length > 0 && raw !== "" && raw != null ? Number(raw) : null);
+
 const gradeOptions = () => GRADE_LIST.map((g) => ({ value: g, label: g }));
 
 function validPinFormat(p) {
@@ -541,6 +560,7 @@ async function openNewPlayerForm() {
     fields: [
       { key: "name", label: L("study_np_name"), type: "text", maxlength: 30 },
       { key: "grade", label: L("study_np_grade"), type: "select", value: "SD", options: gradeOptions() },
+      classField((v) => v.grade, (v) => classesOf(v.grade)),
       { key: "pin", label: L("study_np_pin"), type: "pin" },
       { key: "pin2", label: L("study_np_pin2"), type: "pin" }
     ],
@@ -548,7 +568,7 @@ async function openNewPlayerForm() {
       if (!String(v.name || "").trim()) return { ok: false, error: L("study_np_name_required") };
       if (!validPinFormat(v.pin)) return { ok: false, error: L("study_pin_invalid") };
       if (v.pin !== v.pin2) return { ok: false, error: L("study_np_mismatch") };
-      const res = await studyCall("player_create", { name: v.name, grade: v.grade, pin: v.pin });
+      const res = await studyCall("player_create", { name: v.name, grade: v.grade, classLevel: classValue(v.grade, v.classLevel), pin: v.pin });
       if (!res.ok) return { ok: false, error: errText(res) };
       return { ok: true, value: res.player };
     }
@@ -583,6 +603,44 @@ function openPlayerPin(playerId) {
     S.viewer = { ...out.res.player, pin: out.pin };
     S.view = "profile";
     render();
+  });
+}
+
+// Ubah grade/kelas sendiri (naik kelas atau ralat). Butuh PIN orang tua bila sudah dibuat,
+// karena menurunkan kelas membuka materi yang lebih rendah.
+function openEditLevel() {
+  const me = S.player;
+  if (!me) return;
+  const parentSet = !!S.overview?.settings?.parentPinSet;
+  return openFormDialog({
+    title: L("study_edit_level_title"),
+    intro: parentSet ? L("study_edit_level_intro_parent") : L("study_edit_level_intro"),
+    okLabel: L("study_save"),
+    cancelLabel: L("study_cancel"),
+    busyLabel: L("study_busy_saving"),
+    fields: [
+      { key: "grade", label: L("study_np_grade"), type: "select", value: me.grade, options: gradeOptions() },
+      classField((v) => v.grade, (v) => classesOf(v.grade), (v) => (v.grade === me.grade && me.classLevel ? String(me.classLevel) : undefined), me.classLevel),
+      ...(parentSet ? [{ key: "parentPin", label: L("study_parent_pin"), type: "pin" }] : [])
+    ],
+    onSubmit: async (v) => {
+      if (parentSet && !validPinFormat(v.parentPin)) return { ok: false, error: L("study_pin_invalid") };
+      const res = await studyCall("player_update_level", {
+        playerId: me.id,
+        pin: S.pin,
+        grade: v.grade,
+        classLevel: classValue(v.grade, v.classLevel),
+        parentPin: v.parentPin
+      });
+      if (!res.ok) return { ok: false, error: errText(res) };
+      return { ok: true, value: res.player };
+    }
+  }).then((player) => {
+    if (!player) return;
+    S.player = { ...S.player, grade: player.grade, classLevel: player.classLevel ?? null };
+    if (S.viewer && S.viewer.id === player.id) S.viewer = { ...S.viewer, grade: player.grade, classLevel: player.classLevel ?? null };
+    loadOverview();
+    loadProfile();
   });
 }
 
@@ -640,7 +698,7 @@ function openLessonForm(fixedPlayer) {
         label: L("study_player"),
         type: "select",
         value: fixedPlayer?.id || players[0]?.id,
-        options: players.map((p) => ({ value: p.id, label: `${p.name} (${p.grade})` })),
+        options: players.map((p) => ({ value: p.id, label: `${p.name} (${gradeText(p.grade, p.classLevel)})` })),
         show: () => !fixed
       },
       { key: "pin", label: L("study_pin"), type: "pin", show: () => !fixed },
@@ -665,6 +723,18 @@ function openLessonForm(fixedPlayer) {
         onOptionsChange: (v) => playerById(fixed ? fixedPlayer.id : v.playerId)?.grade,
         help: L("study_grade_help")
       },
+      classField(
+        (v) => v.materialGrade,
+        (v) => {
+          const pl = playerById(fixed ? fixedPlayer.id : v.playerId);
+          return allowedClasses(pl?.grade || "Umum", pl?.classLevel, v.materialGrade);
+        },
+        (v) => {
+          const pl = playerById(fixed ? fixedPlayer.id : v.playerId);
+          return pl && pl.grade === v.materialGrade && pl.classLevel ? String(pl.classLevel) : undefined;
+        },
+        (fixedPlayer || players[0])?.classLevel
+      ),
       { key: "count", label: L("study_count"), type: "select", value: "10", options: COUNTS.map((n) => ({ value: String(n), label: String(n) })) },
       {
         key: "level",
@@ -699,6 +769,7 @@ function openLessonForm(fixedPlayer) {
         subject,
         topic: String(v.topic || "").trim(),
         materialGrade: v.materialGrade,
+        materialClass: classValue(v.materialGrade, v.materialClass ?? v.classLevel),
         level: v.level,
         count: Number(v.count),
         engine: "auto"
@@ -708,7 +779,7 @@ function openLessonForm(fixedPlayer) {
     }
   }).then((out) => {
     if (!out) return;
-    S.player = { id: out.player.id, name: out.player.name, grade: out.player.grade };
+    S.player = { id: out.player.id, name: out.player.name, grade: out.player.grade, classLevel: out.player.classLevel ?? null };
     S.pin = out.pin;
     S.viewer = { ...S.player, pin: out.pin };
     S.quiz = {
@@ -909,7 +980,7 @@ function openProfileFromTimeline() {
   const o = S.tl?.owner;
   if (!o) return;
   if (S.viewer && S.viewer.id === o.id) {
-    S.player = { id: o.id, name: o.name, grade: o.grade };
+    S.player = { id: o.id, name: o.name, grade: o.grade, classLevel: o.classLevel ?? null };
     S.pin = S.viewer.pin;
     S.profile = null;
     S.view = "profile";
@@ -931,7 +1002,7 @@ function openViewerLogin() {
     cancelLabel: L("study_cancel"),
     busyLabel: L("study_loading"),
     fields: [
-      { key: "playerId", label: L("study_player"), type: "select", value: first.id, options: players.map((p) => ({ value: p.id, label: `${p.name} (${p.grade})` })) },
+      { key: "playerId", label: L("study_player"), type: "select", value: first.id, options: players.map((p) => ({ value: p.id, label: `${p.name} (${gradeText(p.grade, p.classLevel)})` })) },
       { key: "pin", label: L("study_pin"), type: "pin" }
     ],
     extra: [
@@ -1003,7 +1074,7 @@ function commentsHtml(it) {
       <div class="study-comment">
         <span class="study-avatar study-avatar--sm">${initial(c.name)}</span>
         <div class="study-comment-main">
-          <div class="study-comment-head"><strong>${esc(c.name)}</strong> <small>${esc(c.grade)}</small> <small>${esc(fmtDateTime(c.createdAt))}</small></div>
+          <div class="study-comment-head"><strong>${esc(c.name)}</strong> <small>${esc(gradeText(c.grade, c.classLevel))}</small> <small>${esc(fmtDateTime(c.createdAt))}</small></div>
           <div class="study-comment-body">${esc(c.body)}</div>
           ${del}
         </div>
@@ -1036,14 +1107,14 @@ function postHtml(it) {
     <header class="study-post-head">
       <span class="study-avatar">${initial(o.name)}</span>
       <div>
-        <div class="study-post-name">${esc(o.name)} <small>${esc(o.grade)}</small></div>
+        <div class="study-post-name">${esc(o.name)} <small>${esc(gradeText(o.grade, o.classLevel))}</small></div>
         <div class="study-row-meta">${esc(fmtDateTime(it.submittedAt))}</div>
       </div>
     </header>
     <p class="study-post-text"><strong>${esc(o.name)}</strong> ${esc(L("study_tl_finished"))} <strong>${esc(it.subject)}</strong>${topic}</p>
     <div class="study-post-chips">
       <span class="study-badge">${esc(L(`study_level_${it.level}`))} (${it.weightPercent}%)</span>
-      <span class="study-badge">${esc(it.materialGrade)}</span>
+      <span class="study-badge">${esc(gradeText(it.materialGrade, it.materialClass))}</span>
       <span class="study-badge study-badge--solid">${esc(L("study_score", { c: it.correct, n: it.total }))}</span>
       <span class="study-post-points">+${fmt(it.points)} ${esc(L("study_pts"))}</span>
     </div>
@@ -1079,7 +1150,7 @@ function renderTimeline(body) {
     <div class="study-card study-profile-head">
       <span class="study-avatar study-avatar--lg">${initial(o.name)}</span>
       <div class="study-profile-info">
-        <div class="study-row-title">${esc(o.name)}${you} <small>${esc(o.grade)}</small></div>
+        <div class="study-row-title">${esc(o.name)}${you} <small>${esc(gradeText(o.grade, o.classLevel))}</small></div>
         <div class="study-row-meta">${esc(L("study_tl_rank", { n: o.rank }))} · ${esc(L("study_tl_stats", { done: fmt(o.sessionsDone), points: fmt(o.totalPoints) }))}</div>
       </div>
       <button type="button" class="secondary-btn" data-act="tl-profile">${esc(L("study_tl_open_profile"))}</button>
@@ -1237,7 +1308,7 @@ function materialsHtml() {
       (it) => `
     <article class="study-material" data-mat="${esc(it.id)}">
       <div class="study-material-title">${esc(it.title)}</div>
-      <div class="study-post-chips"><span class="study-badge">${esc(it.subject)}</span><span class="study-badge">${esc(it.grade)}</span></div>
+      <div class="study-post-chips"><span class="study-badge">${esc(it.subject)}</span><span class="study-badge">${esc(gradeText(it.grade, it.classLevel))}</span></div>
       <p class="study-material-detail">${esc(it.detail)}</p>
       <div class="study-row-meta">${esc(L("study_mat_by", { name: it.creatorName }))} · ${esc(fmtDate(it.createdAt))}</div>
       <div class="study-material-actions">
@@ -1263,7 +1334,7 @@ function renderMaterial(body) {
   body.innerHTML = `
     <div class="study-card">
       <div class="study-row-title">${esc(m.title)}</div>
-      <div class="study-post-chips"><span class="study-badge">${esc(m.subject)}</span><span class="study-badge">${esc(m.grade)}</span></div>
+      <div class="study-post-chips"><span class="study-badge">${esc(m.subject)}</span><span class="study-badge">${esc(gradeText(m.grade, m.classLevel))}</span></div>
       <div class="study-row-meta">${esc(L("study_mat_by", { name: m.creatorName }))} · ${esc(fmtDate(m.createdAt))}</div>
       <div class="study-row-meta">${esc(m.detail)}</div>
       <div class="study-actions"><button type="button" class="primary-btn" data-act="mat-reader-pdf" ${m.content ? "" : "disabled"}>${esc(L("study_mat_pdf"))}</button></div>
@@ -1332,7 +1403,7 @@ function openMaterialCreate() {
     cancelLabel: L("study_cancel"),
     busyLabel: L("study_mat_generating"),
     fields: [
-      { key: "playerId", label: L("study_player"), type: "select", value: S.viewer?.id || players[0].id, options: players.map((p) => ({ value: p.id, label: `${p.name} (${p.grade})` })) },
+      { key: "playerId", label: L("study_player"), type: "select", value: S.viewer?.id || players[0].id, options: players.map((p) => ({ value: p.id, label: `${p.name} (${gradeText(p.grade, p.classLevel)})` })) },
       { key: "pin", label: L("study_pin"), type: "pin" },
       {
         key: "grade",
@@ -1341,6 +1412,15 @@ function openMaterialCreate() {
         value: playerById(S.viewer?.id || players[0].id)?.grade || "Umum",
         options: GRADE_LIST.map((g) => ({ value: g, label: g }))
       },
+      classField(
+        (v) => v.grade,
+        (v) => classesOf(v.grade),
+        (v) => {
+          const pl = playerById(v.playerId);
+          return pl && pl.grade === v.grade && pl.classLevel ? String(pl.classLevel) : undefined;
+        },
+        playerById(S.viewer?.id || players[0].id)?.classLevel
+      ),
       {
         key: "subject",
         label: L("study_subject"),
@@ -1357,13 +1437,13 @@ function openMaterialCreate() {
       if (!subject) return { ok: false, error: L("study_subject_required") };
       const detail = String(v.detail || "").replace(/\s+/g, " ").trim();
       if (detail.length < 3) return { ok: false, error: L("study_mat_detail_required") };
-      const res = await studyCall("material_create", { playerId: v.playerId, pin: v.pin, subject, grade: v.grade, detail, engine: "auto" });
+      const res = await studyCall("material_create", { playerId: v.playerId, pin: v.pin, subject, grade: v.grade, classLevel: classValue(v.grade, v.classLevel), detail, engine: "auto" });
       if (!res.ok) return { ok: false, error: errText(res) };
       return { ok: true, value: { material: res.material, player: playerById(v.playerId), pin: v.pin } };
     }
   }).then(async (out) => {
     if (!out) return;
-    if (out.player) S.viewer = { id: out.player.id, name: out.player.name, grade: out.player.grade, pin: out.pin };
+    if (out.player) S.viewer = { id: out.player.id, name: out.player.name, grade: out.player.grade, classLevel: out.player.classLevel ?? null, pin: out.pin };
     const { material } = out;
     S.materials.items = [{ ...material, content: undefined }, ...S.materials.items.filter((i) => i.id !== material.id)];
     S.materials.loaded = true;
@@ -1683,7 +1763,7 @@ async function onSettingsClick(e) {
       cancelLabel: L("study_cancel"),
       busyLabel: L("study_busy_saving"),
       fields: [
-        { key: "playerId", label: L("study_player"), type: "select", options: players.map((p) => ({ value: p.id, label: `${p.name} (${p.grade})` })) },
+        { key: "playerId", label: L("study_player"), type: "select", options: players.map((p) => ({ value: p.id, label: `${p.name} (${gradeText(p.grade, p.classLevel)})` })) },
         { key: "points", label: L("study_penalty_points"), type: "number", min: 1 },
         { key: "reason", label: L("study_penalty_reason"), type: "text", maxlength: 200 }
       ],

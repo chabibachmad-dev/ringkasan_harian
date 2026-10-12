@@ -3,6 +3,7 @@
 
 import { jsPDF } from "jspdf";
 import { pdfSafeText, studyPdfFileName, materialBlocks, materialPdfFileName } from "./study-text.js";
+import { gradeText } from "../supabase/functions/_shared/study-core.ts";
 
 const LETTERS = ["A", "B", "C", "D"];
 
@@ -45,7 +46,7 @@ export function buildStudyPdf(result, L, locale = "id-ID") {
   write(pdfSafeText(`${L("study_pdf_title")}: ${s.subject || ""}`), { size: 16, bold: true, gap: 4 });
   if (s.topic) write(pdfSafeText(`${L("study_topic_label")}: ${s.topic}`), { size: 10, gray: true });
   write(
-    pdfSafeText(`${L("study_pdf_player")}: ${result.player?.name || ""} (${result.player?.grade || ""})  |  ${L("study_material_grade")}: ${s.materialGrade || ""}  |  ${L("study_level")}: ${levelName} (${result.weightPercent}%)`),
+    pdfSafeText(`${L("study_pdf_player")}: ${result.player?.name || ""} (${gradeText(result.player?.grade || "", result.player?.classLevel)})  |  ${L("study_material_grade")}: ${gradeText(s.materialGrade || "", s.materialClass)}  |  ${L("study_level")}: ${levelName} (${result.weightPercent}%)`),
     { size: 10, gray: true }
   );
   write(dateText, { size: 10, gray: true, gap: 8 });
@@ -151,7 +152,7 @@ export function buildMaterialPdf(material, L, locale = "id-ID") {
 
   const when = material.createdAt ? new Date(material.createdAt) : new Date();
   write(pdfSafeText(material.title || ""), { size: 17, bold: true, gap: 4 });
-  write(pdfSafeText(`${material.subject || ""}  |  ${L("study_np_grade")}: ${material.grade || ""}`), { size: 10, gray: true });
+  write(pdfSafeText(`${material.subject || ""}  |  ${L("study_np_grade")}: ${gradeText(material.grade || "", material.classLevel)}`), { size: 10, gray: true });
   write(pdfSafeText(`${L("study_mat_pdf_by")}: ${material.creatorName || "-"}  |  ${when.toLocaleDateString(locale, { dateStyle: "long" })}`), { size: 10, gray: true });
   if (material.detail) write(pdfSafeText(`${L("study_mat_pdf_detail")}: ${material.detail}`), { size: 10, gray: true });
   write(pdfSafeText(L("study_mat_pdf_note")), { size: 9, gray: true, gap: 12 });

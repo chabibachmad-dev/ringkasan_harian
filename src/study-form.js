@@ -130,7 +130,7 @@ export function openFormDialog(cfg) {
 
     // Hitung ulang bagian dinamis (tampil/sembunyi, opsi select, teks bantuan).
     const refresh = () => {
-      const v = current();
+      let v = current();
       for (const f of fields) {
         const e = els.get(f.key);
         if (!e) continue;
@@ -145,6 +145,7 @@ export function openFormDialog(cfg) {
             e.input.innerHTML = opts.map((o) => `<option value="${esc(o.value)}">${esc(o.label)}</option>`).join("");
             e.sig = sig;
             e.input.value = opts.some((o) => String(o.value) === String(prev)) ? String(prev) : opts[0] ? String(opts[0].value) : "";
+            v = current(); // field sesudahnya (mis. kelas) bergantung pada nilai yang baru saja berubah ini
           }
         }
         const helpText = val(f.help, v);

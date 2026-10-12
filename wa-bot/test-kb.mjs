@@ -50,6 +50,21 @@ const idx = await openKbIndex({ file: ":memory:", log: silent });
   idx.removeDoc("d2");
   check(idx.listDocs().length === 1 && idx.search("isi baru").length === 0, "removeDoc membersihkan FTS");
 }
+// filter judul (grup WA yang hanya memakai surat tertentu)
+{
+  const tx = await openKbIndex({ file: ":memory:", log: silent });
+  tx.upsertDoc({ id: "s1", title: "Surat Edaran Dirjen 2026", pages: [{ page: 1, text: "Batas waktu penyampaian laporan realisasi anggaran adalah tanggal lima setiap bulan." }] });
+  tx.upsertDoc({ id: "s2", title: "PMK Laporan Keuangan", pages: [{ page: 4, text: "Batas waktu penyampaian laporan keuangan semesteran adalah tanggal sepuluh bulan berikutnya." }] });
+  const q = "batas waktu penyampaian laporan";
+  const all = tx.search(q, { budgetChars: 3000 });
+  const only = tx.search(q, { budgetChars: 3000, titles: ["surat edaran"] });
+  const none = tx.search(q, { budgetChars: 3000, titles: ["tidak ada judul ini"] });
+  const two = tx.search(q, { budgetChars: 3000, titles: ["surat edaran", "pmk laporan"] });
+  check(all.some((x) => x.title.startsWith("PMK")) && all.some((x) => x.title.startsWith("Surat")), "tanpa filter: kedua dokumen muncul");
+  check(only.length > 0 && only.every((x) => x.title === "Surat Edaran Dirjen 2026"), "titles: hanya dokumen yang judulnya cocok (tidak peka huruf besar/kecil)");
+  check(none.length === 0, "titles tanpa kecocokan -> kosong (tidak bocor ke dokumen lain)");
+  check(two.length >= 2, "titles beberapa potongan judul = gabungan");
+}
 // dokumen besar tanpa batas: 3000 halaman
 {
   const pages = Array.from({ length: 3000 }, (_, i) => ({ page: i + 1, text: `Halaman ${i + 1}. ${i === 2345 ? "Ketentuan khusus kapal tongkang pasal 77." : "Teks pengisi biasa."} `.repeat(8) }));
