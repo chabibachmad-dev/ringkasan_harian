@@ -3216,7 +3216,8 @@ mark.chat-search-hit--active {
 /* ---- Study: tab Materi ---- */
 .study-tabs {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-auto-flow: column;
+  grid-auto-columns: 1fr;
   gap: 0;
   margin: 4px 0 14px;
   border: 1.5px solid var(--border);
@@ -3294,4 +3295,230 @@ mark.chat-search-hit--active {
   flex-direction: column;
   gap: 8px;
   margin-top: 10px;
+}
+
+/* ---- Study: timeline global, profil publik, kompetisi ---- */
+.study-tabs--sub {
+  margin-top: 10px;
+}
+
+.study-tabs--sub .study-tab {
+  font-size: 0.85rem;
+}
+
+.study-name-btn {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-weight: 800;
+  cursor: pointer;
+  text-align: left;
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+}
+
+.study-name-btn.is-static {
+  cursor: default;
+  text-decoration: none;
+}
+
+.study-kind {
+  display: inline-block;
+  padding: 1px 8px;
+  margin-right: 4px;
+  border: 1.5px solid var(--border);
+  border-radius: 999px;
+  font-size: 0.7rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.study-top {
+  list-style: none;
+  margin: 10px 0 6px;
+  padding: 0;
+  border: 1.5px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.study-top-row {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr) 44px 52px;
+  gap: 6px;
+  align-items: center;
+  padding: 7px 10px;
+  font-size: 0.85rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.study-top-row:last-child {
+  border-bottom: none;
+}
+
+.study-top-row span:nth-child(n + 3) {
+  text-align: right;
+}
+
+.study-top-name {
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.study-feed-winner {
+  font-size: 0.85rem;
+  font-weight: 700;
+  margin: 4px 0;
+}
+
+.study-feed-me {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.study-stats {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.study-stat {
+  border: 1.5px solid var(--border);
+  border-radius: 12px;
+  padding: 10px 12px;
+}
+
+.study-stat-label {
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.study-stat-value {
+  font-size: 1.4rem;
+  font-weight: 800;
+}
+
+.study-stat-sub {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+}
+
+.study-trow {
+  display: grid;
+  gap: 6px;
+  align-items: center;
+  width: 100%;
+  padding: 10px 12px;
+  text-align: left;
+  font: inherit;
+  font-size: 0.82rem;
+  color: var(--text);
+  background: none;
+  border: none;
+  border-bottom: 1px solid var(--border);
+}
+
+button.study-trow {
+  cursor: pointer;
+}
+
+button.study-trow:active {
+  background: var(--notify-bg);
+}
+
+.study-trow:last-child {
+  border-bottom: none;
+}
+
+.study-trow.is-me {
+  background: var(--notify-bg);
+}
+
+.study-thead {
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  border-bottom: 1.5px solid var(--border);
+}
+
+.study-table--solo .study-trow {
+  grid-template-columns: 74px minmax(0, 1fr) 50px 56px;
+}
+
+.study-table--comp .study-trow {
+  grid-template-columns: 70px minmax(0, 1fr) 34px 46px 56px;
+}
+
+.study-table--room .study-trow {
+  grid-template-columns: 24px minmax(0, 1fr) 44px 48px 76px;
+}
+
+.study-table--solo .study-trow > :nth-child(n + 3),
+.study-table--comp .study-trow > :nth-child(n + 3),
+.study-table--room .study-trow > :nth-child(n + 3) {
+  text-align: right;
+}
+
+.study-tcell-main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.study-tcell-main small,
+.study-pts small {
+  display: block;
+  font-size: 0.68rem;
+  font-weight: 400;
+  color: var(--text-muted);
+}
+
+.study-room-card {
+  border: 1.5px solid var(--border);
+  border-radius: 14px;
+  padding: 14px;
+  margin-bottom: 14px;
+}
+
+.study-room-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.study-room-head .study-row-title {
+  overflow-wrap: anywhere;
+}
+
+.study-room-card .study-actions {
+  margin-bottom: 0;
+}
+
+.study-room-player {
+  align-items: center;
+}
+
+.study-hint--top {
+  margin: 0 0 12px;
+}
+
+.study-timer-static {
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+
+.study-winner {
+  text-align: center;
+}
+
+.study-winner-name {
+  font-size: 1.15rem;
+  font-weight: 800;
 }

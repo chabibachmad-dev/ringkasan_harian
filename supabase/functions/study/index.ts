@@ -24,7 +24,7 @@
 //   session_cancel      { playerId, pin, sessionId }                         -> { ok }   (hanya sesi yang belum dikumpulkan)
 //   redeem              { playerId, pin, itemId }                            -> { redemption }
 //   settings_open       { parentPin? }                                       -> { settings, pendingRedemptions, players }
-//   settings_save       { parentPin?, perQuestionPoints, perfectBonusPercent, secondsPerQuestion, weights:{easy,normal,hard}, subjects:[...] } -> { settings }
+//   settings_save       { parentPin?, perQuestionPoints, perfectBonusPercent, secondsPerQuestion, competitionWinBonus, weights:{easy,normal,hard}, subjects:[...] } -> { settings }
 //   redeem_item_save    { parentPin?, id?, name, cost }                      -> { items }
 //   redeem_item_delete  { parentPin?, id }                                   -> { items }
 //   redeem_mark         { parentPin?, redemptionId, status:"given"|"pending" } -> { ok }
@@ -33,12 +33,24 @@
 //   -- timeline (Facebook-like): lihat kegiatan pemain, suka, komentar, detil. Melihat timeline & komentar tidak perlu PIN;
 //      suka/komentar/detil butuh PIN penonton (viewerId + viewerPin) dan tidak boleh pada kegiatan sendiri (suka/komentar).
 //   player_verify       { playerId, pin }                                    -> { player }   (masuk sebagai penonton)
-//   timeline            { playerId, viewerId?, viewerPin?, before? }         -> { owner:{id,name,grade,rank,sessionsDone,totalPoints}, items:[...], hasMore }
-//   like_toggle         { viewerId, viewerPin, sessionId }                   -> { liked, count }
-//   comment_list        { sessionId }                                        -> { comments:[{id,playerId,name,grade,body,createdAt}] }
-//   comment_add         { viewerId, viewerPin, sessionId, body }             -> { comment, count }
+//   feed                { ownerId?, kinds?, viewerId?, viewerPin?, before? } -> { items:[{kind:"lesson"|"competition"|"material", id, at, likeCount, commentCount, liked, ...}], hasMore }
+//                         (tanpa ownerId = timeline global semua pemain; dengan ownerId = kegiatan satu pemain; kinds menyaring jenis)
+//   player_public       { playerId }                                         -> { player:{id,name,grade,classLevel}, stats:{rank,totalPoints,soloPoints,competitionPoints,lessons,competitions,wins,materials} }   (profil publik, tanpa PIN)
+//   like_toggle         { viewerId, viewerPin, kind?, targetId }             -> { liked, count }   (kind: lesson (bawaan, boleh pakai sessionId) | competition | material)
+//   comment_list        { kind?, targetId }                                  -> { comments:[{id,playerId,name,grade,body,createdAt}] }
+//   comment_add         { viewerId, viewerPin, kind?, targetId, body }       -> { comment, count }
 //   comment_delete      { commentId, viewerId?, viewerPin? | parentPin }     -> { ok, count }   (penulisnya, atau orang tua bila PIN-nya sudah dibuat)
 //   result_detail       { viewerId, viewerPin, sessionId }                   -> { result }   (soal + jawaban + kunci + pembahasan, hanya pelajaran selesai)
+//   -- KOMPETISI (room). Pembuat memilih pelajaran/tingkat/level/jumlah soal/waktu, pemain lain bergabung di lobi, pembuat menekan Mulai,
+//      semua mengerjakan soal yang sama serentak. Skor tertinggi menang + bonus. Semua aksi room butuh PIN pemain (playerId + pin), kecuali room_list/room_result.
+//   room_list           { }                                                  -> { rooms:[{...room, creatorName, players, playerNames}] }   (lobi & yang sedang berjalan)
+//   room_create         { playerId, pin, subject, topic?, materialGrade, materialClass?, level, count, minutes, engine? } -> { state }
+//   room_join           { roomId, playerId, pin }                            -> { state }
+//   room_leave          { roomId, playerId, pin }                            -> { cancelled }   (pembuat keluar = room dibatalkan)
+//   room_start          { roomId, playerId, pin }                            -> { state }   (pembuat, minimal 2 pemain)
+//   room_state          { roomId, playerId, pin }                            -> { state:{room, players, me, questions|null, results|null} }   (dipanggil berkala saat di lobi / menunggu hasil)
+//   room_submit         { roomId, playerId, pin, answers:[0..3|null] }       -> { state }
+//   room_result         { roomId }                                           -> { room, results:[{rank,name,grade,classLevel,correct,seconds,points,bonus,timedOut}] }   (publik, hanya room selesai)
 //   -- materi pelajaran buatan AI (tab "Materi"); DAFTAR & ISI bisa dibaca semua orang tanpa PIN, membuat butuh PIN pemain
 //   material_list       { before? }                                          -> { items:[{id,title,subject,grade,detail,creatorName,createdAt}], hasMore }
 //   material_get        { materialId }                                       -> { material:{...,content} }
@@ -157,6 +169,7 @@ const publicSettings = (s: Row, items: Row[]) => ({
   perQuestionPoints: s.per_question_points,
   perfectBonusPercent: s.perfect_bonus_percent,
   secondsPerQuestion: s.seconds_per_question, // 0 = tanpa timer
+  competitionWinBonus: s.competition_win_bonus,
   weights: { easy: s.weight_easy, normal: s.weight_normal, hard: s.weight_hard },
   subjects: Array.isArray(s.subjects) ? s.subjects : [],
   parentPinSet: !!s.parent_pin_hash,
@@ -368,12 +381,14 @@ function readSettingsInput(body: Row): { ok: true; value: Row } | { ok: false; e
   const perQ = int(body.perQuestionPoints, 1, 10000);
   const bonus = int(body.perfectBonusPercent, 0, 100);
   const spq = int(body.secondsPerQuestion, 0, 600);
+  const winBonus = int(body.competitionWinBonus, 0, 1000);
   const w = (body.weights ?? {}) as Row;
   const easy = int(w.easy, 1, 1000);
   const normal = int(w.normal, 1, 1000);
   const hard = int(w.hard, 1, 1000);
   if (perQ === null) return { ok: false, error: "Poin per soal harus bilangan bulat 1-10000." };
   if (bonus === null) return { ok: false, error: "Bonus nilai sempurna harus bilangan bulat 0-100 (persen)." };
+  if (winBonus === null) return { ok: false, error: "Bonus pemenang kompetisi harus bilangan bulat 0-1000." };
   if (spq === null || (spq !== 0 && spq < 10)) return { ok: false, error: "Waktu per soal harus 0 (tanpa timer) atau 10-600 detik." };
   if (easy === null || normal === null || hard === null) return { ok: false, error: "Bobot level harus bilangan bulat 1-1000 (persen)." };
   const rawSubjects = Array.isArray(body.subjects) ? body.subjects : [];
@@ -383,7 +398,7 @@ function readSettingsInput(body: Row): { ok: true; value: Row } | { ok: false; e
     if (name && !subjects.some((x) => x.toLowerCase() === name.toLowerCase())) subjects.push(name);
   }
   if (subjects.length === 0 || subjects.length > 30) return { ok: false, error: "Daftar pelajaran harus berisi 1-30 nama." };
-  return { ok: true, value: { per_question_points: perQ, perfect_bonus_percent: bonus, seconds_per_question: spq, weight_easy: easy, weight_normal: normal, weight_hard: hard, subjects, updated_at: new Date().toISOString() } };
+  return { ok: true, value: { per_question_points: perQ, perfect_bonus_percent: bonus, seconds_per_question: spq, competition_win_bonus: winBonus, weight_easy: easy, weight_normal: normal, weight_hard: hard, subjects, updated_at: new Date().toISOString() } };
 }
 
 // ---------------------------------------------------------------- pembatas pemakaian AI
@@ -445,6 +460,145 @@ async function loadSubmittedSession(admin: Admin, sessionId: unknown): Promise<{
   return { session: s };
 }
 
+// ---------------------------------------------------------------- suka & komentar: jenis kegiatan
+const KIND_COL: Record<string, string> = { lesson: "session_id", competition: "room_id", material: "material_id" };
+
+function readTarget(body: Row): { kind: string; id: string } | null {
+  const kind = typeof body.kind === "string" ? body.kind : "lesson";
+  const id = body.targetId ?? body.sessionId;
+  if (!KIND_COL[kind] || !isUuid(id)) return null;
+  return { kind, id };
+}
+
+// Kegiatan yang boleh dilihat komentarnya: pelajaran selesai, kompetisi selesai, atau materi.
+async function targetVisible(admin: Admin, t: { kind: string; id: string }): Promise<boolean> {
+  if (t.kind === "lesson") {
+    const { data } = await admin.from("study_sessions").select("id").eq("id", t.id).eq("status", "submitted").maybeSingle();
+    return !!data;
+  }
+  if (t.kind === "competition") {
+    const { data } = await admin.from("study_rooms").select("id").eq("id", t.id).eq("status", "finished").maybeSingle();
+    return !!data;
+  }
+  const { data } = await admin.from("study_materials").select("id").eq("id", t.id).maybeSingle();
+  return !!data;
+}
+
+// ---------------------------------------------------------------- timeline global: bantu
+const FEED_KINDS = ["lesson", "competition", "material"];
+const ISO_CURSOR_RE = /^\d{4}-\d{2}-\d{2}T[\d:.]+(Z|[+-]\d{2}:?\d{2})$/;
+
+const feedItem = (r: Row) => ({
+  kind: r.kind,
+  id: r.ref_id,
+  at: r.at,
+  likeCount: r.like_count,
+  commentCount: r.comment_count,
+  liked: !!r.liked,
+  ...(r.data as Row)
+});
+
+// ---------------------------------------------------------------- kompetisi: bantu
+const ROOM_MAX_MINUTES = 120;
+const ROOM_LIST_MAX = 30;
+
+function roomError(message: string): Response | null {
+  if (/ROOM_TIDAK_ADA/.test(message)) return fail("Room itu tidak ditemukan (mungkin sudah dibatalkan).", 404);
+  if (/SUDAH_DI_ROOM/.test(message)) return fail("Kamu masih ada di room lain yang belum selesai. Selesaikan atau keluar dulu.", 409, { alreadyInRoom: true });
+  if (/ROOM_BUKAN_LOBI/.test(message)) return fail("Room itu sudah dimulai, tidak bisa bergabung lagi.", 409);
+  if (/ROOM_PENUH/.test(message)) return fail("Room sudah penuh.", 409);
+  if (/ROOM_SUDAH_JALAN/.test(message)) return fail("Room sudah berjalan, tidak bisa ditinggalkan.", 409);
+  if (/ROOM_BELUM_JALAN/.test(message)) return fail("Room belum dimulai.", 409);
+  if (/BUKAN_PEMBUAT/.test(message)) return fail("Hanya pembuat room yang bisa memulai.", 403);
+  if (/PEMAIN_KURANG/.test(message)) return fail("Minimal 2 pemain untuk memulai kompetisi.", 409);
+  if (/BUKAN_PESERTA/.test(message)) return fail("Kamu bukan peserta room ini.", 403);
+  if (/PEMAIN_TIDAK_ADA/.test(message)) return fail("Pemain tidak ditemukan.", 404);
+  if (/JAWABAN_TIDAK_VALID|SOAL_TIDAK_VALID/.test(message)) return fail("Data tidak valid.", 400);
+  return null;
+}
+
+const roomRow = (r: Row, playerCount: number) => ({
+  id: r.id,
+  subject: r.subject,
+  topic: r.topic,
+  materialGrade: r.material_grade,
+  materialClass: r.material_class ?? null,
+  level: r.level,
+  numQuestions: r.num_questions,
+  timeLimitSeconds: r.time_limit_seconds,
+  maxPlayers: r.max_players,
+  status: r.status,
+  creatorId: r.creator_id ?? null,
+  creatorName: r.creator_name,
+  createdAt: r.created_at,
+  startedAt: r.started_at ?? null,
+  winnerName: r.winner_name ?? null,
+  winBonus: r.win_bonus,
+  perQuestionPoints: r.per_question_points,
+  weightPercent: r.weight_percent,
+  perfectBonusPercent: r.perfect_bonus_percent,
+  players: playerCount,
+  // sisa waktu menurut jam SERVER (detik) selama room berjalan
+  secondsLeft: r.status === "running" && r.ends_at ? Math.max(0, Math.ceil((new Date(r.ends_at).getTime() - Date.now()) / 1000)) : null
+});
+
+async function loadRoom(admin: Admin, roomId: unknown): Promise<Row | null> {
+  if (!isUuid(roomId)) return null;
+  await admin.rpc("study_room_sweep"); // tutup room yang waktunya habis / lobi menganggur sebelum dibaca
+  const { data } = await admin.from("study_rooms").select("*").eq("id", roomId).maybeSingle();
+  return data ?? null;
+}
+
+// Hasil room selesai: tabel peringkat. Skor baru dibuka setelah room selesai supaya tidak membocorkan jawaban peserta lain.
+async function roomResults(admin: Admin, room: Row): Promise<Row[]> {
+  const { data: rps } = await admin.from("study_room_players").select("*").eq("room_id", room.id).order("rank", { ascending: true });
+  const ids = (rps ?? []).map((x: Row) => x.player_id);
+  const { data: ps } = ids.length ? await admin.from("study_players").select("id,name,grade,class_level").in("id", ids) : { data: [] as Row[] };
+  const byId = new Map<string, Row>((ps ?? []).map((p: Row) => [p.id as string, p] as [string, Row]));
+  const startedMs = room.started_at ? new Date(room.started_at).getTime() : 0;
+  return (rps ?? []).map((rp: Row) => ({
+    rank: rp.rank,
+    playerId: rp.player_id,
+    name: byId.get(rp.player_id)?.name ?? "?",
+    grade: byId.get(rp.player_id)?.grade ?? "",
+    classLevel: byId.get(rp.player_id)?.class_level ?? null,
+    correct: rp.correct_count ?? 0,
+    total: room.num_questions,
+    seconds: rp.submitted_at && startedMs ? Math.max(0, Math.round((new Date(rp.submitted_at).getTime() - startedMs) / 1000)) : null,
+    points: rp.points_awarded ?? 0,
+    bonus: rp.bonus_points ?? 0,
+    timedOut: !!rp.timed_out
+  }));
+}
+
+// Keadaan room untuk satu peserta. Soal (tanpa kunci) hanya dikirim saat room berjalan dan peserta belum mengumpulkan.
+async function roomState(admin: Admin, room: Row, me: string | null) {
+  const { data: rps } = await admin.from("study_room_players").select("player_id,submitted_at,joined_at").eq("room_id", room.id).order("joined_at", { ascending: true });
+  const ids = (rps ?? []).map((x: Row) => x.player_id);
+  const { data: ps } = ids.length ? await admin.from("study_players").select("id,name,grade,class_level").in("id", ids) : { data: [] as Row[] };
+  const byId = new Map<string, Row>((ps ?? []).map((p: Row) => [p.id as string, p] as [string, Row]));
+  const mine = (rps ?? []).find((x: Row) => x.player_id === me);
+  let questions: Row[] | null = null;
+  if (room.status === "running" && mine && !mine.submitted_at) {
+    const { data: qs } = await admin.from("study_room_questions").select("idx,question,options").eq("room_id", room.id).order("idx", { ascending: true });
+    questions = qs ?? [];
+  }
+  return {
+    room: roomRow(room, (rps ?? []).length),
+    players: (rps ?? []).map((rp: Row) => ({
+      id: rp.player_id,
+      name: byId.get(rp.player_id)?.name ?? "?",
+      grade: byId.get(rp.player_id)?.grade ?? "",
+      classLevel: byId.get(rp.player_id)?.class_level ?? null,
+      isCreator: rp.player_id === room.creator_id,
+      submitted: !!rp.submitted_at
+    })),
+    me: mine ? { submitted: !!mine.submitted_at } : null,
+    questions,
+    results: room.status === "finished" ? await roomResults(admin, room) : null
+  };
+}
+
 // ================================================================ handler
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
@@ -468,7 +622,7 @@ Deno.serve(async (req) => {
       if (!settings) return fail("Setting Study belum ada. Jalankan migrasi 0023_study.sql.", 500);
       return json({
         ok: true,
-        players: (board ?? []).map((p: Row) => ({ id: p.id, name: p.name, grade: p.grade, classLevel: p.class_level ?? null, sessionsDone: p.sessions_done, totalPoints: p.total_points, balance: p.balance })),
+        players: (board ?? []).map((p: Row) => ({ id: p.id, name: p.name, grade: p.grade, classLevel: p.class_level ?? null, sessionsDone: p.sessions_done, competitions: p.competitions ?? 0, wins: p.wins ?? 0, totalPoints: p.total_points, balance: p.balance })),
         settings: publicSettings(settings, items),
         grades: GRADES
       });
@@ -516,11 +670,11 @@ Deno.serve(async (req) => {
         admin.rpc("study_balance", { p_player: p.id }),
         admin.from("study_sessions").select("*").eq("player_id", p.id).order("created_at", { ascending: false }).limit(50),
         admin.from("study_redemptions").select("*").eq("player_id", p.id).order("created_at", { ascending: false }).limit(100),
-        admin.from("study_ledger").select("kind,points,note,meta,created_at").eq("player_id", p.id).in("kind", ["session", "penalty"]).order("created_at", { ascending: false }).limit(300),
+        admin.from("study_ledger").select("kind,points,note,meta,created_at").eq("player_id", p.id).in("kind", ["session", "competition", "competition_bonus", "penalty"]).order("created_at", { ascending: false }).limit(300),
         loadItems(admin)
       ]);
       const ledgerRows = (ledger.data ?? []) as Row[];
-      const totalEarned = ledgerRows.filter((l) => l.kind === "session").reduce((a, l) => a + l.points, 0);
+      const totalEarned = ledgerRows.filter((l) => l.kind !== "penalty").reduce((a, l) => a + l.points, 0);
       return json({
         ok: true,
         player: { id: p.id, name: p.name, grade: p.grade, classLevel: p.class_level ?? null },
@@ -784,73 +938,67 @@ Deno.serve(async (req) => {
       return json({ ok: true, player: { id: auth.player.id, name: auth.player.name, grade: auth.player.grade, classLevel: auth.player.class_level ?? null } });
     }
 
-    // ------------------------------------------------------------ timeline: daftar kegiatan satu pemain
-    if (action === "timeline") {
-      if (!isUuid(body.playerId)) return fail("Pemain tidak valid.");
+    // ------------------------------------------------------------ timeline global / per pemain
+    if (action === "feed") {
+      let owner: string | null = null;
+      if (body.ownerId !== undefined && body.ownerId !== null && body.ownerId !== "") {
+        if (!isUuid(body.ownerId)) return fail("Pemain tidak valid.");
+        owner = body.ownerId;
+      }
       let viewerId: string | null = null;
       if (body.viewerId !== undefined && body.viewerId !== null && body.viewerId !== "") {
         const v = await checkPlayerPin(admin, body.viewerId, body.viewerPin);
         if (v instanceof Response) return v;
         viewerId = v.player.id;
       }
+      let kinds: string[] | null = null;
+      if (Array.isArray(body.kinds)) {
+        kinds = body.kinds.filter((k: unknown) => typeof k === "string" && FEED_KINDS.includes(k)) as string[];
+        if (kinds.length === 0) return fail("Jenis kegiatan tidak valid.");
+      }
       let before: string | null = null;
       if (typeof body.before === "string" && body.before) {
         // dipakai apa adanya (presisi mikrodetik dari database), asal bentuknya tanggal-waktu ISO yang wajar
-        if (body.before.length > 40 || !/^\d{4}-\d{2}-\d{2}T[\d:.]+(Z|[+-]\d{2}:?\d{2})$/.test(body.before) || Number.isNaN(new Date(body.before).getTime())) {
+        if (body.before.length > 40 || !ISO_CURSOR_RE.test(body.before) || Number.isNaN(new Date(body.before).getTime())) {
           return fail("Kursor halaman tidak valid.");
         }
         before = body.before;
       }
-      const [board, tl] = await Promise.all([
-        admin.rpc("study_leaderboard"),
-        admin.rpc("study_timeline", { p_owner: body.playerId, p_viewer: viewerId, p_limit: TIMELINE_PAGE + 1, p_before: before })
-      ]);
-      if (board.error) return fail(board.error.message, 500);
-      if (tl.error) return fail(tl.error.message, 500);
-      const rows = (board.data ?? []) as Row[];
-      const at = rows.findIndex((p) => p.id === body.playerId);
-      if (at < 0) return fail("Pemain tidak ditemukan.", 404);
-      const owner = rows[at];
-      const all = (tl.data ?? []) as Row[];
-      const page = all.slice(0, TIMELINE_PAGE);
-      return json({
-        ok: true,
-        owner: { id: owner.id, name: owner.name, grade: owner.grade, classLevel: owner.class_level ?? null, rank: at + 1, sessionsDone: owner.sessions_done, totalPoints: owner.total_points },
-        items: page.map((r) => ({
-          sessionId: r.session_id,
-          subject: r.subject,
-          topic: r.topic,
-          materialGrade: r.material_grade,
-          materialClass: r.material_class ?? null,
-          level: r.level,
-          total: r.num_questions,
-          correct: r.correct_count,
-          points: r.points_awarded,
-          weightPercent: r.weight_percent,
-          submittedAt: r.submitted_at,
-          likeCount: r.like_count,
-          commentCount: r.comment_count,
-          liked: !!r.liked
-        })),
-        hasMore: all.length > TIMELINE_PAGE
-      });
+      await admin.rpc("study_room_sweep"); // kompetisi yang waktunya habis ikut tampil
+      const { data, error } = await admin.rpc("study_feed", { p_owner: owner, p_viewer: viewerId, p_kinds: kinds, p_limit: TIMELINE_PAGE + 1, p_before: before });
+      if (error) return fail(error.message, 500);
+      const all = (data ?? []) as Row[];
+      return json({ ok: true, items: all.slice(0, TIMELINE_PAGE).map(feedItem), hasMore: all.length > TIMELINE_PAGE });
+    }
+
+    // ------------------------------------------------------------ profil publik (tanpa PIN): hanya prestasi, bukan saldo
+    if (action === "player_public") {
+      if (!isUuid(body.playerId)) return fail("Pemain tidak valid.");
+      await admin.rpc("study_room_sweep");
+      const { data: p } = await admin.from("study_players").select("id,name,grade,class_level").eq("id", body.playerId).maybeSingle();
+      if (!p) return fail("Pemain tidak ditemukan.", 404);
+      const { data: stats, error } = await admin.rpc("study_player_stats", { p_player: p.id });
+      if (error) return fail(error.message, 500);
+      return json({ ok: true, player: { id: p.id, name: p.name, grade: p.grade, classLevel: p.class_level ?? null }, stats });
     }
 
     // ------------------------------------------------------------ suka / batal suka
     if (action === "like_toggle") {
       const v = await checkPlayerPin(admin, body.viewerId, body.viewerPin);
       if (v instanceof Response) return v;
-      if (!isUuid(body.sessionId)) return fail("Kegiatan tidak valid.");
-      const { data, error } = await admin.rpc("study_toggle_like", { p_session: body.sessionId, p_player: v.player.id });
+      const t = readTarget(body);
+      if (!t) return fail("Kegiatan tidak valid.");
+      const { data, error } = await admin.rpc("study_post_like", { p_kind: t.kind, p_id: t.id, p_player: v.player.id });
       if (error) return socialError(error.message) ?? fail(error.message, 500);
       return json({ ok: true, ...(data as Row) });
     }
 
     // ------------------------------------------------------------ komentar
     if (action === "comment_list") {
-      const ss = await loadSubmittedSession(admin, body.sessionId);
-      if (ss instanceof Response) return ss;
-      const { data: cs, error } = await admin.from("study_comments").select("id,player_id,body,created_at").eq("session_id", ss.session.id).order("created_at", { ascending: true }).limit(200);
+      const t = readTarget(body);
+      if (!t) return fail("Kegiatan tidak valid.");
+      if (!(await targetVisible(admin, t))) return fail("Kegiatan itu tidak ditemukan.", 404);
+      const { data: cs, error } = await admin.from("study_comments").select("id,player_id,body,created_at").eq(KIND_COL[t.kind], t.id).order("created_at", { ascending: true }).limit(200);
       if (error) return fail(error.message, 500);
       const ids = [...new Set((cs ?? []).map((c: Row) => c.player_id))];
       const { data: ps } = ids.length ? await admin.from("study_players").select("id,name,grade,class_level").in("id", ids) : { data: [] as Row[] };
@@ -872,10 +1020,11 @@ Deno.serve(async (req) => {
     if (action === "comment_add") {
       const v = await checkPlayerPin(admin, body.viewerId, body.viewerPin);
       if (v instanceof Response) return v;
-      if (!isUuid(body.sessionId)) return fail("Kegiatan tidak valid.");
+      const t = readTarget(body);
+      if (!t) return fail("Kegiatan tidak valid.");
       const text = cleanLine(body.body, COMMENT_MAX + 1);
       if (!text || text.length > COMMENT_MAX) return fail(`Komentar harus 1-${COMMENT_MAX} karakter.`);
-      const { data, error } = await admin.rpc("study_add_comment", { p_session: body.sessionId, p_player: v.player.id, p_body: text });
+      const { data, error } = await admin.rpc("study_post_comment", { p_kind: t.kind, p_id: t.id, p_player: v.player.id, p_body: text });
       if (error) return socialError(error.message) ?? fail(error.message, 500);
       const r = data as Row;
       return json({
@@ -887,7 +1036,7 @@ Deno.serve(async (req) => {
 
     if (action === "comment_delete") {
       if (!isUuid(body.commentId)) return fail("Komentar tidak valid.");
-      const { data: c } = await admin.from("study_comments").select("id,session_id,player_id").eq("id", body.commentId).maybeSingle();
+      const { data: c } = await admin.from("study_comments").select("id,session_id,room_id,material_id,player_id").eq("id", body.commentId).maybeSingle();
       if (!c) return fail("Komentar tidak ditemukan.", 404);
       if (body.viewerId) {
         // penulisnya sendiri (PIN pemain)
@@ -903,7 +1052,8 @@ Deno.serve(async (req) => {
       }
       const { error } = await admin.from("study_comments").delete().eq("id", c.id);
       if (error) return fail(error.message, 500);
-      const { count } = await admin.from("study_comments").select("id", { count: "exact", head: true }).eq("session_id", c.session_id);
+      const col = c.session_id ? "session_id" : c.room_id ? "room_id" : "material_id";
+      const { count } = await admin.from("study_comments").select("id", { count: "exact", head: true }).eq(col, c.session_id ?? c.room_id ?? c.material_id);
       return json({ ok: true, count: count ?? 0 });
     }
 
@@ -1012,6 +1162,107 @@ Deno.serve(async (req) => {
       const { error } = await admin.from("study_materials").delete().eq("id", m.id);
       if (error) return fail(error.message, 500);
       return json({ ok: true });
+    }
+
+    // ------------------------------------------------------------ kompetisi: daftar room terbuka (tanpa PIN)
+    if (action === "room_list") {
+      await admin.rpc("study_room_sweep");
+      const { data: rooms, error } = await admin.from("study_rooms").select("*").in("status", ["lobby", "running"]).order("created_at", { ascending: false }).limit(ROOM_LIST_MAX);
+      if (error) return fail(error.message, 500);
+      const ids = (rooms ?? []).map((r: Row) => r.id);
+      const { data: rps } = ids.length ? await admin.from("study_room_players").select("room_id,player_id").in("room_id", ids) : { data: [] as Row[] };
+      const pids = [...new Set((rps ?? []).map((x: Row) => x.player_id))];
+      const { data: ps } = pids.length ? await admin.from("study_players").select("id,name").in("id", pids) : { data: [] as Row[] };
+      const nameOf = new Map<string, string>((ps ?? []).map((p: Row) => [p.id as string, p.name as string] as [string, string]));
+      return json({
+        ok: true,
+        rooms: (rooms ?? []).map((r: Row) => {
+          const mine = (rps ?? []).filter((x: Row) => x.room_id === r.id);
+          return { ...roomRow(r, mine.length), playerNames: mine.map((x: Row) => nameOf.get(x.player_id) ?? "?") };
+        })
+      });
+    }
+
+    // ------------------------------------------------------------ kompetisi: buat room
+    if (action === "room_create") {
+      const auth = await checkPlayerPin(admin, body.playerId, body.pin);
+      if (auth instanceof Response) return auth;
+      const p = auth.player;
+      const subject = cleanLine(body.subject, 60);
+      const topic = cleanLine(body.topic, 100);
+      if (!subject) return fail("Pilih atau ketik mata pelajaran.");
+      if (typeof body.materialGrade !== "string" || !isMaterialGradeAllowed(p.grade, body.materialGrade)) {
+        return fail("Tingkat materi tidak boleh lebih rendah dari grade pemain.");
+      }
+      const materialClass = classOf(body.materialClass);
+      if (classesOf(body.materialGrade).length > 0 && materialClass === null) return fail("Pilih kelasnya.");
+      if (!isLevelAllowed(p.grade, p.class_level, body.materialGrade, materialClass)) {
+        return fail("Kelas materi tidak boleh lebih rendah dari kelas pemain.");
+      }
+      if (typeof body.level !== "string" || !LEVELS.includes(body.level)) return fail("Level tidak valid.");
+      if (!validCount(body.count)) return fail(`Jumlah soal harus 1-${MAX_QUESTIONS}.`);
+      const count = body.count as number;
+      const minutes = body.minutes;
+      if (typeof minutes !== "number" || !Number.isInteger(minutes) || minutes < 1 || minutes > ROOM_MAX_MINUTES) {
+        return fail(`Waktu harus 1-${ROOM_MAX_MINUTES} menit.`);
+      }
+      await admin.rpc("study_room_sweep");
+      const { data: already } = await admin.rpc("study_active_room", { p_player: p.id });
+      if (already) return roomError("SUDAH_DI_ROOM") as Response;
+
+      const slot = await takeGenerationSlot(admin, p.id, "lesson");
+      if (slot) return slot;
+      const engine = parseEngine(body.engine);
+      wireReporters(admin);
+      const made = await makeQuestions(admin, { subject, topic: topic || undefined, grade: body.materialGrade, classLevel: materialClass, level: body.level, count }, engine);
+      const minOk = Math.max(1, Math.ceil(count * 0.8));
+      if (made.questions.length < minOk) {
+        return fail(`Gagal membuat soal (${made.questions.length} dari ${count} yang layak). ${made.lastError}`.trim(), 502, { generationFailed: true });
+      }
+      const { data: rid, error } = await admin.rpc("study_room_create", {
+        p_creator: p.id,
+        p_meta: { subject, topic, materialGrade: body.materialGrade, materialClass, level: body.level, timeLimitSeconds: minutes * 60, provider: made.provider },
+        p_questions: made.questions.map((q) => ({ question: q.question, options: q.options, correctIndex: q.correctIndex }))
+      });
+      if (error) return roomError(error.message) ?? fail(error.message, 500);
+      const room = await loadRoom(admin, rid);
+      if (!room) return fail("Room gagal dibuat.", 500);
+      return json({ ok: true, state: await roomState(admin, room, p.id) });
+    }
+
+    // ------------------------------------------------------------ kompetisi: bergabung / keluar / mulai / keadaan / kumpulkan
+    if (["room_join", "room_leave", "room_start", "room_state", "room_submit"].includes(action)) {
+      const auth = await checkPlayerPin(admin, body.playerId, body.pin);
+      if (auth instanceof Response) return auth;
+      const p = auth.player;
+      if (!isUuid(body.roomId)) return fail("Room tidak valid.");
+      const roomId = body.roomId;
+      if (action === "room_join") {
+        const { error } = await admin.rpc("study_room_join", { p_room: roomId, p_player: p.id });
+        if (error) return roomError(error.message) ?? fail(error.message, 500);
+      } else if (action === "room_leave") {
+        const { data, error } = await admin.rpc("study_room_leave", { p_room: roomId, p_player: p.id });
+        if (error) return roomError(error.message) ?? fail(error.message, 500);
+        return json({ ok: true, cancelled: !!(data as Row)?.cancelled });
+      } else if (action === "room_start") {
+        const { error } = await admin.rpc("study_room_start", { p_room: roomId, p_player: p.id });
+        if (error) return roomError(error.message) ?? fail(error.message, 500);
+      } else if (action === "room_submit") {
+        if (!Array.isArray(body.answers)) return fail("Jawaban tidak valid.");
+        const { error } = await admin.rpc("study_room_submit", { p_room: roomId, p_player: p.id, p_answers: body.answers });
+        if (error) return roomError(error.message) ?? fail(error.message, 500);
+      }
+      const room = await loadRoom(admin, roomId);
+      if (!room) return fail("Room itu tidak ditemukan (mungkin sudah dibatalkan).", 404);
+      return json({ ok: true, state: await roomState(admin, room, p.id) });
+    }
+
+    // ------------------------------------------------------------ kompetisi: tabel hasil (publik)
+    if (action === "room_result") {
+      const room = await loadRoom(admin, body.roomId);
+      if (!room || room.status !== "finished") return fail("Hasil kompetisi itu tidak ditemukan.", 404);
+      const results = await roomResults(admin, room);
+      return json({ ok: true, room: roomRow(room, results.length), results });
     }
 
     return fail("action tidak dikenal.", 400);

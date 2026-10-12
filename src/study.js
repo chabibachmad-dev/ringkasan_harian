@@ -43,11 +43,15 @@ const S = {
   result: null,
   autoSubmittedId: "", // id pelajaran yang dikumpulkan otomatis karena waktu habis (untuk pesan di hasil)
   explainFailed: false,
-  resultFrom: "profile", // dari mana hasil dibuka: "profile" (milik sendiri) | "timeline" (detil kegiatan pemain lain)
-  viewer: null, // { id, name, grade, pin } pemain yang sudah "masuk" untuk suka/komentar/detil; PIN hanya di memori
-  tl: null, // timeline yang sedang dibuka
-  tlScroll: 0,
-  tab: "board", // tab beranda: "board" (leaderboard) | "materi"
+  resultFrom: "profile", // dari mana hasil dibuka: "profile" (milik sendiri) | "feed" (detil kegiatan pemain lain)
+  viewer: null, // { id, name, grade, pin } pemain yang sudah "masuk" untuk suka/komentar/detil/room; PIN hanya di memori
+  stack: [], // tumpukan layar (profil publik, hasil, materi, daftar room) supaya tombol kembali ke asalnya
+  tab: "timeline", // tab beranda: "timeline" (default) | "board" (leaderboard) | "materi"
+  feed: null, // timeline global (beranda)
+  pub: null, // profil publik yang sedang dibuka: { id, player, stats, sub, feeds }
+  rr: null, // tabel hasil kompetisi yang sedang dibuka
+  rooms: { items: [], loading: false, loaded: false, error: "" },
+  room: null, // room yang sedang diikuti: { id, creds, state, busy, leftQuiz }
   materials: { items: [], hasMore: false, loading: false, loaded: false, error: "" },
   material: null // materi yang sedang dibaca: { id, title, ..., content (null = masih dimuat) }
 };
@@ -113,7 +117,14 @@ export function hideStudyScreen() {
   S.player = null;
   S.profile = null;
   S.viewer = null;
-  S.tl = null;
+  S.pub = null;
+  S.rr = null;
+  S.room = null;
+  S.quiz = null;
+  S.stack = [];
+  S.view = "home";
+  stopPoll();
+  syncQuizTimer();
 }
 
 export function showStudyScreen() {
@@ -125,12 +136,17 @@ export function showStudyScreen() {
   S.quiz = null;
   S.result = null;
   S.viewer = null;
-  S.tl = null;
+  S.pub = null;
+  S.rr = null;
+  S.room = null;
+  S.stack = [];
   S.material = null;
+  S.feed = newFeed(null, null);
   S.materials = { items: [], hasMore: false, loading: false, loaded: false, error: "" };
   render();
   loadOverview();
   if (S.tab === "materi") loadMaterials(true);
+  else if (S.tab === "timeline") loadFeed(S.feed, "first");
 }
 
 export function rerenderStudy() {
@@ -140,6 +156,15 @@ export function rerenderStudy() {
 
 function onBack() {
   if (S.view === "quiz") {
+    if (S.quiz?.kind === "room") {
+      // kompetisi: waktu tetap berjalan; kembali ke room, soal bisa dilanjutkan dari sana
+      if (!window.confirm(L("study_room_leave_quiz_confirm"))) return;
+      if (S.room) S.room.leftQuiz = true;
+      S.quiz = null;
+      S.view = "room";
+      render();
+      return;
+    }
     if (!window.confirm(L("study_leave_confirm"))) return;
     S.quiz = null;
     S.view = "profile";
@@ -148,30 +173,17 @@ function onBack() {
   }
   if (S.view === "result") {
     S.result = null;
-    if (S.resultFrom === "timeline" && S.tl) {
-      S.view = "timeline";
-      render();
-      window.scrollTo(0, S.tlScroll || 0);
-      return;
-    }
+    if (S.resultFrom === "feed" && popView()) return;
     S.view = "profile";
     loadProfile();
     return;
   }
-  if (S.view === "material") {
-    S.view = "home";
-    S.material = null;
-    render();
-    return;
-  }
-  if (S.view === "timeline") {
-    S.view = "home";
-    S.tl = null;
-    S.player = null;
-    S.pin = "";
-    S.profile = null;
-    render();
-    loadOverview();
+  if (S.view === "room") return leaveRoomView();
+  if (["material", "public", "roomresult", "rooms"].includes(S.view)) {
+    if (!popView()) {
+      S.view = "home";
+      render();
+    }
     return;
   }
   if (S.view === "profile") {
@@ -179,6 +191,8 @@ function onBack() {
     S.player = null;
     S.pin = "";
     S.profile = null;
+    S.stack = [];
+    if (S.feed) S.feed.stale = true;
     render();
     loadOverview();
     return;
@@ -227,8 +241,17 @@ function setTopbar() {
   const title = $("study-title");
   const settingsBtn = $("study-settings-btn");
   if (title) {
-    title.textContent =
-      S.view === "profile" && S.player ? S.player.name : S.view === "timeline" && S.tl?.owner ? S.tl.owner.name : S.view === "material" ? L("study_mat_title") : S.view === "quiz" ? L("study_quiz_title") : S.view === "result" ? L("study_result_title") : L("study_title");
+    const titles = {
+      profile: S.player?.name,
+      public: S.pub?.player?.name || L("study_pub_title"),
+      material: L("study_mat_title"),
+      quiz: S.quiz?.kind === "room" ? L("study_kind_competition") : L("study_quiz_title"),
+      result: L("study_result_title"),
+      rooms: L("study_rooms_title"),
+      room: L("study_room_title"),
+      roomresult: L("study_room_result_title")
+    };
+    title.textContent = titles[S.view] || L("study_title");
   }
   if (settingsBtn) settingsBtn.hidden = S.view !== "home";
 }
@@ -241,10 +264,14 @@ function render() {
   else if (S.view === "profile") renderProfile(body);
   else if (S.view === "quiz") renderQuiz(body);
   else if (S.view === "result") renderResult(body);
-  else if (S.view === "timeline") renderTimeline(body);
+  else if (S.view === "public") renderPublic(body);
   else if (S.view === "material") renderMaterial(body);
+  else if (S.view === "rooms") renderRooms(body);
+  else if (S.view === "room") renderRoom(body);
+  else if (S.view === "roomresult") renderRoomResult(body);
   typesetMath(body).catch(() => {});
   syncQuizTimer();
+  syncPoll();
 }
 
 // ---------------------------------------------------------------- timer ujian
@@ -312,7 +339,7 @@ function renderHome(body) {
   const rows = players
     .map(
       (p, i) => `
-      <button type="button" class="study-board-row" data-act="open-timeline" data-id="${esc(p.id)}">
+      <button type="button" class="study-board-row" data-act="open-public" data-id="${esc(p.id)}">
         <span class="study-rank">${i + 1}</span>
         <span class="study-name">${esc(p.name)}</span>
         <span>${esc(gradeText(p.grade, p.classLevel))}</span>
@@ -337,10 +364,13 @@ function renderHome(body) {
     <div class="study-actions">
       <button type="button" class="primary-btn" data-act="new-player">${esc(L("study_new_player"))}</button>
       <button type="button" class="primary-btn" data-act="new-lesson">${esc(L("study_new_lesson"))}</button>
+      <button type="button" class="primary-btn" data-act="rooms">${esc(L("study_rooms_btn"))}</button>
     </div>
-    <div class="study-tabs" role="tablist">${tab("board", L("study_tab_board"))}${tab("materi", L("study_tab_materi"))}</div>
+    <div class="study-tabs" role="tablist">${tab("timeline", L("study_tab_timeline"))}${tab("board", L("study_tab_board"))}${tab("materi", L("study_tab_materi"))}</div>
     ${S.loading && S.tab === "board" ? `<p class="status-text">${esc(L("study_loading"))}</p>` : ""}
-    <div role="tabpanel">${S.tab === "materi" ? materialsHtml() : boardHtml}</div>`;
+    <div role="tabpanel">${S.tab === "materi" ? materialsHtml() : S.tab === "timeline" ? timelineHtml() : boardHtml}</div>`;
+  // kegiatan baru (pelajaran/kompetisi/materi selesai) sejak timeline dimuat: segarkan diam-diam
+  if (S.tab === "timeline" && S.feed && S.feed.stale && !S.feed.loading) setTimeout(() => S.feed && loadFeed(S.feed, "refresh"), 0);
 }
 
 function renderProfile(body) {
@@ -455,7 +485,7 @@ function renderQuiz(body) {
     .join("");
   body.innerHTML = `
     <div class="study-card">
-      <div class="study-row-title">${esc(q.session.subject)}${q.session.topic ? ` · ${esc(q.session.topic)}` : ""}</div>
+      <div class="study-row-title">${q.kind === "room" ? `<span class="study-badge study-badge--solid">${esc(L("study_kind_competition"))}</span> ` : ""}${esc(q.session.subject)}${q.session.topic ? ` · ${esc(q.session.topic)}` : ""}</div>
       <div class="study-row-meta">${esc(gradeText(q.session.materialGrade, q.session.materialClass))} · ${esc(levelLabel(q.session.level, S.overview?.settings))} · ${q.questions.length} ${esc(L("study_questions_unit"))}</div>
       ${q.shortfall ? `<div class="study-row-meta">${esc(L("study_shortfall", { got: q.questions.length, want: q.questions.length + q.shortfall }))}</div>` : ""}
       ${q.endsAt ? `<div class="study-row-meta">${esc(L("study_time_hint", { m: Math.ceil((q.session.timeLimitSeconds || 0) / 60) }))}</div>` : ""}
@@ -513,11 +543,11 @@ function renderResult(body) {
       ${r.bonusPercent > 0 ? `<div class="study-bonus">${esc(L("study_bonus_line", { b: r.bonusPercent }))}</div>` : ""}
       ${r.timedOut ? `<div class="study-warn">${esc(L("study_time_up_late"))}</div>` : S.autoSubmittedId === r.session.id ? `<div class="study-warn">${esc(L("study_time_up_auto"))}</div>` : ""}
     </div>
-    ${S.explainFailed && S.resultFrom !== "timeline" ? `<div class="study-card"><p>${esc(L("study_explain_failed"))}</p><button type="button" class="secondary-btn" data-act="explain-retry">${esc(L("study_explain_retry"))}</button></div>` : ""}
+    ${S.explainFailed && S.resultFrom !== "feed" ? `<div class="study-card"><p>${esc(L("study_explain_failed"))}</p><button type="button" class="secondary-btn" data-act="explain-retry">${esc(L("study_explain_retry"))}</button></div>` : ""}
     <div class="study-actions">
       <button type="button" class="primary-btn" data-act="share-pdf">${esc(L("study_share_pdf"))}</button>
       ${
-        S.resultFrom === "timeline"
+        S.resultFrom === "feed"
           ? `<button type="button" class="secondary-btn" data-act="to-timeline">${esc(L("study_back_timeline"))}</button>`
           : `<button type="button" class="secondary-btn" data-act="to-profile">${esc(L("study_to_profile"))}</button>`
       }
@@ -547,17 +577,36 @@ async function onBodyClick(e) {
   if (act === "new-lesson-me") return openLessonForm(S.player);
   if (act === "open-player") return openPlayerPin(id);
   if (act === "tab") return switchTab(btn.dataset.tab);
+  if (act === "rooms") return openRooms();
+  if (act === "rooms-refresh") return loadRooms();
+  if (act === "room-new") return openRoomCreate();
+  if (act === "room-join") return joinRoomFlow(id);
+  if (act === "room-start") return roomStart();
+  if (act === "room-leave") return leaveRoomView();
+  if (act === "room-resume") {
+    if (S.room) S.room.leftQuiz = false;
+    return startRoomQuiz();
+  }
+  if (act === "room-back") {
+    S.room = null;
+    S.view = "rooms";
+    render();
+    return loadRooms();
+  }
+  if (act === "open-public") return openPublic(id);
+  if (act === "pub-tab") return switchPubTab(btn.dataset.tab);
+  if (act === "pub-reload") return S.pub && loadPublic(S.pub);
+  if (act === "feed-reload") return loadFeed(shownFeed(), "first");
   if (act === "mat-new") return openMaterialCreate();
   if (act === "mat-view") return openMaterial(id);
   if (act === "mat-pdf") return materialPdf(id, btn);
   if (act === "mat-reader-pdf") return materialPdf(S.material?.id, btn);
   if (act === "mat-del") return deleteMaterial(id);
   if (act === "mat-more") return loadMaterials(false);
-  if (act === "open-timeline") return openTimeline(id);
-  if (act === "my-timeline") return openTimeline(S.player?.id);
+  if (act === "my-timeline") return openPublic(S.player?.id);
   if (act === "edit-level") return openEditLevel();
-  if (act === "tl-profile") return openProfileFromTimeline();
-  if (act === "tl-more") return loadMoreTimeline();
+  if (act === "tl-profile") return openProfileFromPublic();
+  if (act === "tl-more") return loadFeed(shownFeed(), "more");
   if (act === "tl-signin") return signInViewer();
   if (act === "tl-signout") return signOutViewer();
   if (act === "like") return doLike(id);
@@ -654,6 +703,8 @@ function openPlayerPin(playerId) {
     S.pin = out.pin;
     S.profile = out.res;
     S.viewer = { ...out.res.player, pin: out.pin };
+    S.stack = [];
+    S.pub = null;
     S.view = "profile";
     render();
   });
@@ -924,6 +975,7 @@ async function submitQuiz(btn, auto = false) {
     btn.disabled = true;
     btn.textContent = L("study_submit_busy");
   }
+  if (q.kind === "room") return submitRoomQuiz(q, btn, old, auto);
   const res = await studyCall("session_submit", { playerId: S.player.id, pin: S.pin, sessionId: q.sessionId, answers: q.answers, engine: "auto" });
   q.submitting = false;
   const btnNow = $("study-submit-btn");
@@ -933,6 +985,7 @@ async function submitQuiz(btn, auto = false) {
   }
   if (!res.ok) return handleFailure(res);
   clearAnswers(q.sessionId);
+  if (S.feed) S.feed.stale = true;
   S.autoSubmittedId = auto ? q.sessionId : "";
   S.quiz = null;
   S.result = res.result;
@@ -941,6 +994,29 @@ async function submitQuiz(btn, auto = false) {
     S.view = "result";
   render();
   window.scrollTo(0, 0);
+}
+
+// Kumpulkan jawaban kompetisi. Setelah itu layar room menampilkan "menunggu" atau tabel hasil.
+async function submitRoomQuiz(q, btn, oldLabel, auto) {
+  const rm = S.room;
+  const res = rm ? await studyCall("room_submit", { playerId: rm.creds.id, pin: rm.creds.pin, roomId: q.roomId, answers: q.answers }) : { ok: false, message: "Error" };
+  q.submitting = false;
+  const btnNow = $("study-submit-btn");
+  if (btnNow) {
+    btnNow.disabled = false;
+    btnNow.textContent = oldLabel || L("study_submit");
+  }
+  if (!res.ok) {
+    if (res.status === 404 && S.room === rm) return roomGone();
+    return handleFailure(res);
+  }
+  clearAnswers(q.sessionId);
+  S.autoSubmittedId = auto ? q.roomId : "";
+  S.quiz = null;
+  S.view = "room";
+  window.scrollTo(0, 0);
+  applyRoomState(res.state);
+  render();
 }
 
 async function retryExplain(btn) {
@@ -970,7 +1046,7 @@ async function sharePdf(btn) {
   }
 }
 
-// ================================================================ Timeline (kegiatan pemain, suka, komentar, detil)
+// ================================================================ Timeline global, profil publik, suka, komentar, detil
 const COMMENT_MAX = 300;
 
 const viewerParams = () => (S.viewer ? { viewerId: S.viewer.id, viewerPin: S.viewer.pin } : {});
@@ -979,91 +1055,158 @@ const fmtDateTime = (v) => {
   return Number.isNaN(d.getTime()) ? "" : d.toLocaleString(locale(), { day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" });
 };
 const initial = (name) => esc(String(name || "?").trim().charAt(0).toUpperCase() || "?");
-const tlItem = (sid) => S.tl?.items.find((i) => i.sessionId === sid);
+const keyOf = (it) => `${it.kind}:${it.id}`;
+const splitKey = (k) => {
+  const i = String(k).indexOf(":");
+  return { kind: k.slice(0, i), id: k.slice(i + 1) };
+};
+// Satu "feed" = satu daftar kartu kegiatan (timeline global di beranda, atau milik satu pemain di profil publik).
+const newFeed = (ownerId, kinds) => ({ ownerId: ownerId || null, kinds: kinds || null, items: [], hasMore: false, loading: false, loaded: false, error: "", stale: false, comments: {}, drafts: {} });
+
+// Feed yang sedang tampil di layar (sasaran semua aksi kartu).
+function shownFeed() {
+  if (S.view === "home" && S.tab === "timeline") return S.feed;
+  if (S.view === "public" && S.pub) return S.pub.feeds[S.pub.sub];
+  return null;
+}
+const feedItemByKey = (key) => shownFeed()?.items.find((i) => keyOf(i) === key);
+const ownerIdOf = (it) => (it.kind === "lesson" ? it.playerId : it.kind === "material" ? it.creatorId : null);
+const isOwnItem = (it) => !!S.viewer && !!ownerIdOf(it) && S.viewer.id === ownerIdOf(it);
+
+// Tumpukan layar: layar yang dibuka dari kartu/baris (profil publik, hasil, materi, daftar room) kembali ke tempat asalnya.
+function pushView() {
+  S.stack.push({ view: S.view, scroll: window.scrollY, pub: S.pub, rr: S.rr, material: S.material });
+}
+function popView() {
+  const e = S.stack.pop();
+  if (!e) return false;
+  S.view = e.view;
+  S.pub = e.pub;
+  S.rr = e.rr;
+  S.material = e.material;
+  render();
+  window.scrollTo(0, e.scroll || 0);
+  // kembali ke beranda: papan peringkat & setting disegarkan diam-diam (poin baru, PIN orang tua, dll.)
+  if (e.view === "home") loadOverviewQuiet().then(() => S.view === "home" && render());
+  return true;
+}
 
 // PIN penonton salah/terkunci (mis. PIN direset): lupakan penonton supaya bisa masuk lagi.
 function viewerFailure(res) {
   if (res.pinWrong || res.locked) {
     S.viewer = null;
-    if (S.view === "timeline") render();
+    render();
   }
   handleFailure(res);
 }
 
-async function openTimeline(ownerId) {
-  if (!ownerId) return;
-  S.tl = { ownerId, owner: null, items: [], hasMore: false, loading: true, comments: {}, drafts: {} };
-  S.view = "timeline";
-  render();
-  window.scrollTo(0, 0);
-  const tl = S.tl;
-  const res = await studyCall("timeline", { playerId: ownerId, ...viewerParams() });
-  if (S.tl !== tl) return;
-  tl.loading = false;
-  if (!res.ok) {
-    S.tl = null;
-    S.view = "home";
-    if (res.pinWrong || res.locked) S.viewer = null;
-    handleFailure(res);
-    render();
-    loadOverview();
-    return;
-  }
-  tl.owner = res.owner;
-  tl.items = res.items;
-  tl.hasMore = res.hasMore;
-  render();
+function rerenderIfShown(feed) {
+  if (shownFeed() === feed) render();
 }
 
-async function loadMoreTimeline() {
-  const tl = S.tl;
-  if (!tl || tl.loading || !tl.hasMore) return;
-  tl.loading = true;
-  render();
-  const last = tl.items[tl.items.length - 1];
-  const res = await studyCall("timeline", { playerId: tl.ownerId, before: last?.submittedAt, ...viewerParams() });
-  if (S.tl !== tl) return;
-  tl.loading = false;
-  if (!res.ok) {
-    render();
-    return viewerFailure(res);
+// mode: "first" (kosongkan lalu muat), "refresh" (muat ulang, isi lama tetap tampil sampai data baru datang), "more" (halaman berikutnya)
+async function loadFeed(feed, mode = "first") {
+  if (!feed || feed.loading) return;
+  feed.loading = true;
+  feed.error = "";
+  feed.stale = false;
+  if (mode === "first") {
+    feed.items = [];
+    feed.hasMore = false;
   }
-  const have = new Set(tl.items.map((i) => i.sessionId));
-  tl.items = tl.items.concat(res.items.filter((i) => !have.has(i.sessionId)));
-  tl.hasMore = res.hasMore;
-  tl.owner = res.owner;
-  render();
+  rerenderIfShown(feed);
+  const last = feed.items[feed.items.length - 1];
+  const res = await studyCall("feed", {
+    ownerId: feed.ownerId || undefined,
+    kinds: feed.kinds || undefined,
+    before: mode === "more" ? last?.at : undefined,
+    ...viewerParams()
+  });
+  feed.loading = false;
+  if (!res.ok) {
+    if (res.pinWrong || res.locked) S.viewer = null;
+    feed.error = errText(res);
+  } else if (mode === "more") {
+    const have = new Set(feed.items.map(keyOf));
+    feed.items = feed.items.concat(res.items.filter((i) => !have.has(keyOf(i))));
+    feed.hasMore = res.hasMore;
+  } else {
+    feed.items = res.items;
+    feed.hasMore = res.hasMore;
+    feed.loaded = true;
+  }
+  rerenderIfShown(feed);
 }
 
 // Ambil ulang semua kartu yang sudah tampil (mis. setelah masuk, supaya status "disukai" benar).
-async function refreshTimeline() {
-  const tl = S.tl;
-  if (!tl) return;
-  const want = Math.max(tl.items.length, 1);
+async function refreshFeed(feed) {
+  if (!feed) return;
+  const want = Math.max(feed.items.length, 1);
   let items = [];
   let more = true;
-  let owner = tl.owner;
   while (more && items.length < want) {
-    const res = await studyCall("timeline", { playerId: tl.ownerId, before: items.length ? items[items.length - 1].submittedAt : undefined, ...viewerParams() });
+    const res = await studyCall("feed", { ownerId: feed.ownerId || undefined, kinds: feed.kinds || undefined, before: items.length ? items[items.length - 1].at : undefined, ...viewerParams() });
     if (!res.ok) return viewerFailure(res);
-    owner = res.owner;
     items = items.concat(res.items);
     more = res.hasMore;
   }
-  if (S.tl !== tl) return;
-  tl.owner = owner;
-  tl.items = items;
-  tl.hasMore = more;
-  render();
+  feed.items = items;
+  feed.hasMore = more;
+  feed.loaded = true;
+  rerenderIfShown(feed);
 }
 
-function openProfileFromTimeline() {
-  const o = S.tl?.owner;
+// ---- profil publik (tanpa PIN: hanya prestasi, bukan saldo/redeem/hukuman)
+function openPublic(playerId) {
+  if (!playerId) return;
+  if (S.view === "public" && S.pub?.id === playerId) return;
+  pushView();
+  const pub = {
+    id: playerId,
+    player: null,
+    stats: null,
+    error: "",
+    sub: "all",
+    feeds: { all: newFeed(playerId, null), lesson: newFeed(playerId, ["lesson"]), competition: newFeed(playerId, ["competition"]) }
+  };
+  S.pub = pub;
+  S.view = "public";
+  render();
+  window.scrollTo(0, 0);
+  loadPublic(pub);
+}
+
+async function loadPublic(pub) {
+  pub.error = "";
+  loadFeed(pub.feeds.all, "first");
+  const res = await studyCall("player_public", { playerId: pub.id });
+  if (res.ok) {
+    pub.player = res.player;
+    pub.stats = res.stats;
+  } else {
+    pub.error = errText(res);
+  }
+  if (S.view === "public" && S.pub === pub) render();
+}
+
+function switchPubTab(sub) {
+  const pub = S.pub;
+  if (!pub || !pub.feeds[sub]) return;
+  pub.sub = sub;
+  render();
+  const f = pub.feeds[sub];
+  if (!f.loaded && !f.loading) loadFeed(f, "first");
+}
+
+function openProfileFromPublic() {
+  const o = S.pub?.player;
   if (!o) return;
   if (S.viewer && S.viewer.id === o.id) {
     S.player = { id: o.id, name: o.name, grade: o.grade, classLevel: o.classLevel ?? null };
     S.pin = S.viewer.pin;
     S.profile = null;
+    S.stack = [];
+    S.pub = null;
     S.view = "profile";
     render();
     loadProfile();
@@ -1076,7 +1219,7 @@ function openProfileFromTimeline() {
 function openViewerLogin() {
   const players = S.overview?.players || [];
   if (!players.length) return Promise.resolve(false);
-  const first = players.find((p) => p.id !== S.tl?.owner?.id) || players[0];
+  const first = S.viewer ? players.find((p) => p.id === S.viewer.id) || players[0] : players.find((p) => p.id !== S.pub?.player?.id) || players[0];
   return openFormDialog({
     title: L("study_signin_title"),
     okLabel: L("study_signin_ok"),
@@ -1109,12 +1252,12 @@ function openViewerLogin() {
 }
 
 async function signInViewer() {
-  if (await openViewerLogin()) await refreshTimeline();
+  if (await openViewerLogin()) await refreshFeed(shownFeed());
 }
 
 function signOutViewer() {
   S.viewer = null;
-  if (S.tl) S.tl.items.forEach((i) => (i.liked = false));
+  shownFeed()?.items.forEach((i) => (i.liked = false));
   render();
 }
 
@@ -1122,7 +1265,7 @@ function signOutViewer() {
 async function ensureViewer() {
   if (S.viewer) return true;
   if (!(await openViewerLogin())) return false;
-  await refreshTimeline();
+  await refreshFeed(shownFeed());
   return !!S.viewer;
 }
 
@@ -1134,10 +1277,11 @@ function viewerBarHtml() {
   return `<div class="study-viewer"><span>${esc(L("study_tl_signed_out"))}</span><button type="button" class="study-link-btn" data-act="tl-signin">${esc(L("study_tl_signin"))}</button></div>`;
 }
 
-function commentsHtml(it) {
-  const cm = S.tl.comments[it.sessionId];
+function commentsHtml(it, feed) {
+  const key = keyOf(it);
+  const cm = feed.comments[key];
   if (!cm || !cm.open) return "";
-  const isOwn = !!S.viewer && S.viewer.id === S.tl.owner.id;
+  const isOwn = isOwnItem(it);
   const parentSet = !!S.overview?.settings?.parentPinSet;
   let list;
   if (cm.loading) list = `<p class="status-text">${esc(L("study_loading"))}</p>`;
@@ -1147,9 +1291,9 @@ function commentsHtml(it) {
       .map((c) => {
         const mine = !!S.viewer && S.viewer.id === c.playerId;
         const del = mine
-          ? `<button type="button" class="study-link-btn" data-act="comment-del" data-id="${esc(c.id)}" data-sid="${esc(it.sessionId)}">${esc(L("study_comment_delete"))}</button>`
+          ? `<button type="button" class="study-link-btn" data-act="comment-del" data-id="${esc(c.id)}" data-sid="${esc(key)}">${esc(L("study_comment_delete"))}</button>`
           : parentSet
-            ? `<button type="button" class="study-link-btn" data-act="comment-del" data-parent="1" data-id="${esc(c.id)}" data-sid="${esc(it.sessionId)}">${esc(L("study_comment_delete_parent"))}</button>`
+            ? `<button type="button" class="study-link-btn" data-act="comment-del" data-parent="1" data-id="${esc(c.id)}" data-sid="${esc(key)}">${esc(L("study_comment_delete_parent"))}</button>`
             : "";
         return `
       <div class="study-comment">
@@ -1171,143 +1315,265 @@ function commentsHtml(it) {
   } else {
     composer = `
       <div class="study-composer">
-        <textarea rows="2" maxlength="${COMMENT_MAX}" data-draft="${esc(it.sessionId)}" placeholder="${esc(L("study_comment_ph"))}" aria-label="${esc(L("study_comment_ph"))}">${esc(S.tl.drafts[it.sessionId] || "")}</textarea>
-        <button type="button" class="primary-btn" data-act="comment-send" data-id="${esc(it.sessionId)}" ${cm.sending ? "disabled" : ""}>${esc(L("study_comment_send"))}</button>
+        <textarea rows="2" maxlength="${COMMENT_MAX}" data-draft="${esc(key)}" placeholder="${esc(L("study_comment_ph"))}" aria-label="${esc(L("study_comment_ph"))}">${esc(feed.drafts[key] || "")}</textarea>
+        <button type="button" class="primary-btn" data-act="comment-send" data-id="${esc(key)}" ${cm.sending ? "disabled" : ""}>${esc(L("study_comment_send"))}</button>
       </div>`;
   }
   return `<div class="study-comments">${list}${composer}</div>`;
 }
 
-function postHtml(it) {
-  const o = S.tl.owner;
-  const isOwn = !!S.viewer && S.viewer.id === o.id;
-  const cm = S.tl.comments[it.sessionId];
-  const topic = it.topic ? ` · ${esc(it.topic)}` : "";
+const topicText = (it) => (it.topic ? ` · ${esc(it.topic)}` : "");
+const nameBtn = (id, name) => (id ? `<button type="button" class="study-name-btn" data-act="open-public" data-id="${esc(id)}">${esc(name)}</button>` : `<span class="study-name-btn is-static">${esc(name)}</span>`);
+
+// Isi khusus tiap jenis kegiatan: { who, whoId, grade, text, chips, extra }
+function cardParts(it) {
+  if (it.kind === "competition") {
+    const minutes = Math.max(1, Math.round((it.timeLimitSeconds || 0) / 60));
+    const top = (it.top || [])
+      .map((x) => `<li class="study-top-row"><span class="study-rank">${x.rank}</span><span class="study-top-name">${esc(x.name)}</span><span>${x.correct}/${it.total}</span><span class="study-pts">${fmt(x.points)}</span></li>`)
+      .join("");
+    const winner = it.winnerName ? esc(L("study_feed_winner", { name: it.winnerName, b: fmt(it.winBonus) })) : esc(L("study_feed_nowinner"));
+    const me = it.me
+      ? `<div class="study-feed-me">${esc(L("study_feed_me", { rank: it.me.rank, score: `${it.me.correct}/${it.total}`, pts: fmt((it.me.points || 0) + (it.me.bonus || 0)) }))}</div>`
+      : "";
+    return {
+      who: it.creatorName,
+      whoId: null,
+      grade: "",
+      text: `<span class="study-kind">${esc(L("study_kind_competition"))}</span> <strong>${esc(it.subject)}</strong>${topicText(it)} <span class="study-row-meta">${esc(L("study_feed_comp_by", { name: it.creatorName }))}</span>`,
+      chips: `<span class="study-badge">${esc(L(`study_level_${it.level}`))}</span><span class="study-badge">${esc(gradeText(it.materialGrade, it.materialClass))}</span><span class="study-badge">${esc(L("study_feed_players", { n: it.players }))}</span><span class="study-badge">${it.total} ${esc(L("study_questions_unit"))}</span><span class="study-badge">${esc(L("study_feed_minutes", { m: minutes }))}</span>`,
+      extra: `${top ? `<ol class="study-top">${top}</ol>` : ""}<div class="study-feed-winner">${winner}</div>${me}`
+    };
+  }
+  if (it.kind === "material") {
+    return {
+      who: it.creatorName,
+      whoId: it.creatorId,
+      grade: "",
+      text: `<span class="study-kind">${esc(L("study_kind_material"))}</span> <strong>${esc(it.creatorName)}</strong> ${esc(L("study_feed_mat_text"))}: <strong>${esc(it.title)}</strong>`,
+      chips: `<span class="study-badge">${esc(it.subject)}</span><span class="study-badge">${esc(gradeText(it.grade, it.classLevel))}</span>`,
+      extra: it.detail ? `<p class="study-material-detail">${esc(it.detail)}</p>` : ""
+    };
+  }
+  return {
+    who: it.playerName,
+    whoId: it.playerId,
+    grade: gradeText(it.grade, it.classLevel),
+    text: `<strong>${esc(it.playerName)}</strong> ${esc(L("study_tl_finished"))} <strong>${esc(it.subject)}</strong>${topicText(it)}`,
+    chips: `<span class="study-badge">${esc(L(`study_level_${it.level}`))} (${it.weightPercent}%)</span><span class="study-badge">${esc(gradeText(it.materialGrade, it.materialClass))}</span><span class="study-badge study-badge--solid">${esc(L("study_score", { c: it.correct, n: it.total }))}</span><span class="study-post-points">+${fmt(it.points)} ${esc(L("study_pts"))}</span>`,
+    extra: ""
+  };
+}
+
+function postHtml(it, feed) {
+  const key = keyOf(it);
+  const isOwn = isOwnItem(it);
+  const cm = feed.comments[key];
+  const p = cardParts(it);
+  const detailLabel = it.kind === "competition" ? L("study_view_result") : it.kind === "material" ? L("study_mat_view") : L("study_detail_btn");
   return `
-  <article class="study-post" data-card="${esc(it.sessionId)}">
+  <article class="study-post study-post--${esc(it.kind)}" data-card="${esc(key)}">
     <header class="study-post-head">
-      <span class="study-avatar">${initial(o.name)}</span>
+      <span class="study-avatar">${initial(p.who)}</span>
       <div>
-        <div class="study-post-name">${esc(o.name)} <small>${esc(gradeText(o.grade, o.classLevel))}</small></div>
-        <div class="study-row-meta">${esc(fmtDateTime(it.submittedAt))}</div>
+        <div class="study-post-name">${nameBtn(p.whoId, p.who)} ${p.grade ? `<small>${esc(p.grade)}</small>` : ""}</div>
+        <div class="study-row-meta">${esc(fmtDateTime(it.at))}</div>
       </div>
     </header>
-    <p class="study-post-text"><strong>${esc(o.name)}</strong> ${esc(L("study_tl_finished"))} <strong>${esc(it.subject)}</strong>${topic}</p>
-    <div class="study-post-chips">
-      <span class="study-badge">${esc(L(`study_level_${it.level}`))} (${it.weightPercent}%)</span>
-      <span class="study-badge">${esc(gradeText(it.materialGrade, it.materialClass))}</span>
-      <span class="study-badge study-badge--solid">${esc(L("study_score", { c: it.correct, n: it.total }))}</span>
-      <span class="study-post-points">+${fmt(it.points)} ${esc(L("study_pts"))}</span>
-    </div>
+    <p class="study-post-text">${p.text}</p>
+    <div class="study-post-chips">${p.chips}</div>
+    ${p.extra}
     <div class="study-post-counts"><span>${esc(L("study_likes_count", { n: fmt(it.likeCount) }))}</span><span>${esc(L("study_comments_count", { n: fmt(it.commentCount) }))}</span></div>
     <div class="study-post-actions">
-      <button type="button" class="study-post-btn ${it.liked ? "is-on" : ""}" data-act="like" data-id="${esc(it.sessionId)}" aria-pressed="${it.liked ? "true" : "false"}" ${isOwn ? "disabled" : ""}>${esc(L(it.liked ? "study_liked" : "study_like"))}</button>
-      <button type="button" class="study-post-btn ${cm && cm.open ? "is-on" : ""}" data-act="comments" data-id="${esc(it.sessionId)}" aria-expanded="${cm && cm.open ? "true" : "false"}">${esc(L("study_comment_btn"))}</button>
-      <button type="button" class="study-post-btn" data-act="detail" data-id="${esc(it.sessionId)}">${esc(L("study_detail_btn"))}</button>
+      <button type="button" class="study-post-btn ${it.liked ? "is-on" : ""}" data-act="like" data-id="${esc(key)}" aria-pressed="${it.liked ? "true" : "false"}" ${isOwn ? "disabled" : ""}>${esc(L(it.liked ? "study_liked" : "study_like"))}</button>
+      <button type="button" class="study-post-btn ${cm && cm.open ? "is-on" : ""}" data-act="comments" data-id="${esc(key)}" aria-expanded="${cm && cm.open ? "true" : "false"}">${esc(L("study_comment_btn"))}</button>
+      <button type="button" class="study-post-btn" data-act="detail" data-id="${esc(key)}">${esc(detailLabel)}</button>
     </div>
-    ${commentsHtml(it)}
+    ${commentsHtml(it, feed)}
   </article>`;
 }
 
-function updateCard(sid) {
-  const it = tlItem(sid);
-  const el = $("study-body")?.querySelector(`[data-card="${CSS.escape(sid)}"]`);
-  if (!it || !el || S.view !== "timeline") return;
+function updateCard(key) {
+  const feed = shownFeed();
+  const it = feedItemByKey(key);
+  const el = $("study-body")?.querySelector(`[data-card="${CSS.escape(key)}"]`);
+  if (!feed || !it || !el) return;
   const tmp = document.createElement("div");
-  tmp.innerHTML = postHtml(it).trim();
+  tmp.innerHTML = postHtml(it, feed).trim();
   el.replaceWith(tmp.firstElementChild);
 }
 
-function renderTimeline(body) {
-  const tl = S.tl;
-  if (!tl) return;
-  if (!tl.owner) {
-    body.innerHTML = `<p class="status-text">${esc(L("study_loading"))}</p>`;
+// Daftar kartu + status muat/galat/kosong/halaman berikutnya.
+function feedBodyHtml(feed, emptyKey = "study_feed_empty") {
+  if (feed.error && feed.items.length === 0) {
+    return `<div class="study-card"><p>${esc(feed.error)}</p><div class="study-actions"><button type="button" class="secondary-btn" data-act="feed-reload">${esc(L("study_reload"))}</button></div></div>`;
+  }
+  if (feed.loading && feed.items.length === 0) return `<p class="status-text">${esc(L("study_loading"))}</p>`;
+  const cards = feed.items.map((it) => postHtml(it, feed)).join("");
+  const empty = feed.loaded && feed.items.length === 0 && !feed.error ? `<p class="status-text">${esc(L(emptyKey))}</p>` : "";
+  const foot = feed.hasMore
+    ? `<div class="study-actions"><button type="button" class="secondary-btn" data-act="tl-more" ${feed.loading ? "disabled" : ""}>${esc(feed.loading ? L("study_loading") : L("study_tl_more"))}</button></div>`
+    : feed.loading
+      ? `<p class="status-text">${esc(L("study_loading"))}</p>`
+      : "";
+  const err = feed.error ? `<p class="study-row-meta">${esc(feed.error)}</p>` : "";
+  return `${empty}${cards}${err}${foot}`;
+}
+
+function timelineHtml() {
+  if (!S.feed) S.feed = newFeed(null, null);
+  return `${viewerBarHtml()}${feedBodyHtml(S.feed)}`;
+}
+
+// Tabel ringkas (profil publik, tab Solo & Kompetisi): satu baris per kegiatan, ketuk = detil.
+function tableHtml(feed, kind) {
+  if (feed.error && feed.items.length === 0) return feedBodyHtml(feed);
+  if (feed.loading && feed.items.length === 0) return `<p class="status-text">${esc(L("study_loading"))}</p>`;
+  if (feed.loaded && feed.items.length === 0) return `<p class="status-text">${esc(L(kind === "lesson" ? "study_pub_empty_solo" : "study_pub_empty_comp"))}</p>`;
+  const rows = feed.items
+    .map((it) => {
+      const key = keyOf(it);
+      if (kind === "lesson") {
+        return `<button type="button" class="study-trow study-trow--solo" data-act="detail" data-id="${esc(key)}">
+          <span>${esc(fmtDate(it.at))}</span>
+          <span class="study-tcell-main"><strong>${esc(it.subject)}</strong><small>${esc(gradeText(it.materialGrade, it.materialClass))} · ${esc(L(`study_level_${it.level}`))}</small></span>
+          <span>${it.correct}/${it.total}</span>
+          <span class="study-pts">+${fmt(it.points)}</span>
+        </button>`;
+      }
+      const m = it.me;
+      return `<button type="button" class="study-trow study-trow--comp" data-act="detail" data-id="${esc(key)}">
+          <span>${esc(fmtDate(it.at))}</span>
+          <span class="study-tcell-main"><strong>${esc(it.subject)}</strong><small>${esc(gradeText(it.materialGrade, it.materialClass))} · ${esc(L("study_feed_players", { n: it.players }))}</small></span>
+          <span>${m ? `#${m.rank}` : "-"}</span>
+          <span>${m ? `${m.correct}/${it.total}` : "-"}</span>
+          <span class="study-pts">${m ? `+${fmt((m.points || 0) + (m.bonus || 0))}` : "-"}</span>
+        </button>`;
+    })
+    .join("");
+  const head =
+    kind === "lesson"
+      ? `<span>${esc(L("study_col_date"))}</span><span>${esc(L("study_col_subject"))}</span><span>${esc(L("study_col_score"))}</span><span>${esc(L("study_col_points"))}</span>`
+      : `<span>${esc(L("study_col_date"))}</span><span>${esc(L("study_col_subject"))}</span><span>${esc(L("study_col_rank"))}</span><span>${esc(L("study_col_score"))}</span><span>${esc(L("study_col_points"))}</span>`;
+  const foot = feed.hasMore
+    ? `<div class="study-actions"><button type="button" class="secondary-btn" data-act="tl-more" ${feed.loading ? "disabled" : ""}>${esc(feed.loading ? L("study_loading") : L("study_tl_more"))}</button></div>`
+    : "";
+  return `<div class="study-board study-table study-table--${kind === "lesson" ? "solo" : "comp"}" role="table"><div class="study-trow study-thead" role="row">${head}</div>${rows}</div><p class="study-hint">${esc(L("study_pub_table_hint"))}</p>${foot}`;
+}
+
+function renderPublic(body) {
+  const pub = S.pub;
+  if (!pub) return;
+  if (!pub.player) {
+    body.innerHTML = pub.error
+      ? `<div class="study-card"><p>${esc(pub.error)}</p><div class="study-actions"><button type="button" class="secondary-btn" data-act="pub-reload">${esc(L("study_reload"))}</button></div></div>`
+      : `<p class="status-text">${esc(L("study_loading"))}</p>`;
     return;
   }
-  const o = tl.owner;
+  const o = pub.player;
+  const st = pub.stats || {};
   const you = S.viewer && S.viewer.id === o.id ? ` ${esc(L("study_tl_you"))}` : "";
+  const stat = (label, value, sub) => `<div class="study-stat"><div class="study-stat-label">${esc(label)}</div><div class="study-stat-value">${fmt(value)}</div>${sub ? `<div class="study-stat-sub">${esc(sub)}</div>` : ""}</div>`;
+  const sub = (id, label) =>
+    `<button type="button" role="tab" class="study-tab ${pub.sub === id ? "is-on" : ""}" aria-selected="${pub.sub === id ? "true" : "false"}" data-act="pub-tab" data-tab="${id}">${esc(label)}</button>`;
+  const feed = pub.feeds[pub.sub];
+  const content = pub.sub === "all" ? `${viewerBarHtml()}${feedBodyHtml(feed)}` : tableHtml(feed, pub.sub);
   body.innerHTML = `
     <div class="study-card study-profile-head">
       <span class="study-avatar study-avatar--lg">${initial(o.name)}</span>
       <div class="study-profile-info">
         <div class="study-row-title">${esc(o.name)}${you} <small>${esc(gradeText(o.grade, o.classLevel))}</small></div>
-        <div class="study-row-meta">${esc(L("study_tl_rank", { n: o.rank }))} · ${esc(L("study_tl_stats", { done: fmt(o.sessionsDone), points: fmt(o.totalPoints) }))}</div>
+        <div class="study-row-meta">${esc(L("study_tl_rank", { n: st.rank ?? "-" }))} · ${fmt(st.totalPoints)} ${esc(L("study_pts"))}</div>
       </div>
       <button type="button" class="secondary-btn" data-act="tl-profile">${esc(L("study_tl_open_profile"))}</button>
     </div>
-    ${viewerBarHtml()}
-    ${tl.items.length === 0 ? `<p class="status-text">${esc(L("study_tl_empty"))}</p>` : tl.items.map(postHtml).join("")}
-    ${tl.hasMore ? `<div class="study-actions"><button type="button" class="secondary-btn" data-act="tl-more" ${tl.loading ? "disabled" : ""}>${esc(tl.loading ? L("study_loading") : L("study_tl_more"))}</button></div>` : tl.loading ? `<p class="status-text">${esc(L("study_loading"))}</p>` : ""}`;
+    <div class="study-stats">
+      ${stat(L("study_stat_lessons"), st.lessons, L("study_stat_solo_pts", { n: fmt(st.soloPoints) }))}
+      ${stat(L("study_stat_competitions"), st.competitions, L("study_stat_comp_pts", { n: fmt(st.competitionPoints) }))}
+      ${stat(L("study_stat_wins"), st.wins)}
+      ${stat(L("study_stat_materials"), st.materials)}
+    </div>
+    <p class="study-hint">${esc(L("study_pub_private_hint"))}</p>
+    <div class="study-tabs study-tabs--sub" role="tablist">${sub("all", L("study_pub_tab_all"))}${sub("lesson", L("study_pub_tab_solo"))}${sub("competition", L("study_pub_tab_comp"))}</div>
+    <div role="tabpanel">${content}</div>`;
 }
 
 // ---- aksi kartu
-async function doLike(sid) {
-  if (!tlItem(sid) || !(await ensureViewer())) return;
-  if (S.viewer.id === S.tl.owner.id) return; // tidak boleh menyukai kegiatan sendiri
-  const res = await studyCall("like_toggle", { ...viewerParams(), sessionId: sid });
+async function doLike(key) {
+  const first = feedItemByKey(key);
+  if (!first || !(await ensureViewer())) return;
+  const cur = feedItemByKey(key); // ambil ulang: masuk tadi memuat ulang kartu
+  if (!cur || isOwnItem(cur)) return; // tidak boleh menyukai kegiatan sendiri
+  const t = splitKey(key);
+  const res = await studyCall("like_toggle", { ...viewerParams(), kind: t.kind, targetId: t.id });
   if (!res.ok) return viewerFailure(res);
-  const it = tlItem(sid); // ambil ulang: masuk tadi memuat ulang kartu
+  const it = feedItemByKey(key);
   if (!it) return;
   it.liked = res.liked;
   it.likeCount = res.count;
-  updateCard(sid);
+  updateCard(key);
 }
 
-async function toggleComments(sid) {
-  const it = tlItem(sid);
-  if (!it) return;
-  const cm = (S.tl.comments[sid] ||= { open: false, loading: false, list: null, sending: false });
+async function toggleComments(key) {
+  const feed = shownFeed();
+  const it = feedItemByKey(key);
+  if (!feed || !it) return;
+  const cm = (feed.comments[key] ||= { open: false, loading: false, list: null, sending: false });
   cm.open = !cm.open;
   if (cm.open && cm.list === null) {
     cm.loading = true;
-    updateCard(sid);
-    const res = await studyCall("comment_list", { sessionId: sid });
+    updateCard(key);
+    const t = splitKey(key);
+    const res = await studyCall("comment_list", { kind: t.kind, targetId: t.id });
     cm.loading = false;
     if (!res.ok) {
       cm.open = false;
-      updateCard(sid);
+      updateCard(key);
       return handleFailure(res);
     }
     cm.list = res.comments;
     it.commentCount = res.comments.length;
   }
-  updateCard(sid);
-  if (cm.open) $("study-body")?.querySelector(`[data-draft="${CSS.escape(sid)}"]`)?.focus();
+  updateCard(key);
+  if (cm.open) $("study-body")?.querySelector(`[data-draft="${CSS.escape(key)}"]`)?.focus();
 }
 
 function onBodyInput(e) {
   const ta = e.target.closest?.("textarea[data-draft]");
-  if (ta && S.tl) S.tl.drafts[ta.dataset.draft] = ta.value;
+  const feed = shownFeed();
+  if (ta && feed) feed.drafts[ta.dataset.draft] = ta.value;
 }
 
-async function sendComment(sid) {
-  const cm = S.tl?.comments[sid];
-  if (!tlItem(sid) || !cm || cm.sending) return;
+async function sendComment(key) {
+  const feed = shownFeed();
+  const cm = feed?.comments[key];
+  if (!feedItemByKey(key) || !cm || cm.sending) return;
   if (!(await ensureViewer())) return;
-  if (S.viewer.id === S.tl.owner.id) return;
-  const text = String(S.tl.drafts[sid] || "").replace(/\s+/g, " ").trim();
+  const cur = feedItemByKey(key);
+  if (!cur || isOwnItem(cur)) return;
+  const text = String(feed.drafts[key] || "").replace(/\s+/g, " ").trim();
   if (!text) return;
   if (text.length > COMMENT_MAX) return window.alert(L("study_comment_ph"));
   cm.sending = true;
-  updateCard(sid);
-  const res = await studyCall("comment_add", { ...viewerParams(), sessionId: sid, body: text });
+  updateCard(key);
+  const t = splitKey(key);
+  const res = await studyCall("comment_add", { ...viewerParams(), kind: t.kind, targetId: t.id, body: text });
   cm.sending = false;
-  if (!S.tl || S.tl.comments[sid] !== cm) return; // timeline sudah ditinggalkan selama menunggu
+  if (feed.comments[key] !== cm) return; // daftar sudah diganti selama menunggu
   if (!res.ok) {
-    updateCard(sid);
+    updateCard(key);
     return viewerFailure(res);
   }
-  const it = tlItem(sid);
+  const it = feedItemByKey(key);
   (cm.list ||= []).push(res.comment);
   if (it) it.commentCount = res.count;
-  S.tl.drafts[sid] = "";
-  updateCard(sid);
+  feed.drafts[key] = "";
+  updateCard(key);
 }
 
-async function deleteComment(commentId, sid, byParent) {
-  const it = tlItem(sid);
-  const cm = S.tl?.comments[sid];
+async function deleteComment(commentId, key, byParent) {
+  const it = feedItemByKey(key);
+  const cm = shownFeed()?.comments[key];
   if (!it || !cm) return;
   let res;
   if (byParent) {
@@ -1332,17 +1598,24 @@ async function deleteComment(commentId, sid, byParent) {
   }
   cm.list = (cm.list || []).filter((c) => c.id !== commentId);
   it.commentCount = res.count;
-  updateCard(sid);
+  updateCard(key);
 }
 
-async function openDetail(sid) {
-  if (!tlItem(sid) || !(await ensureViewer())) return;
-  const res = await studyCall("result_detail", { ...viewerParams(), sessionId: sid });
+// "Detil": pelajaran = soal + pembahasan (perlu masuk), kompetisi = tabel hasil, materi = pembaca materi.
+async function openDetail(key) {
+  const it = feedItemByKey(key);
+  if (!it) return;
+  if (it.kind === "competition") return openRoomResult(it.id);
+  if (it.kind === "material") {
+    return openMaterial(it.id, { id: it.id, title: it.title, subject: it.subject, grade: it.grade, classLevel: it.classLevel, detail: it.detail, creatorId: it.creatorId, creatorName: it.creatorName, createdAt: it.at });
+  }
+  if (!(await ensureViewer())) return;
+  const res = await studyCall("result_detail", { ...viewerParams(), sessionId: it.id });
   if (!res.ok) return viewerFailure(res);
-  S.tlScroll = window.scrollY;
+  pushView();
   S.result = res.result;
   S.explainFailed = false;
-  S.resultFrom = "timeline";
+  S.resultFrom = "feed";
   S.view = "result";
   render();
   window.scrollTo(0, 0);
@@ -1352,10 +1625,11 @@ async function openDetail(sid) {
 const MATERIAL_DETAIL_MAX = 300;
 
 function switchTab(tab) {
-  if (tab !== "board" && tab !== "materi") return;
+  if (tab !== "timeline" && tab !== "board" && tab !== "materi") return;
   S.tab = tab;
   render();
   if (tab === "materi" && !S.materials.loaded && !S.materials.loading) loadMaterials(true);
+  if (tab === "timeline" && S.feed && !S.feed.loaded && !S.feed.loading) loadFeed(S.feed, "first");
 }
 
 async function loadMaterials(reset) {
@@ -1402,7 +1676,6 @@ function materialsHtml() {
     .join("");
   return `
     <div class="study-actions"><button type="button" class="primary-btn" data-act="mat-new">${esc(L("study_mat_new"))}</button></div>
-    <p class="study-hint">${esc(L("study_mat_intro"))}</p>
     ${m.error ? `<div class="study-card"><p>${esc(m.error)}</p><button type="button" class="secondary-btn" data-act="mat-more">${esc(L("study_reload"))}</button></div>` : ""}
     ${m.loaded && m.items.length === 0 && !m.error ? `<p class="status-text">${esc(L("study_mat_empty"))}</p>` : ""}
     ${cards}
@@ -1427,7 +1700,10 @@ async function fetchMaterial(id) {
   const res = await studyCall("material_get", { materialId: id });
   if (!res.ok) {
     handleFailure(res);
-    if (res.status === 404) loadMaterials(true);
+    if (res.status === 404) {
+      loadMaterials(true);
+      if (S.feed) S.feed.stale = true;
+    }
     return null;
   }
   return res.material;
@@ -1437,6 +1713,7 @@ async function openMaterial(id, known) {
   const list = S.materials.items.find((i) => i.id === id);
   const base = known || list;
   if (!base) return;
+  if (S.view !== "material") pushView();
   S.material = { ...base, content: known?.content || null };
   S.view = "material";
   render();
@@ -1446,8 +1723,10 @@ async function openMaterial(id, known) {
   if (!S.material || S.material.id !== id) return; // pengguna sudah pindah
   if (!full) {
     S.material = null;
-    S.view = "home";
-    render();
+    if (!popView()) {
+      S.view = "home";
+      render();
+    }
     return;
   }
   S.material = full;
@@ -1528,6 +1807,7 @@ function openMaterialCreate() {
     const { material } = out;
     S.materials.items = [{ ...material, content: undefined }, ...S.materials.items.filter((i) => i.id !== material.id)];
     S.materials.loaded = true;
+    if (S.feed) S.feed.stale = true;
     if (S.view === "home") render();
     await openMaterialDone(material);
   });
@@ -1614,6 +1894,7 @@ async function deleteMaterial(id) {
   });
   if (!done) return;
   S.materials.items = S.materials.items.filter((i) => i.id !== id);
+  if (S.feed) S.feed.stale = true;
   if (S.view === "home") render();
   window.alert(L("study_mat_del_done"));
 }
@@ -1631,6 +1912,503 @@ async function doRedeem(itemId) {
   }
   window.alert(L("study_redeem_done", { item: res.redemption.itemName, balance: fmt(res.redemption.balance) }));
   loadProfile();
+}
+
+// ================================================================ Kompetisi (room, serentak dengan lobi)
+// Alur: daftar room -> gabung / buat -> lobi (polling) -> pembuat menekan Mulai -> semua mengerjakan soal yang sama
+// -> kumpulkan -> menunggu -> tabel hasil. Skor, peringkat, dan poin dihitung server; layar ini hanya menampilkan.
+const ROOM_POLL_MS = 3500;
+const ROOM_LIST_POLL_MS = 6000;
+const ROOM_MAX_PLAYERS = 10;
+const MINUTE_OPTIONS = [3, 5, 10, 15, 20, 30, 45, 60, 90, 120];
+let pollId = 0;
+let pollMode = "";
+
+function syncPoll() {
+  const hidden = !$("screen-study") || $("screen-study").hidden;
+  let mode = "";
+  if (!hidden) {
+    if (S.view === "rooms") mode = "rooms";
+    else if (S.view === "room" && S.room?.state && S.room.state.room.status !== "finished") mode = "room";
+  }
+  if (mode === pollMode) return;
+  if (pollId) clearInterval(pollId);
+  pollId = 0;
+  pollMode = mode;
+  if (mode) pollId = setInterval(pollTick, mode === "room" ? ROOM_POLL_MS : ROOM_LIST_POLL_MS);
+}
+
+function stopPoll() {
+  if (pollId) clearInterval(pollId);
+  pollId = 0;
+  pollMode = "";
+}
+
+async function pollTick() {
+  if (S.view === "rooms") return loadRooms();
+  const rm = S.room;
+  if (S.view !== "room" || !rm || rm.busy || rm.polling) return;
+  rm.polling = true;
+  const res = await studyCall("room_state", { playerId: rm.creds.id, pin: rm.creds.pin, roomId: rm.id });
+  rm.polling = false;
+  if (S.room !== rm || S.view !== "room" || rm.busy) return;
+  if (!res.ok) {
+    if (res.status === 404) roomGone();
+    return; // galat sementara (jaringan): coba lagi pada putaran berikutnya
+  }
+  applyRoomState(res.state);
+}
+
+function roomGone() {
+  window.alert(L("study_room_gone"));
+  S.room = null;
+  S.view = "rooms";
+  render();
+  loadRooms();
+}
+
+const roomMinutes = (r) => Math.max(1, Math.round((r.timeLimitSeconds || 0) / 60));
+const roomTitle = (r) => `${esc(r.subject)}${r.topic ? ` · ${esc(r.topic)}` : ""}`;
+
+// ---- daftar room
+function openRooms() {
+  pushView();
+  S.rooms = { items: [], loading: false, loaded: false, error: "" };
+  S.view = "rooms";
+  render();
+  window.scrollTo(0, 0);
+  loadRooms();
+}
+
+async function loadRooms() {
+  const r = S.rooms;
+  if (r.loading) return;
+  r.loading = true;
+  if (!r.loaded) render();
+  const res = await studyCall("room_list");
+  r.loading = false;
+  if (res.ok) {
+    r.items = res.rooms;
+    r.loaded = true;
+    r.error = "";
+  } else {
+    r.error = errText(res);
+  }
+  if (S.view === "rooms" && S.rooms === r) render();
+}
+
+function renderRooms(body) {
+  const r = S.rooms;
+  const bonus = S.overview?.settings?.competitionWinBonus ?? 10;
+  const cards = r.items
+    .map((x) => {
+      const running = x.status === "running";
+      return `
+      <article class="study-room-card" data-room="${esc(x.id)}">
+        <div class="study-room-head">
+          <div class="study-row-title">${roomTitle(x)}</div>
+          <span class="study-badge ${running ? "study-badge--solid" : ""}">${esc(L(running ? "study_room_status_running" : "study_room_status_lobby"))}</span>
+        </div>
+        <div class="study-post-chips">
+          <span class="study-badge">${esc(gradeText(x.materialGrade, x.materialClass))}</span>
+          <span class="study-badge">${esc(L(`study_level_${x.level}`))}</span>
+          <span class="study-badge">${x.numQuestions} ${esc(L("study_questions_unit"))}</span>
+          <span class="study-badge">${esc(L("study_feed_minutes", { m: roomMinutes(x) }))}</span>
+          <span class="study-badge">${esc(L("study_room_count", { n: x.players, max: x.maxPlayers }))}</span>
+        </div>
+        <div class="study-row-meta">${esc(L("study_room_by", { name: x.creatorName }))} · ${esc((x.playerNames || []).join(", "))}</div>
+        <div class="study-actions"><button type="button" class="primary-btn" data-act="room-join" data-id="${esc(x.id)}">${esc(L(running ? "study_room_enter" : "study_room_join"))}</button></div>
+      </article>`;
+    })
+    .join("");
+  body.innerHTML = `
+    <p class="study-hint study-hint--top">${esc(L("study_rooms_intro", { b: fmt(bonus), max: ROOM_MAX_PLAYERS }))}</p>
+    <div class="study-actions">
+      <button type="button" class="primary-btn" data-act="room-new">${esc(L("study_room_new"))}</button>
+      <button type="button" class="secondary-btn" data-act="rooms-refresh">${esc(L("study_rooms_refresh"))}</button>
+    </div>
+    ${r.error ? `<div class="study-card"><p>${esc(r.error)}</p></div>` : ""}
+    ${r.loaded && r.items.length === 0 && !r.error ? `<p class="status-text">${esc(L("study_rooms_empty"))}</p>` : ""}
+    ${!r.loaded && r.loading ? `<p class="status-text">${esc(L("study_loading"))}</p>` : ""}
+    ${cards}`;
+}
+
+// ---- gabung / masuk
+async function joinRoomFlow(roomId) {
+  const room = S.rooms.items.find((x) => x.id === roomId);
+  const players = S.overview?.players || [];
+  if (!room) return;
+  if (!players.length) return window.alert(L("study_no_players"));
+  const running = room.status === "running";
+  const first = (S.viewer && players.find((p) => p.id === S.viewer.id)) || players[0];
+  const out = await openFormDialog({
+    title: L(running ? "study_room_enter_title" : "study_room_join_title"),
+    intro: L("study_room_join_intro", { subject: `${room.subject}${room.topic ? ` · ${room.topic}` : ""}`, count: room.numQuestions, m: roomMinutes(room) }),
+    okLabel: L(running ? "study_room_enter" : "study_room_join"),
+    cancelLabel: L("study_cancel"),
+    busyLabel: L("study_loading"),
+    fields: [
+      { key: "playerId", label: L("study_player"), type: "select", value: first.id, options: players.map((p) => ({ value: p.id, label: `${p.name} (${gradeText(p.grade, p.classLevel)})` })) },
+      { key: "pin", label: L("study_pin"), type: "pin" }
+    ],
+    extra: [
+      {
+        label: L("study_forgot_pin"),
+        onClick: (v) => {
+          const pl = players.find((p) => p.id === v.playerId);
+          if (pl) openResetPin(pl);
+        }
+      }
+    ],
+    onSubmit: async (v) => {
+      if (!validPinFormat(v.pin)) return { ok: false, error: L("study_pin_invalid") };
+      // room berjalan: hanya peserta lama yang boleh masuk lagi (room_state); lobi: bergabung (idempotent)
+      const res = await studyCall(running ? "room_state" : "room_join", { playerId: v.playerId, pin: v.pin, roomId });
+      if (!res.ok) return { ok: false, error: errText(res) };
+      if (!res.state.me) return { ok: false, error: L("study_room_not_member") };
+      return { ok: true, value: { state: res.state, player: players.find((p) => p.id === v.playerId), pin: v.pin } };
+    }
+  });
+  if (out) enterRoom(out.state, out.player, out.pin);
+}
+
+function enterRoom(state, player, pin) {
+  S.viewer = { id: player.id, name: player.name, grade: player.grade, classLevel: player.classLevel ?? null, pin };
+  S.room = { id: state.room.id, creds: S.viewer, state: null, busy: false, polling: false, leftQuiz: false };
+  S.view = "room";
+  window.scrollTo(0, 0);
+  applyRoomState(state);
+}
+
+// Simpan keadaan terbaru dari server lalu tampilkan; room yang baru berjalan langsung membuka soal.
+function applyRoomState(state) {
+  const rm = S.room;
+  if (!rm) return;
+  rm.state = state;
+  const r = state.room;
+  if (r.status === "cancelled") return roomGone();
+  if (r.status === "finished") {
+    clearAnswers(`room_${r.id}`);
+    if (S.feed) S.feed.stale = true;
+    if (S.overview) loadOverviewQuiet();
+    if (S.quiz?.kind === "room") S.quiz = null;
+    S.view = "room";
+  }
+  if (S.view === "room" && r.status === "running" && state.me && !state.me.submitted && state.questions && state.questions.length && !rm.leftQuiz) {
+    return startRoomQuiz();
+  }
+  if (S.view === "room") render();
+}
+
+// Muat ulang papan peringkat tanpa menggeser layar (poin baru dari kompetisi).
+async function loadOverviewQuiet() {
+  const res = await studyCall("overview");
+  if (res.ok) S.overview = res;
+}
+
+function startRoomQuiz() {
+  const rm = S.room;
+  const st = rm?.state;
+  if (!st?.questions?.length) return;
+  const r = st.room;
+  const sid = `room_${r.id}`;
+  S.quiz = {
+    kind: "room",
+    roomId: r.id,
+    sessionId: sid,
+    session: { subject: r.subject, topic: r.topic, materialGrade: r.materialGrade, materialClass: r.materialClass, level: r.level, timeLimitSeconds: r.timeLimitSeconds, secondsLeft: r.secondsLeft },
+    questions: st.questions,
+    answers: loadAnswers(sid, st.questions.length),
+    shortfall: 0
+  };
+  armQuizTimer(S.quiz);
+  S.autoSubmittedId = "";
+  rm.leftQuiz = false;
+  S.view = "quiz";
+  render();
+  window.scrollTo(0, 0);
+}
+
+// ---- buat room
+function openRoomCreate() {
+  const ov = S.overview;
+  const settings = ov?.settings;
+  if (!settings) return window.alert(S.overviewError || L("study_loading"));
+  const players = ov.players || [];
+  if (!players.length) return window.alert(L("study_no_players"));
+  const subjects = settings.subjects || [];
+  const spq = settings.secondsPerQuestion ?? 0;
+  const playerById = (id) => players.find((p) => p.id === id);
+  const first = (S.viewer && playerById(S.viewer.id)) || players[0];
+  return openFormDialog({
+    title: L("study_room_create_title"),
+    okLabel: L("study_room_create_ok"),
+    cancelLabel: L("study_cancel"),
+    busyLabel: L("study_room_creating"),
+    fields: [
+      { key: "playerId", label: L("study_player"), type: "select", value: first.id, options: players.map((p) => ({ value: p.id, label: `${p.name} (${gradeText(p.grade, p.classLevel)})` })) },
+      { key: "pin", label: L("study_pin"), type: "pin" },
+      {
+        key: "subject",
+        label: L("study_subject"),
+        type: "select",
+        value: subjects[0] || CUSTOM,
+        options: [...subjects.map((s) => ({ value: s, label: s })), { value: CUSTOM, label: L("study_subject_custom") }]
+      },
+      { key: "customSubject", label: L("study_subject_custom_label"), type: "text", maxlength: 60, show: (v) => v.subject === CUSTOM },
+      { key: "topic", label: L("study_topic"), type: "text", maxlength: 100, placeholder: L("study_topic_ph") },
+      {
+        key: "materialGrade",
+        label: L("study_material_grade"),
+        type: "select",
+        value: first.grade,
+        options: (v) => allowedMaterialGrades(playerById(v.playerId)?.grade || "Umum").map((g) => ({ value: g, label: g })),
+        onOptionsChange: (v) => playerById(v.playerId)?.grade,
+        help: L("study_grade_help")
+      },
+      classField(
+        (v) => v.materialGrade,
+        (v) => {
+          const pl = playerById(v.playerId);
+          return allowedClasses(pl?.grade || "Umum", pl?.classLevel, v.materialGrade);
+        },
+        (v) => {
+          const pl = playerById(v.playerId);
+          return pl && pl.grade === v.materialGrade && pl.classLevel ? String(pl.classLevel) : undefined;
+        },
+        first.classLevel
+      ),
+      { key: "count", label: L("study_count"), type: "select", value: "10", options: COUNTS.map((n) => ({ value: String(n), label: String(n) })) },
+      {
+        key: "level",
+        label: L("study_level"),
+        type: "select",
+        value: "normal",
+        options: ["easy", "normal", "hard"].map((lv) => ({ value: lv, label: levelLabel(lv, settings) }))
+      },
+      {
+        key: "minutes",
+        label: L("study_room_minutes"),
+        type: "select",
+        value: "10",
+        options: MINUTE_OPTIONS.map((m) => ({ value: String(m), label: String(m) })),
+        help: (v) => (spq ? L("study_room_minutes_help", { m: Math.ceil(timeLimitSeconds(Number(v.count || 10), spq) / 60), s: spq }) : L("study_room_minutes_free"))
+      }
+    ],
+    extra: [
+      {
+        label: L("study_forgot_pin"),
+        onClick: (v) => {
+          const pl = playerById(v.playerId);
+          if (pl) openResetPin(pl);
+        }
+      }
+    ],
+    onSubmit: async (v) => {
+      const pl = playerById(v.playerId);
+      if (!pl) return { ok: false, error: L("study_pick_player") };
+      if (!validPinFormat(v.pin)) return { ok: false, error: L("study_pin_invalid") };
+      const subject = v.subject === CUSTOM ? String(v.customSubject || "").trim() : v.subject;
+      if (!subject) return { ok: false, error: L("study_subject_required") };
+      const res = await studyCall("room_create", {
+        playerId: pl.id,
+        pin: v.pin,
+        subject,
+        topic: String(v.topic || "").trim(),
+        materialGrade: v.materialGrade,
+        materialClass: classValue(v.materialGrade, v.materialClass ?? v.classLevel),
+        level: v.level,
+        count: Number(v.count),
+        minutes: Number(v.minutes),
+        engine: "auto"
+      });
+      if (!res.ok) return { ok: false, error: errText(res) };
+      return { ok: true, value: { state: res.state, player: pl, pin: v.pin } };
+    }
+  }).then((out) => {
+    if (out) enterRoom(out.state, out.player, out.pin);
+  });
+}
+
+// ---- tampilan room
+function roomTableHtml(results, meId) {
+  const rows = results
+    .map((r) => {
+      const total = r.points + r.bonus;
+      return `<button type="button" class="study-trow study-trow--room ${meId && r.playerId === meId ? "is-me" : ""}" data-act="open-public" data-id="${esc(r.playerId)}">
+        <span class="study-rank">${r.rank}</span>
+        <span class="study-tcell-main"><strong>${esc(r.name)}</strong><small>${esc(gradeText(r.grade, r.classLevel))}${r.timedOut ? ` · ${esc(L("study_room_timedout"))}` : ""}</small></span>
+        <span>${r.correct}/${r.total}</span>
+        <span>${r.seconds == null ? "-" : esc(formatClock(r.seconds))}</span>
+        <span class="study-pts">${fmt(total)}${r.bonus > 0 ? `<small>${esc(L("study_room_bonus", { b: fmt(r.bonus) }))}</small>` : ""}</span>
+      </button>`;
+    })
+    .join("");
+  return `<div class="study-board study-table study-table--room" role="table">
+    <div class="study-trow study-thead" role="row"><span>#</span><span>${esc(L("study_col_name"))}</span><span>${esc(L("study_col_score"))}</span><span>${esc(L("study_col_time"))}</span><span>${esc(L("study_col_points"))}</span></div>
+    ${rows}
+  </div>`;
+}
+
+function roomInfoHtml(r) {
+  return `
+    <div class="study-card">
+      <div class="study-room-head">
+        <div class="study-row-title">${roomTitle(r)}</div>
+        <span class="study-badge study-badge--solid">${esc(L("study_kind_competition"))}</span>
+      </div>
+      <div class="study-post-chips">
+        <span class="study-badge">${esc(gradeText(r.materialGrade, r.materialClass))}</span>
+        <span class="study-badge">${esc(L(`study_level_${r.level}`))} (${r.weightPercent}%)</span>
+        <span class="study-badge">${r.numQuestions} ${esc(L("study_questions_unit"))}</span>
+        <span class="study-badge">${esc(L("study_feed_minutes", { m: roomMinutes(r) }))}</span>
+      </div>
+      <div class="study-row-meta">${esc(L("study_room_by", { name: r.creatorName }))}</div>
+    </div>`;
+}
+
+function renderRoom(body) {
+  const rm = S.room;
+  const st = rm?.state;
+  if (!st) {
+    body.innerHTML = `<p class="status-text">${esc(L("study_loading"))}</p>`;
+    return;
+  }
+  const r = st.room;
+  const meId = rm.creds.id;
+  const isCreator = r.creatorId === meId;
+  const playerRows = (withState) =>
+    st.players
+      .map(
+        (p) => `
+      <div class="study-row study-room-player">
+        <span class="study-avatar study-avatar--sm">${initial(p.name)}</span>
+        <div class="study-row-main"><div class="study-row-title">${esc(p.name)}${p.id === meId ? ` <small>(${esc(L("study_room_you"))})</small>` : ""}</div><div class="study-row-meta">${esc(gradeText(p.grade, p.classLevel))}${p.isCreator ? ` · ${esc(L("study_room_creator_tag"))}` : ""}</div></div>
+        ${withState ? `<span class="study-badge ${p.submitted ? "study-badge--solid" : ""}">${esc(L(p.submitted ? "study_room_p_done" : "study_room_p_working"))}</span>` : ""}
+      </div>`
+      )
+      .join("");
+
+  if (r.status === "lobby") {
+    const enough = st.players.length >= 2;
+    body.innerHTML = `
+      ${roomInfoHtml(r)}
+      <h2 class="study-h">${esc(L("study_room_lobby"))} <small>(${esc(L("study_room_count", { n: st.players.length, max: r.maxPlayers }))})</small></h2>
+      ${playerRows(false)}
+      <p class="study-hint">${esc(isCreator ? L("study_room_hint_creator") : L("study_room_hint_guest", { name: r.creatorName }))}</p>
+      <div class="study-actions">
+        ${isCreator ? `<button type="button" class="primary-btn" data-act="room-start" ${enough && !rm.busy ? "" : "disabled"}>${esc(rm.busy ? L("study_room_starting") : L("study_room_start"))}</button>` : ""}
+        <button type="button" class="secondary-btn" data-act="room-leave" ${rm.busy ? "disabled" : ""}>${esc(L(isCreator ? "study_room_cancel" : "study_room_leave"))}</button>
+      </div>
+      ${isCreator && !enough ? `<p class="study-row-meta">${esc(L("study_room_need_two"))}</p>` : ""}`;
+    return;
+  }
+
+  if (r.status === "running") {
+    const done = !!st.me?.submitted;
+    body.innerHTML = `
+      ${roomInfoHtml(r)}
+      <div class="study-card">
+        <div class="study-row-title">${esc(L("study_room_running"))}</div>
+        ${r.secondsLeft != null ? `<div class="study-timer-static">${esc(L("study_time_left", { t: formatClock(r.secondsLeft) }))}</div>` : ""}
+        ${done ? `<p>${esc(L("study_room_waiting"))}</p>` : `<button type="button" class="primary-btn" data-act="room-resume">${esc(L("study_room_resume"))}</button>`}
+      </div>
+      ${playerRows(true)}
+      ${S.autoSubmittedId === r.id ? `<p class="study-warn">${esc(L("study_time_up_auto"))}</p>` : ""}`;
+    return;
+  }
+
+  // selesai
+  const winner = r.winnerName ? esc(L("study_room_winner", { name: r.winnerName })) : esc(L("study_room_no_winner"));
+  body.innerHTML = `
+    ${roomInfoHtml(r)}
+    <div class="study-card study-winner">
+      <div class="study-row-title">${esc(L("study_room_finished"))}</div>
+      <div class="study-winner-name">${winner}</div>
+      ${r.winnerName ? `<div class="study-row-meta">${esc(L("study_room_bonus_line", { b: fmt(r.winBonus) }))}</div>` : ""}
+    </div>
+    ${roomTableHtml(st.results || [], meId)}
+    <div class="study-actions"><button type="button" class="primary-btn" data-act="room-back">${esc(L("study_room_back"))}</button></div>`;
+}
+
+async function roomStart() {
+  const rm = S.room;
+  if (!rm || rm.busy) return;
+  rm.busy = true;
+  render();
+  const res = await studyCall("room_start", { playerId: rm.creds.id, pin: rm.creds.pin, roomId: rm.id });
+  rm.busy = false;
+  if (S.room !== rm) return;
+  if (!res.ok) {
+    render();
+    if (res.status === 404) return roomGone();
+    return handleFailure(res);
+  }
+  applyRoomState(res.state);
+}
+
+// Keluar dari lobi (pembuat keluar = room dibatalkan). Room yang sudah berjalan tidak bisa ditinggalkan, hanya ditutup layarnya.
+async function leaveRoomView() {
+  const rm = S.room;
+  const status = rm?.state?.room.status;
+  if (rm && status === "lobby") {
+    const creator = rm.state.room.creatorId === rm.creds.id;
+    if (!window.confirm(L(creator ? "study_room_cancel_confirm" : "study_room_leave_confirm"))) return;
+    rm.busy = true;
+    render();
+    const res = await studyCall("room_leave", { playerId: rm.creds.id, pin: rm.creds.pin, roomId: rm.id });
+    rm.busy = false;
+    if (!res.ok && res.status !== 404) {
+      render();
+      return handleFailure(res);
+    }
+  }
+  S.room = null;
+  S.view = "rooms";
+  render();
+  loadRooms();
+}
+
+// ---- tabel hasil kompetisi (publik, dari kartu timeline atau tabel profil)
+async function openRoomResult(roomId) {
+  if (S.view !== "roomresult") pushView();
+  const rr = { id: roomId, loading: true, room: null, results: null, error: "" };
+  S.rr = rr;
+  S.view = "roomresult";
+  render();
+  window.scrollTo(0, 0);
+  const res = await studyCall("room_result", { roomId });
+  rr.loading = false;
+  if (res.ok) {
+    rr.room = res.room;
+    rr.results = res.results;
+  } else {
+    rr.error = errText(res);
+  }
+  if (S.view === "roomresult" && S.rr === rr) render();
+}
+
+function renderRoomResult(body) {
+  const rr = S.rr;
+  if (!rr) return;
+  if (rr.loading) {
+    body.innerHTML = `<p class="status-text">${esc(L("study_loading"))}</p>`;
+    return;
+  }
+  if (rr.error || !rr.room) {
+    body.innerHTML = `<div class="study-card"><p>${esc(rr.error || "Error")}</p></div>`;
+    return;
+  }
+  const r = rr.room;
+  const winner = r.winnerName ? esc(L("study_room_winner", { name: r.winnerName })) : esc(L("study_room_no_winner"));
+  body.innerHTML = `
+    ${roomInfoHtml(r)}
+    <div class="study-card study-winner">
+      <div class="study-winner-name">${winner}</div>
+      ${r.winnerName ? `<div class="study-row-meta">${esc(L("study_room_bonus_line", { b: fmt(r.winBonus) }))}</div>` : ""}
+    </div>
+    ${roomTableHtml(rr.results || [], S.viewer?.id)}
+    <p class="study-hint">${esc(L("study_pub_table_hint"))}</p>`;
 }
 
 // ================================================================ Setting (area orang tua)
@@ -1708,6 +2486,7 @@ function renderSettings(data) {
       <label class="study-field"><span class="study-field-label">${esc(L("study_set_perq"))}</span><input type="number" inputmode="numeric" min="1" max="10000" name="perQuestionPoints" value="${s.perQuestionPoints}" /></label>
       <label class="study-field"><span class="study-field-label">${esc(L("study_set_bonus"))}</span><input type="number" inputmode="numeric" min="0" max="100" name="perfectBonusPercent" value="${s.perfectBonusPercent}" /></label>
       <label class="study-field"><span class="study-field-label">${esc(L("study_set_spq"))}</span><input type="number" inputmode="numeric" min="0" max="600" name="secondsPerQuestion" value="${s.secondsPerQuestion}" /><small class="study-field-help">${esc(L("study_set_spq_help"))}</small></label>
+      <label class="study-field"><span class="study-field-label">${esc(L("study_set_winbonus"))}</span><input type="number" inputmode="numeric" min="0" max="1000" name="competitionWinBonus" value="${s.competitionWinBonus ?? 10}" /></label>
       <label class="study-field"><span class="study-field-label">${esc(L("study_set_w_easy"))}</span><input type="number" inputmode="numeric" min="1" max="1000" name="easy" value="${s.weights.easy}" /></label>
       <label class="study-field"><span class="study-field-label">${esc(L("study_set_w_normal"))}</span><input type="number" inputmode="numeric" min="1" max="1000" name="normal" value="${s.weights.normal}" /></label>
       <label class="study-field"><span class="study-field-label">${esc(L("study_set_w_hard"))}</span><input type="number" inputmode="numeric" min="1" max="1000" name="hard" value="${s.weights.hard}" /></label>
@@ -1782,6 +2561,7 @@ async function onPointsSubmit(e) {
     perQuestionPoints: num("perQuestionPoints"),
     perfectBonusPercent: num("perfectBonusPercent"),
     secondsPerQuestion: num("secondsPerQuestion"),
+    competitionWinBonus: num("competitionWinBonus"),
     weights: { easy: num("easy"), normal: num("normal"), hard: num("hard") },
     subjects: f.elements.subjects.value.split("\n")
   });
