@@ -22,6 +22,7 @@ import {
   cleanMaterial,
   MATERIAL_MAX_CHARS,
   cleanLine,
+  cleanQuestion,
   MAX_QUESTIONS,
   classesOf,
   validClass,
@@ -53,6 +54,19 @@ check(!isMaterialGradeAllowed("SD", "Kuliah"), "tingkat tak dikenal ditolak");
 check(validPin("1234") && validPin("123456") && !validPin("123") && !validPin("1234567") && !validPin("12a4") && !validPin(1234) && !validPin(""), "aturan PIN 4-6 digit angka");
 check(validCount(15) && validCount(1) && validCount(MAX_QUESTIONS) && !validCount(0) && !validCount(MAX_QUESTIONS + 1) && !validCount(2.5) && !validCount("5"), "aturan jumlah soal");
 check(cleanLine("  a\n\nb\t c  ", 10) === "a b c" && cleanLine("x".repeat(50), 5) === "xxxxx" && cleanLine(null, 5) === "", "cleanLine merapikan dan memotong");
+{
+  const code = "Perhatikan kode:\n```vb\nDim x As Integer = 0\nIf x <> 0 Then\n    Console.WriteLine(\"a\")\n\n\n  End If\n```\nApa keluarannya?";
+  const c = cleanQuestion(code, 500);
+  check(c.includes("\n    Console.WriteLine") && c.includes("```vb\nDim x") && c.split("\n").length === 10, "cleanQuestion: baris baru & indentasi dalam blok kode dipertahankan: " + JSON.stringify(c));
+  check(cleanQuestion("a   b\n\n\n\nc   d  ", 50) === "a b\n\nc d", "cleanQuestion: di luar blok kode, spasi dirapatkan dan baris kosong ganda diringkas");
+  check(cleanQuestion("x\n```js\nlet a = 1;", 100).endsWith("```") && (cleanQuestion("x\n```js\nlet a = 1;", 100).match(/```/g) || []).length === 2, "cleanQuestion: blok kode tak tertutup ditutup otomatis");
+  const cut = cleanQuestion("t\n```\n" + "a\n".repeat(100) + "```\nq", 40);
+  check(cut.length <= 44 && (cut.match(/```/g) || []).length % 2 === 0, "cleanQuestion: terpotong di dalam blok tetap seimbang");
+  check(cleanQuestion("tab\tdan\u0001kontrol", 50) === "tab dan kontrol", "cleanQuestion: karakter kontrol & tab dibersihkan");
+  const parsed = parseQuestions(JSON.stringify({ questions: [{ question: "Apa keluarannya?\n```python\nfor i in range(2):\n    print(i)\n```", options: ["0 1", "1 2", "0", "2"], answer: "A" }] }), { shuffle: false });
+  check(parsed.length === 1 && parsed[0].question.includes("\n    print(i)"), "parseQuestions: kode multi-baris dari AI tetap berbaris");
+  check(buildQuestionPrompt({ subject: "Pemrograman", grade: "SMA", level: "normal", count: 2 }).system.includes("SATU BARIS PER STATEMEN"), "prompt soal meminta kode dalam blok berbaris");
+}
 
 // ---------------------------------------------------------------- PIN
 {

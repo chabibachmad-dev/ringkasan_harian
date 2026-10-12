@@ -1,6 +1,6 @@
 // Tes pengubah teks PDF hasil belajar (src/study-text.js).
 //   node test-study-text.mjs
-import { pdfSafeText, studyPdfFileName, materialBlocks, materialPdfFileName, pointsFormula } from "../src/study-text.js";
+import { pdfSafeText, studyPdfFileName, studyCardFileName, splitFences, materialBlocks, materialPdfFileName, pointsFormula } from "../src/study-text.js";
 
 let fails = 0;
 const check = (c, m) => { if (!c) { fails++; console.log("FAIL:", m); } else console.log("ok:", m); };
@@ -49,6 +49,15 @@ check(materialPdfFileName("", "", new Date("2026-10-12T05:00:00Z")) === "Materi_
   eq(pointsFormula({ perQuestionPoints: 10, correct: 8, total: 10, weightPercent: 100, bonusPercent: 0 }, L), "Poin = 10 x 8 benar x 100%", "rumus baru tanpa bonus");
   eq(pointsFormula({ perQuestionPoints: 10, correct: 10, total: 10, weightPercent: 120, bonusPercent: 10 }, L), "Poin = 10 x 10 benar x 120% x 110% (bonus)", "rumus baru dengan bonus sempurna");
   eq(pointsFormula({ perQuestionPoints: null, basePoints: 100, correct: 8, total: 10, weightPercent: 100 }, L), "Poin = 100 x 8/10 x 100%", "pelajaran lama memakai rumus lama");
+}
+
+{
+  const d = new Date("2026-10-12T05:00:00Z");
+  eq(studyCardFileName("Ali Ünal", "IPA (Sains)", d), "Kartu_Ali_Unal_IPA_Sains_2026-10-12.png", "nama berkas kartu gambar");
+  eq(studyCardFileName("", "", d), "Kartu_hasil_pelajaran_2026-10-12.png", "nama berkas kartu bawaan");
+  const parts = splitFences("Perhatikan kode:\n```vb\nFor i = 1 To 3\n    Console.WriteLine(i)\nNext\n```\nApa keluarannya?");
+  eq(parts.map((x) => x.type).join(","), "text,code,text", "splitFences: teks, kode, teks");
+  eq(parts[1].text, "For i = 1 To 3\n    Console.WriteLine(i)\nNext", "splitFences: kode tetap berbaris + berindentasi");
 }
 
 if (fails) { console.log(`\n${fails} GAGAL`); process.exit(1); }

@@ -8,7 +8,8 @@ import { studyCall } from "./study-client.js";
 import { openFormDialog } from "./study-form.js";
 import { renderAiMarkdown, typesetMath } from "./markdown.js";
 import { buildStudyPdf, shareOrSaveStudyPdf, buildMaterialPdf, shareOrSaveMaterialPdf } from "./study-pdf.js";
-import { pointsFormula } from "./study-text.js";
+import { pointsFormula, studyCardFileName } from "./study-text.js";
+import { renderLessonCard, renderRoomCard, shareOrSaveCard } from "./study-card.js";
 import { allowedClasses, allowedMaterialGrades, classesOf, computePoints, formatClock, gradeText, timeLimitSeconds } from "../supabase/functions/_shared/study-core.ts";
 
 const $ = (id) => document.getElementById(id);
@@ -545,7 +546,8 @@ function renderResult(body) {
     </div>
     ${S.explainFailed && S.resultFrom !== "feed" ? `<div class="study-card"><p>${esc(L("study_explain_failed"))}</p><button type="button" class="secondary-btn" data-act="explain-retry">${esc(L("study_explain_retry"))}</button></div>` : ""}
     <div class="study-actions">
-      <button type="button" class="primary-btn" data-act="share-pdf">${esc(L("study_share_pdf"))}</button>
+      <button type="button" class="primary-btn" data-act="share-card">${esc(L("study_share_card"))}</button>
+      <button type="button" class="secondary-btn" data-act="share-pdf">${esc(L("study_share_pdf"))}</button>
       ${
         S.resultFrom === "feed"
           ? `<button type="button" class="secondary-btn" data-act="to-timeline">${esc(L("study_back_timeline"))}</button>`
@@ -622,6 +624,8 @@ async function onBodyClick(e) {
   if (act === "submit") return submitQuiz(btn);
   if (act === "explain-retry") return retryExplain(btn);
   if (act === "share-pdf") return sharePdf(btn);
+  if (act === "share-card") return shareLessonCard(btn);
+  if (act === "room-card") return shareRoomCard(btn);
   if (act === "to-profile") {
     S.result = null;
     S.view = "profile";
@@ -1044,6 +1048,76 @@ async function sharePdf(btn) {
   } finally {
     btn.disabled = false;
   }
+}
+
+// ---- kartu gambar (PNG) untuk galeri / WhatsApp
+async function shareCardSafely(btn, make, name, title) {
+  btn.disabled = true;
+  try {
+    const canvas = await make();
+    await shareOrSaveCard(canvas, name, title);
+  } catch (err) {
+    window.alert(`${L("study_card_failed")} (${err instanceof Error ? err.message : String(err)})`);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function shareLessonCard(btn) {
+  const r = S.result;
+  if (!r) return Promise.resolve();
+  const s = r.session;
+  const when = s.submittedAt ? new Date(s.submittedAt) : new Date();
+  const make = () =>
+    renderLessonCard({
+      brand: L("brand"),
+      dateText: when.toLocaleDateString(locale(), { day: "numeric", month: "long", year: "numeric" }),
+      title: s.subject || "",
+      topic: s.topic || "",
+      player: r.player?.name || "",
+      meta: `${gradeText(r.player?.grade || "", r.player?.classLevel)} · ${gradeText(s.materialGrade || "", s.materialClass)} · ${L(`study_level_${s.level}`)} (${r.weightPercent}%)`,
+      big: `${r.correct}/${r.total}`,
+      scoreLabel: L("study_score", { c: r.correct, n: r.total }),
+      points: `+${fmt(r.points)}`,
+      ptsUnit: L("study_pts"),
+      formula: pointsFormula(r, L),
+      bonus: r.bonusPercent > 0 ? L("study_bonus_line", { b: r.bonusPercent }) : "",
+      flags: (r.items || []).map((it) => (it.userAnswer === null || it.userAnswer === undefined ? "n" : it.isCorrect ? "c" : "w")),
+      footer: L("study_card_footer", { name: L("brand") })
+    });
+  return shareCardSafely(btn, make, studyCardFileName(r.player?.name, s.subject, when), `${L("study_pdf_title")}: ${s.subject}`);
+}
+
+function shareRoomCard(btn) {
+  const room = S.view === "roomresult" ? S.rr?.room : S.room?.state?.room;
+  const results = S.view === "roomresult" ? S.rr?.results : S.room?.state?.results;
+  if (!room) return Promise.resolve();
+  const LIMIT = 10;
+  const list = results || [];
+  const rows = list.slice(0, LIMIT).map((x) => ({
+    rank: String(x.rank),
+    name: x.name,
+    sub: `${gradeText(x.grade, x.classLevel)}${x.timedOut ? ` · ${L("study_room_timedout")}` : ""}`,
+    score: `${x.correct}/${x.total}`,
+    time: x.seconds == null ? "-" : formatClock(x.seconds),
+    points: fmt(x.points + x.bonus),
+    isWinner: x.bonus > 0
+  }));
+  const make = () =>
+    renderRoomCard({
+      brand: L("brand"),
+      badge: L("study_kind_competition"),
+      title: `${room.subject}${room.topic ? ` · ${room.topic}` : ""}`,
+      info: `${gradeText(room.materialGrade, room.materialClass)} · ${L(`study_level_${room.level}`)} (${room.weightPercent}%) · ${room.numQuestions} ${L("study_questions_unit")} · ${L("study_feed_minutes", { m: roomMinutes(room) })}`,
+      creator: L("study_room_by", { name: room.creatorName }),
+      winner: room.winnerName ? L("study_room_winner", { name: room.winnerName }) : L("study_room_no_winner"),
+      winnerSub: room.winnerName ? L("study_room_bonus_line", { b: fmt(room.winBonus) }) : "",
+      cols: { name: L("study_col_name"), score: L("study_col_score"), time: L("study_col_time"), points: L("study_col_points") },
+      rows,
+      more: list.length > LIMIT ? L("study_card_more", { n: list.length - LIMIT }) : "",
+      footer: L("study_card_footer", { name: L("brand") })
+    });
+  return shareCardSafely(btn, make, studyCardFileName(L("study_kind_competition"), room.subject), `${L("study_kind_competition")}: ${room.subject}`);
 }
 
 // ================================================================ Timeline global, profil publik, suka, komentar, detil
@@ -2328,7 +2402,10 @@ function renderRoom(body) {
       ${r.winnerName ? `<div class="study-row-meta">${esc(L("study_room_bonus_line", { b: fmt(r.winBonus) }))}</div>` : ""}
     </div>
     ${roomTableHtml(st.results || [], meId)}
-    <div class="study-actions"><button type="button" class="primary-btn" data-act="room-back">${esc(L("study_room_back"))}</button></div>`;
+    <div class="study-actions">
+      <button type="button" class="primary-btn" data-act="room-card">${esc(L("study_share_card"))}</button>
+      <button type="button" class="secondary-btn" data-act="room-back">${esc(L("study_room_back"))}</button>
+    </div>`;
 }
 
 async function roomStart() {
@@ -2408,6 +2485,7 @@ function renderRoomResult(body) {
       ${r.winnerName ? `<div class="study-row-meta">${esc(L("study_room_bonus_line", { b: fmt(r.winBonus) }))}</div>` : ""}
     </div>
     ${roomTableHtml(rr.results || [], S.viewer?.id)}
+    <div class="study-actions"><button type="button" class="primary-btn" data-act="room-card">${esc(L("study_share_card"))}</button></div>
     <p class="study-hint">${esc(L("study_pub_table_hint"))}</p>`;
 }
 

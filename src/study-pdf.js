@@ -2,7 +2,7 @@
 // supaya hasilnya sama di semua perangkat. Teks dibersihkan lewat pdfSafeText (font standar PDF hanya Latin-1).
 
 import { jsPDF } from "jspdf";
-import { pdfSafeText, studyPdfFileName, materialBlocks, materialPdfFileName, pointsFormula } from "./study-text.js";
+import { pdfSafeText, studyPdfFileName, materialBlocks, materialPdfFileName, pointsFormula, splitFences } from "./study-text.js";
 import { gradeText } from "../supabase/functions/_shared/study-core.ts";
 
 const LETTERS = ["A", "B", "C", "D"];
@@ -22,8 +22,8 @@ export function buildStudyPdf(result, L, locale = "id-ID") {
       y = margin;
     }
   };
-  const write = (text, { size = 11, bold = false, gap = 0, indent = 0, gray = false } = {}) => {
-    doc.setFont("helvetica", bold ? "bold" : "normal");
+  const write = (text, { size = 11, bold = false, gap = 0, indent = 0, gray = false, font = "helvetica" } = {}) => {
+    doc.setFont(font, bold ? "bold" : "normal");
     doc.setFontSize(size);
     doc.setTextColor(gray ? 110 : 0);
     const lh = size * 1.35;
@@ -63,7 +63,17 @@ export function buildStudyPdf(result, L, locale = "id-ID") {
 
   for (const it of result.items || []) {
     ensureSpace(60);
-    write(pdfSafeText(`${it.idx + 1}. ${it.question}`), { size: 11, bold: true, gap: 2 });
+    // soal berisi kode: teks biasa dan blok kode digambar terpisah (kode: font monospasi, baris & indentasi dipertahankan)
+    const segs = splitFences(it.question);
+    let first = true;
+    for (const seg of segs.length ? segs : [{ type: "text", text: "" }]) {
+      if (seg.type === "code") {
+        write(seg.text.replace(/[^\n\t -~ -ÿ]/g, "?"), { size: 9.5, font: "courier", indent: 14, gap: 3 });
+      } else {
+        write(pdfSafeText(`${first ? `${it.idx + 1}. ` : ""}${seg.text}`), { size: 11, bold: true, gap: first ? 2 : 3 });
+      }
+      first = false;
+    }
     it.options.forEach((opt, i) => {
       const marks = [];
       if (i === it.correctIndex) marks.push(L("study_pdf_key"));

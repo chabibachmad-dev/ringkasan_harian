@@ -71,11 +71,47 @@ export function pdfSafeText(input) {
   return t.replace(/[ \t]+\n/g, "\n").replace(/[ \t]{2,}/g, " ").trim();
 }
 
+// Teks soal -> segmen { type: "text"|"code", text } (blok ``` dipisah supaya kode digambar apa adanya, berbaris dan berindentasi).
+export function splitFences(input) {
+  const lines = String(input ?? "").replace(/\r\n?/g, "\n").split("\n");
+  const out = [];
+  let buf = [];
+  let code = null;
+  const flush = (type, arr) => {
+    const text = type === "code" ? arr.join("\n").replace(/\s+$/, "") : arr.join("\n").trim();
+    if (text.trim()) out.push({ type, text });
+  };
+  for (const line of lines) {
+    if (/^\s*```/.test(line)) {
+      if (code === null) {
+        flush("text", buf);
+        buf = [];
+        code = [];
+      } else {
+        flush("code", code);
+        code = null;
+      }
+      continue;
+    }
+    if (code !== null) code.push(line);
+    else buf.push(line);
+  }
+  if (code !== null) flush("code", code);
+  else flush("text", buf);
+  return out;
+}
+
 // Nama berkas aman, mis. "Hasil_Ali_Matematika_2026-10-12".
 export function studyPdfFileName(playerName, subject, date = new Date()) {
   const slug = (s) => String(s ?? "").normalize("NFKD").replace(/[̀-ͯ]/g, "").replace(/[^\p{L}\p{N}]+/gu, "_").replace(/^_+|_+$/g, "").slice(0, 30);
   const d = date.toISOString().slice(0, 10);
   return `Hasil_${slug(playerName) || "pemain"}_${slug(subject) || "pelajaran"}_${d}.pdf`;
+}
+
+// Nama berkas kartu gambar, mis. "Kartu_Ali_Matematika_2026-10-12.png" atau "Kartu_Kompetisi_Matematika_2026-10-12.png".
+export function studyCardFileName(first, second, date = new Date()) {
+  const slug = (s, n) => String(s ?? "").normalize("NFKD").replace(/[̀-ͯ]/g, "").replace(/[^\p{L}\p{N}]+/gu, "_").replace(/^_+|_+$/g, "").slice(0, n);
+  return `Kartu_${slug(first, 30) || "hasil"}_${slug(second, 30) || "pelajaran"}_${date.toISOString().slice(0, 10)}.png`;
 }
 
 // Nama berkas aman untuk PDF materi, mis. "Materi_Matematika_Teorema_Pythagoras_2026-10-12.pdf".

@@ -90,6 +90,46 @@ export function cleanLine(v: unknown, max: number): string {
     .slice(0, max);
 }
 
+// Teks soal: baris baru dan indentasi di dalam blok kode (```) DIPERTAHANKAN supaya kode program terbaca;
+// di luar blok, spasi dirapatkan seperti cleanLine. Blok yang tidak tertutup (mis. terpotong) ditutup otomatis.
+export function cleanQuestion(v: unknown, max: number): string {
+  const lines = String(v ?? "")
+    .replace(/\r\n?/g, "\n")
+    .replace(/\t/g, "  ")
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, " ")
+    .split("\n");
+  const out: string[] = [];
+  let inCode = false;
+  let blank = 0;
+  for (const raw of lines) {
+    const line = raw.replace(/\s+$/, "");
+    if (/^\s*```/.test(line)) {
+      inCode = !inCode;
+      blank = 0;
+      out.push(line.trim().replace(/^```\s*([\w+#.-]*).*$/, (_m, lang) => "```" + lang));
+      continue;
+    }
+    if (inCode) {
+      out.push(line);
+      continue;
+    }
+    const t = line.trim().replace(/\s+/g, " ");
+    if (!t) {
+      if (++blank <= 1 && out.length > 0) out.push("");
+      continue;
+    }
+    blank = 0;
+    out.push(t);
+  }
+  if (inCode) out.push("```");
+  let text = out.join("\n").trim();
+  if (text.length > max) {
+    text = text.slice(0, max).replace(/\s+$/, "");
+    if ((text.match(/^\s*```/gm) ?? []).length % 2 === 1) text += "\n```";
+  }
+  return text;
+}
+
 export function validPin(pin: unknown): boolean {
   return typeof pin === "string" && /^\d{4,6}$/.test(pin);
 }
@@ -179,12 +219,13 @@ export function buildQuestionPrompt(spec: QuestionSpec): { system: string; user:
   const english = /inggris|english/i.test(spec.subject);
   const system = [
     "Kamu adalah penyusun soal ujian pilihan ganda yang teliti untuk aplikasi belajar keluarga.",
-    "Balas HANYA dengan JSON valid tanpa teks lain dan tanpa code fence.",
+    "Balas HANYA dengan JSON valid tanpa teks lain dan tanpa code fence di luar JSON (blok kode di DALAM teks soal, bila perlu, tetap boleh).",
     "ATURAN SOAL:",
     "- Tiap soal punya TEPAT 4 pilihan jawaban dan TEPAT SATU jawaban yang benar. Pastikan kunci jawaban benar secara faktual dan hitungan matematikanya sudah kamu cek ulang.",
     "- Jangan membuat pilihan seperti \"semua jawaban benar\", \"semua salah\", \"tidak ada yang benar\", atau \"A dan B benar\". Tiap pilihan harus berdiri sendiri.",
     "- Jangan menulis huruf pilihan (A., B.) di dalam teks pilihan.",
     "- Soal harus mandiri (tidak merujuk gambar/tabel yang tidak ada), tidak ambigu, bukan soal opini, dan tidak berulang satu sama lain.",
+    "- Jika soal memuat KODE PROGRAM, tulis kodenya dalam blok kode di dalam string \"question\": kalimat pertanyaan dulu, lalu baris baru, ```bahasa, kode dengan SATU BARIS PER STATEMEN dan indentasi yang benar (tulis \\n untuk baris baru dalam JSON), lalu ``` penutup, lalu pertanyaannya (mis. \"Apa keluaran kode tersebut?\"). JANGAN menulis kode dalam satu baris panjang. Potongan kode pendek di pilihan jawaban atau di kalimat boleh memakai `backtick`.",
     "- Tulis rumus dan simbol sebagai teks biasa/Unicode yang mudah dibaca (contoh: x², √16, 3/4, ≥, ×), JANGAN memakai LaTeX atau tanda dolar.",
     "- Untuk pelajaran agama, gunakan hal yang disepakati secara umum (hindari masalah khilafiyah).",
     english ? "- Karena pelajarannya Bahasa Inggris, tulis soal dan pilihan dalam bahasa Inggris yang sesuai tingkat." : "- Tulis dalam Bahasa Indonesia.",
@@ -201,7 +242,7 @@ export function buildQuestionPrompt(spec: QuestionSpec): { system: string; user:
   ];
   if (spec.avoid && spec.avoid.length > 0) {
     lines.push("Soal yang SUDAH ADA (jangan diulang atau dibuat mirip):");
-    for (const q of spec.avoid.slice(-40)) lines.push(`- ${q.slice(0, 160)}`);
+    for (const q of spec.avoid.slice(-40)) lines.push(`- ${q.replace(/\s+/g, " ").slice(0, 160)}`);
   }
   lines.push(
     'Format keluaran: {"questions":[{"question":"...","options":["...","...","...","..."],"answer":"B"}]} dengan "answer" berupa huruf A, B, C, atau D.'
@@ -302,7 +343,7 @@ export function parseQuestions(
   for (const raw of arr) {
     if (!raw || typeof raw !== "object") continue;
     const r = raw as Record<string, unknown>;
-    const question = cleanLine(r.question ?? r.soal ?? r.pertanyaan, 800);
+    const question = cleanQuestion(r.question ?? r.soal ?? r.pertanyaan, 1500);
     const rawOptions = r.options ?? r.pilihan ?? r.choices;
     if (question.length < 5 || !Array.isArray(rawOptions) || rawOptions.length !== 4) continue;
     const options = rawOptions.map((o) => stripLetterPrefix(cleanLine(o, 300)));
@@ -340,7 +381,7 @@ export function buildExplainPrompt(subject: string, grade: string, items: Explai
     "- Jelaskan MENGAPA jawaban yang benar itu benar, dengan langkah/penalaran singkat (maksimal 4 kalimat).",
     "- Jika jawaban pemain salah, jelaskan juga singkat mengapa pilihannya keliru. Jika tidak dijawab, katakan bahwa soal belum dijawab.",
     "- Gunakan Bahasa Indonesia (kecuali pelajaran Bahasa Inggris boleh bercampur contoh Inggris).",
-    "- Tulis rumus sebagai teks biasa/Unicode (x², √16, 3/4), JANGAN memakai LaTeX atau tanda dolar.",
+    "- Tulis rumus sebagai teks biasa/Unicode (x², √16, 3/4), JANGAN memakai LaTeX atau tanda dolar. Potongan kode pendek boleh memakai `backtick`.",
     '- Periksa sendiri apakah kunci jawaban yang diberikan memang benar. Jika menurutmu kunci itu KELIRU atau soalnya ambigu, isi "keyAgrees": false dan jelaskan jawaban yang menurutmu benar di pembahasan.'
   ].join("\n");
   const lines = [`Pelajaran: "${spec(subject)}" (tingkat ${grade}).`, "Soal:"];
