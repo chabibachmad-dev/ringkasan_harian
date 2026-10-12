@@ -6,6 +6,7 @@
 import { t } from "./i18n.js";
 import { clearDeviceLogin, isDeviceToken, readDeviceLogin, saveDeviceLogin, studyCall, studyHooks } from "./study-client.js";
 import { openFormDialog } from "./study-form.js";
+import { fileToAvatarBase64 } from "./study-avatar.js";
 import { renderAiMarkdown, typesetMath } from "./markdown.js";
 import { buildStudyPdf, shareOrSaveStudyPdf, buildMaterialPdf, shareOrSaveMaterialPdf } from "./study-pdf.js";
 import { pointsFormula, studyCardFileName } from "./study-text.js";
@@ -33,6 +34,8 @@ const CUSTOM = "__custom";
 
 // view: "home" | "profile" | "quiz" | "result". PIN hanya hidup di memori (hilang saat layar Study ditinggalkan).
 const S = {
+  avatarBusy: false,
+  avatarMsg: "",
   view: "home",
   overview: null,
   overviewError: "",
@@ -108,6 +111,18 @@ export function initStudy(context) {
   $("study-body")?.addEventListener("click", onBodyClick);
   $("study-body")?.addEventListener("change", onBodyChange);
   $("study-body")?.addEventListener("input", onBodyInput);
+  // foto yang gagal dimuat (file hilang / offline): kembali ke huruf awal
+  $("study-body")?.addEventListener(
+    "error",
+    (e) => {
+      const img = e.target;
+      if (!img || img.tagName !== "IMG" || !img.closest(".study-avatar")) return;
+      const box = img.closest(".study-avatar");
+      box.classList.remove("has-img");
+      box.textContent = img.dataset.initial || "?";
+    },
+    true
+  );
 }
 
 export function hideStudyScreen() {
@@ -219,6 +234,7 @@ async function loadOverview() {
 
 async function loadProfile() {
   if (!S.player) return;
+  S.avatarMsg = "";
   S.loading = true;
   render();
   const res = await studyCall("player_profile", { playerId: S.player.id, pin: S.pin });
@@ -342,7 +358,7 @@ function renderHome(body) {
       (p, i) => `
       <button type="button" class="study-board-row ${i < 3 ? "is-top" : ""}" data-act="open-public" data-id="${esc(p.id)}">
         <span class="study-rank">${i + 1}</span>
-        <span class="study-avatar study-avatar--sm" aria-hidden="true">${initial(p.name)}</span>
+        ${avatarHtml(p.id, p.name, "study-avatar--sm", true)}
         <span class="study-board-main"><span class="study-name">${esc(p.name)}</span><small class="study-board-meta">${esc(gradeText(p.grade, p.classLevel))} · ${fmt(p.sessionsDone)} ${esc(L("study_col_done").toLowerCase())}</small></span>
         <span class="study-pts">${fmt(p.totalPoints)}<small>${esc(L("study_pts"))}</small></span>
       </button>`
@@ -443,7 +459,7 @@ function renderProfile(body) {
         <div class="study-profile-name">${esc(p.player.name)}</div>
         <div class="study-row-meta">${esc(gradeText(p.player.grade, p.player.classLevel))}</div>
       </div>
-      <span class="study-avatar study-avatar--xl">${initial(p.player.name)}</span>
+      <button type="button" class="study-avatar-btn" data-act="avatar-pick" aria-label="${esc(L("study_photo_change"))}">${avatarHtml(p.player.id, p.player.name, "study-avatar--xl", true)}<span class="study-avatar-badge" aria-hidden="true">${ICONS.camera}</span></button>
     </div>
     <div class="study-balance">
       <div class="study-balance-label">${esc(L("study_balance"))}</div>
@@ -454,8 +470,11 @@ function renderProfile(body) {
       <button type="button" class="primary-btn" data-act="new-lesson-me">${esc(L("study_new_lesson"))}</button>
       <button type="button" class="secondary-btn" data-act="my-timeline">${esc(L("study_tl_my"))}</button>
       <button type="button" class="secondary-btn" data-act="edit-level">${esc(L("study_edit_level"))}</button>
+      <button type="button" class="secondary-btn" data-act="avatar-pick">${esc(L("study_photo_change"))}</button>
+      ${avatarUrlOf(p.player.id) ? `<button type="button" class="study-link-btn" data-act="avatar-remove">${esc(L("study_photo_remove"))}</button>` : ""}
       <button type="button" class="study-link-btn" data-act="tl-signout">${esc(L("study_logout_device"))}</button>
     </div>
+    ${S.avatarMsg ? `<p class="study-hint" role="status">${esc(S.avatarMsg)}</p>` : ""}
     <h2 class="study-h">${esc(L("study_redeem"))}</h2>
     ${redeem}
     <details class="study-details"><summary>${esc(L("study_redeem_history"))} (${(p.redemptions || []).length})</summary>${redHistory}</details>
@@ -613,6 +632,8 @@ async function onBodyClick(e) {
   if (act === "mat-more") return loadMaterials(false);
   if (act === "my-timeline") return openPublic(S.player?.id);
   if (act === "edit-level") return openEditLevel();
+  if (act === "avatar-pick") return pickAvatar();
+  if (act === "avatar-remove") return removeAvatar();
   if (act === "tl-profile") return openProfileFromPublic();
   if (act === "tl-more") return loadFeed(shownFeed(), "more");
   if (act === "tl-signin") return signInViewer();
@@ -830,6 +851,66 @@ function openPlayerPin(playerId) {
 
 // Ubah grade/kelas sendiri (naik kelas atau ralat). Butuh PIN orang tua bila sudah dibuat,
 // karena menurunkan kelas membuka materi yang lebih rendah.
+// ---- ganti / hapus foto profil (hanya profil sendiri: S.player + S.pin)
+function setAvatarLocal(id, url) {
+  const pl = (S.overview?.players || []).find((p) => p.id === id);
+  if (pl) pl.avatarUrl = url || null;
+}
+
+function pickAvatar() {
+  const me = S.player;
+  if (!me || S.avatarBusy) return;
+  const input = document.createElement("input");
+  input.type = "file";
+  input.accept = "image/*"; // tanpa "capture": peramban menawarkan galeri (dan kamera) sesuai perangkat
+  input.addEventListener("change", async () => {
+    const file = input.files && input.files[0];
+    if (!file) return;
+    S.avatarBusy = true;
+    S.avatarMsg = L("study_photo_busy");
+    render();
+    try {
+      let image;
+      try {
+        image = await fileToAvatarBase64(file);
+      } catch (e) {
+        S.avatarMsg = e && e.message === "size" ? L("study_photo_err_size") : L("study_photo_err_read");
+        return;
+      }
+      const res = await studyCall("player_avatar_set", { playerId: me.id, pin: S.pin, image });
+      if (!res.ok) {
+        S.avatarMsg = errText(res);
+        return;
+      }
+      setAvatarLocal(me.id, res.avatarUrl);
+      S.avatarMsg = L("study_photo_saved");
+      if (S.feed) S.feed.stale = true;
+    } finally {
+      S.avatarBusy = false;
+      render();
+    }
+  });
+  input.click();
+}
+
+async function removeAvatar() {
+  const me = S.player;
+  if (!me || S.avatarBusy) return;
+  if (!window.confirm(L("study_photo_remove_confirm"))) return;
+  S.avatarBusy = true;
+  S.avatarMsg = L("study_photo_busy");
+  render();
+  const res = await studyCall("player_avatar_remove", { playerId: me.id, pin: S.pin });
+  S.avatarBusy = false;
+  if (res.ok) {
+    setAvatarLocal(me.id, null);
+    S.avatarMsg = L("study_photo_removed");
+  } else {
+    S.avatarMsg = errText(res);
+  }
+  render();
+}
+
 function openEditLevel() {
   const me = S.player;
   if (!me) return;
@@ -1324,6 +1405,14 @@ const fmtDateTime = (v) => {
   return Number.isNaN(d.getTime()) ? "" : d.toLocaleString(locale(), { day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" });
 };
 const initial = (name) => esc(String(name || "?").trim().charAt(0).toUpperCase() || "?");
+
+// ---- foto profil: URL dari overview (players[].avatarUrl), huruf awal bila belum punya foto atau gagal dimuat
+const avatarUrlOf = (id) => (id ? (S.overview?.players || []).find((p) => p.id === id)?.avatarUrl || "" : "");
+function avatarHtml(id, name, cls = "", hidden = false) {
+  const url = avatarUrlOf(id);
+  const inner = url ? `<img src="${esc(url)}" alt="" loading="lazy" decoding="async" data-initial="${initial(name)}">` : initial(name);
+  return `<span class="study-avatar ${cls} ${url ? "has-img" : ""}"${hidden ? ' aria-hidden="true"' : ""}>${inner}</span>`;
+}
 const keyOf = (it) => `${it.kind}:${it.id}`;
 const splitKey = (k) => {
   const i = String(k).indexOf(":");
@@ -1559,7 +1648,7 @@ function commentsHtml(it, feed) {
             : "";
         return `
       <div class="study-comment">
-        <span class="study-avatar study-avatar--sm">${initial(c.name)}</span>
+        ${avatarHtml(c.playerId, c.name, "study-avatar--sm")}
         <div class="study-comment-main">
           <div class="study-comment-head"><strong>${esc(c.name)}</strong> <small>${esc(gradeText(c.grade, c.classLevel))}</small> <small>${esc(fmtDateTime(c.createdAt))}</small></div>
           <div class="study-comment-body">${esc(c.body)}</div>
@@ -1600,7 +1689,7 @@ function cardParts(it) {
       : "";
     return {
       who: it.creatorName,
-      whoId: null,
+      whoId: it.creatorId || null,
       grade: "",
       text: `<span class="study-kind">${esc(L("study_kind_competition"))}</span> <strong>${esc(it.subject)}</strong>${topicText(it)} <span class="study-row-meta">${esc(L("study_feed_comp_by", { name: it.creatorName }))}</span>`,
       chips: `<span class="study-badge">${esc(L(`study_level_${it.level}`))}</span><span class="study-badge">${esc(gradeText(it.materialGrade, it.materialClass))}</span><span class="study-badge">${esc(L("study_feed_players", { n: it.players }))}</span><span class="study-badge">${it.total} ${esc(L("study_questions_unit"))}</span><span class="study-badge">${esc(L("study_feed_minutes", { m: minutes }))}</span>`,
@@ -1633,6 +1722,7 @@ function cardParts(it) {
 const ICONS = {
   like: '<svg class="study-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20.5s-8-4.9-8-10.7A4.6 4.6 0 0 1 12 7a4.6 4.6 0 0 1 8 2.8c0 5.8-8 10.7-8 10.7z"/></svg>',
   comment: '<svg class="study-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M20.5 11.5a8 8 0 0 1-11.7 7.1L3.5 20l1.5-4.6A8 8 0 1 1 20.5 11.5z"/></svg>',
+  camera: '<svg class="study-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8.5h3l1.5-2h7l1.5 2h3v10H4z"/><circle cx="12" cy="13" r="3.2"/></svg>',
   open: '<svg class="study-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 17 17 7M8.5 7H17v8.5"/></svg>'
 };
 
@@ -1646,7 +1736,7 @@ function postHtml(it, feed) {
   return `
   <article class="study-post study-post--${esc(it.kind)}" data-card="${esc(key)}">
     <div class="study-post-side">
-      <span class="study-avatar">${initial(p.who)}</span>
+      ${avatarHtml(p.whoId, p.who)}
       ${hasReplies ? '<span class="study-thread-line" aria-hidden="true"></span>' : ""}
     </div>
     <div class="study-post-main">
@@ -1697,7 +1787,7 @@ function feedBodyHtml(feed, emptyKey = "study_feed_empty") {
 
 function timelineHtml() {
   if (!S.feed) S.feed = newFeed(null, null);
-  const composeBar = `<button type="button" class="study-compose-bar" data-act="new-lesson"><span class="study-avatar study-avatar--sm" aria-hidden="true">${S.viewer ? initial(S.viewer.name) : "+"}</span><span class="study-compose-text">${esc(L("study_compose_ph"))}</span></button>`;
+  const composeBar = `<button type="button" class="study-compose-bar" data-act="new-lesson">${S.viewer ? avatarHtml(S.viewer.id, S.viewer.name, "study-avatar--sm", true) : '<span class="study-avatar study-avatar--sm" aria-hidden="true">+</span>'}<span class="study-compose-text">${esc(L("study_compose_ph"))}</span></button>`;
   return `${viewerBarHtml()}${composeBar}${feedBodyHtml(S.feed)}`;
 }
 
@@ -1761,7 +1851,7 @@ function renderPublic(body) {
         <div class="study-row-meta">${esc(gradeText(o.grade, o.classLevel))}</div>
         <div class="study-row-meta">${esc(L("study_tl_rank", { n: st.rank ?? "-" }))} · ${fmt(st.totalPoints)} ${esc(L("study_pts"))}</div>
       </div>
-      <span class="study-avatar study-avatar--xl">${initial(o.name)}</span>
+      ${avatarHtml(o.id, o.name, "study-avatar--xl")}
     </div>
     <div class="study-actions study-actions--chips"><button type="button" class="secondary-btn" data-act="tl-profile">${esc(L("study_tl_open_profile"))}</button></div>
     <div class="study-stats">
@@ -2577,7 +2667,7 @@ function renderRoom(body) {
       .map(
         (p) => `
       <div class="study-row study-room-player">
-        <span class="study-avatar study-avatar--sm">${initial(p.name)}</span>
+        ${avatarHtml(p.id, p.name, "study-avatar--sm")}
         <div class="study-row-main"><div class="study-row-title">${esc(p.name)}${p.id === meId ? ` <small>(${esc(L("study_room_you"))})</small>` : ""}</div><div class="study-row-meta">${esc(gradeText(p.grade, p.classLevel))}${p.isCreator ? ` · ${esc(L("study_room_creator_tag"))}` : ""}</div></div>
         ${withState ? `<span class="study-badge ${p.submitted ? "study-badge--solid" : ""}">${esc(L(p.submitted ? "study_room_p_done" : "study_room_p_working"))}</span>` : ""}
       </div>`

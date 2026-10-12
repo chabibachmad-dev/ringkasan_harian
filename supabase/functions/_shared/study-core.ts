@@ -561,3 +561,30 @@ export function cleanMaterial(text: string, fallbackTitle: string): { title: str
   }
   return { title: title || cleanLine(fallbackTitle, 120) || "Materi", content: t };
 }
+
+// ---------------------------------------------------------------- foto profil
+export const AVATAR_MAX_BYTES = 150 * 1024;
+
+/** Terima foto profil dari klien (base64, boleh berawalan "data:image/jpeg;base64,"). Hanya JPEG, maksimal AVATAR_MAX_BYTES.
+ *  Mengembalikan byte-nya, atau null bila bukan JPEG yang sah / terlalu besar / bukan base64. */
+export function parseAvatarImage(input: unknown): Uint8Array | null {
+  if (typeof input !== "string") return null;
+  let b64 = input.trim();
+  const m = /^data:image\/jpeg;base64,/i.exec(b64);
+  if (m) b64 = b64.slice(m[0].length);
+  if (b64.length === 0 || b64.length > Math.ceil((AVATAR_MAX_BYTES * 4) / 3) + 8) return null;
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(b64)) return null;
+  let bin: string;
+  try {
+    bin = atob(b64);
+  } catch {
+    return null;
+  }
+  if (bin.length < 4 || bin.length > AVATAR_MAX_BYTES) return null;
+  // tanda JPEG: FF D8 FF di awal, FF D9 di akhir
+  if (bin.charCodeAt(0) !== 0xff || bin.charCodeAt(1) !== 0xd8 || bin.charCodeAt(2) !== 0xff) return null;
+  if (bin.charCodeAt(bin.length - 2) !== 0xff || bin.charCodeAt(bin.length - 1) !== 0xd9) return null;
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}

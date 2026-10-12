@@ -33,6 +33,9 @@
 //   parent_pin_set      { newPin, parentPin? }                               -> { ok }
 //   -- timeline (Facebook-like): lihat kegiatan pemain, suka, komentar, detil. Melihat timeline & komentar tidak perlu PIN;
 //      suka/komentar/detil butuh PIN penonton (viewerId + viewerPin) dan tidak boleh pada kegiatan sendiri (suka/komentar).
+//   player_avatar_set   { playerId, pin, image }                            -> { avatarUrl }   (foto profil: JPEG base64 <= 150 KB, sudah dipotong persegi di peramban; bucket publik study-avatars, migrasi 0031)
+//   player_avatar_remove { playerId, pin }                                   -> { avatarUrl: null }
+//   overview menyertakan players[].avatarUrl (null = belum punya foto).
 //   player_verify       { playerId, pin }                                    -> { player }   (masuk sebagai penonton)
 //   login               { playerId, pin }                                    -> { token, player }   (login perangkat: simpan token di perangkat; token berlaku sebagai pengganti PIN di semua aksi pemain)
 //   logout              { playerId, token }                                  -> { ok }   (cabut token perangkat ini)
@@ -93,6 +96,7 @@ import {
   isDeviceToken,
   MAX_DEVICE_TOKENS,
   newDeviceToken,
+  parseAvatarImage,
   PRACTICE_QUESTIONS,
   validCount,
   validPin,
@@ -120,6 +124,14 @@ const isUuid = (v: unknown): v is string => typeof v === "string" && UUID_RE.tes
 
 function pacificDate(): string {
   return new Intl.DateTimeFormat("en-CA", { timeZone: "America/Los_Angeles" }).format(new Date());
+}
+
+// ---------------------------------------------------------------- foto profil
+const AVATAR_BUCKET = "study-avatars";
+function avatarUrl(id: string, ver: unknown): string | null {
+  const v = Number(ver);
+  if (!Number.isFinite(v) || v <= 0) return null;
+  return `${Deno.env.get("SUPABASE_URL")}/storage/v1/object/public/${AVATAR_BUCKET}/${id}.jpg?v=${v}`;
 }
 
 // ---------------------------------------------------------------- PIN
@@ -639,12 +651,14 @@ Deno.serve(async (req) => {
   try {
     // ------------------------------------------------------------ overview
     if (action === "overview") {
-      const [{ data: board, error }, settings, items] = await Promise.all([admin.rpc("study_leaderboard"), loadSettings(admin), loadItems(admin)]);
+      const [{ data: board, error }, settings, items, av] = await Promise.all([admin.rpc("study_leaderboard"), loadSettings(admin), loadItems(admin), admin.from("study_players").select("id,avatar_ver")]);
       if (error) return fail(error.message, 500);
+      // avatar_ver ada setelah migrasi 0031; sebelum itu kueri ini gagal dan foto dianggap tidak ada
+      const avById = new Map<string, unknown>((av.error ? [] : av.data ?? []).map((r: Row) => [r.id as string, r.avatar_ver] as [string, unknown]));
       if (!settings) return fail("Setting Study belum ada. Jalankan migrasi 0023_study.sql.", 500);
       return json({
         ok: true,
-        players: (board ?? []).map((p: Row) => ({ id: p.id, name: p.name, grade: p.grade, classLevel: p.class_level ?? null, sessionsDone: p.sessions_done, competitions: p.competitions ?? 0, wins: p.wins ?? 0, totalPoints: p.total_points, balance: p.balance })),
+        players: (board ?? []).map((p: Row) => ({ id: p.id, name: p.name, grade: p.grade, classLevel: p.class_level ?? null, sessionsDone: p.sessions_done, competitions: p.competitions ?? 0, wins: p.wins ?? 0, totalPoints: p.total_points, balance: p.balance, avatarUrl: avatarUrl(p.id, avById.get(p.id)) })),
         settings: publicSettings(settings, items),
         grades: GRADES
       });
@@ -709,6 +723,31 @@ Deno.serve(async (req) => {
         allowedGrades: allowedMaterialGrades(p.grade),
         classRanges: Object.fromEntries(["SD", "SMP", "SMA"].map((g) => [g, classesOf(g)]))
       });
+    }
+
+    // ------------------------------------------------------------ foto profil
+    if (action === "player_avatar_set") {
+      const auth = await checkPlayerPin(admin, body.playerId, body.pin);
+      if (auth instanceof Response) return auth;
+      const bytes = parseAvatarImage(body.image);
+      if (!bytes) return fail("Foto tidak valid. Pakai gambar JPEG berukuran kecil (maksimal 150 KB).");
+      const p = auth.player;
+      const { error: ue } = await admin.storage.from(AVATAR_BUCKET).upload(`${p.id}.jpg`, bytes, { contentType: "image/jpeg", upsert: true, cacheControl: "31536000" });
+      if (ue) return fail(`Gagal menyimpan foto: ${ue.message}`, 500);
+      const ver = (Number(p.avatar_ver) || 0) + 1;
+      const { error: de } = await admin.from("study_players").update({ avatar_ver: ver }).eq("id", p.id);
+      if (de) return fail(de.message, 500);
+      return json({ ok: true, avatarUrl: avatarUrl(p.id, ver) });
+    }
+
+    if (action === "player_avatar_remove") {
+      const auth = await checkPlayerPin(admin, body.playerId, body.pin);
+      if (auth instanceof Response) return auth;
+      const p = auth.player;
+      await admin.storage.from(AVATAR_BUCKET).remove([`${p.id}.jpg`]);
+      const { error: de } = await admin.from("study_players").update({ avatar_ver: 0 }).eq("id", p.id);
+      if (de) return fail(de.message, 500);
+      return json({ ok: true, avatarUrl: null });
     }
 
     // ------------------------------------------------------------ reset PIN pemain (orang tua)

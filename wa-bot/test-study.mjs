@@ -1,6 +1,8 @@
 // Tes logika murni menu Study (supabase/functions/_shared/study-core.ts).
 //   node test-study.mjs      (butuh Node 22.18+ yang bisa memuat .ts langsung)
 import {
+  parseAvatarImage,
+  AVATAR_MAX_BYTES,
   allowedMaterialGrades,
   isMaterialGradeAllowed,
   validPin,
@@ -264,6 +266,22 @@ check(computePoints(7, 3, 5, 100) === 21 && computePoints(5, 7, 10, 80) === 28, 
 check(timeLimitSeconds(10, 60) === 600 && timeLimitSeconds(20, 60) === 1200 && timeLimitSeconds(15, 45) === 675, "waktu = jumlah soal x detik per soal");
 check(timeLimitSeconds(10, 0) === null && timeLimitSeconds(0, 60) === null, "0 detik per soal = tanpa timer");
 check(formatClock(600) === "10:00" && formatClock(61) === "1:01" && formatClock(9) === "0:09" && formatClock(0) === "0:00" && formatClock(-5) === "0:00" && formatClock(3723) === "1:02:03", "format hitung mundur");
+
+// ---------------------------------------------------------------- foto profil
+{
+  const b64 = (bytes) => Buffer.from(bytes).toString("base64");
+  const jpeg = (n) => { const a = new Uint8Array(n); a[0] = 0xff; a[1] = 0xd8; a[2] = 0xff; a[n - 2] = 0xff; a[n - 1] = 0xd9; return a; };
+  const ok = parseAvatarImage(b64(jpeg(1000)));
+  check(ok instanceof Uint8Array && ok.length === 1000 && ok[0] === 0xff, "foto: JPEG sah diterima");
+  check(parseAvatarImage("data:image/jpeg;base64," + b64(jpeg(500)))?.length === 500, "foto: awalan data URL jpeg dibuang");
+  check(parseAvatarImage(b64(jpeg(AVATAR_MAX_BYTES)))?.length === AVATAR_MAX_BYTES, "foto: tepat di batas masih diterima");
+  check(parseAvatarImage(b64(jpeg(AVATAR_MAX_BYTES + 1))) === null, "foto: melewati batas ditolak");
+  const png = new Uint8Array(100); png.set([0x89, 0x50, 0x4e, 0x47]);
+  check(parseAvatarImage(b64(png)) === null && parseAvatarImage("data:image/png;base64," + b64(jpeg(100))) === null, "foto: PNG (tanda & tipe) ditolak");
+  const cut = jpeg(100); cut[99] = 0;
+  check(parseAvatarImage(b64(cut)) === null, "foto: JPEG terpotong (tanpa FF D9) ditolak");
+  check(parseAvatarImage("") === null && parseAvatarImage(null) === null && parseAvatarImage(123) === null && parseAvatarImage("@@@@") === null, "foto: kosong / bukan teks / bukan base64 ditolak");
+}
 
 if (fails) {
   console.log(`\n${fails} GAGAL`);

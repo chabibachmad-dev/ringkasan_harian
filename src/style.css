@@ -3685,3 +3685,50 @@ button.study-trow:active {
   border-bottom: 1px solid var(--border);
 }
 
+
+/* ---- Study: foto profil ---- */
+.study-avatar {
+  overflow: hidden;
+}
+
+.study-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.study-avatar.has-img {
+  background: var(--surface-2, var(--border));
+}
+
+.study-avatar-btn {
+  position: relative;
+  flex: 0 0 auto;
+  padding: 0;
+  border: 0;
+  background: none;
+  border-radius: 50%;
+  cursor: pointer;
+  color: inherit;
+}
+
+.study-avatar-badge {
+  position: absolute;
+  right: -2px;
+  bottom: -2px;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: var(--bg);
+  color: var(--text);
+  border: 1.5px solid var(--text);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.study-avatar-badge .study-ico {
+  width: 14px;
+  height: 14px;
+}
