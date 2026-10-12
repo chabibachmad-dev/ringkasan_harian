@@ -198,8 +198,10 @@ export function materialBlocks(md) {
 export function pointsFormula(result, L) {
   const r = result || {};
   if (r.perQuestionPoints) {
-    const text = L("study_formula_new", { perq: r.perQuestionPoints, correct: r.correct, weight: r.weightPercent });
-    return r.bonusPercent > 0 ? `${text} ${L("study_formula_bonus", { b: 100 + r.bonusPercent })}` : text;
+    let text = L("study_formula_new", { perq: r.perQuestionPoints, correct: r.correct, weight: r.weightPercent });
+    if (r.bonusPercent > 0) text += ` ${L("study_formula_bonus", { b: 100 + r.bonusPercent })}`;
+    if (r.repeatPercent > 0 && r.repeatPercent < 100) text += ` ${L("study_formula_repeat", { p: r.repeatPercent })}`;
+    return text;
   }
   return L("study_pdf_formula", { base: r.basePoints, correct: r.correct, total: r.total, weight: r.weightPercent });
 }

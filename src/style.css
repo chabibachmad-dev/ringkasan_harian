@@ -3848,3 +3848,93 @@ button.study-trow:active {
 .study-daily-val {
   font-variant-numeric: tabular-nums;
 }
+
+/* ---- Study: tombol lonceng notifikasi ---- */
+.study-notif-btn {
+  position: relative;
+}
+
+.study-bell {
+  width: 22px;
+  height: 22px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  display: block;
+}
+
+.study-notif-badge {
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 4px;
+  border: 1.5px solid var(--bg);
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--accent-contrast);
+  font-size: 0.66rem;
+  font-weight: 800;
+  line-height: 15px;
+  text-align: center;
+  box-sizing: border-box;
+}
+
+.study-notif-badge[hidden] {
+  display: none;
+}
+
+.study-notif-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.study-notif-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  width: 100%;
+  padding: 12px 2px;
+  border: 0;
+  border-bottom: 1px dashed var(--border);
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.study-notif-main {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow-wrap: anywhere;
+}
+
+.study-notif-row.is-unread .study-notif-text {
+  font-weight: 800;
+}
+
+.study-notif-quote {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+.study-notif-time {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+}
+
+.study-notif-dot {
+  flex: 0 0 auto;
+  width: 10px;
+  height: 10px;
+  margin-top: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+}

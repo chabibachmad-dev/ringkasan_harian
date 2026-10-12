@@ -28,7 +28,15 @@
 //   session_cancel      { playerId, pin, sessionId }                         -> { ok }   (hanya sesi yang belum dikumpulkan)
 //   redeem              { playerId, pin, itemId }                            -> { redemption }
 //   settings_open       { parentPin? }                                       -> { settings, pendingRedemptions, players }
-//   settings_save       { parentPin?, perQuestionPoints, perfectBonusPercent, secondsPerQuestion, competitionWinBonus, dailyPointsCap?, weights:{easy,normal,hard}, subjects:[...] } -> { settings }   (dailyPointsCap 0-1000000, 0 = tanpa batas; dihilangkan = tidak diubah)
+//   ANTI-SPAM PENGULANGAN (migrasi 0033): mata pelajaran yang SAMA dikumpulkan lagi di hari yang sama (ke-2 dst) -> poin x settings.repeatSubjectPercent
+//                         (bawaan 50; null = migrasi belum ada). session_start/session_get(aktif) membawa repeat:{count,percent} (percent 100 = tanpa pengurangan);
+//                         hasil membawa repeatPercent; player_profile.daily.subjects = mata pelajaran yang sudah dikerjakan hari ini.
+//   NOTIFIKASI suka & komentar (migrasi 0034), butuh PIN/token pemain:
+//   notif_list          { playerId, pin }                                    -> { items:[{type:"like"|"comment",kind,targetId,title,actorId,actorName,body,at,unread}], unread }
+//   notif_count         { playerId, pin }                                    -> { unread }
+//   notif_seen          { playerId, pin, upTo? }                             -> { ok }   (tandai sudah dibaca sampai waktu upTo, bawaan sekarang)
+//                         Sebelum migrasi 0034 ketiganya menjawab { ok:true, unavailable:true } (daftar kosong).
+//   settings_save       { parentPin?, perQuestionPoints, perfectBonusPercent, secondsPerQuestion, competitionWinBonus, dailyPointsCap?, repeatSubjectPercent?, weights:{easy,normal,hard}, subjects:[...] } -> { settings }   (dailyPointsCap 0-1000000, 0 = tanpa batas; repeatSubjectPercent 0-100, 100 = tanpa pengurangan; dihilangkan = tidak diubah)
 //   redeem_item_save    { parentPin?, id?, name, cost }                      -> { items }
 //   redeem_item_delete  { parentPin?, id }                                   -> { items }
 //   redeem_mark         { parentPin?, redemptionId, status:"given"|"pending" } -> { ok }
@@ -205,6 +213,7 @@ const publicSettings = (s: Row, items: Row[]) => ({
   perfectBonusPercent: s.perfect_bonus_percent,
   secondsPerQuestion: s.seconds_per_question, // 0 = tanpa timer
   competitionWinBonus: s.competition_win_bonus,
+  repeatSubjectPercent: typeof s.repeat_subject_percent === "number" ? s.repeat_subject_percent : null, // null = migrasi 0033 belum dijalankan
   dailyPointsCap: typeof s.daily_points_cap === "number" ? s.daily_points_cap : null, // 0 = tanpa batas; null = migrasi 0032 belum dijalankan
   weights: { easy: s.weight_easy, normal: s.weight_normal, hard: s.weight_hard },
   subjects: Array.isArray(s.subjects) ? s.subjects : [],
@@ -226,6 +235,14 @@ async function loadSettings(admin: Admin): Promise<Row | null> {
 async function loadDaily(admin: Admin, playerId: string): Promise<Row | null> {
   const { data, error } = await admin.rpc("study_daily", { p_player: playerId });
   return error || !data ? null : (data as Row);
+}
+
+// Pengulangan mata pelajaran yang sama hari ini (migrasi 0033): { count, percent }. percent 100 = pelajaran berikutnya tidak dikurangi.
+// null bila migrasi belum dijalankan.
+async function loadRepeat(admin: Admin, playerId: string, subject: string): Promise<{ count: number; percent: number } | null> {
+  const [{ data: n, error }, settings] = await Promise.all([admin.rpc("study_repeat_count", { p_player: playerId, p_subject: subject }), loadSettings(admin)]);
+  if (error || typeof n !== "number" || !settings || typeof settings.repeat_subject_percent !== "number") return null;
+  return { count: n, percent: n > 0 ? settings.repeat_subject_percent : 100 };
 }
 
 // Kelas dari klien: bilangan bulat atau kosong (null). Nilai lain -> NaN supaya ditolak validClass.
@@ -251,6 +268,7 @@ const sessionRow = (s: Row) => ({
   provider: s.provider,
   createdAt: s.created_at,
   submittedAt: s.submitted_at,
+  repeatPercent: s.repeat_percent ?? null, // persen poin karena mata pelajaran sama sudah dikerjakan hari itu (null = pelajaran lama)
   pointsRaw: s.points_raw ?? null, // sebelum dipotong batas harian (null = tidak dipotong / pelajaran lama)
   bonusPercent: s.bonus_percent ?? 0,
   timedOut: !!s.timed_out,
@@ -286,6 +304,7 @@ async function loadResult(admin: Admin, session: Row, player: Row) {
     timedOut: !!session.timed_out,
     weightPercent: session.weight_percent,
     points: session.points_awarded ?? 0,
+    repeatPercent: session.repeat_percent ?? 100,
     rawPoints: session.points_raw ?? session.points_awarded ?? 0, // sebelum dipotong batas harian
     capped: (session.points_raw ?? 0) > (session.points_awarded ?? 0),
     items
@@ -429,6 +448,7 @@ function readSettingsInput(body: Row): { ok: true; value: Row } | { ok: false; e
   const bonus = int(body.perfectBonusPercent, 0, 100);
   const spq = int(body.secondsPerQuestion, 0, 600);
   const winBonus = int(body.competitionWinBonus, 0, 1000);
+  const rep = body.repeatSubjectPercent === undefined || body.repeatSubjectPercent === null ? undefined : int(body.repeatSubjectPercent, 0, 100);
   const cap = body.dailyPointsCap === undefined || body.dailyPointsCap === null ? undefined : int(body.dailyPointsCap, 0, 1_000_000);
   const w = (body.weights ?? {}) as Row;
   const easy = int(w.easy, 1, 1000);
@@ -437,6 +457,7 @@ function readSettingsInput(body: Row): { ok: true; value: Row } | { ok: false; e
   if (perQ === null) return { ok: false, error: "Poin per soal harus bilangan bulat 1-10000." };
   if (bonus === null) return { ok: false, error: "Bonus nilai sempurna harus bilangan bulat 0-100 (persen)." };
   if (winBonus === null) return { ok: false, error: "Bonus pemenang kompetisi harus bilangan bulat 0-1000." };
+  if (rep === null) return { ok: false, error: "Poin pengulangan mata pelajaran harus bilangan bulat 0-100 (persen; 100 = tanpa pengurangan)." };
   if (cap === null) return { ok: false, error: "Batas poin harian harus bilangan bulat 0-1.000.000 (0 = tanpa batas)." };
   if (spq === null || (spq !== 0 && spq < 10)) return { ok: false, error: "Waktu per soal harus 0 (tanpa timer) atau 10-600 detik." };
   if (easy === null || normal === null || hard === null) return { ok: false, error: "Bobot level harus bilangan bulat 1-1000 (persen)." };
@@ -447,7 +468,7 @@ function readSettingsInput(body: Row): { ok: true; value: Row } | { ok: false; e
     if (name && !subjects.some((x) => x.toLowerCase() === name.toLowerCase())) subjects.push(name);
   }
   if (subjects.length === 0 || subjects.length > 30) return { ok: false, error: "Daftar pelajaran harus berisi 1-30 nama." };
-  return { ok: true, value: { per_question_points: perQ, perfect_bonus_percent: bonus, seconds_per_question: spq, competition_win_bonus: winBonus, ...(cap === undefined ? {} : { daily_points_cap: cap }), weight_easy: easy, weight_normal: normal, weight_hard: hard, subjects, updated_at: new Date().toISOString() } };
+  return { ok: true, value: { per_question_points: perQ, perfect_bonus_percent: bonus, seconds_per_question: spq, competition_win_bonus: winBonus, ...(cap === undefined ? {} : { daily_points_cap: cap }), ...(rep === undefined ? {} : { repeat_subject_percent: rep }), weight_easy: easy, weight_normal: normal, weight_hard: hard, subjects, updated_at: new Date().toISOString() } };
 }
 
 // ---------------------------------------------------------------- pembatas pemakaian AI
@@ -886,6 +907,7 @@ Deno.serve(async (req) => {
         ok: true,
         sessionId: s.id,
         session: sessionRow(s),
+        repeat: await loadRepeat(admin, p.id, subject),
         questions: made.questions.map((q, i) => ({ idx: i, question: q.question, options: q.options })),
         provider: made.provider,
         requested: count,
@@ -902,7 +924,7 @@ Deno.serve(async (req) => {
       const s = owned.session;
       if (s.status === "submitted") return json({ ok: true, status: "submitted", result: await loadResult(admin, s, auth.player) });
       const { data: qs } = await admin.from("study_questions").select("idx,question,options").eq("session_id", s.id).order("idx", { ascending: true });
-      return json({ ok: true, status: "active", session: sessionRow(s), questions: qs ?? [] });
+      return json({ ok: true, status: "active", session: sessionRow(s), repeat: await loadRepeat(admin, auth.player.id, s.subject), questions: qs ?? [] });
     }
 
     // ------------------------------------------------------------ kumpulkan
@@ -939,6 +961,37 @@ Deno.serve(async (req) => {
       if (owned.session.status !== "active") return fail("Hanya pelajaran yang belum dikumpulkan yang bisa dibatalkan.", 409);
       await admin.from("study_sessions").delete().eq("id", owned.session.id);
       return json({ ok: true });
+    }
+
+    // ------------------------------------------------------------ notifikasi suka & komentar (migrasi 0034)
+    if (action === "notif_list" || action === "notif_count" || action === "notif_seen") {
+      const auth = await checkPlayerPin(admin, body.playerId, body.pin);
+      if (auth instanceof Response) return auth;
+      const pid = auth.player.id;
+      if (action === "notif_seen") {
+        const upTo = typeof body.upTo === "string" && !Number.isNaN(Date.parse(body.upTo)) ? new Date(body.upTo).toISOString() : null;
+        const { error } = await admin.rpc("study_notif_seen", { p_player: pid, p_upto: upTo });
+        return error ? json({ ok: true, unavailable: true }) : json({ ok: true });
+      }
+      if (action === "notif_count") {
+        const { data, error } = await admin.rpc("study_notif_count", { p_player: pid });
+        return error ? json({ ok: true, unread: 0, unavailable: true }) : json({ ok: true, unread: Number(data) || 0 });
+      }
+      const [list, seenRow] = await Promise.all([admin.rpc("study_notifications", { p_player: pid, p_limit: 50 }), admin.from("study_players").select("notif_seen_at").eq("id", pid).maybeSingle()]);
+      if (list.error || seenRow.error) return json({ ok: true, items: [], unread: 0, unavailable: true });
+      const seenMs = seenRow.data?.notif_seen_at ? new Date(seenRow.data.notif_seen_at).getTime() : 0;
+      const items = ((list.data ?? []) as Row[]).map((n) => ({
+        type: n.type,
+        kind: n.kind,
+        targetId: n.target_id,
+        title: n.title,
+        actorId: n.actor_id,
+        actorName: n.actor_name,
+        body: n.body ?? null,
+        at: n.created_at,
+        unread: new Date(n.created_at).getTime() > seenMs
+      }));
+      return json({ ok: true, items, unread: items.filter((i) => i.unread).length });
     }
 
     // ------------------------------------------------------------ redeem

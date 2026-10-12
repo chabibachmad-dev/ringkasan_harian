@@ -77,6 +77,11 @@ function dailyCardHtml(d) {
       : d.reached
         ? L("study_daily_full", { tz: tzLabel(d.timezone) })
         : L("study_daily_left", { n: fmt(d.remaining ?? Math.max(0, cap - earned)) });
+  const repP = S.overview?.settings?.repeatSubjectPercent;
+  const subs = Array.isArray(d.subjects) ? d.subjects : [];
+  const subjectsLine = subs.length
+    ? `<div class="study-row-meta">${esc(L("study_daily_subjects", { list: subs.map((x) => (x.count > 1 ? `${x.subject} ×${x.count}` : x.subject)).join(", ") }))}</div>${typeof repP === "number" && repP < 100 ? `<div class="study-row-meta">${esc(L("study_daily_repeat_hint", { p: repP }))}</div>` : ""}`
+    : "";
   return `
     <section class="study-daily" aria-label="${esc(L("study_daily_title"))}">
       <div class="study-daily-head">
@@ -88,6 +93,7 @@ function dailyCardHtml(d) {
       <div class="study-row-meta" data-daily-status>${esc(status)}</div>
       <div class="study-row-meta">${esc(L("study_daily_breakdown", { solo: fmt(d.solo), comp: fmt(d.competition), bonus: fmt(d.bonus) }))}</div>
       <div class="study-row-meta">${esc(L("study_daily_counts", { s: d.sessions ?? 0, c: d.competitions ?? 0 }))}</div>
+      ${subjectsLine}
       ${hist.length ? `<div class="study-daily-week-label">${esc(L("study_daily_week"))}</div><ul class="study-daily-week">${bars}</ul>` : ""}
       ${cap > 0 ? `<p class="study-hint">${esc(L("study_daily_note", { tz: tzLabel(d.timezone) }))}</p>` : ""}
     </section>`;
@@ -104,6 +110,7 @@ const CUSTOM = "__custom";
 
 // view: "home" | "profile" | "quiz" | "result". PIN hanya hidup di memori (hilang saat layar Study ditinggalkan).
 const S = {
+  notif: { unread: 0, items: [], loading: false, error: "", available: true, forId: "" }, // notifikasi suka & komentar (migrasi 0034)
   boardMode: "total", // papan leaderboard: "total" | "today" (poin didapat hari ini)
   avatarBusy: false,
   avatarMsg: "",
@@ -179,6 +186,9 @@ export function initStudy(context) {
   ctx = { ...ctx, ...context };
   $("study-back-btn")?.addEventListener("click", onBack);
   $("study-settings-btn")?.addEventListener("click", () => openSettings());
+  const bell = $("study-notif-icon");
+  if (bell) bell.innerHTML = BELL_SVG;
+  $("study-notif-btn")?.addEventListener("click", () => openNotifications());
   $("study-body")?.addEventListener("click", onBodyClick);
   $("study-body")?.addEventListener("change", onBodyChange);
   $("study-body")?.addEventListener("input", onBodyInput);
@@ -212,6 +222,7 @@ export function hideStudyScreen() {
   S.view = "home";
   stopPoll();
   syncQuizTimer();
+  syncNotif();
 }
 
 export function showStudyScreen() {
@@ -266,7 +277,7 @@ function onBack() {
     return;
   }
   if (S.view === "room") return leaveRoomView();
-  if (["material", "public", "roomresult", "rooms"].includes(S.view)) {
+  if (["material", "public", "roomresult", "rooms", "notif"].includes(S.view)) {
     if (!popView()) {
       S.view = "home";
       render();
@@ -338,7 +349,8 @@ function setTopbar() {
       result: L("study_result_title"),
       rooms: L("study_rooms_title"),
       room: L("study_room_title"),
-      roomresult: L("study_room_result_title")
+      roomresult: L("study_room_result_title"),
+      notif: L("study_notif_title")
     };
     title.textContent = titles[S.view] || L("study_title");
   }
@@ -358,9 +370,11 @@ function render() {
   else if (S.view === "rooms") renderRooms(body);
   else if (S.view === "room") renderRoom(body);
   else if (S.view === "roomresult") renderRoomResult(body);
+  else if (S.view === "notif") renderNotif(body);
   typesetMath(body).catch(() => {});
   syncQuizTimer();
   syncPoll();
+  syncNotif();
 }
 
 // ---------------------------------------------------------------- timer ujian
@@ -530,7 +544,7 @@ function renderProfile(body) {
           if (s.status === "submitted") {
             return `
           <div class="study-row">
-            <div class="study-row-main"><div class="study-row-title">${esc(s.subject)}</div><div class="study-row-meta">${lvl} · ${fmtDate(s.submittedAt)}<br>${esc(L("study_score", { c: s.correctCount, n: s.numQuestions }))} · +${fmt(s.pointsAwarded)} ${esc(L("study_pts"))}${s.pointsRaw > s.pointsAwarded ? ` (${esc(L("study_row_capped", { raw: fmt(s.pointsRaw) }))})` : ""}</div></div>
+            <div class="study-row-main"><div class="study-row-title">${esc(s.subject)}</div><div class="study-row-meta">${lvl} · ${fmtDate(s.submittedAt)}<br>${esc(L("study_score", { c: s.correctCount, n: s.numQuestions }))} · +${fmt(s.pointsAwarded)} ${esc(L("study_pts"))}${s.repeatPercent != null && s.repeatPercent < 100 ? ` · ${esc(L("study_row_repeat", { p: s.repeatPercent }))}` : ""}${s.pointsRaw > s.pointsAwarded ? ` (${esc(L("study_row_capped", { raw: fmt(s.pointsRaw) }))})` : ""}</div></div>
             <button type="button" class="secondary-btn" data-act="view-result" data-id="${esc(s.id)}">${esc(L("study_view_result"))}</button>
           </div>`;
           }
@@ -606,6 +620,7 @@ function renderQuiz(body) {
       <div class="study-row-meta">${esc(gradeText(q.session.materialGrade, q.session.materialClass))} · ${esc(levelLabel(q.session.level, S.overview?.settings))} · ${q.questions.length} ${esc(L("study_questions_unit"))}</div>
       ${q.shortfall ? `<div class="study-row-meta">${esc(L("study_shortfall", { got: q.questions.length, want: q.questions.length + q.shortfall }))}</div>` : ""}
       ${q.endsAt ? `<div class="study-row-meta">${esc(L("study_time_hint", { m: Math.ceil((q.session.timeLimitSeconds || 0) / 60) }))}</div>` : ""}
+      ${q.kind !== "room" && q.repeat && q.repeat.percent < 100 ? `<div class="study-warn" role="status">${esc(L("study_repeat_quiz", { p: q.repeat.percent, n: q.repeat.count }))}</div>` : ""}
     </div>
     ${cards}
     <div class="study-submit-bar">
@@ -658,6 +673,7 @@ function renderResult(body) {
       <div class="study-score-main">${esc(L("study_score", { c: r.correct, n: r.total }))}</div>
       <div class="study-score-points">+${fmt(r.points)} <small>${esc(L("study_pts"))}</small></div>
       <div class="study-row-meta">${esc(pointsFormula(r, L))}</div>
+      ${r.repeatPercent < 100 ? `<div class="study-warn" role="status">${esc(L("study_repeat_result", { p: r.repeatPercent }))}</div>` : ""}
       ${r.capped ? `<div class="study-warn" role="status">${esc(L("study_daily_capped_line", { raw: fmt(r.rawPoints), got: fmt(r.points) }))}</div>` : ""}
       ${r.daily && dailyCapOf() !== null ? `<div class="study-row-meta">${esc(dailyLine(r.daily.earned, r.daily.cap))}</div>` : ""}
       ${r.bonusPercent > 0 ? `<div class="study-bonus">${esc(L("study_bonus_line", { b: r.bonusPercent }))}</div>` : ""}
@@ -701,6 +717,8 @@ async function onBodyClick(e) {
   }
   if (act === "open-player") return openPlayerPin(id);
   if (act === "tab") return switchTab(btn.dataset.tab);
+  if (act === "notif-open") return openNotifItem(Number(btn.dataset.i));
+  if (act === "notif-reload") return openNotifications();
   if (act === "board-mode") {
     S.boardMode = btn.dataset.mode === "today" ? "today" : "total";
     return render();
@@ -1213,7 +1231,8 @@ async function enterQuiz(out) {
     session: out.res.session,
     questions: out.res.questions,
     answers: new Array(out.res.questions.length).fill(null),
-    shortfall: out.res.shortfall || 0
+    shortfall: out.res.shortfall || 0,
+    repeat: out.res.repeat || null
   };
   armQuizTimer(S.quiz);
   S.autoSubmittedId = "";
@@ -1317,7 +1336,8 @@ async function resumeLesson(sessionId) {
     session: res.session,
     questions: res.questions,
     answers: loadAnswers(sessionId, res.questions.length),
-    shortfall: 0
+    shortfall: 0,
+    repeat: res.repeat || null
   };
   armQuizTimer(S.quiz);
   S.view = "quiz";
@@ -2924,6 +2944,158 @@ function renderRoomResult(body) {
     <p class="study-hint">${esc(L("study_pub_table_hint"))}</p>`;
 }
 
+// ================================================================ Notifikasi suka & komentar (tombol lonceng)
+// Server (migrasi 0034) membaca suka/komentar pemain LAIN pada pelajaran, materi, dan kompetisi milik pemain yang masuk.
+// Tombol lonceng di bilah atas tampil bila sudah masuk; angkanya = yang belum dibuka; dicek tiap NOTIF_POLL_MS selagi layar Study terbuka.
+const NOTIF_POLL_MS = 45000;
+let notifTimerId = 0;
+const BELL_SVG = '<svg class="study-bell" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 16.5V11a6 6 0 0 1 12 0v5.5l1.5 2h-15z"/><path d="M10 20.5a2 2 0 0 0 4 0"/></svg>';
+
+function paintNotif() {
+  const btn = $("study-notif-btn");
+  if (!btn) return;
+  const screenOpen = !!$("screen-study") && !$("screen-study").hidden;
+  const on = screenOpen && !!S.viewer && S.notif.available && S.view !== "quiz";
+  btn.hidden = !on;
+  const badge = $("study-notif-badge");
+  const n = on ? S.notif.unread : 0;
+  if (badge) {
+    badge.hidden = n <= 0;
+    badge.textContent = n > 99 ? "99+" : String(n);
+  }
+  btn.setAttribute("aria-label", n > 0 ? L("study_notif_aria_n", { n }) : L("study_notif_title"));
+  btn.classList.toggle("has-new", n > 0);
+}
+
+// Dipanggil dari render(): tampilkan/sembunyikan lonceng, mulai/hentikan pengecekan berkala.
+function syncNotif() {
+  const screenOpen = !!$("screen-study") && !$("screen-study").hidden;
+  const active = screenOpen && !!S.viewer && S.notif.available;
+  if (active) {
+    if (S.notif.forId !== S.viewer.id) {
+      S.notif.forId = S.viewer.id; // pemain yang masuk berganti: mulai dari nol
+      S.notif.unread = 0;
+      S.notif.items = [];
+      refreshNotifCount();
+    }
+    if (!notifTimerId) notifTimerId = setInterval(refreshNotifCount, NOTIF_POLL_MS);
+  } else {
+    if (notifTimerId) clearInterval(notifTimerId);
+    notifTimerId = 0;
+    if (!S.viewer) {
+      S.notif.forId = "";
+      S.notif.unread = 0;
+    }
+  }
+  paintNotif();
+}
+
+async function refreshNotifCount() {
+  const v = S.viewer;
+  if (!v || !S.notif.available || document.visibilityState === "hidden") return;
+  const res = await studyCall("notif_count", { playerId: v.id, pin: v.pin });
+  if (S.viewer !== v) return;
+  if (!res.ok) {
+    // PIN/token tidak berlaku lagi (mis. PIN direset): lupakan penonton diam-diam
+    if (res.pinWrong || res.locked) {
+      S.viewer = null;
+      if (isDeviceToken(v.pin)) clearDeviceLogin();
+      render();
+    }
+    return;
+  }
+  if (res.unavailable) {
+    S.notif.available = false; // migrasi 0034 belum dijalankan: lonceng disembunyikan
+  } else {
+    S.notif.unread = res.unread ?? 0;
+  }
+  syncNotif();
+}
+
+async function openNotifications() {
+  const v = S.viewer;
+  if (!v) return;
+  if (S.view !== "notif") pushView();
+  S.view = "notif";
+  S.notif.loading = true;
+  S.notif.error = "";
+  render();
+  window.scrollTo(0, 0);
+  const res = await studyCall("notif_list", { playerId: v.id, pin: v.pin });
+  S.notif.loading = false;
+  if (S.view !== "notif" || S.viewer !== v) return;
+  if (!res.ok) {
+    S.notif.error = errText(res);
+    render();
+    return;
+  }
+  S.notif.items = res.items || [];
+  if (res.unavailable) S.notif.available = false;
+  render();
+  // dibuka = dibaca (yang tampil tetap bergaris tebal sampai layar ini ditutup)
+  if (S.notif.items.length) {
+    studyCall("notif_seen", { playerId: v.id, pin: v.pin, upTo: S.notif.items[0].at });
+  }
+  S.notif.unread = 0;
+  paintNotif();
+}
+
+function notifText(n) {
+  const key = `study_notif_${n.type}_${n.kind}`;
+  return L(key, { name: n.actorName || "?", title: n.title || "" });
+}
+
+function renderNotif(body) {
+  const nf = S.notif;
+  if (nf.loading && nf.items.length === 0) {
+    body.innerHTML = `<p class="status-text">${esc(L("study_loading"))}</p>`;
+    return;
+  }
+  if (nf.error) {
+    body.innerHTML = `<div class="study-card"><p>${esc(nf.error)}</p><div class="study-actions"><button type="button" class="secondary-btn" data-act="notif-reload">${esc(L("study_reload"))}</button></div></div>`;
+    return;
+  }
+  if (nf.items.length === 0) {
+    body.innerHTML = `<p class="status-text">${esc(L("study_notif_empty"))}</p><p class="study-hint">${esc(L("study_notif_hint"))}</p>`;
+    return;
+  }
+  const rows = nf.items
+    .map(
+      (n, i) => `
+    <button type="button" class="study-notif-row ${n.unread ? "is-unread" : ""}" data-act="notif-open" data-i="${i}">
+      ${avatarHtml(n.actorId, n.actorName, "study-avatar--sm", true)}
+      <span class="study-notif-main">
+        <span class="study-notif-text">${esc(notifText(n))}</span>
+        ${n.body ? `<span class="study-notif-quote">“${esc(n.body)}”</span>` : ""}
+        <small class="study-notif-time">${esc(fmtDateTime(n.at))}</small>
+      </span>
+      ${n.unread ? `<span class="study-notif-dot" role="img" aria-label="${esc(L("study_notif_new"))}"></span>` : ""}
+    </button>`
+    )
+    .join("");
+  body.innerHTML = `<div class="study-notif-list">${rows}</div><p class="study-hint">${esc(L("study_notif_hint"))}</p>`;
+}
+
+// Buka kegiatan yang disuka/dikomentari: pelajaran -> detail hasil, materi -> pembaca materi, kompetisi -> tabel hasil.
+async function openNotifItem(i) {
+  const n = S.notif.items[i];
+  const v = S.viewer;
+  if (!n || !v) return;
+  if (n.kind === "competition") return openRoomResult(n.targetId);
+  if (n.kind === "material") {
+    return openMaterial(n.targetId, { id: n.targetId, title: n.title, subject: "", grade: "", classLevel: null, detail: "", creatorId: v.id, creatorName: v.name, createdAt: n.at });
+  }
+  const res = await studyCall("result_detail", { viewerId: v.id, viewerPin: v.pin, sessionId: n.targetId });
+  if (!res.ok) return viewerFailure(res);
+  pushView();
+  S.result = res.result;
+  S.explainFailed = false;
+  S.resultFrom = "feed";
+  S.view = "result";
+  render();
+  window.scrollTo(0, 0);
+}
+
 // ================================================================ Setting (area orang tua)
 let settingsDlg = null;
 let parentPin = "";
@@ -3001,6 +3173,7 @@ function renderSettings(data) {
       <label class="study-field"><span class="study-field-label">${esc(L("study_set_spq"))}</span><input type="number" inputmode="numeric" min="0" max="600" name="secondsPerQuestion" value="${s.secondsPerQuestion}" /><small class="study-field-help">${esc(L("study_set_spq_help"))}</small></label>
       <label class="study-field"><span class="study-field-label">${esc(L("study_set_winbonus"))}</span><input type="number" inputmode="numeric" min="0" max="1000" name="competitionWinBonus" value="${s.competitionWinBonus ?? 10}" /></label>
       ${typeof s.dailyPointsCap === "number" ? `<label class="study-field"><span class="study-field-label">${esc(L("study_set_dailycap"))}</span><input type="number" inputmode="numeric" min="0" max="1000000" name="dailyPointsCap" value="${s.dailyPointsCap}" /><small class="study-field-help">${esc(L("study_set_dailycap_help"))}</small></label>` : ""}
+      ${typeof s.repeatSubjectPercent === "number" ? `<label class="study-field"><span class="study-field-label">${esc(L("study_set_repeat"))}</span><input type="number" inputmode="numeric" min="0" max="100" name="repeatSubjectPercent" value="${s.repeatSubjectPercent}" /><small class="study-field-help">${esc(L("study_set_repeat_help"))}</small></label>` : ""}
       <label class="study-field"><span class="study-field-label">${esc(L("study_set_w_easy"))}</span><input type="number" inputmode="numeric" min="1" max="1000" name="easy" value="${s.weights.easy}" /></label>
       <label class="study-field"><span class="study-field-label">${esc(L("study_set_w_normal"))}</span><input type="number" inputmode="numeric" min="1" max="1000" name="normal" value="${s.weights.normal}" /></label>
       <label class="study-field"><span class="study-field-label">${esc(L("study_set_w_hard"))}</span><input type="number" inputmode="numeric" min="1" max="1000" name="hard" value="${s.weights.hard}" /></label>
@@ -3077,6 +3250,7 @@ async function onPointsSubmit(e) {
     secondsPerQuestion: num("secondsPerQuestion"),
     competitionWinBonus: num("competitionWinBonus"),
     ...(f.elements.dailyPointsCap ? { dailyPointsCap: num("dailyPointsCap") } : {}),
+    ...(f.elements.repeatSubjectPercent ? { repeatSubjectPercent: num("repeatSubjectPercent") } : {}),
     weights: { easy: num("easy"), normal: num("normal"), hard: num("hard") },
     subjects: f.elements.subjects.value.split("\n")
   });

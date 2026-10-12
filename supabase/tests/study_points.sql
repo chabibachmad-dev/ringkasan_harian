@@ -6,6 +6,8 @@
 create temp table res(name text, ok boolean);
 create or replace function pg_temp.chk(n text, c boolean) returns void language plpgsql as $$ begin insert into res values (n, coalesce(c,false)); end $$;
 
+-- Anti-spam pengulangan mata pelajaran (0033) dimatikan di berkas ini: pemain yang sama mengerjakan mata pelajaran yang sama berkali-kali dalam sehari. Aturannya diuji di study_repeat.sql.
+do $$ begin if exists (select 1 from information_schema.columns where table_name='study_settings' and column_name='repeat_subject_percent') then execute 'update study_settings set repeat_subject_percent = 100 where id = 1'; end if; end $$;
 insert into study_players(name,grade,pin_salt,pin_hash) values ('Ali','SD','s','h'),('Budi','SMP','s','h') ;
 select pg_temp.chk('seed 3 hadiah', (select count(*) from study_redeem_items)=3);
 select pg_temp.chk('seed setting 80/100/120', (select weight_easy=80 and weight_normal=100 and weight_hard=120 and base_points=100 from study_settings));
