@@ -40,7 +40,11 @@ const S = {
   profile: null,
   quiz: null, // { sessionId, session, questions, answers }
   result: null,
-  explainFailed: false
+  explainFailed: false,
+  resultFrom: "profile", // dari mana hasil dibuka: "profile" (milik sendiri) | "timeline" (detil kegiatan pemain lain)
+  viewer: null, // { id, name, grade, pin } pemain yang sudah "masuk" untuk suka/komentar/detil; PIN hanya di memori
+  tl: null, // timeline yang sedang dibuka
+  tlScroll: 0
 };
 
 // ---------------------------------------------------------------- util
@@ -96,6 +100,7 @@ export function initStudy(context) {
   $("study-settings-btn")?.addEventListener("click", () => openSettings());
   $("study-body")?.addEventListener("click", onBodyClick);
   $("study-body")?.addEventListener("change", onBodyChange);
+  $("study-body")?.addEventListener("input", onBodyInput);
 }
 
 export function hideStudyScreen() {
@@ -105,6 +110,8 @@ export function hideStudyScreen() {
   S.pin = "";
   S.player = null;
   S.profile = null;
+  S.viewer = null;
+  S.tl = null;
 }
 
 export function showStudyScreen() {
@@ -115,6 +122,8 @@ export function showStudyScreen() {
   S.profile = null;
   S.quiz = null;
   S.result = null;
+  S.viewer = null;
+  S.tl = null;
   render();
   loadOverview();
 }
@@ -134,8 +143,24 @@ function onBack() {
   }
   if (S.view === "result") {
     S.result = null;
+    if (S.resultFrom === "timeline" && S.tl) {
+      S.view = "timeline";
+      render();
+      window.scrollTo(0, S.tlScroll || 0);
+      return;
+    }
     S.view = "profile";
     loadProfile();
+    return;
+  }
+  if (S.view === "timeline") {
+    S.view = "home";
+    S.tl = null;
+    S.player = null;
+    S.pin = "";
+    S.profile = null;
+    render();
+    loadOverview();
     return;
   }
   if (S.view === "profile") {
@@ -194,7 +219,7 @@ function setTopbar() {
   const settingsBtn = $("study-settings-btn");
   if (title) {
     title.textContent =
-      S.view === "profile" && S.player ? S.player.name : S.view === "quiz" ? L("study_quiz_title") : S.view === "result" ? L("study_result_title") : L("study_title");
+      S.view === "profile" && S.player ? S.player.name : S.view === "timeline" && S.tl?.owner ? S.tl.owner.name : S.view === "quiz" ? L("study_quiz_title") : S.view === "result" ? L("study_result_title") : L("study_title");
   }
   if (settingsBtn) settingsBtn.hidden = S.view !== "home";
 }
@@ -207,6 +232,7 @@ function render() {
   else if (S.view === "profile") renderProfile(body);
   else if (S.view === "quiz") renderQuiz(body);
   else if (S.view === "result") renderResult(body);
+  else if (S.view === "timeline") renderTimeline(body);
   typesetMath(body).catch(() => {});
 }
 
@@ -231,7 +257,7 @@ function renderHome(body) {
   const rows = players
     .map(
       (p, i) => `
-      <button type="button" class="study-board-row" data-act="open-player" data-id="${esc(p.id)}">
+      <button type="button" class="study-board-row" data-act="open-timeline" data-id="${esc(p.id)}">
         <span class="study-rank">${i + 1}</span>
         <span class="study-name">${esc(p.name)}</span>
         <span>${esc(p.grade)}</span>
@@ -335,6 +361,7 @@ function renderProfile(body) {
     </div>
     <div class="study-actions">
       <button type="button" class="primary-btn" data-act="new-lesson-me">${esc(L("study_new_lesson"))}</button>
+      <button type="button" class="secondary-btn" data-act="my-timeline">${esc(L("study_tl_my"))}</button>
     </div>
     <h2 class="study-h">${esc(L("study_redeem"))}</h2>
     ${redeem}
@@ -423,10 +450,14 @@ function renderResult(body) {
       <div class="study-score-points">+${fmt(r.points)} <small>${esc(L("study_pts"))}</small></div>
       <div class="study-row-meta">${esc(L("study_pdf_formula", { base: r.basePoints, correct: r.correct, total: r.total, weight: r.weightPercent }))}</div>
     </div>
-    ${S.explainFailed ? `<div class="study-card"><p>${esc(L("study_explain_failed"))}</p><button type="button" class="secondary-btn" data-act="explain-retry">${esc(L("study_explain_retry"))}</button></div>` : ""}
+    ${S.explainFailed && S.resultFrom !== "timeline" ? `<div class="study-card"><p>${esc(L("study_explain_failed"))}</p><button type="button" class="secondary-btn" data-act="explain-retry">${esc(L("study_explain_retry"))}</button></div>` : ""}
     <div class="study-actions">
       <button type="button" class="primary-btn" data-act="share-pdf">${esc(L("study_share_pdf"))}</button>
-      <button type="button" class="secondary-btn" data-act="to-profile">${esc(L("study_to_profile"))}</button>
+      ${
+        S.resultFrom === "timeline"
+          ? `<button type="button" class="secondary-btn" data-act="to-timeline">${esc(L("study_back_timeline"))}</button>`
+          : `<button type="button" class="secondary-btn" data-act="to-profile">${esc(L("study_to_profile"))}</button>`
+      }
     </div>
     ${items}`;
 }
@@ -453,6 +484,18 @@ async function onBodyClick(e) {
   if (act === "new-lesson") return openLessonForm(null);
   if (act === "new-lesson-me") return openLessonForm(S.player);
   if (act === "open-player") return openPlayerPin(id);
+  if (act === "open-timeline") return openTimeline(id);
+  if (act === "my-timeline") return openTimeline(S.player?.id);
+  if (act === "tl-profile") return openProfileFromTimeline();
+  if (act === "tl-more") return loadMoreTimeline();
+  if (act === "tl-signin") return signInViewer();
+  if (act === "tl-signout") return signOutViewer();
+  if (act === "like") return doLike(id);
+  if (act === "comments") return toggleComments(id);
+  if (act === "comment-send") return sendComment(id);
+  if (act === "comment-del") return deleteComment(id, btn.dataset.sid, btn.dataset.parent === "1");
+  if (act === "detail") return openDetail(id);
+  if (act === "to-timeline") return onBack();
   if (act === "redeem") return doRedeem(id);
   if (act === "resume") return resumeLesson(id);
   if (act === "view-result") return viewResult(id);
@@ -522,6 +565,7 @@ function openPlayerPin(playerId) {
     S.player = out.res.player;
     S.pin = out.pin;
     S.profile = out.res;
+    S.viewer = { ...out.res.player, pin: out.pin };
     S.view = "profile";
     render();
   });
@@ -651,6 +695,7 @@ function openLessonForm(fixedPlayer) {
     if (!out) return;
     S.player = { id: out.player.id, name: out.player.name, grade: out.player.grade };
     S.pin = out.pin;
+    S.viewer = { ...S.player, pin: out.pin };
     S.quiz = {
       sessionId: out.res.sessionId,
       session: out.res.session,
@@ -671,6 +716,7 @@ async function resumeLesson(sessionId) {
   if (res.status === "submitted") {
     S.result = res.result;
     S.explainFailed = res.result.items.some((i) => !i.explanation);
+    S.resultFrom = "profile";
     S.view = "result";
     render();
     return;
@@ -693,7 +739,8 @@ async function viewResult(sessionId) {
   if (res.status !== "submitted") return resumeLesson(sessionId);
   S.result = res.result;
   S.explainFailed = res.result.items.some((i) => !i.explanation);
-  S.view = "result";
+  S.resultFrom = "profile";
+    S.view = "result";
   render();
   window.scrollTo(0, 0);
 }
@@ -723,7 +770,8 @@ async function submitQuiz(btn) {
   S.quiz = null;
   S.result = res.result;
   S.explainFailed = !!res.explainFailed;
-  S.view = "result";
+  S.resultFrom = "profile";
+    S.view = "result";
   render();
   window.scrollTo(0, 0);
 }
@@ -753,6 +801,384 @@ async function sharePdf(btn) {
   } finally {
     btn.disabled = false;
   }
+}
+
+// ================================================================ Timeline (kegiatan pemain, suka, komentar, detil)
+const COMMENT_MAX = 300;
+
+const viewerParams = () => (S.viewer ? { viewerId: S.viewer.id, viewerPin: S.viewer.pin } : {});
+const fmtDateTime = (v) => {
+  const d = new Date(v);
+  return Number.isNaN(d.getTime()) ? "" : d.toLocaleString(locale(), { day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" });
+};
+const initial = (name) => esc(String(name || "?").trim().charAt(0).toUpperCase() || "?");
+const tlItem = (sid) => S.tl?.items.find((i) => i.sessionId === sid);
+
+// PIN penonton salah/terkunci (mis. PIN direset): lupakan penonton supaya bisa masuk lagi.
+function viewerFailure(res) {
+  if (res.pinWrong || res.locked) {
+    S.viewer = null;
+    if (S.view === "timeline") render();
+  }
+  handleFailure(res);
+}
+
+async function openTimeline(ownerId) {
+  if (!ownerId) return;
+  S.tl = { ownerId, owner: null, items: [], hasMore: false, loading: true, comments: {}, drafts: {} };
+  S.view = "timeline";
+  render();
+  window.scrollTo(0, 0);
+  const tl = S.tl;
+  const res = await studyCall("timeline", { playerId: ownerId, ...viewerParams() });
+  if (S.tl !== tl) return;
+  tl.loading = false;
+  if (!res.ok) {
+    S.tl = null;
+    S.view = "home";
+    if (res.pinWrong || res.locked) S.viewer = null;
+    handleFailure(res);
+    render();
+    loadOverview();
+    return;
+  }
+  tl.owner = res.owner;
+  tl.items = res.items;
+  tl.hasMore = res.hasMore;
+  render();
+}
+
+async function loadMoreTimeline() {
+  const tl = S.tl;
+  if (!tl || tl.loading || !tl.hasMore) return;
+  tl.loading = true;
+  render();
+  const last = tl.items[tl.items.length - 1];
+  const res = await studyCall("timeline", { playerId: tl.ownerId, before: last?.submittedAt, ...viewerParams() });
+  if (S.tl !== tl) return;
+  tl.loading = false;
+  if (!res.ok) {
+    render();
+    return viewerFailure(res);
+  }
+  const have = new Set(tl.items.map((i) => i.sessionId));
+  tl.items = tl.items.concat(res.items.filter((i) => !have.has(i.sessionId)));
+  tl.hasMore = res.hasMore;
+  tl.owner = res.owner;
+  render();
+}
+
+// Ambil ulang semua kartu yang sudah tampil (mis. setelah masuk, supaya status "disukai" benar).
+async function refreshTimeline() {
+  const tl = S.tl;
+  if (!tl) return;
+  const want = Math.max(tl.items.length, 1);
+  let items = [];
+  let more = true;
+  let owner = tl.owner;
+  while (more && items.length < want) {
+    const res = await studyCall("timeline", { playerId: tl.ownerId, before: items.length ? items[items.length - 1].submittedAt : undefined, ...viewerParams() });
+    if (!res.ok) return viewerFailure(res);
+    owner = res.owner;
+    items = items.concat(res.items);
+    more = res.hasMore;
+  }
+  if (S.tl !== tl) return;
+  tl.owner = owner;
+  tl.items = items;
+  tl.hasMore = more;
+  render();
+}
+
+function openProfileFromTimeline() {
+  const o = S.tl?.owner;
+  if (!o) return;
+  if (S.viewer && S.viewer.id === o.id) {
+    S.player = { id: o.id, name: o.name, grade: o.grade };
+    S.pin = S.viewer.pin;
+    S.profile = null;
+    S.view = "profile";
+    render();
+    loadProfile();
+    return;
+  }
+  return openPlayerPin(o.id);
+}
+
+// ---- masuk sebagai penonton
+function openViewerLogin() {
+  const players = S.overview?.players || [];
+  if (!players.length) return Promise.resolve(false);
+  const first = players.find((p) => p.id !== S.tl?.owner?.id) || players[0];
+  return openFormDialog({
+    title: L("study_signin_title"),
+    okLabel: L("study_signin_ok"),
+    cancelLabel: L("study_cancel"),
+    busyLabel: L("study_loading"),
+    fields: [
+      { key: "playerId", label: L("study_player"), type: "select", value: first.id, options: players.map((p) => ({ value: p.id, label: `${p.name} (${p.grade})` })) },
+      { key: "pin", label: L("study_pin"), type: "pin" }
+    ],
+    extra: [
+      {
+        label: L("study_forgot_pin"),
+        onClick: (v) => {
+          const pl = players.find((p) => p.id === v.playerId);
+          if (pl) openResetPin(pl);
+        }
+      }
+    ],
+    onSubmit: async (v) => {
+      if (!validPinFormat(v.pin)) return { ok: false, error: L("study_pin_invalid") };
+      const res = await studyCall("player_verify", { playerId: v.playerId, pin: v.pin });
+      if (!res.ok) return { ok: false, error: errText(res) };
+      return { ok: true, value: { player: res.player, pin: v.pin } };
+    }
+  }).then((out) => {
+    if (!out) return false;
+    S.viewer = { ...out.player, pin: out.pin };
+    return true;
+  });
+}
+
+async function signInViewer() {
+  if (await openViewerLogin()) await refreshTimeline();
+}
+
+function signOutViewer() {
+  S.viewer = null;
+  if (S.tl) S.tl.items.forEach((i) => (i.liked = false));
+  render();
+}
+
+// Pastikan sudah masuk; bila belum, tampilkan popup. true = siap.
+async function ensureViewer() {
+  if (S.viewer) return true;
+  if (!(await openViewerLogin())) return false;
+  await refreshTimeline();
+  return !!S.viewer;
+}
+
+// ---- tampilan
+function viewerBarHtml() {
+  if (S.viewer) {
+    return `<div class="study-viewer"><span>${esc(L("study_tl_signed_as", { name: S.viewer.name }))}</span><button type="button" class="study-link-btn" data-act="tl-signout">${esc(L("study_tl_signout"))}</button></div>`;
+  }
+  return `<div class="study-viewer"><span>${esc(L("study_tl_signed_out"))}</span><button type="button" class="study-link-btn" data-act="tl-signin">${esc(L("study_tl_signin"))}</button></div>`;
+}
+
+function commentsHtml(it) {
+  const cm = S.tl.comments[it.sessionId];
+  if (!cm || !cm.open) return "";
+  const isOwn = !!S.viewer && S.viewer.id === S.tl.owner.id;
+  const parentSet = !!S.overview?.settings?.parentPinSet;
+  let list;
+  if (cm.loading) list = `<p class="status-text">${esc(L("study_loading"))}</p>`;
+  else if (!cm.list || cm.list.length === 0) list = `<p class="study-row-meta">${esc(L("study_comment_none"))}</p>`;
+  else {
+    list = cm.list
+      .map((c) => {
+        const mine = !!S.viewer && S.viewer.id === c.playerId;
+        const del = mine
+          ? `<button type="button" class="study-link-btn" data-act="comment-del" data-id="${esc(c.id)}" data-sid="${esc(it.sessionId)}">${esc(L("study_comment_delete"))}</button>`
+          : parentSet
+            ? `<button type="button" class="study-link-btn" data-act="comment-del" data-parent="1" data-id="${esc(c.id)}" data-sid="${esc(it.sessionId)}">${esc(L("study_comment_delete_parent"))}</button>`
+            : "";
+        return `
+      <div class="study-comment">
+        <span class="study-avatar study-avatar--sm">${initial(c.name)}</span>
+        <div class="study-comment-main">
+          <div class="study-comment-head"><strong>${esc(c.name)}</strong> <small>${esc(c.grade)}</small> <small>${esc(fmtDateTime(c.createdAt))}</small></div>
+          <div class="study-comment-body">${esc(c.body)}</div>
+          ${del}
+        </div>
+      </div>`;
+      })
+      .join("");
+  }
+  let composer;
+  if (!S.viewer) {
+    composer = `<p class="study-row-meta">${esc(L("study_comment_need_signin"))} <button type="button" class="study-link-btn" data-act="tl-signin">${esc(L("study_tl_signin"))}</button></p>`;
+  } else if (isOwn) {
+    composer = `<p class="study-row-meta">${esc(L("study_comment_own"))}</p>`;
+  } else {
+    composer = `
+      <div class="study-composer">
+        <textarea rows="2" maxlength="${COMMENT_MAX}" data-draft="${esc(it.sessionId)}" placeholder="${esc(L("study_comment_ph"))}" aria-label="${esc(L("study_comment_ph"))}">${esc(S.tl.drafts[it.sessionId] || "")}</textarea>
+        <button type="button" class="primary-btn" data-act="comment-send" data-id="${esc(it.sessionId)}" ${cm.sending ? "disabled" : ""}>${esc(L("study_comment_send"))}</button>
+      </div>`;
+  }
+  return `<div class="study-comments">${list}${composer}</div>`;
+}
+
+function postHtml(it) {
+  const o = S.tl.owner;
+  const isOwn = !!S.viewer && S.viewer.id === o.id;
+  const cm = S.tl.comments[it.sessionId];
+  const topic = it.topic ? ` · ${esc(it.topic)}` : "";
+  return `
+  <article class="study-post" data-card="${esc(it.sessionId)}">
+    <header class="study-post-head">
+      <span class="study-avatar">${initial(o.name)}</span>
+      <div>
+        <div class="study-post-name">${esc(o.name)} <small>${esc(o.grade)}</small></div>
+        <div class="study-row-meta">${esc(fmtDateTime(it.submittedAt))}</div>
+      </div>
+    </header>
+    <p class="study-post-text"><strong>${esc(o.name)}</strong> ${esc(L("study_tl_finished"))} <strong>${esc(it.subject)}</strong>${topic}</p>
+    <div class="study-post-chips">
+      <span class="study-badge">${esc(L(`study_level_${it.level}`))} (${it.weightPercent}%)</span>
+      <span class="study-badge">${esc(it.materialGrade)}</span>
+      <span class="study-badge study-badge--solid">${esc(L("study_score", { c: it.correct, n: it.total }))}</span>
+      <span class="study-post-points">+${fmt(it.points)} ${esc(L("study_pts"))}</span>
+    </div>
+    <div class="study-post-counts"><span>${esc(L("study_likes_count", { n: fmt(it.likeCount) }))}</span><span>${esc(L("study_comments_count", { n: fmt(it.commentCount) }))}</span></div>
+    <div class="study-post-actions">
+      <button type="button" class="study-post-btn ${it.liked ? "is-on" : ""}" data-act="like" data-id="${esc(it.sessionId)}" aria-pressed="${it.liked ? "true" : "false"}" ${isOwn ? "disabled" : ""}>${esc(L(it.liked ? "study_liked" : "study_like"))}</button>
+      <button type="button" class="study-post-btn ${cm && cm.open ? "is-on" : ""}" data-act="comments" data-id="${esc(it.sessionId)}" aria-expanded="${cm && cm.open ? "true" : "false"}">${esc(L("study_comment_btn"))}</button>
+      <button type="button" class="study-post-btn" data-act="detail" data-id="${esc(it.sessionId)}">${esc(L("study_detail_btn"))}</button>
+    </div>
+    ${commentsHtml(it)}
+  </article>`;
+}
+
+function updateCard(sid) {
+  const it = tlItem(sid);
+  const el = $("study-body")?.querySelector(`[data-card="${CSS.escape(sid)}"]`);
+  if (!it || !el || S.view !== "timeline") return;
+  const tmp = document.createElement("div");
+  tmp.innerHTML = postHtml(it).trim();
+  el.replaceWith(tmp.firstElementChild);
+}
+
+function renderTimeline(body) {
+  const tl = S.tl;
+  if (!tl) return;
+  if (!tl.owner) {
+    body.innerHTML = `<p class="status-text">${esc(L("study_loading"))}</p>`;
+    return;
+  }
+  const o = tl.owner;
+  const you = S.viewer && S.viewer.id === o.id ? ` ${esc(L("study_tl_you"))}` : "";
+  body.innerHTML = `
+    <div class="study-card study-profile-head">
+      <span class="study-avatar study-avatar--lg">${initial(o.name)}</span>
+      <div class="study-profile-info">
+        <div class="study-row-title">${esc(o.name)}${you} <small>${esc(o.grade)}</small></div>
+        <div class="study-row-meta">${esc(L("study_tl_rank", { n: o.rank }))} · ${esc(L("study_tl_stats", { done: fmt(o.sessionsDone), points: fmt(o.totalPoints) }))}</div>
+      </div>
+      <button type="button" class="secondary-btn" data-act="tl-profile">${esc(L("study_tl_open_profile"))}</button>
+    </div>
+    ${viewerBarHtml()}
+    ${tl.items.length === 0 ? `<p class="status-text">${esc(L("study_tl_empty"))}</p>` : tl.items.map(postHtml).join("")}
+    ${tl.hasMore ? `<div class="study-actions"><button type="button" class="secondary-btn" data-act="tl-more" ${tl.loading ? "disabled" : ""}>${esc(tl.loading ? L("study_loading") : L("study_tl_more"))}</button></div>` : tl.loading ? `<p class="status-text">${esc(L("study_loading"))}</p>` : ""}`;
+}
+
+// ---- aksi kartu
+async function doLike(sid) {
+  if (!tlItem(sid) || !(await ensureViewer())) return;
+  if (S.viewer.id === S.tl.owner.id) return; // tidak boleh menyukai kegiatan sendiri
+  const res = await studyCall("like_toggle", { ...viewerParams(), sessionId: sid });
+  if (!res.ok) return viewerFailure(res);
+  const it = tlItem(sid); // ambil ulang: masuk tadi memuat ulang kartu
+  if (!it) return;
+  it.liked = res.liked;
+  it.likeCount = res.count;
+  updateCard(sid);
+}
+
+async function toggleComments(sid) {
+  const it = tlItem(sid);
+  if (!it) return;
+  const cm = (S.tl.comments[sid] ||= { open: false, loading: false, list: null, sending: false });
+  cm.open = !cm.open;
+  if (cm.open && cm.list === null) {
+    cm.loading = true;
+    updateCard(sid);
+    const res = await studyCall("comment_list", { sessionId: sid });
+    cm.loading = false;
+    if (!res.ok) {
+      cm.open = false;
+      updateCard(sid);
+      return handleFailure(res);
+    }
+    cm.list = res.comments;
+    it.commentCount = res.comments.length;
+  }
+  updateCard(sid);
+  if (cm.open) $("study-body")?.querySelector(`[data-draft="${CSS.escape(sid)}"]`)?.focus();
+}
+
+function onBodyInput(e) {
+  const ta = e.target.closest?.("textarea[data-draft]");
+  if (ta && S.tl) S.tl.drafts[ta.dataset.draft] = ta.value;
+}
+
+async function sendComment(sid) {
+  const cm = S.tl?.comments[sid];
+  if (!tlItem(sid) || !cm || cm.sending) return;
+  if (!(await ensureViewer())) return;
+  if (S.viewer.id === S.tl.owner.id) return;
+  const text = String(S.tl.drafts[sid] || "").replace(/\s+/g, " ").trim();
+  if (!text) return;
+  if (text.length > COMMENT_MAX) return window.alert(L("study_comment_ph"));
+  cm.sending = true;
+  updateCard(sid);
+  const res = await studyCall("comment_add", { ...viewerParams(), sessionId: sid, body: text });
+  cm.sending = false;
+  if (!S.tl || S.tl.comments[sid] !== cm) return; // timeline sudah ditinggalkan selama menunggu
+  if (!res.ok) {
+    updateCard(sid);
+    return viewerFailure(res);
+  }
+  const it = tlItem(sid);
+  (cm.list ||= []).push(res.comment);
+  if (it) it.commentCount = res.count;
+  S.tl.drafts[sid] = "";
+  updateCard(sid);
+}
+
+async function deleteComment(commentId, sid, byParent) {
+  const it = tlItem(sid);
+  const cm = S.tl?.comments[sid];
+  if (!it || !cm) return;
+  let res;
+  if (byParent) {
+    res = await openFormDialog({
+      title: L("study_comment_parent_title"),
+      okLabel: L("study_comment_delete"),
+      cancelLabel: L("study_cancel"),
+      busyLabel: L("study_loading"),
+      fields: [{ key: "parentPin", label: L("study_parent_pin"), type: "pin" }],
+      onSubmit: async (v) => {
+        if (!validPinFormat(v.parentPin)) return { ok: false, error: L("study_pin_invalid") };
+        const r = await studyCall("comment_delete", { commentId, parentPin: v.parentPin });
+        if (!r.ok) return { ok: false, error: errText(r) };
+        return { ok: true, value: r };
+      }
+    });
+    if (!res) return;
+  } else {
+    if (!window.confirm(L("study_comment_delete_confirm"))) return;
+    res = await studyCall("comment_delete", { commentId, ...viewerParams() });
+    if (!res.ok) return viewerFailure(res);
+  }
+  cm.list = (cm.list || []).filter((c) => c.id !== commentId);
+  it.commentCount = res.count;
+  updateCard(sid);
+}
+
+async function openDetail(sid) {
+  if (!tlItem(sid) || !(await ensureViewer())) return;
+  const res = await studyCall("result_detail", { ...viewerParams(), sessionId: sid });
+  if (!res.ok) return viewerFailure(res);
+  S.tlScroll = window.scrollY;
+  S.result = res.result;
+  S.explainFailed = false;
+  S.resultFrom = "timeline";
+  S.view = "result";
+  render();
+  window.scrollTo(0, 0);
 }
 
 // ---------------------------------------------------------------- redeem

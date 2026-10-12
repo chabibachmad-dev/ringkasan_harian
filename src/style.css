@@ -3007,3 +3007,182 @@ mark.chat-search-hit--active {
   font-size: 0.8rem;
   font-weight: 700;
 }
+
+/* ---- Study: timeline kegiatan (suka, komentar, detil) ---- */
+.study-profile-head {
+  flex-direction: row;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.study-profile-info {
+  flex: 1 1 140px;
+  min-width: 0;
+}
+
+.study-avatar {
+  flex: 0 0 auto;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: var(--accent-contrast);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 800;
+  font-size: 1.05rem;
+}
+
+.study-avatar--lg {
+  width: 52px;
+  height: 52px;
+  font-size: 1.4rem;
+}
+
+.study-avatar--sm {
+  width: 28px;
+  height: 28px;
+  font-size: 0.8rem;
+}
+
+.study-viewer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 8px 12px;
+  margin-bottom: 14px;
+  border: 1.5px dashed var(--border);
+  border-radius: 10px;
+  font-size: 0.8rem;
+}
+
+.study-post {
+  border: 1.5px solid var(--border);
+  border-radius: 14px;
+  padding: 14px;
+  margin-bottom: 14px;
+}
+
+.study-post-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.study-post-name {
+  font-weight: 800;
+}
+
+.study-post-name small {
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.study-post-text {
+  margin: 10px 0 8px;
+  overflow-wrap: anywhere;
+}
+
+.study-post-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.study-post-points {
+  font-weight: 800;
+  margin-left: auto;
+}
+
+.study-post-counts {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.study-post-actions {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.study-post-btn {
+  min-height: 40px;
+  border: 1.5px solid var(--border);
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.study-post-btn.is-on {
+  background: var(--accent);
+  color: var(--accent-contrast);
+}
+
+.study-post-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.study-comments {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.study-comment {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+}
+
+.study-comment-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  background: var(--notify-bg);
+  border-radius: 12px;
+  padding: 8px 12px;
+}
+
+.study-comment-head small {
+  color: var(--text-muted);
+  margin-left: 4px;
+}
+
+.study-comment-body {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.study-composer {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.study-composer textarea {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  padding: 10px 12px;
+  border: 1.5px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-card);
+  color: var(--text);
+  font: inherit;
+}

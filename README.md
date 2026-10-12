@@ -263,7 +263,7 @@ Menu **Study** di beranda: pemain mendaftar (nama, grade TK–S3/Umum, PIN), mem
 
 **Pasang (sekali saja):**
 
-1. Jalankan migrasi `supabase/migrations/0023_study.sql` (SQL Editor, atau `npx supabase db push`).
+1. Jalankan migrasi `supabase/migrations/0023_study.sql`, lalu `supabase/migrations/0024_study_social.sql` (timeline: suka & komentar). Lewat SQL Editor, atau `npx supabase db push` untuk keduanya.
 2. Deploy fungsi baru: `npx supabase functions deploy study` (sama seperti fungsi lain).
 3. Deploy ulang fungsi `chat` (`npx supabase functions deploy chat`) karena `_shared/gemini.ts` ikut berubah, lalu push frontend ke GitHub seperti biasa.
 
@@ -280,6 +280,11 @@ Tidak ada secret baru. Fungsi `study` memakai `CHAT_ACCESS_CODE` dan kunci AI ya
 - **PIN orang tua** menjaga reset PIN pemain, Setting, hukuman, dan penandaan hadiah. Selama belum dibuat, area itu terbuka (ada peringatan di Setting, sebaiknya segera dibuat). Kalau lupa PIN orang tua, ulang lewat SQL Editor: `update study_settings set parent_pin_salt = null, parent_pin_hash = null where id = 1;`
 - PIN pemain terkunci 5 menit setelah 5 kali salah.
 - Batas: maksimal 30 soal per pelajaran (dibuat per 10 soal), maksimal 3 pelajaran belum selesai per pemain, dan soal yang gagal sebagian tetap dipakai bila minimal 80% dari yang diminta.
+- **Timeline kegiatan** (seperti media sosial): ketuk nama di papan peringkat untuk melihat kegiatan pemain itu, satu kartu per pelajaran yang selesai (terbaru di atas, 20 per halaman). Tombol **Suka**, **Komentar**, dan **Detil** (soal, jawaban, kunci, dan pembahasan AI, bisa dibagikan sebagai PDF) di tiap kartu.
+  - Melihat timeline dan membaca komentar tidak perlu PIN. Suka, komentar, dan Detil butuh **masuk sebagai pemain** (pilih nama + PIN, sekali per kunjungan ke layar Study; hilang saat layar ditinggalkan).
+  - Pemain tidak bisa menyukai atau mengomentari kegiatannya sendiri (dijaga di database), tetapi boleh membuka Detil-nya dan menghapus komentarnya sendiri. Komentar 1-300 karakter, maksimal 10 per pemain per pelajaran, tampil sebagai teks biasa.
+  - Orang tua bisa menghapus komentar siapa pun lewat tombol **Hapus (orang tua)** (wajib PIN orang tua yang sudah dibuat).
+  - Penukaran hadiah dan hukuman **tidak** tampil di timeline. Tombol **Buka profil (PIN)** di timeline membuka saldo dan hadiah; bila pemilik sudah masuk, PIN tidak diminta lagi.
 - PDF hasil memakai font standar: teks Arab diganti `[teks Arab]` dan rumus ditulis sebagai teks biasa.
 
-**Uji:** `cd wa-bot && npm test` (logika murni), dan untuk database: `psql -d <db> -f supabase/migrations/0023_study.sql && psql -d <db> -f supabase/tests/study_points.sql` (kolom `gagal` harus 0).
+**Uji:** `cd wa-bot && npm test` (logika murni), dan untuk database (pada DB kosong): `psql -d <db> -f supabase/migrations/0023_study.sql -f supabase/migrations/0024_study_social.sql -f supabase/tests/study_points.sql -f supabase/tests/study_social.sql` (kolom `gagal` harus 0 di kedua tes).

@@ -28,6 +28,15 @@
 //   redeem_mark         { parentPin?, redemptionId, status:"given"|"pending" } -> { ok }
 //   penalty             { parentPin?, playerId, points, reason }             -> { requested, applied, balance }
 //   parent_pin_set      { newPin, parentPin? }                               -> { ok }
+//   -- timeline (Facebook-like): lihat kegiatan pemain, suka, komentar, detil. Melihat timeline & komentar tidak perlu PIN;
+//      suka/komentar/detil butuh PIN penonton (viewerId + viewerPin) dan tidak boleh pada kegiatan sendiri (suka/komentar).
+//   player_verify       { playerId, pin }                                    -> { player }   (masuk sebagai penonton)
+//   timeline            { playerId, viewerId?, viewerPin?, before? }         -> { owner:{id,name,grade,rank,sessionsDone,totalPoints}, items:[...], hasMore }
+//   like_toggle         { viewerId, viewerPin, sessionId }                   -> { liked, count }
+//   comment_list        { sessionId }                                        -> { comments:[{id,playerId,name,grade,body,createdAt}] }
+//   comment_add         { viewerId, viewerPin, sessionId, body }             -> { comment, count }
+//   comment_delete      { commentId, viewerId?, viewerPin? | parentPin }     -> { ok, count }   (penulisnya, atau orang tua bila PIN-nya sudah dibuat)
+//   result_detail       { viewerId, viewerPin, sessionId }                   -> { result }   (soal + jawaban + kunci + pembahasan, hanya pelajaran selesai)
 
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { corsHeaders } from "../_shared/cors.ts";
@@ -336,6 +345,27 @@ function readSettingsInput(body: Row): { ok: true; value: Row } | { ok: false; e
   return { ok: true, value: { base_points: base, weight_easy: easy, weight_normal: normal, weight_hard: hard, subjects, updated_at: new Date().toISOString() } };
 }
 
+// ---------------------------------------------------------------- timeline: bantu
+const TIMELINE_PAGE = 20;
+const COMMENT_MAX = 300;
+
+// Pesan galat dari fungsi SQL timeline -> respons ramah.
+function socialError(message: string): Response | null {
+  if (/KEGIATAN_TIDAK_ADA/.test(message)) return fail("Kegiatan itu tidak ditemukan.", 404);
+  if (/KEGIATAN_SENDIRI/.test(message)) return fail("Kamu tidak bisa menyukai atau mengomentari kegiatanmu sendiri.", 400);
+  if (/KOMENTAR_PENUH/.test(message)) return fail("Batas komentar untuk kegiatan ini sudah tercapai.", 429);
+  if (/KOMENTAR_TIDAK_VALID/.test(message)) return fail(`Komentar harus 1-${COMMENT_MAX} karakter.`, 400);
+  if (/PEMAIN_TIDAK_ADA/.test(message)) return fail("Pemain tidak ditemukan.", 404);
+  return null;
+}
+
+async function loadSubmittedSession(admin: Admin, sessionId: unknown): Promise<{ session: Row } | Response> {
+  if (!isUuid(sessionId)) return fail("Kegiatan tidak valid.");
+  const { data: s } = await admin.from("study_sessions").select("*").eq("id", sessionId).maybeSingle();
+  if (!s || s.status !== "submitted") return fail("Kegiatan itu tidak ditemukan.", 404);
+  return { session: s };
+}
+
 // ================================================================ handler
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
@@ -637,6 +667,145 @@ Deno.serve(async (req) => {
         .eq("id", 1);
       if (error) return fail(error.message, 500);
       return json({ ok: true });
+    }
+
+    // ------------------------------------------------------------ timeline: masuk sebagai penonton
+    if (action === "player_verify") {
+      const auth = await checkPlayerPin(admin, body.playerId, body.pin);
+      if (auth instanceof Response) return auth;
+      return json({ ok: true, player: { id: auth.player.id, name: auth.player.name, grade: auth.player.grade } });
+    }
+
+    // ------------------------------------------------------------ timeline: daftar kegiatan satu pemain
+    if (action === "timeline") {
+      if (!isUuid(body.playerId)) return fail("Pemain tidak valid.");
+      let viewerId: string | null = null;
+      if (body.viewerId !== undefined && body.viewerId !== null && body.viewerId !== "") {
+        const v = await checkPlayerPin(admin, body.viewerId, body.viewerPin);
+        if (v instanceof Response) return v;
+        viewerId = v.player.id;
+      }
+      let before: string | null = null;
+      if (typeof body.before === "string" && body.before) {
+        // dipakai apa adanya (presisi mikrodetik dari database), asal bentuknya tanggal-waktu ISO yang wajar
+        if (body.before.length > 40 || !/^\d{4}-\d{2}-\d{2}T[\d:.]+(Z|[+-]\d{2}:?\d{2})$/.test(body.before) || Number.isNaN(new Date(body.before).getTime())) {
+          return fail("Kursor halaman tidak valid.");
+        }
+        before = body.before;
+      }
+      const [board, tl] = await Promise.all([
+        admin.rpc("study_leaderboard"),
+        admin.rpc("study_timeline", { p_owner: body.playerId, p_viewer: viewerId, p_limit: TIMELINE_PAGE + 1, p_before: before })
+      ]);
+      if (board.error) return fail(board.error.message, 500);
+      if (tl.error) return fail(tl.error.message, 500);
+      const rows = (board.data ?? []) as Row[];
+      const at = rows.findIndex((p) => p.id === body.playerId);
+      if (at < 0) return fail("Pemain tidak ditemukan.", 404);
+      const owner = rows[at];
+      const all = (tl.data ?? []) as Row[];
+      const page = all.slice(0, TIMELINE_PAGE);
+      return json({
+        ok: true,
+        owner: { id: owner.id, name: owner.name, grade: owner.grade, rank: at + 1, sessionsDone: owner.sessions_done, totalPoints: owner.total_points },
+        items: page.map((r) => ({
+          sessionId: r.session_id,
+          subject: r.subject,
+          topic: r.topic,
+          materialGrade: r.material_grade,
+          level: r.level,
+          total: r.num_questions,
+          correct: r.correct_count,
+          points: r.points_awarded,
+          weightPercent: r.weight_percent,
+          submittedAt: r.submitted_at,
+          likeCount: r.like_count,
+          commentCount: r.comment_count,
+          liked: !!r.liked
+        })),
+        hasMore: all.length > TIMELINE_PAGE
+      });
+    }
+
+    // ------------------------------------------------------------ suka / batal suka
+    if (action === "like_toggle") {
+      const v = await checkPlayerPin(admin, body.viewerId, body.viewerPin);
+      if (v instanceof Response) return v;
+      if (!isUuid(body.sessionId)) return fail("Kegiatan tidak valid.");
+      const { data, error } = await admin.rpc("study_toggle_like", { p_session: body.sessionId, p_player: v.player.id });
+      if (error) return socialError(error.message) ?? fail(error.message, 500);
+      return json({ ok: true, ...(data as Row) });
+    }
+
+    // ------------------------------------------------------------ komentar
+    if (action === "comment_list") {
+      const ss = await loadSubmittedSession(admin, body.sessionId);
+      if (ss instanceof Response) return ss;
+      const { data: cs, error } = await admin.from("study_comments").select("id,player_id,body,created_at").eq("session_id", ss.session.id).order("created_at", { ascending: true }).limit(200);
+      if (error) return fail(error.message, 500);
+      const ids = [...new Set((cs ?? []).map((c: Row) => c.player_id))];
+      const { data: ps } = ids.length ? await admin.from("study_players").select("id,name,grade").in("id", ids) : { data: [] as Row[] };
+      const byId = new Map<string, Row>((ps ?? []).map((p: Row) => [p.id as string, p] as [string, Row]));
+      return json({
+        ok: true,
+        comments: (cs ?? []).map((c: Row) => ({
+          id: c.id,
+          playerId: c.player_id,
+          name: byId.get(c.player_id)?.name ?? "?",
+          grade: byId.get(c.player_id)?.grade ?? "",
+          body: c.body,
+          createdAt: c.created_at
+        }))
+      });
+    }
+
+    if (action === "comment_add") {
+      const v = await checkPlayerPin(admin, body.viewerId, body.viewerPin);
+      if (v instanceof Response) return v;
+      if (!isUuid(body.sessionId)) return fail("Kegiatan tidak valid.");
+      const text = cleanLine(body.body, COMMENT_MAX + 1);
+      if (!text || text.length > COMMENT_MAX) return fail(`Komentar harus 1-${COMMENT_MAX} karakter.`);
+      const { data, error } = await admin.rpc("study_add_comment", { p_session: body.sessionId, p_player: v.player.id, p_body: text });
+      if (error) return socialError(error.message) ?? fail(error.message, 500);
+      const r = data as Row;
+      return json({
+        ok: true,
+        count: r.count,
+        comment: { id: r.id, playerId: r.playerId, name: v.player.name, grade: v.player.grade, body: r.body, createdAt: r.createdAt }
+      });
+    }
+
+    if (action === "comment_delete") {
+      if (!isUuid(body.commentId)) return fail("Komentar tidak valid.");
+      const { data: c } = await admin.from("study_comments").select("id,session_id,player_id").eq("id", body.commentId).maybeSingle();
+      if (!c) return fail("Komentar tidak ditemukan.", 404);
+      if (body.viewerId) {
+        // penulisnya sendiri (PIN pemain)
+        const v = await checkPlayerPin(admin, body.viewerId, body.viewerPin);
+        if (v instanceof Response) return v;
+        if (v.player.id !== c.player_id) return fail("Hanya penulis komentar yang bisa menghapusnya.", 403);
+      } else {
+        // orang tua: wajib PIN orang tua yang SUDAH dibuat (tidak terbuka bagi semua orang)
+        const settings = await loadSettings(admin);
+        if (!settings?.parent_pin_hash) return fail("PIN orang tua belum dibuat. Buat dulu di Setting.", 403);
+        const par = await checkParentPin(admin, body.parentPin);
+        if (par instanceof Response) return par;
+      }
+      const { error } = await admin.from("study_comments").delete().eq("id", c.id);
+      if (error) return fail(error.message, 500);
+      const { count } = await admin.from("study_comments").select("id", { count: "exact", head: true }).eq("session_id", c.session_id);
+      return json({ ok: true, count: count ?? 0 });
+    }
+
+    // ------------------------------------------------------------ detil kegiatan (soal + pembahasan)
+    if (action === "result_detail") {
+      const v = await checkPlayerPin(admin, body.viewerId, body.viewerPin);
+      if (v instanceof Response) return v;
+      const ss = await loadSubmittedSession(admin, body.sessionId);
+      if (ss instanceof Response) return ss;
+      const { data: owner } = await admin.from("study_players").select("id,name,grade").eq("id", ss.session.player_id).maybeSingle();
+      if (!owner) return fail("Pemain tidak ditemukan.", 404);
+      return json({ ok: true, result: await loadResult(admin, ss.session, owner) });
     }
 
     return fail("action tidak dikenal.", 400);
