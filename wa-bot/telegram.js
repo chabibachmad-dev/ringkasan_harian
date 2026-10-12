@@ -82,6 +82,47 @@ export function waToTelegramHtml(text) {
   return s.replace(/\u0000(\d+)\u0000/g, (_, i) => stash[Number(i)]);
 }
 
+
+// ---------------------------------------------------------------- tombol pilihan (alur "simab rekam/ubah/hapus")
+const CMD_LABELS = {
+  lanjut: "⏭ Lanjut",
+  balik: "⏮ Balik",
+  semua: "📋 Semua",
+  kembali: "↩️ Kembali",
+  "ya hapus": "🗑 Ya, hapus",
+  ya: "✅ Ya, simpan",
+  ubah: "✏️ Ubah",
+  hapus: "🗑 Hapus",
+  batal: "✖️ Batal"
+};
+const CMD_ORDER = ["lanjut", "balik", "semua", "kembali", "ya", "ya hapus", "ubah", "hapus", "batal"];
+
+/**
+ * Susun tombol dari TEKS balasan SiMAB (bukan dari data internalnya, jadi alur SiMAB tidak diubah):
+ *  - daftar bernomor ("3. *kode* ...") jadi satu tombol per baris, HANYA bila teksnya meminta "Balas *angka*";
+ *  - kata perintah tebal di 6 baris terakhir (*lanjut*, *kembali*, *ya*, *batal* ...) jadi tombol perintah.
+ * Menekan tombol sama dengan mengetik katanya. "*cari <kata>*" tetap diketik. Mengembalikan inline_keyboard atau null.
+ */
+export function simabKeyboard(text) {
+  const lines = String(text ?? "").split("\n");
+  const rows = [];
+  if (/\*angka\*/.test(text)) {
+    for (const line of lines) {
+      const m = /^(\d{1,3})\.\s+(.*)$/.exec(line);
+      if (!m) continue;
+      let label = m[2].replace(/\*/g, "").trim();
+      if (label.length > 40) label = `${label.slice(0, 39)}…`;
+      rows.push([{ text: `${m[1]}. ${label}`, callback_data: `sm:${m[1]}` }]);
+    }
+  }
+  const tail = lines.slice(-6).join("\n");
+  const found = new Set();
+  for (const m of tail.matchAll(/\*(lanjut|balik|semua|kembali|ya hapus|ya|ubah|hapus|batal)\*/gi)) found.add(m[1].toLowerCase());
+  const cmds = CMD_ORDER.filter((c) => found.has(c));
+  for (let i = 0; i < cmds.length; i += 3) rows.push(cmds.slice(i, i + 3).map((c) => ({ text: CMD_LABELS[c], callback_data: `sm:${c}` })));
+  return rows.length ? rows : null;
+}
+
 const HELP = [
   "Halo, ini Ayyubi di Telegram.",
   "",
@@ -89,6 +130,8 @@ const HELP = [
   "",
   "Perintah:",
   "/simab <perintah>  — SiMAB (pagu, cek, perjadin, sbm, rpd, rekam). Boleh juga tulis \"simab ...\" tanpa garis miring.",
+  "Selama perekaman/ubah/hapus SiMAB, pilihan muncul sebagai tombol di bawah pesan (mengetik angka/kata tetap bisa).",
+  "/status  — kondisi bot: WhatsApp, key Gemini, token hari ini, Ollama, dokumen",
   "/ringkasan  — ringkasan percakapan WhatsApp hari ini",
   "/peraturan  — pantau peraturan terbaru (\"/peraturan semua\" = tampilkan semua hasil)",
   "/baru  — mulai obrolan baru (lupakan konteks sebelumnya)",
@@ -101,6 +144,7 @@ const HELP = [
  *   chat(history, userText)           -> Promise<string>   jawaban AI (history = [{role:"user"|"model", text}] sudah termasuk userText)
  *   simab?: { enabled, hasSession(key), run(text, {notify, sessionKey}) -> Promise<string> }
  *   summary?()                        -> Promise<string>   teks ringkasan harian
+ *   status?()                         -> Promise<string>   teks kondisi bot (/status)
  *   regNow?({ all, sendTo })          -> Promise            jalankan pantauan peraturan, kirim lewat sendTo(text)
  *   state?: { get(key), set(key, value) }                   penyimpan offset (supaya restart tidak memproses ulang)
  * }
@@ -111,6 +155,7 @@ export function createTelegram({ config, deps = {}, fetchImpl = globalThis.fetch
   const histories = new Map(); // chatId -> [{role, text}]
   const pairingSeen = new Map(); // chatId -> waktu balasan pairing terakhir
   const ignoredLogged = new Set();
+  const lastKeyboard = new Map(); // chatId -> message_id pesan yang masih membawa tombol
   let running = false;
   let stopped = false;
   let offset = 0;
@@ -143,10 +188,10 @@ export function createTelegram({ config, deps = {}, fetchImpl = globalThis.fetch
     }
   }
 
-  async function sendPart(chatId, part) {
-    const base = { chat_id: chatId, link_preview_options: { is_disabled: true } };
+  async function sendPart(chatId, part, markup = null) {
+    const base = { chat_id: chatId, link_preview_options: { is_disabled: true }, ...(markup ? { reply_markup: { inline_keyboard: markup } } : {}) };
     try {
-      await api("sendMessage", { ...base, text: waToTelegramHtml(part), parse_mode: "HTML" });
+      return await api("sendMessage", { ...base, text: waToTelegramHtml(part), parse_mode: "HTML" });
     } catch (e) {
       if (e.status === 429 && e.retryAfter) {
         await sleep(Math.min(Number(e.retryAfter), 30) * 1000);
@@ -158,10 +203,20 @@ export function createTelegram({ config, deps = {}, fetchImpl = globalThis.fetch
     }
   }
 
-  async function send(chatId, text) {
+  async function send(chatId, text, { markup = null } = {}) {
     const parts = splitMessage(text);
-    for (const p of parts) await sendPart(chatId, p);
+    let last = null;
+    for (let i = 0; i < parts.length; i++) last = await sendPart(chatId, parts[i], i === parts.length - 1 ? markup : null);
+    if (markup && last?.message_id) lastKeyboard.set(String(chatId), last.message_id);
     return parts.length;
+  }
+
+  // Tombol lama dihapus saat ada pilihan baru / setelah ditekan, supaya tidak ada tombol basi yang bisa terpencet.
+  async function clearKeyboard(chatId, messageId = null) {
+    const id = messageId ?? lastKeyboard.get(String(chatId));
+    if (!id) return;
+    if (messageId == null || lastKeyboard.get(String(chatId)) === id) lastKeyboard.delete(String(chatId));
+    await api("editMessageReplyMarkup", { chat_id: chatId, message_id: id, reply_markup: { inline_keyboard: [] } }, { timeoutMs: 8000 }).catch(() => {});
   }
 
   /** Kirim ke semua pemilik. Mengembalikan jumlah pemilik yang berhasil menerima (0 = tidak ada / semua gagal). */
@@ -197,6 +252,41 @@ export function createTelegram({ config, deps = {}, fetchImpl = globalThis.fetch
     }
   }
 
+  /** Jalankan satu baris untuk SiMAB; bila sesi masih berlanjut, pilihannya dilampirkan sebagai tombol. */
+  async function runSimab(chatId, line) {
+    const simab = deps.simab;
+    const key = `tg:${chatId}`;
+    const reply = (t) => send(chatId, t);
+    try {
+      const out = await withTyping(chatId, () => simab.run(line, { notify: reply, sessionKey: key }));
+      if (out) {
+        await clearKeyboard(chatId);
+        const markup = simab.hasSession?.(key) ? simabKeyboard(out) : null;
+        await send(chatId, out, { markup });
+      }
+    } catch (e) {
+      log.error?.(`✈️ [Telegram/SiMAB] gagal: ${e?.message || e}`);
+      await reply(`⚠️ SiMAB: ${String(e?.message || e).slice(0, 300)}`);
+    }
+  }
+
+  /** Penekanan tombol = pemilik mengetik katanya. Hanya dari pemilik, hanya tombol buatan bot ("sm:..."). */
+  async function handleCallback(cb) {
+    await api("answerCallbackQuery", { callback_query_id: cb.id }, { timeoutMs: 8000 }).catch(() => {});
+    const chat = cb.message?.chat;
+    const chatId = chat ? String(chat.id) : "";
+    if (owners.size === 0 || !chat || chat.type !== "private" || !owners.has(chatId) || !owners.has(String(cb.from?.id))) return;
+    const data = String(cb.data || "");
+    if (!data.startsWith("sm:")) return;
+    await clearKeyboard(chatId, cb.message.message_id);
+    const simab = deps.simab;
+    if (!simab?.enabled || !simab.hasSession?.(`tg:${chatId}`)) {
+      await send(chatId, "Sesi SiMAB sudah berakhir. Mulai lagi dengan /simab rekam <seksi>.").catch(() => {});
+      return;
+    }
+    await runSimab(chatId, data.slice(3));
+  }
+
   /** Satu pesan dari pemilik -> balasan. Dipisah dari polling supaya mudah dites. */
   async function handleOwnerText(chatId, rawText) {
     const text = String(rawText ?? "").trim();
@@ -219,13 +309,15 @@ export function createTelegram({ config, deps = {}, fetchImpl = globalThis.fetch
     const isSimabText = name === "simab" || /^simab\b/i.test(text);
     if (isSimabText || (simab?.enabled && simab.hasSession?.(key))) {
       if (!simab?.enabled) return void (await reply("Fitur SiMAB belum aktif: isi SIMAB_SUPABASE_URL, SIMAB_SUPABASE_ANON_KEY, SIMAB_BOT_EMAIL, SIMAB_BOT_PASSWORD di .env lalu restart bot."));
-      const line = name === "simab" ? `simab ${arg}`.trim() : text;
+      return runSimab(chatId, name === "simab" ? `simab ${arg}`.trim() : text);
+    }
+
+    if (name === "status") {
+      if (!deps.status) return void (await reply("Status belum tersedia."));
       try {
-        const out = await withTyping(chatId, () => simab.run(line, { notify: reply, sessionKey: key }));
-        if (out) await reply(out);
+        await reply(await withTyping(chatId, () => deps.status()));
       } catch (e) {
-        log.error?.(`✈️ [Telegram/SiMAB] gagal: ${e?.message || e}`);
-        await reply(`⚠️ SiMAB: ${String(e?.message || e).slice(0, 300)}`);
+        await reply(`⚠️ Status gagal dibuat: ${String(e?.message || e).slice(0, 300)}`);
       }
       return;
     }
@@ -267,6 +359,7 @@ export function createTelegram({ config, deps = {}, fetchImpl = globalThis.fetch
   }
 
   async function handleUpdate(u) {
+    if (u.callback_query) return handleCallback(u.callback_query);
     const m = u.message;
     if (!m || !m.chat) return;
     const chatId = String(m.chat.id);
@@ -309,7 +402,7 @@ export function createTelegram({ config, deps = {}, fetchImpl = globalThis.fetch
     let backoff = 2000;
     while (!stopped) {
       try {
-        const updates = await api("getUpdates", { offset, timeout: config.pollTimeoutSec, allowed_updates: ["message"] }, { timeoutMs: (config.pollTimeoutSec + 15) * 1000 });
+        const updates = await api("getUpdates", { offset, timeout: config.pollTimeoutSec, allowed_updates: ["message", "callback_query"] }, { timeoutMs: (config.pollTimeoutSec + 15) * 1000 });
         backoff = 2000;
         for (const u of updates) {
           if (stopped) break;
@@ -362,6 +455,7 @@ export function createTelegram({ config, deps = {}, fetchImpl = globalThis.fetch
       await api("setMyCommands", {
         commands: [
           { command: "simab", description: "SiMAB: pagu, cek, perjadin, sbm, rpd, rekam" },
+          { command: "status", description: "Kondisi bot: WhatsApp, key Gemini, token, Ollama" },
           { command: "ringkasan", description: "Ringkasan percakapan WhatsApp hari ini" },
           { command: "peraturan", description: "Pantau peraturan terbaru" },
           { command: "baru", description: "Mulai obrolan baru" },

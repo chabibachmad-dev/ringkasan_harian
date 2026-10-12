@@ -3039,6 +3039,63 @@ async function generateTelegramReply(history) {
   return guarded ? guarded.reply : raw;
 }
 
+// Teks /status di Telegram: kondisi bot sekilas (tanpa membuka rahasia: key hanya dihitung, tidak ditampilkan).
+function fmtDuration(ms) {
+  const m = Math.max(0, Math.floor(ms / 60_000));
+  const d = Math.floor(m / 1440);
+  const h = Math.floor((m % 1440) / 60);
+  return d > 0 ? `${d} hari ${h} jam` : h > 0 ? `${h} jam ${m % 60} mnt` : `${m} mnt`;
+}
+async function buildBotStatusText() {
+  const now = Date.now();
+  const lines = [`📊 *Status Ayyubi*`, `Bot hidup: ${fmtDuration(process.uptime() * 1000)}`, ""];
+
+  lines.push(`💬 WhatsApp: ${currentSock ? "tersambung" : "⚠️ terputus (menyambung ulang...)"}`);
+  lines.push(
+    `🤖 Auto-reply: ${AUTO_REPLY_ACTIVE ? `aktif (mesin ${WA_AI_ENGINE})` : "mati"}`
+  );
+
+  if (GEMINI_API_KEYS.length > 0) {
+    const waiting = GEMINI_API_KEYS.map((k) => geminiKeyExhaustedUntil.get(k) || 0).filter((t) => t > now);
+    const ready = GEMINI_API_KEYS.length - waiting.length;
+    lines.push(
+      `🔑 Gemini: ${ready} dari ${GEMINI_API_KEYS.length} key siap` +
+        (waiting.length > 0 ? ` • ${waiting.length} kena batas, terdekat pulih ${formatClockInTimezone(Math.min(...waiting))} ${WA_TIMEZONE_LABEL}` : "")
+    );
+  } else {
+    lines.push("🔑 Gemini: belum ada key (isi GEMINI_API_KEYS)");
+  }
+  lines.push(`🛟 Cadangan: ${llmFallback.available() ? llmFallback.describe() : "tidak diatur"}`);
+
+  try {
+    const { data } = await supabase.from("token_usage").select("total_tokens, total_cost_usd").eq("usage_date", pacificDateString()).maybeSingle();
+    lines.push(
+      data
+        ? `📈 Token hari ini: ${Number(data.total_tokens || 0).toLocaleString("id-ID")} • $${Number(data.total_cost_usd || 0).toFixed(4)} (hari Pasifik, sama dgn layar Status di aplikasi)`
+        : "📈 Token hari ini: belum ada pemakaian"
+    );
+  } catch {
+    lines.push("📈 Token hari ini: gagal dibaca");
+  }
+
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 3000);
+    const res = await fetch(`${OLLAMA_BASE_URL}/api/tags`, { signal: ctrl.signal }).finally(() => clearTimeout(timer));
+    lines.push(`🦙 Ollama: ${res.ok ? `menjawab (model ${OLLAMA_MODEL}${ollamaQueue.pending ? `, antrean ${ollamaQueue.pending}` : ""})` : `HTTP ${res.status}`}`);
+  } catch {
+    lines.push("🦙 Ollama: tidak menjawab");
+  }
+
+  const kb = kbIndex?.stats?.();
+  lines.push(`📚 Dokumen: ${kb ? `${kb.docs} dokumen, ${kb.chunks} potongan (indeks laptop)` : "indeks laptop belum aktif"}`);
+  lines.push(`🏛️ SiMAB: ${simab.enabled ? "aktif" : "mati"}`);
+  lines.push(`📋 Ringkasan harian: ${WA_DAILY_SUMMARY_ENABLED ? `aktif (setelah ${String(WA_DAILY_SUMMARY_HOUR).padStart(2, "0")}:00 ${WA_TIMEZONE_LABEL}${summarySentDate ? `, terakhir terkirim ${summarySentDate}` : ""})` : "mati"}`);
+  lines.push(`📜 Pantauan peraturan: ${regMonitor.describe()}`);
+  lines.push(`✈️ Telegram: ${telegram.describe()}`);
+  return lines.join("\n");
+}
+
 const telegram = createTelegram({
   config: readTelegramConfig(process.env),
   deps: {
@@ -3046,6 +3103,7 @@ const telegram = createTelegram({
     simab,
     summary: () => buildDailySummaryText(zonedParts(Date.now(), WA_TIMEZONE).dateStr, { allowAi: true }),
     regNow: (opts) => regMonitor.runNow(opts),
+    status: () => buildBotStatusText(),
     state: {
       get: async (key) => {
         const { data } = await supabase.from("bot_state").select("value").eq("key", key).maybeSingle();

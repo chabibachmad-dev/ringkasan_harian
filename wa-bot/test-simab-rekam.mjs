@@ -1,6 +1,7 @@
 // Tes perekaman SiMAB lewat WhatsApp (database Supabase palsu di memori).
 //   node test-simab-rekam.mjs
 import { createSimab } from "./simab.js";
+import { simabKeyboard } from "./telegram.js";
 import { parseTanggal, parseJumlah, parseInput, parseSeksi, groupKey, parsePatch, searchTerms, matchesTerms } from "./simab-rekam.js";
 
 let fails = 0;
@@ -141,6 +142,7 @@ const KEY = "owner@s.whatsapp.net";
   r = await s.run("simab rekam umum", { sessionKey: KEY });
   check(s.hasSession(KEY) && /Seksi Umum/.test(r) && /1\. \*4701\.EBA\.002\* — Kerumahtanggaan/.test(r), "daftar kelompok: 4701.EBA.002 Kerumahtanggaan");
   check(!/994/.test(r), "kelompok milik seksi lain tidak muncul");
+  { const kb = simabKeyboard(r); check(kb && kb[0][0].callback_data === "sm:1" && kb[0][0].text.includes("4701.EBA.002") && kb.flat().some((b) => b.callback_data === "sm:batal"), "tombol Telegram dari layar kelompok ASLI: nomor 1 + Batal"); }
   check(!/SATKER LAIN|TAHUN LAIN/.test(r), "satker/tahun lain tidak ikut");
   r = await s.run("9", { sessionKey: KEY });
   check(/Angka di luar daftar/.test(r), "angka di luar daftar ditolak, sesi tetap");
@@ -149,6 +151,7 @@ const KEY = "owner@s.whatsapp.net";
   r = await s.run("1", { sessionKey: KEY });
   check(/4701\.EBA\.002/.test(r) && /521111\.10/.test(r) && /522111\.20/.test(r) && /524111\.01/.test(r), "daftar kode terpanjang muncul");
   check(!/\*4701\.EBA\.002\.052\.A\.524111\*/.test(r) && !/\*4701\.EBA\.002\.051\*/.test(r), "kode yang punya turunan TIDAK bisa dipilih");
+  { const kb = simabKeyboard(r); const n = (r.match(/^\d+\. /gm) || []).length; check(kb && kb.filter((x) => /^sm:\d+$/.test(x[0].callback_data)).length === n && kb.flat().some((b) => b.callback_data === "sm:kembali"), `tombol Telegram dari daftar kode ASLI: ${n} tombol nomor + Kembali`); }
   check(!/SATKER LAIN|TAHUN LAIN/.test(r), "daftar kode: satker/tahun lain tidak ikut");
   // urutan: 051.A.521111.10, 051.A.522111.20, 052.A.524111.01
   check(/1\. \*4701\.EBA\.002\.051\.A\.521111\.10\*[\s\S]*pagu Rp 1\.500\.000 • sisa \*Rp 1\.100\.000\*/.test(r), "sisa = pagu semua seksi (1,5jt) - blokir 100rb - realisasi 300rb = 1,1jt");
@@ -157,12 +160,14 @@ const KEY = "owner@s.whatsapp.net";
   await s.run("1", { sessionKey: KEY });
   r = await s.run("1", { sessionKey: KEY });
   check(/Sisa pagu: \*Rp 1\.100\.000\*/.test(r) && /3 baris dalam satu pesan/.test(r), "kode dipilih -> minta uraian, tanggal, jumlah");
+  check(simabKeyboard(r).flat().map((b) => b.callback_data).join() === "sm:kembali,sm:batal", "tombol Telegram dari layar isi data ASLI: Kembali + Batal (tanpa tombol palsu dari contoh)");
   r = await s.run("hanya satu baris", { sessionKey: KEY });
   check(/kurang/.test(r) && s.hasSession(KEY), "input salah -> minta ulang, sesi tetap");
   r = await s.run("Pembelian ATK bulan Oktober\n5/10/2026\n1.500.000", { sessionKey: KEY });
   check(/Konfirmasi rekam kegiatan/.test(r) && /Rp 1\.500\.000/.test(r) && /Status: Rekam Data/.test(r), "ringkasan konfirmasi");
   check(/Melebihi sisa pagu sebesar Rp 400\.000/.test(r), "peringatan melebihi sisa pagu (1,5jt vs sisa 1,1jt)");
   check(db.rpcCalls.length === 0, "belum ada yang disimpan sebelum 'ya'");
+  check(simabKeyboard(r).flat().map((b) => b.callback_data).join() === "sm:ya,sm:ubah,sm:batal", "tombol Telegram dari konfirmasi ASLI: Ya, Ubah, Batal");
   r = await s.run("ubah", { sessionKey: KEY });
   check(/3 baris dalam satu pesan/.test(r), "ubah -> isi ulang");
   r = await s.run("Pembelian ATK bulan Oktober\n5 okt 2026\n1jt", { sessionKey: KEY });

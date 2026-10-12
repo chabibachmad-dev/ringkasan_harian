@@ -1,6 +1,6 @@
 // Tes modul Telegram (telegram.js) dengan Bot API palsu, tanpa jaringan.
 //   node test-telegram.mjs
-import { createTelegram, readTelegramConfig, splitMessage, waToTelegramHtml } from "./telegram.js";
+import { createTelegram, readTelegramConfig, simabKeyboard, splitMessage, waToTelegramHtml } from "./telegram.js";
 
 let fails = 0;
 const check = (c, m) => { if (!c) { fails++; console.log("FAIL:", m); } else console.log("ok:", m); };
@@ -176,6 +176,86 @@ const msg = (chat, text, extra = {}) => ({ update_id: 1, message: { chat: { id: 
   const tg = createTelegram({ config: cfg(), deps: {}, fetchImpl: f, log: quiet });
   const n = await tg.send("111", Array.from({ length: 30 }, (_, i) => `baris ${i} ` + "z".repeat(300)).join("\n\n"));
   check(n > 1 && f.calls.filter((c) => c.method === "sendMessage").length === n, "kirim: pesan panjang dipecah jadi beberapa pesan");
+}
+
+
+// ---- tombol pilihan SiMAB (dari teks balasan)
+{
+  const groups = [
+    "📋 *Rekam kegiatan — Seksi Umum*", "TA 2026", "3 kelompok POK • 9 kode MAK", "",
+    "1. *4701.EBA.002* — Layanan perkantoran", "   pagu seksi Rp10.000.000",
+    "2. *4701.EBA.994*", "3. *4701.EBA.951* — Layanan sarana dan prasarana internal yang sangat panjang sekali uraiannya",
+    "", "Balas *angka* untuk memilih kelompok • *lanjut* / *balik* (hal 2/3)", "Atau *cari <kata>* untuk langsung mencari kode MAK, mis. *cari listrik* • *batal*"
+  ].join("\n");
+  const kb = simabKeyboard(groups);
+  const flat = kb.flat();
+  check(kb.slice(0, 3).every((r) => r.length === 1) && kb[0][0].callback_data === "sm:1" && kb[1][0].callback_data === "sm:2" && kb[2][0].callback_data === "sm:3", "tombol: tiap pilihan bernomor jadi satu tombol (callback sm:N)");
+  check(kb[0][0].text.startsWith("1. 4701.EBA.002") && !kb[0][0].text.includes("*") && kb[2][0].text.length <= 46 && kb[2][0].text.endsWith("…"), "tombol: label tanpa tanda *, label panjang dipotong");
+  check(flat.some((b) => b.callback_data === "sm:lanjut") && flat.some((b) => b.callback_data === "sm:balik") && flat.some((b) => b.callback_data === "sm:batal") && !flat.some((b) => /cari/.test(b.callback_data)), "tombol: Lanjut/Balik/Batal ada, 'cari <kata>' tidak dijadikan tombol");
+  const confirm = ["✅ *Ringkasan*", "MAK: *4701.EBA.002.052.A.521211*", "Jumlah: *Rp1.500.000*", "", "Balas *ya* untuk menyimpan • *ubah* untuk mengisi ulang • *batal*"].join("\n");
+  check(simabKeyboard(confirm).flat().map((b) => b.callback_data).join() === "sm:ya,sm:ubah,sm:batal", "tombol: layar konfirmasi = Ya, Ubah, Batal");
+  const del = ["🗑️ *Konfirmasi hapus kegiatan*", "ID: *AB12*", "", "Balas *ya hapus* untuk menghapus • *batal* untuk membatalkan"].join("\n");
+  check(simabKeyboard(del).flat().map((b) => b.callback_data).join() === "sm:ya hapus,sm:batal", "tombol: konfirmasi hapus = 'ya hapus' (bukan 'ya'), Batal");
+  const input = ["✅ *4701.EBA.002*", "Sisa pagu: *Rp1*", "", "Kirim *3 baris dalam satu pesan*:", "1️⃣ uraian", "2️⃣ tanggal dokumen", "3️⃣ jumlah", "", "Contoh:", "Pembelian ATK", "5/10/2026", "1.500.000", "", "*kembali* untuk memilih kode lain • *batal*"].join("\n");
+  check(simabKeyboard(input).flat().map((b) => b.callback_data).join() === "sm:kembali,sm:batal", "tombol: layar isi data = Kembali, Batal; contoh '1.500.000' bukan pilihan");
+  check(simabKeyboard("Pagu seksi umum: *Rp5.000.000*\n1. *a* — b") === null, "tombol: jawaban biasa tanpa ajakan 'Balas *angka*' tidak diberi tombol");
+  check(simabKeyboard("Dibatalkan. Tidak ada yang disimpan.") === null, "tombol: teks tanpa pilihan -> null");
+}
+
+// ---- alur tombol di Telegram
+{
+  const f = fakeApi();
+  const runs = [];
+  let session = true;
+  const LIST = ["Pilih:", "1. *AAA* — satu", "2. *BBB* — dua", "", "Balas *angka* • *batal*"].join("\n");
+  const simab = { enabled: true, hasSession: () => session, run: async (text) => { runs.push(text); if (text === "batal") { session = false; return "Perekaman dibatalkan."; } return LIST; } };
+  const tg = createTelegram({ config: cfg(), deps: { chat: async () => "ai", simab }, fetchImpl: f, log: quiet });
+  await tg.handleUpdate(msg(111, "/simab rekam umum"));
+  const sent = f.calls.filter((c) => c.method === "sendMessage");
+  const kbMsg = sent.at(-1).body;
+  check(kbMsg.reply_markup?.inline_keyboard?.length === 3 && kbMsg.reply_markup.inline_keyboard[0][0].callback_data === "sm:1", "alur: balasan SiMAB yang menunggu pilihan membawa tombol (2 nomor + batal)");
+  const cb = (data, from = 111, chat = 111, type = "private", mid = 7) => ({ update_id: 9, callback_query: { id: "cbq1", from: { id: from }, data, message: { message_id: mid, chat: { id: chat, type } } } });
+  await tg.handleUpdate(cb("sm:2"));
+  check(runs.at(-1) === "2" && f.calls.some((c) => c.method === "answerCallbackQuery"), "alur: menekan tombol 2 = mengetik '2' untuk SiMAB, dan ditandai 'diterima' ke Telegram");
+  check(f.calls.some((c) => c.method === "editMessageReplyMarkup" && c.body.message_id === 7 && c.body.reply_markup.inline_keyboard.length === 0), "alur: tombol pada pesan yang ditekan dihapus");
+  const before = runs.length;
+  await tg.handleUpdate(cb("sm:1", 222, 222));
+  await tg.handleUpdate(cb("sm:1", 111, -100, "supergroup"));
+  await tg.handleUpdate(cb("lain:1"));
+  check(runs.length === before, "keamanan: tombol dari non-pemilik, dari grup, atau data bukan 'sm:' tidak menjalankan apa pun");
+  const kbBefore = f.calls.filter((c) => c.method === "editMessageReplyMarkup").length;
+  await tg.handleUpdate(msg(111, "1"));
+  check(f.calls.filter((c) => c.method === "editMessageReplyMarkup").length > kbBefore, "alur: balasan baru berisi tombol menghapus tombol pesan sebelumnya (tidak ada tombol basi)");
+  await tg.handleUpdate(cb("sm:batal"));
+  check(runs.at(-1) === "batal" && f.texts(111).at(-1).includes("dibatalkan") && !f.calls.filter((c) => c.method === "sendMessage").at(-1).body.reply_markup, "alur: 'Batal' mengakhiri sesi, balasan akhir tanpa tombol");
+  await tg.handleUpdate(cb("sm:1"));
+  check(f.texts(111).at(-1).includes("Sesi SiMAB sudah berakhir") && runs.at(-1) === "batal", "alur: menekan tombol lama setelah sesi berakhir -> pesan 'sesi berakhir', SiMAB tidak dijalankan");
+}
+{
+  // markup hanya di potongan terakhir bila balasan panjang
+  const f = fakeApi();
+  const long = Array.from({ length: 12 }, (_, i) => `${i + 1}. *KODE${i}* — ` + "u".repeat(400)).join("\n") + "\n\nBalas *angka* • *batal*";
+  const simab = { enabled: true, hasSession: () => true, run: async () => long };
+  const tg = createTelegram({ config: cfg(), deps: { simab }, fetchImpl: f, log: quiet });
+  await tg.handleUpdate(msg(111, "/simab rekam umum"));
+  const sent = f.calls.filter((c) => c.method === "sendMessage");
+  check(sent.length > 1 && sent.slice(0, -1).every((c) => !c.body.reply_markup) && sent.at(-1).body.reply_markup, "alur: balasan panjang dipecah, tombol hanya di pesan terakhir");
+}
+
+// ---- /status
+{
+  const f = fakeApi();
+  const tg = createTelegram({ config: cfg(), deps: { status: async () => "📊 *Status Ayyubi*\nWhatsApp: tersambung" }, fetchImpl: f, log: quiet });
+  await tg.handleOwnerText("111", "/status");
+  check(f.texts(111)[0] === "📊 <b>Status Ayyubi</b>\nWhatsApp: tersambung", "status: teks dari index.js dikirim ke pemilik");
+  const f2 = fakeApi();
+  const tg2 = createTelegram({ config: cfg(), deps: { status: async () => { throw new Error("db mati"); } }, fetchImpl: f2, log: quiet });
+  await tg2.handleOwnerText("111", "/status");
+  check(f2.texts(111)[0].includes("Status gagal dibuat") && f2.texts(111)[0].includes("db mati"), "status: gagal -> pesan error, bot tetap hidup");
+  const f3 = fakeApi();
+  const tg3 = createTelegram({ config: cfg(), deps: {}, fetchImpl: f3, log: quiet });
+  await tg3.handleOwnerText("111", "/status");
+  check(f3.texts(111)[0].includes("belum tersedia"), "status: tanpa dependensi -> pesan 'belum tersedia'");
 }
 
 // ---- start & polling
