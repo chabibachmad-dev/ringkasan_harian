@@ -10,7 +10,7 @@ import { renderAiMarkdown, typesetMath } from "./markdown.js";
 import { buildStudyPdf, shareOrSaveStudyPdf, buildMaterialPdf, shareOrSaveMaterialPdf } from "./study-pdf.js";
 import { pointsFormula, studyCardFileName } from "./study-text.js";
 import { renderLessonCard, renderRoomCard, shareOrSaveCard } from "./study-card.js";
-import { allowedClasses, allowedMaterialGrades, classesOf, computePoints, formatClock, gradeText, timeLimitSeconds } from "../supabase/functions/_shared/study-core.ts";
+import { allowedClasses, allowedMaterialGrades, classesOf, computePoints, formatClock, gradeText, PRACTICE_QUESTIONS as PRACTICE_COUNT, timeLimitSeconds } from "../supabase/functions/_shared/study-core.ts";
 
 const $ = (id) => document.getElementById(id);
 let ctx = { getLang: () => "id" };
@@ -536,6 +536,7 @@ function renderResult(body) {
     .join("");
   body.innerHTML = `
     <div class="study-card study-score">
+      ${r.session.materialTitle ? `<div class="study-post-chips"><span class="study-badge study-badge--solid">${esc(L("study_kind_practice"))}</span></div>` : ""}
       <div class="study-row-title">${esc(r.session.subject)}${r.session.topic ? ` · ${esc(r.session.topic)}` : ""}</div>
       <div class="study-row-meta">${esc(r.player.name)} · ${esc(gradeText(r.session.materialGrade, r.session.materialClass))} · ${esc(L(`study_level_${r.session.level}`))} (${r.weightPercent}%)</div>
       <div class="study-score-main">${esc(L("study_score", { c: r.correct, n: r.total }))}</div>
@@ -602,6 +603,8 @@ async function onBodyClick(e) {
   if (act === "mat-new") return openMaterialCreate();
   if (act === "mat-view") return openMaterial(id);
   if (act === "mat-pdf") return materialPdf(id, btn);
+  if (act === "mat-practice") return openPracticeForm(S.materials.items.find((i) => i.id === id));
+  if (act === "mat-reader-practice") return openPracticeForm(S.material);
   if (act === "mat-reader-pdf") return materialPdf(S.material?.id, btn);
   if (act === "mat-del") return deleteMaterial(id);
   if (act === "mat-more") return loadMaterials(false);
@@ -901,25 +904,106 @@ function openLessonForm(fixedPlayer) {
       if (!res.ok) return { ok: false, error: errText(res) };
       return { ok: true, value: { res, player: pl, pin } };
     }
-  }).then((out) => {
-    if (!out) return;
-    S.player = { id: out.player.id, name: out.player.name, grade: out.player.grade, classLevel: out.player.classLevel ?? null };
-    S.pin = out.pin;
-    S.viewer = { ...S.player, pin: out.pin };
-    S.quiz = {
-      sessionId: out.res.sessionId,
-      session: out.res.session,
-      questions: out.res.questions,
-      answers: new Array(out.res.questions.length).fill(null),
-      shortfall: out.res.shortfall || 0
-    };
-    armQuizTimer(S.quiz);
-    S.autoSubmittedId = "";
-    saveAnswers(S.quiz.sessionId, S.quiz.answers);
-    S.view = "quiz";
-    render();
-    window.scrollTo(0, 0);
+  }).then(enterQuiz);
+}
+
+// Setelah sesi dibuat (pelajaran baru atau latihan materi): simpan pemain + PIN dan buka layar soal.
+function enterQuiz(out) {
+  if (!out) return;
+  S.player = { id: out.player.id, name: out.player.name, grade: out.player.grade, classLevel: out.player.classLevel ?? null };
+  S.pin = out.pin;
+  S.viewer = { ...S.player, pin: out.pin };
+  S.quiz = {
+    sessionId: out.res.sessionId,
+    session: out.res.session,
+    questions: out.res.questions,
+    answers: new Array(out.res.questions.length).fill(null),
+    shortfall: out.res.shortfall || 0
+  };
+  armQuizTimer(S.quiz);
+  S.autoSubmittedId = "";
+  saveAnswers(S.quiz.sessionId, S.quiz.answers);
+  S.view = "quiz";
+  render();
+  window.scrollTo(0, 0);
+}
+
+// ---------------------------------------------------------------- latihan dari materi
+// 10 soal yang dibuat AI dari isi materi; pelajaran, tingkat, dan kelas mengikuti materinya. Hasilnya = pelajaran biasa
+// (poin, timer, pembahasan) dan tampil di timeline dengan penanda "Latihan".
+async function openPracticeForm(material) {
+  if (!material) return;
+  const ov = S.overview;
+  if (!ov?.settings) {
+    window.alert(S.overviewError || L("study_loading"));
+    return;
+  }
+  const players = (ov.players || []).filter((p) => allowedMaterialGrades(p.grade).includes(material.grade));
+  if (players.length === 0) {
+    window.alert(L("study_practice_no_player", { grade: material.grade }));
+    return;
+  }
+  const settings = ov.settings;
+  const perQ = settings.perQuestionPoints ?? 10;
+  const bonus = settings.perfectBonusPercent ?? 0;
+  const spq = settings.secondsPerQuestion ?? 0;
+  const n = PRACTICE_COUNT;
+  const playerById = (id) => players.find((p) => p.id === id);
+  const fixed = null; // selalu minta pemain + PIN (latihan bisa dimulai dari tab Materi tanpa profil terbuka)
+  const out = await openFormDialog({
+    title: L("study_practice_title"),
+    intro: L("study_practice_intro", { title: material.title, n, subject: material.subject, grade: gradeText(material.grade, material.classLevel) }),
+    okLabel: L("study_start"),
+    cancelLabel: L("study_cancel"),
+    busyLabel: L("study_generating"),
+    fields: [
+      {
+        key: "playerId",
+        label: L("study_player"),
+        type: "select",
+        value: (fixed || players[0]).id,
+        options: players.map((p) => ({ value: p.id, label: `${p.name} (${gradeText(p.grade, p.classLevel)})` })),
+        show: () => !fixed
+      },
+      { key: "pin", label: L("study_pin"), type: "pin", show: () => !fixed },
+      {
+        key: "level",
+        label: L("study_level"),
+        type: "select",
+        value: "normal",
+        options: ["easy", "normal", "hard"].map((lv) => ({ value: lv, label: levelLabel(lv, settings) })),
+        help: (v) => {
+          const pts = fmt(computePoints(perQ, n, n, settings.weights[v.level || "normal"] ?? 100, bonus));
+          const time = timeLimitSeconds(n, spq);
+          return `${bonus > 0 ? L("study_max_points_bonus", { n: pts, b: bonus }) : L("study_max_points", { n: pts })} ${time ? L("study_time_estimate", { m: Math.ceil(time / 60), s: spq }) : L("study_time_none")}`;
+        }
+      }
+    ],
+    extra: fixed
+      ? []
+      : [
+          {
+            label: L("study_forgot_pin"),
+            onClick: (v) => {
+              const pl = playerById(v.playerId);
+              if (pl) openResetPin(pl);
+            }
+          }
+        ],
+    onSubmit: async (v) => {
+      const pl = fixed || playerById(v.playerId);
+      if (!pl) return { ok: false, error: L("study_pick_player") };
+      const pin = fixed ? S.pin : v.pin;
+      if (!validPinFormat(pin)) return { ok: false, error: L("study_pin_invalid") };
+      const res = await studyCall("session_start", { playerId: pl.id, pin, materialId: material.id, level: v.level, engine: "auto" });
+      if (!res.ok) return { ok: false, error: errText(res) };
+      return { ok: true, value: { res, player: pl, pin } };
+    }
   });
+  if (!out) return;
+  S.stack = [];
+  S.material = null;
+  enterQuiz(out);
 }
 
 async function resumeLesson(sessionId) {
@@ -1433,8 +1517,10 @@ function cardParts(it) {
     who: it.playerName,
     whoId: it.playerId,
     grade: gradeText(it.grade, it.classLevel),
-    text: `<strong>${esc(it.playerName)}</strong> ${esc(L("study_tl_finished"))} <strong>${esc(it.subject)}</strong>${topicText(it)}`,
-    chips: `<span class="study-badge">${esc(L(`study_level_${it.level}`))} (${it.weightPercent}%)</span><span class="study-badge">${esc(gradeText(it.materialGrade, it.materialClass))}</span><span class="study-badge study-badge--solid">${esc(L("study_score", { c: it.correct, n: it.total }))}</span><span class="study-post-points">+${fmt(it.points)} ${esc(L("study_pts"))}</span>`,
+    text: it.materialTitle
+      ? `<span class="study-kind">${esc(L("study_kind_practice"))}</span> <strong>${esc(it.playerName)}</strong> ${esc(L("study_tl_practiced"))} <strong>${esc(it.materialTitle)}</strong>`
+      : `<strong>${esc(it.playerName)}</strong> ${esc(L("study_tl_finished"))} <strong>${esc(it.subject)}</strong>${topicText(it)}`,
+    chips: `${it.materialTitle ? `<span class="study-badge">${esc(it.subject)}</span>` : ""}<span class="study-badge">${esc(L(`study_level_${it.level}`))} (${it.weightPercent}%)</span><span class="study-badge">${esc(gradeText(it.materialGrade, it.materialClass))}</span><span class="study-badge study-badge--solid">${esc(L("study_score", { c: it.correct, n: it.total }))}</span><span class="study-post-points">+${fmt(it.points)} ${esc(L("study_pts"))}</span>`,
     extra: ""
   };
 }
@@ -1743,6 +1829,7 @@ function materialsHtml() {
       <div class="study-material-actions">
         <button type="button" class="primary-btn" data-act="mat-view" data-id="${esc(it.id)}">${esc(L("study_mat_view"))}</button>
         <button type="button" class="secondary-btn" data-act="mat-pdf" data-id="${esc(it.id)}">${esc(L("study_mat_pdf"))}</button>
+        <button type="button" class="secondary-btn" data-act="mat-practice" data-id="${esc(it.id)}">${esc(L("study_practice_btn"))}</button>
         <button type="button" class="study-link-btn" data-act="mat-del" data-id="${esc(it.id)}">${esc(L("study_mat_delete"))}</button>
       </div>
     </article>`
@@ -1765,7 +1852,10 @@ function renderMaterial(body) {
       <div class="study-post-chips"><span class="study-badge">${esc(m.subject)}</span><span class="study-badge">${esc(gradeText(m.grade, m.classLevel))}</span></div>
       <div class="study-row-meta">${esc(L("study_mat_by", { name: m.creatorName }))} · ${esc(fmtDate(m.createdAt))}</div>
       <div class="study-row-meta">${esc(m.detail)}</div>
-      <div class="study-actions"><button type="button" class="primary-btn" data-act="mat-reader-pdf" ${m.content ? "" : "disabled"}>${esc(L("study_mat_pdf"))}</button></div>
+      <div class="study-actions">
+        <button type="button" class="primary-btn" data-act="mat-reader-practice">${esc(L("study_practice_btn"))}</button>
+        <button type="button" class="secondary-btn" data-act="mat-reader-pdf" ${m.content ? "" : "disabled"}>${esc(L("study_mat_pdf"))}</button>
+      </div>
     </div>
     ${m.content ? `<article class="study-material-body chat-md">${mdBlock(m.content)}</article><p class="study-hint">${esc(L("study_mat_hint"))}</p>` : `<p class="status-text">${esc(L("study_loading"))}</p>`}`;
 }
@@ -1899,6 +1989,7 @@ function openMaterialDone(material) {
         <div class="study-done-actions">
           <button type="button" class="primary-btn" data-done="view">${esc(L("study_mat_view"))}</button>
           <button type="button" class="secondary-btn" data-done="pdf">${esc(L("study_mat_pdf"))}</button>
+          <button type="button" class="secondary-btn" data-done="practice">${esc(L("study_practice_btn"))}</button>
           <button type="button" class="study-link-btn" data-done="close">${esc(L("study_close"))}</button>
         </div>
       </div>`;
@@ -1921,6 +2012,7 @@ function openMaterialDone(material) {
       if (!b) return;
       const act = b.dataset.done;
       if (act === "view") finish(() => openMaterial(material.id, material));
+      else if (act === "practice") finish(() => openPracticeForm(material));
       else if (act === "close") finish();
       else if (act === "pdf") {
         b.disabled = true;

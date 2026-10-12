@@ -17,6 +17,7 @@
 //   player_profile      { playerId, pin }                                    -> { player, balance, totalEarned, sessions, redemptions, penalties, allowedGrades }
 //   pin_reset           { playerId, newPin, parentPin? }                     -> { ok }
 //   session_start       { playerId, pin, subject, topic?, materialGrade, materialClass?, level, count, engine? }
+//                       ATAU latihan dari materi: { playerId, pin, materialId, level, engine? } (10 soal dari isi materi; pelajaran/tingkat/kelas diambil dari materi)
 //                                                                            -> { sessionId, questions:[{idx,question,options}], provider, requested, shortfall }
 //   session_get         { playerId, pin, sessionId }                         -> { status, questions } | { status:"submitted", result }
 //   session_submit      { playerId, pin, sessionId, answers:[0..3|null], engine? } -> { result, explainFailed }
@@ -84,6 +85,8 @@ import {
   lockSecondsLeft,
   parseExplanations,
   parseQuestions,
+  practiceSource,
+  PRACTICE_QUESTIONS,
   validCount,
   validPin,
   verifyPin
@@ -198,6 +201,8 @@ const sessionRow = (s: Row) => ({
   topic: s.topic,
   materialGrade: s.material_grade,
   materialClass: s.material_class ?? null,
+  materialId: s.material_id ?? null,
+  materialTitle: s.material_title ?? null,
   level: s.level,
   numQuestions: s.num_questions,
   status: s.status,
@@ -294,7 +299,7 @@ const parseEngine = (v: unknown): Engine => (v === "gemini" || v === "groq" || v
 // Minta soal per kelompok (maks QUESTION_BATCH) sampai jumlah terpenuhi; soal tak sah/kembar dibuang & diminta lagi.
 async function makeQuestions(
   admin: Admin,
-  spec: { subject: string; topic?: string; grade: string; classLevel?: number | null; level: string; count: number },
+  spec: { subject: string; topic?: string; grade: string; classLevel?: number | null; level: string; count: number; source?: string },
   engine: Engine
 ): Promise<{ questions: ParsedQuestion[]; provider: string; lastError: string }> {
   const keys = getGeminiApiKeys();
@@ -712,20 +717,30 @@ Deno.serve(async (req) => {
       const auth = await checkPlayerPin(admin, body.playerId, body.pin);
       if (auth instanceof Response) return auth;
       const p = auth.player;
-      const subject = cleanLine(body.subject, 60);
-      const topic = cleanLine(body.topic, 100);
+      // Latihan dari materi: pelajaran, topik, tingkat, dan kelas diambil dari materinya; jumlah soal tetap PRACTICE_QUESTIONS.
+      let material: Row | null = null;
+      if (body.materialId !== undefined && body.materialId !== null && body.materialId !== "") {
+        if (!isUuid(body.materialId)) return fail("Materi tidak valid.");
+        const { data: m, error: me } = await admin.from("study_materials").select("*").eq("id", body.materialId).maybeSingle();
+        if (me) return fail(me.message, 500);
+        if (!m) return fail("Materi itu tidak ditemukan.", 404);
+        material = m;
+      }
+      const subject = material ? cleanLine(material.subject, 60) : cleanLine(body.subject, 60);
+      const topic = material ? cleanLine(material.title, 100) : cleanLine(body.topic, 100);
+      const materialGrade: unknown = material ? material.grade : body.materialGrade;
       if (!subject) return fail("Pilih atau ketik mata pelajaran.");
-      if (typeof body.materialGrade !== "string" || !isMaterialGradeAllowed(p.grade, body.materialGrade)) {
+      if (typeof materialGrade !== "string" || !isMaterialGradeAllowed(p.grade, materialGrade)) {
         return fail("Tingkat materi tidak boleh lebih rendah dari grade pemain.");
       }
-      const materialClass = classOf(body.materialClass);
-      if (classesOf(body.materialGrade).length > 0 && materialClass === null) return fail("Pilih kelasnya.");
-      if (!isLevelAllowed(p.grade, p.class_level, body.materialGrade, materialClass)) {
+      const materialClass = classOf(material ? material.class_level : body.materialClass);
+      if (!material && classesOf(materialGrade).length > 0 && materialClass === null) return fail("Pilih kelasnya.");
+      if (!isLevelAllowed(p.grade, p.class_level, materialGrade, materialClass)) {
         return fail("Kelas materi tidak boleh lebih rendah dari kelas pemain.");
       }
       if (typeof body.level !== "string" || !LEVELS.includes(body.level)) return fail("Level tidak valid.");
-      if (!validCount(body.count)) return fail(`Jumlah soal harus 1-${MAX_QUESTIONS}.`);
-      const count = body.count as number;
+      if (!material && !validCount(body.count)) return fail(`Jumlah soal harus 1-${MAX_QUESTIONS}.`);
+      const count = material ? PRACTICE_QUESTIONS : (body.count as number);
 
       const { count: active } = await admin.from("study_sessions").select("id", { count: "exact", head: true }).eq("player_id", p.id).eq("status", "active");
       if ((active ?? 0) >= MAX_ACTIVE_SESSIONS) {
@@ -736,7 +751,11 @@ Deno.serve(async (req) => {
       if (slot) return slot;
       const engine = parseEngine(body.engine);
       wireReporters(admin);
-      const made = await makeQuestions(admin, { subject, topic: topic || undefined, grade: body.materialGrade, classLevel: materialClass, level: body.level, count }, engine);
+      const made = await makeQuestions(
+        admin,
+        { subject, topic: topic || undefined, grade: materialGrade, classLevel: materialClass, level: body.level, count, source: material ? practiceSource(material.content) : undefined },
+        engine
+      );
       const minOk = Math.max(1, Math.ceil(count * 0.8));
       if (made.questions.length < minOk) {
         return fail(`Gagal membuat soal (${made.questions.length} dari ${count} yang layak). ${made.lastError}`.trim(), 502, { generationFailed: true });
@@ -748,7 +767,7 @@ Deno.serve(async (req) => {
       const timeLimit = spq > 0 ? made.questions.length * spq : null;
       const { data: s, error: e1 } = await admin
         .from("study_sessions")
-        .insert({ player_id: p.id, subject, topic: topic || null, material_grade: body.materialGrade, material_class: materialClass, level: body.level, num_questions: made.questions.length, provider: made.provider, time_limit_seconds: timeLimit })
+        .insert({ player_id: p.id, subject, topic: topic || null, material_grade: materialGrade, material_class: materialClass, level: body.level, num_questions: made.questions.length, provider: made.provider, time_limit_seconds: timeLimit, material_id: material?.id ?? null, material_title: material ? material.title : null })
         .select("*")
         .single();
       if (e1 || !s) return fail(e1?.message || "Gagal menyimpan pelajaran.", 500);
