@@ -2645,57 +2645,6 @@ mark.chat-search-hit--active {
   color: var(--text-muted);
 }
 
-.study-board {
-  border: 1.5px solid var(--border);
-  border-radius: 14px;
-  overflow: hidden;
-}
-
-.study-board-head,
-.study-board-row {
-  display: grid;
-  grid-template-columns: 28px minmax(0, 1fr) 46px 52px 68px;
-  gap: 6px;
-  align-items: center;
-  padding: 10px 12px;
-  text-align: left;
-  font: inherit;
-  font-size: 0.85rem;
-  color: var(--text);
-}
-
-.study-board-head {
-  font-size: 0.72rem;
-  font-weight: 700;
-  text-transform: uppercase;
-  border-bottom: 1.5px solid var(--border);
-}
-
-.study-board-head span:nth-child(n + 4),
-.study-board-row span:nth-child(n + 4) {
-  text-align: right;
-}
-
-.study-board-row {
-  width: 100%;
-  background: none;
-  border: none;
-  border-bottom: 1px solid var(--border);
-  cursor: pointer;
-}
-
-.study-board-row:last-child {
-  border-bottom: none;
-}
-
-.study-board-row:active {
-  background: var(--notify-bg);
-}
-
-.study-rank {
-  font-weight: 700;
-}
-
 .study-name {
   font-weight: 700;
   overflow: hidden;
@@ -2705,11 +2654,6 @@ mark.chat-search-hit--active {
 
 .study-pts {
   font-weight: 700;
-}
-
-.study-balance {
-  align-items: center;
-  text-align: center;
 }
 
 .study-balance-label {
@@ -3035,18 +2979,6 @@ mark.chat-search-hit--active {
 }
 
 /* ---- Study: timeline kegiatan (suka, komentar, detil) ---- */
-.study-profile-head {
-  flex-direction: row;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 12px;
-}
-
-.study-profile-info {
-  flex: 1 1 140px;
-  min-width: 0;
-}
-
 .study-avatar {
   flex: 0 0 auto;
   width: 40px;
@@ -3073,46 +3005,6 @@ mark.chat-search-hit--active {
   font-size: 0.8rem;
 }
 
-.study-viewer {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  flex-wrap: wrap;
-  padding: 8px 12px;
-  margin-bottom: 14px;
-  border: 1.5px dashed var(--border);
-  border-radius: 10px;
-  font-size: 0.8rem;
-}
-
-.study-post {
-  border: 1.5px solid var(--border);
-  border-radius: 14px;
-  padding: 14px;
-  margin-bottom: 14px;
-}
-
-.study-post-head {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.study-post-name {
-  font-weight: 800;
-}
-
-.study-post-name small {
-  font-weight: 600;
-  color: var(--text-muted);
-}
-
-.study-post-text {
-  margin: 10px 0 8px;
-  overflow-wrap: anywhere;
-}
-
 .study-post-chips {
   display: flex;
   flex-wrap: wrap;
@@ -3125,64 +3017,9 @@ mark.chat-search-hit--active {
   margin-left: auto;
 }
 
-.study-post-counts {
-  display: flex;
-  justify-content: space-between;
-  gap: 10px;
-  margin-top: 12px;
-  padding-bottom: 8px;
-  border-bottom: 1px solid var(--border);
-  font-size: 0.75rem;
-  color: var(--text-muted);
-}
-
-.study-post-actions {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 6px;
-  margin-top: 8px;
-}
-
-.study-post-btn {
-  min-height: 40px;
-  border: 1.5px solid var(--border);
-  border-radius: 10px;
-  background: transparent;
-  color: var(--text);
-  font: inherit;
-  font-weight: 700;
-  cursor: pointer;
-}
-
-.study-post-btn.is-on {
-  background: var(--accent);
-  color: var(--accent-contrast);
-}
-
 .study-post-btn:disabled {
   opacity: 0.45;
   cursor: not-allowed;
-}
-
-.study-comments {
-  margin-top: 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.study-comment {
-  display: flex;
-  gap: 8px;
-  align-items: flex-start;
-}
-
-.study-comment-main {
-  flex: 1 1 auto;
-  min-width: 0;
-  background: var(--notify-bg);
-  border-radius: 12px;
-  padding: 8px 12px;
 }
 
 .study-comment-head small {
@@ -3214,43 +3051,6 @@ mark.chat-search-hit--active {
 }
 
 /* ---- Study: tab Materi ---- */
-.study-tabs {
-  display: grid;
-  grid-auto-flow: column;
-  grid-auto-columns: 1fr;
-  gap: 0;
-  margin: 4px 0 14px;
-  border: 1.5px solid var(--border);
-  border-radius: 12px;
-  overflow: hidden;
-}
-
-.study-tab {
-  min-height: 42px;
-  border: 0;
-  background: transparent;
-  color: var(--text);
-  font: inherit;
-  font-weight: 800;
-  cursor: pointer;
-}
-
-.study-tab + .study-tab {
-  border-left: 1.5px solid var(--border);
-}
-
-.study-tab.is-on {
-  background: var(--accent);
-  color: var(--accent-contrast);
-}
-
-.study-material {
-  border: 1.5px solid var(--border);
-  border-radius: 14px;
-  padding: 14px;
-  margin-bottom: 14px;
-}
-
 .study-material-title {
   font-weight: 800;
   font-size: 1.05rem;
@@ -3376,19 +3176,6 @@ mark.chat-search-hit--active {
 .study-feed-me {
   font-size: 0.8rem;
   color: var(--text-muted);
-}
-
-.study-stats {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 8px;
-  margin-bottom: 6px;
-}
-
-.study-stat {
-  border: 1.5px solid var(--border);
-  border-radius: 12px;
-  padding: 10px 12px;
 }
 
 .study-stat-label {
@@ -3528,3 +3315,373 @@ button.study-trow:active {
   align-items: center;
   gap: 14px;
 }
+
+
+/* ================================================================
+   Study: gaya "Threads" di atas dasar Snail OS.
+   Daftar tanpa kotak (garis tipis pemisah), kolom avatar + garis utas, aksi berikon,
+   tab bergaris bawah, profil dengan avatar besar. Tetap hitam-putih, monospace, dan
+   mengikuti tema terang/gelap lewat variabel warna.
+   ================================================================ */
+
+/* tombol pintas di beranda: deretan pil yang bisa digeser */
+.study-actions--chips {
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  gap: 8px;
+  margin: 2px 0 12px;
+  scrollbar-width: none;
+}
+
+.study-actions--chips::-webkit-scrollbar {
+  display: none;
+}
+
+.study-actions--chips > .secondary-btn {
+  flex: 0 0 auto;
+  padding: 8px 16px;
+  border-radius: 999px;
+  font-size: 0.85rem;
+  white-space: nowrap;
+}
+
+/* tab: teks dengan garis bawah (bukan kotak) */
+.study-tabs {
+  display: flex;
+  margin: 0 0 2px;
+  border-bottom: 1px solid var(--border);
+}
+
+.study-tab {
+  flex: 1 1 0;
+  min-height: 44px;
+  margin-bottom: -1px;
+  border: 0;
+  border-bottom: 3px solid transparent;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.study-tab.is-on {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+}
+
+/* bilah "Masuk sebagai ..." */
+.study-viewer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 10px 2px;
+  border-bottom: 1px dashed var(--border);
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+/* kolom tulis ala "Mulai utas" */
+.study-compose-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 14px 2px;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  background: none;
+  color: var(--text-muted);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.study-compose-bar:active {
+  background: var(--notify-bg);
+}
+
+/* satu kegiatan = satu utas: kolom avatar di kiri, isi di kanan */
+.study-post {
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr);
+  column-gap: 12px;
+  padding: 14px 2px 4px;
+  border-bottom: 1px solid var(--border);
+}
+
+.study-post-side {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+
+.study-thread-line {
+  flex: 1 1 auto;
+  width: 2px;
+  min-height: 14px;
+  margin-bottom: 8px;
+  border-radius: 2px;
+  background: var(--text-muted);
+  opacity: 0.45;
+}
+
+.study-post-main {
+  min-width: 0;
+}
+
+.study-post-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.study-post-name {
+  min-width: 0;
+  font-weight: 800;
+}
+
+.study-post-name small {
+  margin-left: 4px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.study-post-time {
+  flex: 0 0 auto;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+}
+
+.study-post-text {
+  margin: 4px 0 8px;
+}
+
+.study-post-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  margin: 8px 0 0 -10px;
+}
+
+.study-post-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 38px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 0.8rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.study-post-btn:active {
+  background: var(--notify-bg);
+}
+
+.study-ico {
+  width: 19px;
+  height: 19px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.study-post-btn.is-on .study-ico {
+  fill: currentColor;
+}
+
+.study-post-counts {
+  display: flex;
+  gap: 6px;
+  margin: 0 0 10px;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.study-post-counts span + span::before {
+  content: "·";
+  margin-right: 6px;
+}
+
+/* balasan: avatar kecil + teks, tanpa gelembung */
+.study-comments {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin: 4px 0 12px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--border);
+}
+
+.study-comment {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.study-comment-main {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* papan peringkat: daftar tanpa kotak, tanpa judul kolom */
+.study-board {
+  border: 0;
+  border-radius: 0;
+  overflow: visible;
+}
+
+.study-board-row {
+  display: grid;
+  grid-template-columns: 28px 36px minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  width: 100%;
+  padding: 12px 2px;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  background: none;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.study-board-row:last-child {
+  border-bottom: 0;
+}
+
+.study-board-row:active {
+  background: var(--notify-bg);
+}
+
+.study-rank {
+  font-weight: 800;
+  text-align: center;
+}
+
+.study-board-row.is-top .study-rank {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: 2px solid var(--border);
+  border-radius: 50%;
+  font-size: 0.8rem;
+}
+
+.study-board-row:first-child .study-rank {
+  background: var(--accent);
+  color: var(--accent-contrast);
+}
+
+.study-board-main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.study-board-meta {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+}
+
+.study-board-row .study-pts {
+  text-align: right;
+  font-size: 1rem;
+}
+
+.study-board-row .study-pts small {
+  margin-left: 4px;
+  font-size: 0.68rem;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+/* profil: nama besar di kiri, avatar besar di kanan */
+.study-profile-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 4px 2px 14px;
+}
+
+.study-profile-top-main {
+  min-width: 0;
+}
+
+.study-profile-name {
+  font-size: 1.5rem;
+  font-weight: 800;
+  line-height: 1.15;
+  overflow-wrap: anywhere;
+}
+
+.study-avatar--xl {
+  width: 68px;
+  height: 68px;
+  font-size: 1.9rem;
+}
+
+.study-balance {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: 12px;
+  padding: 8px 2px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.study-balance-value {
+  font-size: 2.6rem;
+}
+
+.study-stats {
+  display: flex;
+  margin: 0 0 8px;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+
+.study-stat {
+  flex: 1 1 0;
+  min-width: 0;
+  padding: 10px 6px;
+  border-right: 1px dashed var(--border);
+  text-align: center;
+}
+
+.study-stat:last-child {
+  border-right: 0;
+}
+
+.study-stat-label {
+  font-size: 0.64rem;
+  text-transform: none;
+  overflow-wrap: anywhere;
+}
+
+.study-stat-value {
+  font-size: 1.3rem;
+}
+
+/* materi: daftar tanpa kotak */
+.study-material {
+  padding: 14px 2px;
+  border-bottom: 1px solid var(--border);
+}
+

@@ -340,32 +340,26 @@ function renderHome(body) {
   const rows = players
     .map(
       (p, i) => `
-      <button type="button" class="study-board-row" data-act="open-public" data-id="${esc(p.id)}">
+      <button type="button" class="study-board-row ${i < 3 ? "is-top" : ""}" data-act="open-public" data-id="${esc(p.id)}">
         <span class="study-rank">${i + 1}</span>
-        <span class="study-name">${esc(p.name)}</span>
-        <span>${esc(gradeText(p.grade, p.classLevel))}</span>
-        <span>${fmt(p.sessionsDone)}</span>
-        <span class="study-pts">${fmt(p.totalPoints)}</span>
+        <span class="study-avatar study-avatar--sm" aria-hidden="true">${initial(p.name)}</span>
+        <span class="study-board-main"><span class="study-name">${esc(p.name)}</span><small class="study-board-meta">${esc(gradeText(p.grade, p.classLevel))} · ${fmt(p.sessionsDone)} ${esc(L("study_col_done").toLowerCase())}</small></span>
+        <span class="study-pts">${fmt(p.totalPoints)}<small>${esc(L("study_pts"))}</small></span>
       </button>`
     )
     .join("");
   const boardHtml =
     players.length === 0
       ? `<p class="status-text">${esc(L("study_board_empty"))}</p>`
-      : `<div class="study-board" role="table">
-        <div class="study-board-head" role="row">
-          <span>#</span><span>${esc(L("study_col_name"))}</span><span>${esc(L("study_col_grade"))}</span><span>${esc(L("study_col_done"))}</span><span>${esc(L("study_col_points"))}</span>
-        </div>
-        ${rows}
-      </div>
+      : `<div class="study-board" role="table">${rows}</div>
       <p class="study-hint">${esc(L("study_board_hint"))}</p>`;
   const tab = (id, label) =>
     `<button type="button" role="tab" id="study-tab-${id}" class="study-tab ${S.tab === id ? "is-on" : ""}" aria-selected="${S.tab === id ? "true" : "false"}" data-act="tab" data-tab="${id}">${esc(label)}</button>`;
   body.innerHTML = `
-    <div class="study-actions">
-      <button type="button" class="primary-btn" data-act="new-player">${esc(L("study_new_player"))}</button>
-      <button type="button" class="primary-btn" data-act="new-lesson">${esc(L("study_new_lesson"))}</button>
-      <button type="button" class="primary-btn" data-act="rooms">${esc(L("study_rooms_btn"))}</button>
+    <div class="study-actions study-actions--chips">
+      <button type="button" class="secondary-btn" data-act="new-player">${esc(L("study_new_player"))}</button>
+      <button type="button" class="secondary-btn" data-act="new-lesson">${esc(L("study_new_lesson"))}</button>
+      <button type="button" class="secondary-btn" data-act="rooms">${esc(L("study_rooms_btn"))}</button>
     </div>
     <div class="study-tabs" role="tablist">${tab("timeline", L("study_tab_timeline"))}${tab("board", L("study_tab_board"))}${tab("materi", L("study_tab_materi"))}</div>
     ${S.loading && S.tab === "board" ? `<p class="status-text">${esc(L("study_loading"))}</p>` : ""}
@@ -444,10 +438,17 @@ function renderProfile(body) {
     : `<p class="status-text">${esc(L("study_lessons_empty"))}</p>`;
 
   body.innerHTML = `
-    <div class="study-card study-balance">
+    <div class="study-profile-top">
+      <div class="study-profile-top-main">
+        <div class="study-profile-name">${esc(p.player.name)}</div>
+        <div class="study-row-meta">${esc(gradeText(p.player.grade, p.player.classLevel))}</div>
+      </div>
+      <span class="study-avatar study-avatar--xl">${initial(p.player.name)}</span>
+    </div>
+    <div class="study-balance">
       <div class="study-balance-label">${esc(L("study_balance"))}</div>
       <div class="study-balance-value">${fmt(p.balance)}</div>
-      <div class="study-row-meta">${esc(gradeText(p.player.grade, p.player.classLevel))} · ${esc(L("study_total_earned"))}: ${fmt(p.totalEarned)}</div>
+      <div class="study-row-meta">${esc(L("study_total_earned"))}: ${fmt(p.totalEarned)}</div>
     </div>
     <div class="study-actions">
       <button type="button" class="primary-btn" data-act="new-lesson-me">${esc(L("study_new_lesson"))}</button>
@@ -1628,31 +1629,42 @@ function cardParts(it) {
   };
 }
 
+// Ikon garis (monokrom, mengikuti warna teks): suka, komentar, buka.
+const ICONS = {
+  like: '<svg class="study-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20.5s-8-4.9-8-10.7A4.6 4.6 0 0 1 12 7a4.6 4.6 0 0 1 8 2.8c0 5.8-8 10.7-8 10.7z"/></svg>',
+  comment: '<svg class="study-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M20.5 11.5a8 8 0 0 1-11.7 7.1L3.5 20l1.5-4.6A8 8 0 1 1 20.5 11.5z"/></svg>',
+  open: '<svg class="study-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 17 17 7M8.5 7H17v8.5"/></svg>'
+};
+
 function postHtml(it, feed) {
   const key = keyOf(it);
   const isOwn = isOwnItem(it);
   const cm = feed.comments[key];
   const p = cardParts(it);
   const detailLabel = it.kind === "competition" ? L("study_view_result") : it.kind === "material" ? L("study_mat_view") : L("study_detail_btn");
+  const hasReplies = it.commentCount > 0 || !!(cm && cm.open);
   return `
   <article class="study-post study-post--${esc(it.kind)}" data-card="${esc(key)}">
-    <header class="study-post-head">
+    <div class="study-post-side">
       <span class="study-avatar">${initial(p.who)}</span>
-      <div>
-        <div class="study-post-name">${nameBtn(p.whoId, p.who)} ${p.grade ? `<small>${esc(p.grade)}</small>` : ""}</div>
-        <div class="study-row-meta">${esc(fmtDateTime(it.at))}</div>
-      </div>
-    </header>
-    <p class="study-post-text">${p.text}</p>
-    <div class="study-post-chips">${p.chips}</div>
-    ${p.extra}
-    <div class="study-post-counts"><span>${esc(L("study_likes_count", { n: fmt(it.likeCount) }))}</span><span>${esc(L("study_comments_count", { n: fmt(it.commentCount) }))}</span></div>
-    <div class="study-post-actions">
-      <button type="button" class="study-post-btn ${it.liked ? "is-on" : ""}" data-act="like" data-id="${esc(key)}" aria-pressed="${it.liked ? "true" : "false"}" ${isOwn ? "disabled" : ""}>${esc(L(it.liked ? "study_liked" : "study_like"))}</button>
-      <button type="button" class="study-post-btn ${cm && cm.open ? "is-on" : ""}" data-act="comments" data-id="${esc(key)}" aria-expanded="${cm && cm.open ? "true" : "false"}">${esc(L("study_comment_btn"))}</button>
-      <button type="button" class="study-post-btn" data-act="detail" data-id="${esc(key)}">${esc(detailLabel)}</button>
+      ${hasReplies ? '<span class="study-thread-line" aria-hidden="true"></span>' : ""}
     </div>
-    ${commentsHtml(it, feed)}
+    <div class="study-post-main">
+      <header class="study-post-head">
+        <div class="study-post-name">${nameBtn(p.whoId, p.who)} ${p.grade ? `<small>${esc(p.grade)}</small>` : ""}</div>
+        <time class="study-post-time">${esc(fmtDateTime(it.at))}</time>
+      </header>
+      <p class="study-post-text">${p.text}</p>
+      <div class="study-post-chips">${p.chips}</div>
+      ${p.extra}
+      <div class="study-post-actions">
+        <button type="button" class="study-post-btn ${it.liked ? "is-on" : ""}" data-act="like" data-id="${esc(key)}" aria-pressed="${it.liked ? "true" : "false"}" ${isOwn ? "disabled" : ""}>${ICONS.like}<span>${esc(L(it.liked ? "study_liked" : "study_like"))}</span></button>
+        <button type="button" class="study-post-btn ${cm && cm.open ? "is-on" : ""}" data-act="comments" data-id="${esc(key)}" aria-expanded="${cm && cm.open ? "true" : "false"}">${ICONS.comment}<span>${esc(L("study_comment_btn"))}</span></button>
+        <button type="button" class="study-post-btn" data-act="detail" data-id="${esc(key)}">${ICONS.open}<span>${esc(detailLabel)}</span></button>
+      </div>
+      <div class="study-post-counts"><span>${esc(L("study_likes_count", { n: fmt(it.likeCount) }))}</span><span>${esc(L("study_comments_count", { n: fmt(it.commentCount) }))}</span></div>
+      ${commentsHtml(it, feed)}
+    </div>
   </article>`;
 }
 
@@ -1685,7 +1697,8 @@ function feedBodyHtml(feed, emptyKey = "study_feed_empty") {
 
 function timelineHtml() {
   if (!S.feed) S.feed = newFeed(null, null);
-  return `${viewerBarHtml()}${feedBodyHtml(S.feed)}`;
+  const composeBar = `<button type="button" class="study-compose-bar" data-act="new-lesson"><span class="study-avatar study-avatar--sm" aria-hidden="true">${S.viewer ? initial(S.viewer.name) : "+"}</span><span class="study-compose-text">${esc(L("study_compose_ph"))}</span></button>`;
+  return `${viewerBarHtml()}${composeBar}${feedBodyHtml(S.feed)}`;
 }
 
 // Tabel ringkas (profil publik, tab Solo & Kompetisi): satu baris per kegiatan, ketuk = detil.
@@ -1742,14 +1755,15 @@ function renderPublic(body) {
   const feed = pub.feeds[pub.sub];
   const content = pub.sub === "all" ? `${viewerBarHtml()}${feedBodyHtml(feed)}` : tableHtml(feed, pub.sub);
   body.innerHTML = `
-    <div class="study-card study-profile-head">
-      <span class="study-avatar study-avatar--lg">${initial(o.name)}</span>
-      <div class="study-profile-info">
-        <div class="study-row-title">${esc(o.name)}${you} <small>${esc(gradeText(o.grade, o.classLevel))}</small></div>
+    <div class="study-profile-top">
+      <div class="study-profile-top-main">
+        <div class="study-profile-name">${esc(o.name)}${you}</div>
+        <div class="study-row-meta">${esc(gradeText(o.grade, o.classLevel))}</div>
         <div class="study-row-meta">${esc(L("study_tl_rank", { n: st.rank ?? "-" }))} · ${fmt(st.totalPoints)} ${esc(L("study_pts"))}</div>
       </div>
-      <button type="button" class="secondary-btn" data-act="tl-profile">${esc(L("study_tl_open_profile"))}</button>
+      <span class="study-avatar study-avatar--xl">${initial(o.name)}</span>
     </div>
+    <div class="study-actions study-actions--chips"><button type="button" class="secondary-btn" data-act="tl-profile">${esc(L("study_tl_open_profile"))}</button></div>
     <div class="study-stats">
       ${stat(L("study_stat_lessons"), st.lessons, L("study_stat_solo_pts", { n: fmt(st.soloPoints) }))}
       ${stat(L("study_stat_competitions"), st.competitions, L("study_stat_comp_pts", { n: fmt(st.competitionPoints) }))}
