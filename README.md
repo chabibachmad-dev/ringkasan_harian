@@ -240,6 +240,7 @@ Aplikasi ini didesain untuk dipakai sendiri, tanpa sistem login (supaya tetap si
 
 - `anon key` Supabase ada di kode frontend yang publik (memang begitu desainnya Supabase) — siapa pun yang tahu key itu bisa membaca tabel `summaries` (memang dimaksudkan publik-terbaca, isinya cuma ringkasan berita). Tabel `push_subscriptions` dan `chat_messages` dikunci total dari anon key (RLS aktif tanpa policy sama sekali) — satu-satunya jalan masuk/keluar adalah lewat Edge Function (`subscribe`, `chat`) yang jalan pakai `service_role`.
 - Edge Function `generate-summary` & `send-push` dilindungi header `x-cron-secret` supaya orang lain tidak bisa memicu Gemini API / kirim notifikasi memakai kuota kamu — pastikan secret `CRON_SECRET` di langkah 5 benar-benar di-set, karena kalau kosong pengecekan ini otomatis dilewati.
+- Edge Function `study` (menu Study) sengaja **tanpa** kode akses; pengamannya PIN pemain/orang tua dan batas pemakaian AI (lihat bagian Menu Study). Siapa pun yang tahu alamat aplikasi bisa mendaftar sebagai pemain dan memakai kuota AI sampai batas harian itu.
 - Edge Function `chat` dilindungi kode akses (`CHAT_ACCESS_CODE`) yang wajib ada — kalau secret ini belum di-set, function-nya menolak semua request (bukan fail-open seperti `x-cron-secret`).
 - `SUPABASE_SERVICE_ROLE_KEY`, `VAPID_KEYS_JSON`, dan `CHAT_ACCESS_CODE` **tidak pernah** ada di frontend — hanya tersimpan sebagai Supabase secret di server. Kode akses chat yang dimasukkan lewat browser cuma disimpan di `localStorage` device kamu sendiri, tidak pernah di-commit ke Git.
 
@@ -263,11 +264,13 @@ Menu **Study** di beranda: pemain mendaftar (nama, grade TK–S3/Umum, PIN), mem
 
 **Pasang (sekali saja):**
 
-1. Jalankan migrasi `supabase/migrations/0023_study.sql`, lalu `supabase/migrations/0024_study_social.sql` (timeline: suka & komentar). Lewat SQL Editor, atau `npx supabase db push` untuk keduanya.
+1. Jalankan migrasi `0023_study.sql`, `0024_study_social.sql` (timeline: suka & komentar), dan `0025_study_materials.sql` (materi pelajaran + pencatat pemakaian AI), berurutan. Lewat SQL Editor, atau `npx supabase db push` untuk semuanya.
 2. Deploy fungsi baru: `npx supabase functions deploy study` (sama seperti fungsi lain).
 3. Deploy ulang fungsi `chat` (`npx supabase functions deploy chat`) karena `_shared/gemini.ts` ikut berubah, lalu push frontend ke GitHub seperti biasa.
 
-Tidak ada secret baru. Fungsi `study` memakai `CHAT_ACCESS_CODE` dan kunci AI yang sudah ada (urutan: Gemini lebih dulu, lalu Groq/OpenRouter).
+Tidak ada secret baru. Fungsi `study` memakai kunci AI yang sudah ada (urutan: Gemini lebih dulu, lalu Groq/OpenRouter).
+
+**Akses tanpa kode akses chat.** Menu **Study, Shalat, Al-Qur'an, dan Info** bisa dipakai tanpa kode akses. Menu lain (Chat AI, WhatsApp, Dokumen, Template WA, Status) tetap meminta kode seperti sebelumnya. Karena Study kini terbuka untuk siapa pun yang tahu alamat aplikasinya, data dijaga oleh PIN pemain dan PIN orang tua, dan pemakaian AI dibatasi di server (konstanta di `supabase/functions/study/index.ts`): maksimal **50 pemain**, **25** pembuatan pelajaran/materi per pemain per 24 jam, dan **100** untuk seluruh pemain per 24 jam (dicatat di tabel `study_gen_log`; membatalkan pelajaran tidak mengembalikan jatah). Ubah angkanya di file itu bila perlu, lalu deploy ulang. Buat PIN orang tua di Setting agar penghapusan komentar/materi oleh orang tua bisa dipakai.
 
 **Cara kerja singkat**
 
@@ -285,6 +288,9 @@ Tidak ada secret baru. Fungsi `study` memakai `CHAT_ACCESS_CODE` dan kunci AI ya
   - Pemain tidak bisa menyukai atau mengomentari kegiatannya sendiri (dijaga di database), tetapi boleh membuka Detil-nya dan menghapus komentarnya sendiri. Komentar 1-300 karakter, maksimal 10 per pemain per pelajaran, tampil sebagai teks biasa.
   - Orang tua bisa menghapus komentar siapa pun lewat tombol **Hapus (orang tua)** (wajib PIN orang tua yang sudah dibuat).
   - Penukaran hadiah dan hukuman **tidak** tampil di timeline. Tombol **Buka profil (PIN)** di timeline membuka saldo dan hadiah; bila pemilik sudah masuk, PIN tidak diminta lagi.
+- **Materi pelajaran** (tab **Materi** di samping Leaderboard): tombol **+ Buat Materi** membuka popup pemain + PIN, grade (bebas TK-S3/Umum), mata pelajaran (daftar bawaan atau ketik sendiri), dan detail materi (maks. 300 huruf), lalu **Generate**. AI menulis materi terstruktur (tujuan belajar, penjelasan, contoh, ringkasan, latihan mandiri). Setelah jadi, muncul popup dengan **Bagikan PDF** dan **Lihat Materi**. Daftar dan isi materi bisa dibaca **semua orang tanpa PIN** (20 per halaman); setiap kartu punya tombol Lihat Materi, Bagikan PDF, dan Hapus.
+  - Hapus: pembuatnya dengan PIN pemain, atau orang tua dengan PIN orang tua (bila sudah dibuat). Materi tidak ikut terhapus bila akun pembuatnya dihapus.
+  - Materi dibuat AI, jadi periksa isinya sebelum dipakai belajar (ada pengingat di layar dan di PDF).
 - PDF hasil memakai font standar: teks Arab diganti `[teks Arab]` dan rumus ditulis sebagai teks biasa.
 
-**Uji:** `cd wa-bot && npm test` (logika murni), dan untuk database (pada DB kosong): `psql -d <db> -f supabase/migrations/0023_study.sql -f supabase/migrations/0024_study_social.sql -f supabase/tests/study_points.sql -f supabase/tests/study_social.sql` (kolom `gagal` harus 0 di kedua tes).
+**Uji:** `cd wa-bot && npm test` (logika murni), dan untuk database (pada DB kosong): `psql -d <db> -f supabase/migrations/0023_study.sql -f supabase/migrations/0024_study_social.sql -f supabase/migrations/0025_study_materials.sql -f supabase/tests/study_points.sql -f supabase/tests/study_social.sql -f supabase/tests/study_materials.sql` (kolom `gagal` harus 0 di ketiga tes).

@@ -7,11 +7,11 @@ import { t } from "./i18n.js";
 import { studyCall } from "./study-client.js";
 import { openFormDialog } from "./study-form.js";
 import { renderAiMarkdown, typesetMath } from "./markdown.js";
-import { buildStudyPdf, shareOrSaveStudyPdf } from "./study-pdf.js";
+import { buildStudyPdf, shareOrSaveStudyPdf, buildMaterialPdf, shareOrSaveMaterialPdf } from "./study-pdf.js";
 import { allowedMaterialGrades } from "../supabase/functions/_shared/study-core.ts";
 
 const $ = (id) => document.getElementById(id);
-let ctx = { getLang: () => "id", askCode: () => {}, onUnauthorized: () => {} };
+let ctx = { getLang: () => "id" };
 const L = (key, vars) => {
   let s = t(ctx.getLang(), key);
   if (vars) for (const [k, v] of Object.entries(vars)) s = s.split(`{${k}}`).join(String(v));
@@ -44,21 +44,21 @@ const S = {
   resultFrom: "profile", // dari mana hasil dibuka: "profile" (milik sendiri) | "timeline" (detil kegiatan pemain lain)
   viewer: null, // { id, name, grade, pin } pemain yang sudah "masuk" untuk suka/komentar/detil; PIN hanya di memori
   tl: null, // timeline yang sedang dibuka
-  tlScroll: 0
+  tlScroll: 0,
+  tab: "board", // tab beranda: "board" (leaderboard) | "materi"
+  materials: { items: [], hasMore: false, loading: false, loaded: false, error: "" },
+  material: null // materi yang sedang dibaca: { id, title, ..., content (null = masih dimuat) }
 };
 
 // ---------------------------------------------------------------- util
 function errText(res) {
-  if (res.noCode) return L("study_need_code");
   if (res.notDeployed) return L("study_not_deployed");
-  if (res.unauthorized) return L("study_code_wrong");
   if (res.network) return `${L("study_network")} (${res.message})`;
   if (res.status === 504 || res.status === 546 || res.status === 502 && !res.generationFailed) return L("study_timeout");
   return res.message || "Error";
 }
 
 function handleFailure(res) {
-  if (res.unauthorized) ctx.onUnauthorized();
   window.alert(errText(res));
 }
 
@@ -124,8 +124,11 @@ export function showStudyScreen() {
   S.result = null;
   S.viewer = null;
   S.tl = null;
+  S.material = null;
+  S.materials = { items: [], hasMore: false, loading: false, loaded: false, error: "" };
   render();
   loadOverview();
+  if (S.tab === "materi") loadMaterials(true);
 }
 
 export function rerenderStudy() {
@@ -151,6 +154,12 @@ function onBack() {
     }
     S.view = "profile";
     loadProfile();
+    return;
+  }
+  if (S.view === "material") {
+    S.view = "home";
+    S.material = null;
+    render();
     return;
   }
   if (S.view === "timeline") {
@@ -186,9 +195,7 @@ async function loadOverview() {
     S.overview = res;
     S.overviewError = "";
   } else {
-    if (res.unauthorized) ctx.onUnauthorized();
     S.overviewError = errText(res);
-    if (res.noCode || res.unauthorized) S.overview = null;
   }
   if (S.view === "home") render();
 }
@@ -219,7 +226,7 @@ function setTopbar() {
   const settingsBtn = $("study-settings-btn");
   if (title) {
     title.textContent =
-      S.view === "profile" && S.player ? S.player.name : S.view === "timeline" && S.tl?.owner ? S.tl.owner.name : S.view === "quiz" ? L("study_quiz_title") : S.view === "result" ? L("study_result_title") : L("study_title");
+      S.view === "profile" && S.player ? S.player.name : S.view === "timeline" && S.tl?.owner ? S.tl.owner.name : S.view === "material" ? L("study_mat_title") : S.view === "quiz" ? L("study_quiz_title") : S.view === "result" ? L("study_result_title") : L("study_title");
   }
   if (settingsBtn) settingsBtn.hidden = S.view !== "home";
 }
@@ -233,17 +240,16 @@ function render() {
   else if (S.view === "quiz") renderQuiz(body);
   else if (S.view === "result") renderResult(body);
   else if (S.view === "timeline") renderTimeline(body);
+  else if (S.view === "material") renderMaterial(body);
   typesetMath(body).catch(() => {});
 }
 
 function renderHome(body) {
   if (S.overviewError && !S.overview) {
-    const needCode = S.overviewError === L("study_need_code") || S.overviewError === L("study_code_wrong");
     body.innerHTML = `
       <div class="study-card">
         <p>${esc(S.overviewError)}</p>
         <div class="study-actions">
-          ${needCode ? `<button type="button" class="primary-btn" data-act="enter-code">${esc(L("study_enter_code"))}</button>` : ""}
           <button type="button" class="secondary-btn" data-act="reload">${esc(L("study_reload"))}</button>
         </div>
       </div>`;
@@ -266,23 +272,26 @@ function renderHome(body) {
       </button>`
     )
     .join("");
-  body.innerHTML = `
-    <div class="study-actions">
-      <button type="button" class="primary-btn" data-act="new-player">${esc(L("study_new_player"))}</button>
-      <button type="button" class="primary-btn" data-act="new-lesson">${esc(L("study_new_lesson"))}</button>
-    </div>
-    <h2 class="study-h">${esc(L("study_leaderboard"))}${S.loading ? ` <small>${esc(L("study_loading"))}</small>` : ""}</h2>
-    ${
-      players.length === 0
-        ? `<p class="status-text">${esc(L("study_board_empty"))}</p>`
-        : `<div class="study-board" role="table">
+  const boardHtml =
+    players.length === 0
+      ? `<p class="status-text">${esc(L("study_board_empty"))}</p>`
+      : `<div class="study-board" role="table">
         <div class="study-board-head" role="row">
           <span>#</span><span>${esc(L("study_col_name"))}</span><span>${esc(L("study_col_grade"))}</span><span>${esc(L("study_col_done"))}</span><span>${esc(L("study_col_points"))}</span>
         </div>
         ${rows}
       </div>
-      <p class="study-hint">${esc(L("study_board_hint"))}</p>`
-    }`;
+      <p class="study-hint">${esc(L("study_board_hint"))}</p>`;
+  const tab = (id, label) =>
+    `<button type="button" role="tab" id="study-tab-${id}" class="study-tab ${S.tab === id ? "is-on" : ""}" aria-selected="${S.tab === id ? "true" : "false"}" data-act="tab" data-tab="${id}">${esc(label)}</button>`;
+  body.innerHTML = `
+    <div class="study-actions">
+      <button type="button" class="primary-btn" data-act="new-player">${esc(L("study_new_player"))}</button>
+      <button type="button" class="primary-btn" data-act="new-lesson">${esc(L("study_new_lesson"))}</button>
+    </div>
+    <div class="study-tabs" role="tablist">${tab("board", L("study_tab_board"))}${tab("materi", L("study_tab_materi"))}</div>
+    ${S.loading && S.tab === "board" ? `<p class="status-text">${esc(L("study_loading"))}</p>` : ""}
+    <div role="tabpanel">${S.tab === "materi" ? materialsHtml() : boardHtml}</div>`;
 }
 
 function renderProfile(body) {
@@ -479,11 +488,17 @@ async function onBodyClick(e) {
   const act = btn.dataset.act;
   const id = btn.dataset.id;
   if (act === "reload") return loadOverview();
-  if (act === "enter-code") return ctx.askCode();
   if (act === "new-player") return openNewPlayerForm();
   if (act === "new-lesson") return openLessonForm(null);
   if (act === "new-lesson-me") return openLessonForm(S.player);
   if (act === "open-player") return openPlayerPin(id);
+  if (act === "tab") return switchTab(btn.dataset.tab);
+  if (act === "mat-new") return openMaterialCreate();
+  if (act === "mat-view") return openMaterial(id);
+  if (act === "mat-pdf") return materialPdf(id, btn);
+  if (act === "mat-reader-pdf") return materialPdf(S.material?.id, btn);
+  if (act === "mat-del") return deleteMaterial(id);
+  if (act === "mat-more") return loadMaterials(false);
   if (act === "open-timeline") return openTimeline(id);
   if (act === "my-timeline") return openTimeline(S.player?.id);
   if (act === "tl-profile") return openProfileFromTimeline();
@@ -1179,6 +1194,267 @@ async function openDetail(sid) {
   S.view = "result";
   render();
   window.scrollTo(0, 0);
+}
+
+// ================================================================ Materi pelajaran (tab Materi)
+const MATERIAL_DETAIL_MAX = 300;
+
+function switchTab(tab) {
+  if (tab !== "board" && tab !== "materi") return;
+  S.tab = tab;
+  render();
+  if (tab === "materi" && !S.materials.loaded && !S.materials.loading) loadMaterials(true);
+}
+
+async function loadMaterials(reset) {
+  const m = S.materials;
+  if (m.loading) return;
+  m.loading = true;
+  m.error = "";
+  if (reset) {
+    m.items = [];
+    m.hasMore = false;
+  }
+  render();
+  const last = m.items[m.items.length - 1];
+  const res = await studyCall("material_list", { before: reset ? undefined : last?.createdAt });
+  m.loading = false;
+  if (!res.ok) {
+    m.error = errText(res);
+  } else {
+    const have = new Set(m.items.map((i) => i.id));
+    m.items = m.items.concat(res.items.filter((i) => !have.has(i.id)));
+    m.hasMore = res.hasMore;
+    m.loaded = true;
+  }
+  if (S.view === "home") render();
+}
+
+function materialsHtml() {
+  const m = S.materials;
+  const cards = m.items
+    .map(
+      (it) => `
+    <article class="study-material" data-mat="${esc(it.id)}">
+      <div class="study-material-title">${esc(it.title)}</div>
+      <div class="study-post-chips"><span class="study-badge">${esc(it.subject)}</span><span class="study-badge">${esc(it.grade)}</span></div>
+      <p class="study-material-detail">${esc(it.detail)}</p>
+      <div class="study-row-meta">${esc(L("study_mat_by", { name: it.creatorName }))} · ${esc(fmtDate(it.createdAt))}</div>
+      <div class="study-material-actions">
+        <button type="button" class="primary-btn" data-act="mat-view" data-id="${esc(it.id)}">${esc(L("study_mat_view"))}</button>
+        <button type="button" class="secondary-btn" data-act="mat-pdf" data-id="${esc(it.id)}">${esc(L("study_mat_pdf"))}</button>
+        <button type="button" class="study-link-btn" data-act="mat-del" data-id="${esc(it.id)}">${esc(L("study_mat_delete"))}</button>
+      </div>
+    </article>`
+    )
+    .join("");
+  return `
+    <div class="study-actions"><button type="button" class="primary-btn" data-act="mat-new">${esc(L("study_mat_new"))}</button></div>
+    <p class="study-hint">${esc(L("study_mat_intro"))}</p>
+    ${m.error ? `<div class="study-card"><p>${esc(m.error)}</p><button type="button" class="secondary-btn" data-act="mat-more">${esc(L("study_reload"))}</button></div>` : ""}
+    ${m.loaded && m.items.length === 0 && !m.error ? `<p class="status-text">${esc(L("study_mat_empty"))}</p>` : ""}
+    ${cards}
+    ${m.loading ? `<p class="status-text">${esc(L("study_loading"))}</p>` : m.hasMore ? `<div class="study-actions"><button type="button" class="secondary-btn" data-act="mat-more">${esc(L("study_tl_more"))}</button></div>` : ""}`;
+}
+
+function renderMaterial(body) {
+  const m = S.material;
+  if (!m) return;
+  body.innerHTML = `
+    <div class="study-card">
+      <div class="study-row-title">${esc(m.title)}</div>
+      <div class="study-post-chips"><span class="study-badge">${esc(m.subject)}</span><span class="study-badge">${esc(m.grade)}</span></div>
+      <div class="study-row-meta">${esc(L("study_mat_by", { name: m.creatorName }))} · ${esc(fmtDate(m.createdAt))}</div>
+      <div class="study-row-meta">${esc(m.detail)}</div>
+      <div class="study-actions"><button type="button" class="primary-btn" data-act="mat-reader-pdf" ${m.content ? "" : "disabled"}>${esc(L("study_mat_pdf"))}</button></div>
+    </div>
+    ${m.content ? `<article class="study-material-body chat-md">${mdBlock(m.content)}</article><p class="study-hint">${esc(L("study_mat_hint"))}</p>` : `<p class="status-text">${esc(L("study_loading"))}</p>`}`;
+}
+
+async function fetchMaterial(id) {
+  const res = await studyCall("material_get", { materialId: id });
+  if (!res.ok) {
+    handleFailure(res);
+    if (res.status === 404) loadMaterials(true);
+    return null;
+  }
+  return res.material;
+}
+
+async function openMaterial(id, known) {
+  const list = S.materials.items.find((i) => i.id === id);
+  const base = known || list;
+  if (!base) return;
+  S.material = { ...base, content: known?.content || null };
+  S.view = "material";
+  render();
+  window.scrollTo(0, 0);
+  if (S.material.content) return;
+  const full = await fetchMaterial(id);
+  if (!S.material || S.material.id !== id) return; // pengguna sudah pindah
+  if (!full) {
+    S.material = null;
+    S.view = "home";
+    render();
+    return;
+  }
+  S.material = full;
+  render();
+}
+
+async function materialPdf(id, btn) {
+  if (!id) return;
+  if (btn) btn.disabled = true;
+  try {
+    const m = S.material && S.material.id === id && S.material.content ? S.material : await fetchMaterial(id);
+    if (!m) return;
+    const doc = buildMaterialPdf(m, L, locale());
+    await shareOrSaveMaterialPdf(doc, m, `${m.title}`);
+  } catch (err) {
+    window.alert(`${L("study_pdf_failed")} (${err instanceof Error ? err.message : String(err)})`);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+function openMaterialCreate() {
+  const ov = S.overview;
+  const settings = ov?.settings;
+  const players = ov?.players || [];
+  if (!settings) return window.alert(S.overviewError || L("study_loading"));
+  if (players.length === 0) return window.alert(L("study_no_players"));
+  const subjects = settings.subjects || [];
+  const playerById = (id) => players.find((p) => p.id === id);
+  return openFormDialog({
+    title: L("study_mat_create_title"),
+    intro: L("study_mat_hint"),
+    okLabel: L("study_mat_generate"),
+    cancelLabel: L("study_cancel"),
+    busyLabel: L("study_mat_generating"),
+    fields: [
+      { key: "playerId", label: L("study_player"), type: "select", value: S.viewer?.id || players[0].id, options: players.map((p) => ({ value: p.id, label: `${p.name} (${p.grade})` })) },
+      { key: "pin", label: L("study_pin"), type: "pin" },
+      {
+        key: "grade",
+        label: L("study_np_grade"),
+        type: "select",
+        value: playerById(S.viewer?.id || players[0].id)?.grade || "Umum",
+        options: GRADE_LIST.map((g) => ({ value: g, label: g }))
+      },
+      {
+        key: "subject",
+        label: L("study_subject"),
+        type: "select",
+        value: subjects[0] || CUSTOM,
+        options: [...subjects.map((x) => ({ value: x, label: x })), { value: CUSTOM, label: L("study_subject_custom") }]
+      },
+      { key: "customSubject", label: L("study_subject_custom_label"), type: "text", maxlength: 60, show: (v) => v.subject === CUSTOM },
+      { key: "detail", label: L("study_mat_detail"), type: "textarea", rows: 3, maxlength: MATERIAL_DETAIL_MAX, placeholder: L("study_mat_detail_ph"), help: L("study_mat_detail_help") }
+    ],
+    onSubmit: async (v) => {
+      if (!validPinFormat(v.pin)) return { ok: false, error: L("study_pin_invalid") };
+      const subject = v.subject === CUSTOM ? String(v.customSubject || "").trim() : v.subject;
+      if (!subject) return { ok: false, error: L("study_subject_required") };
+      const detail = String(v.detail || "").replace(/\s+/g, " ").trim();
+      if (detail.length < 3) return { ok: false, error: L("study_mat_detail_required") };
+      const res = await studyCall("material_create", { playerId: v.playerId, pin: v.pin, subject, grade: v.grade, detail, engine: "auto" });
+      if (!res.ok) return { ok: false, error: errText(res) };
+      return { ok: true, value: { material: res.material, player: playerById(v.playerId), pin: v.pin } };
+    }
+  }).then(async (out) => {
+    if (!out) return;
+    if (out.player) S.viewer = { id: out.player.id, name: out.player.name, grade: out.player.grade, pin: out.pin };
+    const { material } = out;
+    S.materials.items = [{ ...material, content: undefined }, ...S.materials.items.filter((i) => i.id !== material.id)];
+    S.materials.loaded = true;
+    if (S.view === "home") render();
+    await openMaterialDone(material);
+  });
+}
+
+// Popup setelah materi jadi: Bagikan PDF atau Lihat Materi.
+function openMaterialDone(material) {
+  return new Promise((resolve) => {
+    const dlg = document.createElement("dialog");
+    dlg.className = "chat-code-dialog study-dialog";
+    dlg.innerHTML = `
+      <div class="chat-code-form-modal">
+        <h2>${esc(L("study_mat_done_title"))}</h2>
+        <p>${esc(L("study_mat_done_text", { title: material.title }))}</p>
+        <div class="study-done-actions">
+          <button type="button" class="primary-btn" data-done="view">${esc(L("study_mat_view"))}</button>
+          <button type="button" class="secondary-btn" data-done="pdf">${esc(L("study_mat_pdf"))}</button>
+          <button type="button" class="study-link-btn" data-done="close">${esc(L("study_close"))}</button>
+        </div>
+      </div>`;
+    let finished = false;
+    const finish = (then) => {
+      if (finished) return;
+      finished = true;
+      try {
+        dlg.close();
+      } catch (_e) {
+        /* sudah tertutup */
+      }
+      dlg.remove();
+      resolve();
+      if (then) then();
+    };
+    dlg.addEventListener("close", () => finish());
+    dlg.addEventListener("click", async (e) => {
+      const b = e.target.closest?.("[data-done]");
+      if (!b) return;
+      const act = b.dataset.done;
+      if (act === "view") finish(() => openMaterial(material.id, material));
+      else if (act === "close") finish();
+      else if (act === "pdf") {
+        b.disabled = true;
+        try {
+          await shareOrSaveMaterialPdf(buildMaterialPdf(material, L, locale()), material, material.title);
+        } catch (err) {
+          window.alert(`${L("study_pdf_failed")} (${err instanceof Error ? err.message : String(err)})`);
+        } finally {
+          b.disabled = false;
+        }
+      }
+    });
+    (document.getElementById("app") || document.body).appendChild(dlg);
+    if (typeof dlg.showModal === "function") dlg.showModal();
+    else dlg.setAttribute("open", "");
+  });
+}
+
+async function deleteMaterial(id) {
+  const m = S.materials.items.find((i) => i.id === id);
+  if (!m) return;
+  const parentSet = !!S.overview?.settings?.parentPinSet;
+  const creatorOk = !!m.creatorId && (S.overview?.players || []).some((p) => p.id === m.creatorId);
+  const options = [];
+  if (creatorOk) options.push({ value: "creator", label: L("study_mat_del_creator") });
+  if (parentSet) options.push({ value: "parent", label: L("study_mat_del_parent") });
+  if (options.length === 0) return window.alert(L("study_mat_del_no_way"));
+  const done = await openFormDialog({
+    title: L("study_mat_del_title"),
+    intro: L("study_mat_del_intro", { title: m.title }),
+    okLabel: L("study_mat_delete"),
+    cancelLabel: L("study_cancel"),
+    busyLabel: L("study_loading"),
+    fields: [
+      { key: "as", label: L("study_mat_del_as"), type: "select", value: options[0].value, options },
+      { key: "pin", label: L("study_pin"), type: "pin" }
+    ],
+    onSubmit: async (v) => {
+      if (!validPinFormat(v.pin)) return { ok: false, error: L("study_pin_invalid") };
+      const params = v.as === "parent" ? { parentPin: v.pin } : { playerId: m.creatorId, pin: v.pin };
+      const res = await studyCall("material_delete", { materialId: id, ...params });
+      if (!res.ok) return { ok: false, error: errText(res) };
+      return { ok: true, value: true };
+    }
+  });
+  if (!done) return;
+  S.materials.items = S.materials.items.filter((i) => i.id !== id);
+  if (S.view === "home") render();
+  window.alert(L("study_mat_del_done"));
 }
 
 // ---------------------------------------------------------------- redeem

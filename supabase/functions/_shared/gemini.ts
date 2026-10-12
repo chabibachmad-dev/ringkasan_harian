@@ -708,6 +708,7 @@ export async function generateChatReply(
 // Urutan sama seperti chat: Gemini dulu (rotasi key + model cadangan), lalu Groq/OpenRouter bila Gemini gagal total.
 // Tanpa Google Search (soal dibuat dari pengetahuan model). Jawaban dikembalikan sebagai TEKS; pemanggil yang mem-parse
 // dan memvalidasi (Groq/OpenRouter tidak dipaksa berformat JSON, jadi pemanggil harus siap menolak keluaran jelek).
+// Opsi plain:true = teks bebas (mis. materi Markdown), tanpa memaksa JSON di Gemini.
 // ================================================================
 export interface JsonTextResult {
   text: string;
@@ -721,7 +722,7 @@ export async function generateJsonText(
   system: string,
   prompt: string,
   apiKeyOrKeys: string | string[],
-  options: { temperature?: number; engine?: "auto" | "gemini" | "groq" | "openrouter" } = {}
+  options: { temperature?: number; engine?: "auto" | "gemini" | "groq" | "openrouter"; plain?: boolean } = {}
 ): Promise<JsonTextResult> {
   const apiKeys = Array.isArray(apiKeyOrKeys) ? apiKeyOrKeys : [apiKeyOrKeys];
   const temperature = options.temperature ?? 0.7;
@@ -733,7 +734,7 @@ export async function generateJsonText(
       JSON.stringify({
         system_instruction: { parts: [{ text: system }] },
         contents: [{ role: "user", parts: [{ text: prompt }] }],
-        generationConfig: { temperature, responseMimeType: "application/json" }
+        generationConfig: options.plain ? { temperature } : { temperature, responseMimeType: "application/json" }
       });
     const steps = [{ model: primaryModel, maxAttempts: MAX_ATTEMPTS - 1 }];
     if (fallbackModel !== primaryModel) steps.push({ model: fallbackModel, maxAttempts: MAX_ATTEMPTS - 1 });

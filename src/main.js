@@ -3550,15 +3550,7 @@ async function main() {
   applyLang();
   wireEvents();
   initFeatures({ getLang: () => state.lang, getCode: () => state.chatCode });
-  initStudy({
-    getLang: () => state.lang,
-    askCode: () => openChatCodeDialog(),
-    // Server menolak kode akses yang tersimpan: lupakan supaya diminta ulang.
-    onUnauthorized: () => {
-      state.chatCode = "";
-      clearStoredChatCode();
-    }
-  });
+  initStudy({ getLang: () => state.lang });
   fixStickyHeaderOnIOSKeyboard();
   await registerServiceWorker();
   await initChat();

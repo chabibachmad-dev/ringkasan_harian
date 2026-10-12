@@ -3186,3 +3186,86 @@ mark.chat-search-hit--active {
   color: var(--text);
   font: inherit;
 }
+
+/* ---- Study: tab Materi ---- */
+.study-tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0;
+  margin: 4px 0 14px;
+  border: 1.5px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.study-tab {
+  min-height: 42px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.study-tab + .study-tab {
+  border-left: 1.5px solid var(--border);
+}
+
+.study-tab.is-on {
+  background: var(--accent);
+  color: var(--accent-contrast);
+}
+
+.study-material {
+  border: 1.5px solid var(--border);
+  border-radius: 14px;
+  padding: 14px;
+  margin-bottom: 14px;
+}
+
+.study-material-title {
+  font-weight: 800;
+  font-size: 1.05rem;
+  overflow-wrap: anywhere;
+  margin-bottom: 8px;
+}
+
+.study-material-detail {
+  margin: 8px 0 6px;
+  font-size: 0.9rem;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.study-material-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.study-material-body {
+  border: 1.5px solid var(--border);
+  border-radius: 14px;
+  padding: 14px;
+  margin-bottom: 14px;
+  overflow-wrap: anywhere;
+}
+
+.study-material-body table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.study-done-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+}

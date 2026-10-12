@@ -77,3 +77,82 @@ export function studyPdfFileName(playerName, subject, date = new Date()) {
   const d = date.toISOString().slice(0, 10);
   return `Hasil_${slug(playerName) || "pemain"}_${slug(subject) || "pelajaran"}_${d}.pdf`;
 }
+
+// Nama berkas aman untuk PDF materi, mis. "Materi_Matematika_Teorema_Pythagoras_2026-10-12.pdf".
+export function materialPdfFileName(subject, title, date = new Date()) {
+  const slug = (s, n) => String(s ?? "").normalize("NFKD").replace(/[\u0300-\u036f]/g, "").replace(/[^\p{L}\p{N}]+/gu, "_").replace(/^_+|_+$/g, "").slice(0, n);
+  return `Materi_${slug(subject, 24) || "pelajaran"}_${slug(title, 40) || "materi"}_${date.toISOString().slice(0, 10)}.pdf`;
+}
+
+// Markdown materi -> daftar blok sederhana untuk digambar jsPDF (font standar, tanpa gaya campuran per baris).
+// Tiap blok: { type: "h2"|"h3"|"p"|"li"|"quote"|"code"|"table", text, level?, num? }; text sudah lewat pdfSafeText.
+export function materialBlocks(md) {
+  const lines = String(md ?? "").replace(/\r\n?/g, "\n").split("\n");
+  const out = [];
+  let para = [];
+  let code = null;
+  const safe = (t) => pdfSafeText(t);
+  const flush = () => {
+    if (para.length) {
+      const text = safe(para.join(" "));
+      if (text) out.push({ type: "p", text });
+      para = [];
+    }
+  };
+  for (const raw of lines) {
+    const line = raw.replace(/\s+$/, "");
+    if (/^\s*```/.test(line)) {
+      if (code === null) {
+        flush();
+        code = [];
+      } else {
+        const text = code.join("\n").replace(/[^\n\t -~ -ÿ]/g, "?");
+        if (text.trim()) out.push({ type: "code", text });
+        code = null;
+      }
+      continue;
+    }
+    if (code !== null) {
+      code.push(line);
+      continue;
+    }
+    if (!line.trim()) {
+      flush();
+      continue;
+    }
+    let m;
+    if ((m = line.match(/^\s{0,3}(#{1,6})\s+(.*)$/))) {
+      flush();
+      const text = safe(m[2]);
+      if (text) out.push({ type: m[1].length <= 2 ? "h2" : "h3", text });
+    } else if (/^\s*([-*_])(\s*\1){2,}\s*$/.test(line)) {
+      flush();
+    } else if ((m = line.match(/^(\s*)[-*+]\s+(.*)$/))) {
+      flush();
+      const text = safe(m[2]);
+      if (text) out.push({ type: "li", text, level: Math.min(3, Math.floor(m[1].length / 2)) });
+    } else if ((m = line.match(/^(\s*)(\d{1,3})[.)]\s+(.*)$/))) {
+      flush();
+      const text = safe(m[3]);
+      if (text) out.push({ type: "li", text, level: Math.min(3, Math.floor(m[1].length / 2)), num: m[2] });
+    } else if ((m = line.match(/^\s*>\s?(.*)$/))) {
+      flush();
+      const text = safe(m[1]);
+      if (text) out.push({ type: "quote", text });
+    } else if (/^\s*\|.*\|\s*$/.test(line)) {
+      flush();
+      if (/^\s*\|[\s:|-]+\|\s*$/.test(line)) continue; // baris pemisah |---|---|
+      const cells = line.trim().replace(/^\||\|$/g, "").split("|").map((c) => safe(c)).filter((c, i, a) => c !== "" || a.length > 1);
+      const text = cells.join(" | ");
+      if (text.trim()) out.push({ type: "table", text });
+    } else {
+      para.push(line.trim());
+    }
+  }
+  if (code !== null) {
+    const text = code.join("\n").replace(/[^\n\t -~ -ÿ]/g, "?");
+    if (text.trim()) out.push({ type: "code", text });
+  }
+  flush();
+  return out;
+}

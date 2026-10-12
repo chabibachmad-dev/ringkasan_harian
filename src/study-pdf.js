@@ -2,7 +2,7 @@
 // supaya hasilnya sama di semua perangkat. Teks dibersihkan lewat pdfSafeText (font standar PDF hanya Latin-1).
 
 import { jsPDF } from "jspdf";
-import { pdfSafeText, studyPdfFileName } from "./study-text.js";
+import { pdfSafeText, studyPdfFileName, materialBlocks, materialPdfFileName } from "./study-text.js";
 
 const LETTERS = ["A", "B", "C", "D"];
 
@@ -92,8 +92,15 @@ export function buildStudyPdf(result, L, locale = "id-ID") {
 }
 
 // Bagikan lewat lembar bagikan perangkat (Web Share API dengan berkas) bila ada; kalau tidak, unduh.
-export async function shareOrSaveStudyPdf(doc, result, shareTitle) {
-  const name = studyPdfFileName(result.player?.name, result.session?.subject);
+export function shareOrSaveStudyPdf(doc, result, shareTitle) {
+  return shareOrSaveFile(doc, studyPdfFileName(result.player?.name, result.session?.subject), shareTitle);
+}
+
+export function shareOrSaveMaterialPdf(doc, material, shareTitle) {
+  return shareOrSaveFile(doc, materialPdfFileName(material.subject, material.title, material.createdAt ? new Date(material.createdAt) : new Date()), shareTitle);
+}
+
+async function shareOrSaveFile(doc, name, shareTitle) {
   try {
     const blob = doc.output("blob");
     const file = new File([blob], name, { type: "application/pdf" });
@@ -107,4 +114,77 @@ export async function shareOrSaveStudyPdf(doc, result, shareTitle) {
   }
   doc.save(name);
   return "saved";
+}
+
+// PDF materi pelajaran. material = { title, subject, grade, detail, creatorName, createdAt, content (Markdown) }.
+export function buildMaterialPdf(material, L, locale = "id-ID") {
+  const doc = new jsPDF({ unit: "pt", format: "a4" });
+  const pageWidth = doc.internal.pageSize.getWidth();
+  const pageHeight = doc.internal.pageSize.getHeight();
+  const margin = 48;
+  const maxWidth = pageWidth - margin * 2;
+  let y = margin;
+
+  const ensureSpace = (h) => {
+    if (y + h > pageHeight - margin) {
+      doc.addPage();
+      y = margin;
+    }
+  };
+  const write = (text, { size = 10.5, bold = false, gap = 0, indent = 0, gray = false, font = "helvetica", prefix = "" } = {}) => {
+    doc.setFont(font, bold ? "bold" : "normal");
+    doc.setFontSize(size);
+    doc.setTextColor(gray ? 110 : 0);
+    const lh = size * 1.4;
+    let first = true;
+    for (const para of String(text).split("\n")) {
+      const lines = para.trim() ? doc.splitTextToSize((first ? prefix : "") + para, maxWidth - indent) : [""];
+      for (const line of lines) {
+        ensureSpace(lh);
+        doc.text(line, margin + indent, y);
+        y += lh;
+      }
+      first = false;
+    }
+    y += gap;
+  };
+
+  const when = material.createdAt ? new Date(material.createdAt) : new Date();
+  write(pdfSafeText(material.title || ""), { size: 17, bold: true, gap: 4 });
+  write(pdfSafeText(`${material.subject || ""}  |  ${L("study_np_grade")}: ${material.grade || ""}`), { size: 10, gray: true });
+  write(pdfSafeText(`${L("study_mat_pdf_by")}: ${material.creatorName || "-"}  |  ${when.toLocaleDateString(locale, { dateStyle: "long" })}`), { size: 10, gray: true });
+  if (material.detail) write(pdfSafeText(`${L("study_mat_pdf_detail")}: ${material.detail}`), { size: 10, gray: true });
+  write(pdfSafeText(L("study_mat_pdf_note")), { size: 9, gray: true, gap: 12 });
+
+  for (const b of materialBlocks(material.content)) {
+    if (b.type === "h2") {
+      ensureSpace(40);
+      y += 6;
+      write(b.text, { size: 14, bold: true, gap: 3 });
+    } else if (b.type === "h3") {
+      ensureSpace(32);
+      y += 3;
+      write(b.text, { size: 12, bold: true, gap: 2 });
+    } else if (b.type === "li") {
+      write(b.text, { indent: 12 + (b.level || 0) * 14, prefix: b.num ? `${b.num}. ` : "- ", gap: 1 });
+    } else if (b.type === "quote") {
+      write(b.text, { indent: 14, gray: true, gap: 3 });
+    } else if (b.type === "code") {
+      write(b.text, { size: 9.5, font: "courier", indent: 10, gap: 5 });
+    } else if (b.type === "table") {
+      write(b.text, { size: 9.5, indent: 10, gap: 1 });
+    } else {
+      write(b.text, { gap: 5 });
+    }
+  }
+
+  const pages = doc.getNumberOfPages();
+  for (let p = 1; p <= pages; p++) {
+    doc.setPage(p);
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(8);
+    doc.setTextColor(120);
+    doc.text(`${p} / ${pages}`, pageWidth - margin, pageHeight - 24, { align: "right" });
+  }
+  return doc;
 }

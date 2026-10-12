@@ -1,7 +1,8 @@
 // Edge Function untuk menu "Study" (latihan soal pilihan ganda buatan AI, poin, redeem, hukuman).
 //
-// Seperti `chat`, semua request wajib membawa kode akses (CHAT_ACCESS_CODE) -- tabel study_* dikunci total
-// dari anon key (lihat migrations/0023_study.sql). Di atas kode akses ada dua lapis PIN:
+// Menu Study TIDAK memakai kode akses chat: siapa pun yang membuka aplikasi bisa memakainya. Tabel study_* dikunci
+// total dari anon key (lihat migrations/0023_study.sql); semua baca/tulis lewat fungsi ini. Pengamannya ada dua lapis PIN
+// plus pembatas pemakaian AI (jumlah pemain, permintaan per pemain & global per 24 jam, lihat konstanta di bawah):
 //   - PIN pemain  : membuka profil/saldo, memulai & mengumpulkan pelajaran, redeem. Disimpan sebagai hash
 //                   PBKDF2 + salt; salah 5 kali = terkunci 5 menit.
 //   - PIN orang tua: untuk reset PIN pemain, hukuman poin, setting, hadiah, dan menandai hadiah "sudah diberikan".
@@ -9,7 +10,7 @@
 // KUNCI JAWABAN tidak pernah dikirim ke klien sebelum pelajaran dikumpulkan. Poin dihitung di database
 // (fungsi study_submit_session), BUKAN oleh AI; AI hanya membuat soal dan menulis pembahasan.
 //
-// Body request (semua: { "code": "...", "action": "...", ... }); respons selalu { ok: boolean, ... }:
+// Body request (semua: { "action": "...", ... }); respons selalu { ok: boolean, ... }:
 //   overview            -> { players: [{id,name,grade,sessionsDone,totalPoints,balance}], settings, grades }
 //   player_create       { name, grade, pin }                                 -> { player }
 //   player_profile      { playerId, pin }                                    -> { player, balance, totalEarned, sessions, redemptions, penalties, allowedGrades }
@@ -37,6 +38,11 @@
 //   comment_add         { viewerId, viewerPin, sessionId, body }             -> { comment, count }
 //   comment_delete      { commentId, viewerId?, viewerPin? | parentPin }     -> { ok, count }   (penulisnya, atau orang tua bila PIN-nya sudah dibuat)
 //   result_detail       { viewerId, viewerPin, sessionId }                   -> { result }   (soal + jawaban + kunci + pembahasan, hanya pelajaran selesai)
+//   -- materi pelajaran buatan AI (tab "Materi"); DAFTAR & ISI bisa dibaca semua orang tanpa PIN, membuat butuh PIN pemain
+//   material_list       { before? }                                          -> { items:[{id,title,subject,grade,detail,creatorName,createdAt}], hasMore }
+//   material_get        { materialId }                                       -> { material:{...,content} }
+//   material_create     { playerId, pin, subject, grade, detail, engine? }   -> { material:{...,content} }
+//   material_delete     { materialId, playerId?, pin? | parentPin }          -> { ok }   (pembuatnya dengan PIN, atau orang tua bila PIN-nya sudah dibuat)
 
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { corsHeaders } from "../_shared/cors.ts";
@@ -50,8 +56,11 @@ import {
   PIN_MAX_FAILURES,
   QUESTION_BATCH,
   allowedMaterialGrades,
+  MATERIAL_DETAIL_MAX,
   buildExplainPrompt,
+  buildMaterialPrompt,
   buildQuestionPrompt,
+  cleanMaterial,
   cleanLine,
   hashPin,
   isMaterialGradeAllowed,
@@ -68,6 +77,9 @@ type Admin = ReturnType<typeof createClient>;
 // deno-lint-ignore no-explicit-any
 type Row = Record<string, any>;
 
+const MAX_PLAYERS = 50; // batas jumlah pemain (Study terbuka tanpa kode akses)
+const GEN_PER_PLAYER_DAY = 25; // permintaan buat pelajaran/materi per pemain per 24 jam
+const GEN_GLOBAL_DAY = 100; // total permintaan buat pelajaran/materi semua pemain per 24 jam
 const MAX_ACTIVE_SESSIONS = 3; // sesi belum dikumpulkan per pemain (mencegah memboroskan kuota AI)
 const GENERATION_BUDGET_MS = 100_000; // berhenti meminta soal tambahan setelah ini (batas fungsi ±150 dtk)
 const EXPLAIN_BATCH = 10;
@@ -345,6 +357,43 @@ function readSettingsInput(body: Row): { ok: true; value: Row } | { ok: false; e
   return { ok: true, value: { base_points: base, weight_easy: easy, weight_normal: normal, weight_hard: hard, subjects, updated_at: new Date().toISOString() } };
 }
 
+// ---------------------------------------------------------------- pembatas pemakaian AI
+// Mencatat satu permintaan pembuatan soal/materi, atau menolaknya bila batas 24 jam terlampaui.
+// Dicatat SEBELUM AI dipanggil (gagal pun tetap memakai kuota), dan pembatalan pelajaran tidak menghapus catatannya.
+async function takeGenerationSlot(admin: Admin, playerId: string, kind: "lesson" | "material"): Promise<Response | null> {
+  const since = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
+  const [mine, all] = await Promise.all([
+    admin.from("study_gen_log").select("id", { count: "exact", head: true }).eq("player_id", playerId).gte("created_at", since),
+    admin.from("study_gen_log").select("id", { count: "exact", head: true }).gte("created_at", since)
+  ]);
+  if ((mine.count ?? 0) >= GEN_PER_PLAYER_DAY) {
+    return fail(`Batas harian tercapai: maksimal ${GEN_PER_PLAYER_DAY} pembuatan soal/materi per pemain dalam 24 jam. Coba lagi nanti.`, 429, { dailyLimit: true });
+  }
+  if ((all.count ?? 0) >= GEN_GLOBAL_DAY) {
+    return fail("Batas harian pembuatan soal/materi untuk seluruh pemain sudah tercapai. Coba lagi besok.", 429, { dailyLimit: true });
+  }
+  await admin.from("study_gen_log").insert({ kind, player_id: playerId });
+  // bersih-bersih catatan lama (tidak perlu disimpan lebih dari beberapa hari)
+  if (Math.random() < 0.05) await admin.from("study_gen_log").delete().lt("created_at", new Date(Date.now() - 3 * 24 * 3600 * 1000).toISOString());
+  return null;
+}
+
+// ---------------------------------------------------------------- materi pelajaran: bantu
+const MATERIAL_PAGE = 20;
+const MATERIAL_PER_PLAYER_ATTEMPTS = 2; // percobaan membuat materi (bila AI mengembalikan jawaban tak layak)
+
+const materialRow = (m: Row, withContent = false) => ({
+  id: m.id,
+  creatorId: m.creator_id ?? null,
+  title: m.title,
+  subject: m.subject,
+  grade: m.grade,
+  detail: m.detail,
+  creatorName: m.creator_name,
+  createdAt: m.created_at,
+  ...(withContent ? { content: m.content } : {})
+});
+
 // ---------------------------------------------------------------- timeline: bantu
 const TIMELINE_PAGE = 20;
 const COMMENT_MAX = 300;
@@ -378,10 +427,6 @@ Deno.serve(async (req) => {
     return fail("Body harus JSON valid", 400);
   }
 
-  const expectedCode = Deno.env.get("CHAT_ACCESS_CODE");
-  if (!expectedCode) return fail("CHAT_ACCESS_CODE belum di-set sebagai Supabase secret.", 500);
-  if (typeof body.code !== "string" || body.code !== expectedCode) return fail("Kode akses salah.", 401);
-
   const admin = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
   const action = String(body.action ?? "");
 
@@ -405,6 +450,8 @@ Deno.serve(async (req) => {
       if (!name) return fail("Nama wajib diisi.");
       if (typeof body.grade !== "string" || !GRADES.includes(body.grade)) return fail("Grade tidak valid.");
       if (!validPin(body.pin)) return fail("PIN harus 4-6 angka.");
+      const { count: nPlayers } = await admin.from("study_players").select("id", { count: "exact", head: true });
+      if ((nPlayers ?? 0) >= MAX_PLAYERS) return fail(`Jumlah pemain sudah mencapai batas (${MAX_PLAYERS}).`, 429);
       const { salt, hash } = await hashPin(body.pin as string);
       const { data, error } = await admin.from("study_players").insert({ name, grade: body.grade, pin_salt: salt, pin_hash: hash }).select("id,name,grade").single();
       if (error) return error.code === "23505" ? fail("Nama itu sudah dipakai pemain lain.", 409) : fail(error.message, 500);
@@ -476,6 +523,8 @@ Deno.serve(async (req) => {
         return fail(`Ada ${active} pelajaran yang belum selesai. Selesaikan atau batalkan dulu sebelum membuat yang baru.`, 429, { tooManyActive: true });
       }
 
+      const slot = await takeGenerationSlot(admin, p.id, "lesson");
+      if (slot) return slot;
       const engine = parseEngine(body.engine);
       wireReporters(admin);
       const made = await makeQuestions(admin, { subject, topic: topic || undefined, grade: body.materialGrade, level: body.level, count }, engine);
@@ -806,6 +855,99 @@ Deno.serve(async (req) => {
       const { data: owner } = await admin.from("study_players").select("id,name,grade").eq("id", ss.session.player_id).maybeSingle();
       if (!owner) return fail("Pemain tidak ditemukan.", 404);
       return json({ ok: true, result: await loadResult(admin, ss.session, owner) });
+    }
+
+    // ------------------------------------------------------------ materi: daftar (tanpa PIN)
+    if (action === "material_list") {
+      let before: string | null = null;
+      if (typeof body.before === "string" && body.before) {
+        if (body.before.length > 40 || !/^\d{4}-\d{2}-\d{2}T[\d:.]+(Z|[+-]\d{2}:?\d{2})$/.test(body.before) || Number.isNaN(new Date(body.before).getTime())) {
+          return fail("Kursor halaman tidak valid.");
+        }
+        before = body.before;
+      }
+      let q = admin.from("study_materials").select("id,title,subject,grade,detail,creator_name,created_at").order("created_at", { ascending: false }).limit(MATERIAL_PAGE + 1);
+      if (before) q = q.lt("created_at", before);
+      const { data, error } = await q;
+      if (error) return fail(error.message, 500);
+      const rows = (data ?? []) as Row[];
+      return json({ ok: true, items: rows.slice(0, MATERIAL_PAGE).map((m) => materialRow(m)), hasMore: rows.length > MATERIAL_PAGE });
+    }
+
+    // ------------------------------------------------------------ materi: isi (tanpa PIN)
+    if (action === "material_get") {
+      if (!isUuid(body.materialId)) return fail("Materi tidak valid.");
+      const { data: m, error } = await admin.from("study_materials").select("*").eq("id", body.materialId).maybeSingle();
+      if (error) return fail(error.message, 500);
+      if (!m) return fail("Materi itu tidak ditemukan.", 404);
+      return json({ ok: true, material: materialRow(m, true) });
+    }
+
+    // ------------------------------------------------------------ materi: buat (PIN pemain)
+    if (action === "material_create") {
+      const auth = await checkPlayerPin(admin, body.playerId, body.pin);
+      if (auth instanceof Response) return auth;
+      const p = auth.player;
+      const subject = cleanLine(body.subject, 60);
+      const detail = cleanLine(body.detail, MATERIAL_DETAIL_MAX + 1);
+      if (!subject) return fail("Pilih atau ketik mata pelajaran.");
+      if (typeof body.grade !== "string" || !GRADES.includes(body.grade)) return fail("Grade tidak valid.");
+      if (detail.length < 3) return fail("Tulis detail materi yang diinginkan (minimal 3 karakter).");
+      if (detail.length > MATERIAL_DETAIL_MAX) return fail(`Detail materi maksimal ${MATERIAL_DETAIL_MAX} karakter.`);
+
+      const slot = await takeGenerationSlot(admin, p.id, "material");
+      if (slot) return slot;
+      const engine = parseEngine(body.engine);
+      wireReporters(admin);
+      const keys = getGeminiApiKeys();
+      const prompt = buildMaterialPrompt({ subject, grade: body.grade, detail });
+      let made: { title: string; content: string } | null = null;
+      let provider = "gemini";
+      let lastError = "";
+      let tokens = 0;
+      let cost = 0;
+      for (let attempt = 0; attempt < MATERIAL_PER_PLAYER_ATTEMPTS && !made; attempt++) {
+        try {
+          const r = await generateJsonText(prompt.system, prompt.user, keys, { temperature: 0.6, engine, plain: true });
+          tokens += r.tokensUsed;
+          cost += r.costUsd;
+          if (r.provider) provider = r.provider;
+          made = cleanMaterial(r.text, `${subject}: ${detail}`);
+          if (!made) lastError = "AI mengembalikan materi yang terlalu pendek atau tidak bisa dipakai.";
+        } catch (err) {
+          lastError = err instanceof Error ? err.message : String(err);
+          console.error("study material_create:", lastError);
+        }
+      }
+      await recordTokens(admin, tokens, cost);
+      if (!made) return fail(`Gagal membuat materi. ${lastError}`.trim(), 502, { generationFailed: true });
+      const { data: m, error } = await admin
+        .from("study_materials")
+        .insert({ creator_id: p.id, creator_name: p.name, subject, grade: body.grade, detail, title: made.title, content: made.content, provider })
+        .select("*")
+        .single();
+      if (error || !m) return fail(error?.message || "Gagal menyimpan materi.", 500);
+      return json({ ok: true, material: materialRow(m, true) });
+    }
+
+    // ------------------------------------------------------------ materi: hapus (pembuat dengan PIN / orang tua)
+    if (action === "material_delete") {
+      if (!isUuid(body.materialId)) return fail("Materi tidak valid.");
+      const { data: m } = await admin.from("study_materials").select("id,creator_id").eq("id", body.materialId).maybeSingle();
+      if (!m) return fail("Materi itu tidak ditemukan.", 404);
+      if (body.playerId) {
+        const v = await checkPlayerPin(admin, body.playerId, body.pin);
+        if (v instanceof Response) return v;
+        if (v.player.id !== m.creator_id) return fail("Hanya pembuat materi yang bisa menghapusnya.", 403);
+      } else {
+        const settings = await loadSettings(admin);
+        if (!settings?.parent_pin_hash) return fail("PIN orang tua belum dibuat. Buat dulu di Setting.", 403);
+        const par = await checkParentPin(admin, body.parentPin);
+        if (par instanceof Response) return par;
+      }
+      const { error } = await admin.from("study_materials").delete().eq("id", m.id);
+      if (error) return fail(error.message, 500);
+      return json({ ok: true });
     }
 
     return fail("action tidak dikenal.", 400);
