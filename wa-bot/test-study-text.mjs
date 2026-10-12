@@ -1,6 +1,6 @@
 // Tes pengubah teks PDF hasil belajar (src/study-text.js).
 //   node test-study-text.mjs
-import { pdfSafeText, studyPdfFileName, materialBlocks, materialPdfFileName } from "../src/study-text.js";
+import { pdfSafeText, studyPdfFileName, materialBlocks, materialPdfFileName, pointsFormula } from "../src/study-text.js";
 
 let fails = 0;
 const check = (c, m) => { if (!c) { fails++; console.log("FAIL:", m); } else console.log("ok:", m); };
@@ -38,6 +38,17 @@ check(materialPdfFileName("", "", new Date("2026-10-12T05:00:00Z")) === "Materi_
   check(materialBlocks("").length === 0 && materialBlocks(null).length === 0, "kosong -> tanpa blok");
   check(materialBlocks("# Judul\nIsi").map((x) => x.type).join(",") === "h2,p", "H1 diperlakukan sebagai judul bagian");
   check(materialBlocks("```\ntanpa penutup").map((x) => x.type).join(",") === "code", "code fence tanpa penutup tetap diproses");
+}
+
+{
+  const L = (k, v = {}) => ({
+    study_formula_new: "Poin = {perq} x {correct} benar x {weight}%",
+    study_formula_bonus: "x {b}% (bonus)",
+    study_pdf_formula: "Poin = {base} x {correct}/{total} x {weight}%"
+  })[k].replace(/\{(\w+)\}/g, (_m, n) => v[n]);
+  eq(pointsFormula({ perQuestionPoints: 10, correct: 8, total: 10, weightPercent: 100, bonusPercent: 0 }, L), "Poin = 10 x 8 benar x 100%", "rumus baru tanpa bonus");
+  eq(pointsFormula({ perQuestionPoints: 10, correct: 10, total: 10, weightPercent: 120, bonusPercent: 10 }, L), "Poin = 10 x 10 benar x 120% x 110% (bonus)", "rumus baru dengan bonus sempurna");
+  eq(pointsFormula({ perQuestionPoints: null, basePoints: 100, correct: 8, total: 10, weightPercent: 100 }, L), "Poin = 100 x 8/10 x 100%", "pelajaran lama memakai rumus lama");
 }
 
 if (fails) { console.log(`\n${fails} GAGAL`); process.exit(1); }

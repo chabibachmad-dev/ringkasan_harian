@@ -2,7 +2,7 @@
 // supaya hasilnya sama di semua perangkat. Teks dibersihkan lewat pdfSafeText (font standar PDF hanya Latin-1).
 
 import { jsPDF } from "jspdf";
-import { pdfSafeText, studyPdfFileName, materialBlocks, materialPdfFileName } from "./study-text.js";
+import { pdfSafeText, studyPdfFileName, materialBlocks, materialPdfFileName, pointsFormula } from "./study-text.js";
 import { gradeText } from "../supabase/functions/_shared/study-core.ts";
 
 const LETTERS = ["A", "B", "C", "D"];
@@ -57,7 +57,7 @@ export function buildStudyPdf(result, L, locale = "id-ID") {
     { size: 13, bold: true }
   );
   write(
-    pdfSafeText(L("study_pdf_formula", { base: result.basePoints, correct: result.correct, total: result.total, weight: result.weightPercent })),
+    pdfSafeText(pointsFormula(result, L)),
     { size: 9, gray: true, gap: 12 }
   );
 

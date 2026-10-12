@@ -8,7 +8,8 @@ import { studyCall } from "./study-client.js";
 import { openFormDialog } from "./study-form.js";
 import { renderAiMarkdown, typesetMath } from "./markdown.js";
 import { buildStudyPdf, shareOrSaveStudyPdf, buildMaterialPdf, shareOrSaveMaterialPdf } from "./study-pdf.js";
-import { allowedClasses, allowedMaterialGrades, classesOf, gradeText } from "../supabase/functions/_shared/study-core.ts";
+import { pointsFormula } from "./study-text.js";
+import { allowedClasses, allowedMaterialGrades, classesOf, computePoints, formatClock, gradeText, timeLimitSeconds } from "../supabase/functions/_shared/study-core.ts";
 
 const $ = (id) => document.getElementById(id);
 let ctx = { getLang: () => "id" };
@@ -40,6 +41,7 @@ const S = {
   profile: null,
   quiz: null, // { sessionId, session, questions, answers }
   result: null,
+  autoSubmittedId: "", // id pelajaran yang dikumpulkan otomatis karena waktu habis (untuk pesan di hasil)
   explainFailed: false,
   resultFrom: "profile", // dari mana hasil dibuka: "profile" (milik sendiri) | "timeline" (detil kegiatan pemain lain)
   viewer: null, // { id, name, grade, pin } pemain yang sudah "masuk" untuk suka/komentar/detil; PIN hanya di memori
@@ -242,6 +244,53 @@ function render() {
   else if (S.view === "timeline") renderTimeline(body);
   else if (S.view === "material") renderMaterial(body);
   typesetMath(body).catch(() => {});
+  syncQuizTimer();
+}
+
+// ---------------------------------------------------------------- timer ujian
+// Sisa waktu dihitung server (secondsLeft) lalu dihitung mundur di sini; habis = jawaban dikumpulkan otomatis.
+let timerId = 0;
+const AUTO_SUBMIT_TRIES = 3;
+
+function armQuizTimer(quiz) {
+  const left = quiz.session?.secondsLeft;
+  quiz.endsAt = typeof left === "number" ? Date.now() + left * 1000 : null;
+  quiz.autoTries = 0;
+  return quiz;
+}
+
+function quizSecondsLeft() {
+  return S.quiz?.endsAt ? Math.max(0, Math.ceil((S.quiz.endsAt - Date.now()) / 1000)) : null;
+}
+
+function paintTimer() {
+  const el = $("study-timer");
+  const n = quizSecondsLeft();
+  if (!el || n === null) return;
+  el.textContent = L("study_time_left", { t: formatClock(n) });
+  el.classList.toggle("is-low", n <= 60);
+}
+
+function syncQuizTimer() {
+  const on = S.view === "quiz" && S.quiz && S.quiz.endsAt;
+  if (!on) {
+    if (timerId) clearInterval(timerId);
+    timerId = 0;
+    return;
+  }
+  paintTimer();
+  if (!timerId) timerId = setInterval(tickQuizTimer, 1000);
+  if (quizSecondsLeft() === 0) tickQuizTimer();
+}
+
+function tickQuizTimer() {
+  if (!(S.view === "quiz" && S.quiz && S.quiz.endsAt)) return syncQuizTimer();
+  paintTimer();
+  const q = S.quiz;
+  if (quizSecondsLeft() === 0 && !q.submitting && q.autoTries < AUTO_SUBMIT_TRIES) {
+    q.autoTries += 1;
+    submitQuiz($("study-submit-btn"), true);
+  }
 }
 
 function renderHome(body) {
@@ -409,9 +458,11 @@ function renderQuiz(body) {
       <div class="study-row-title">${esc(q.session.subject)}${q.session.topic ? ` · ${esc(q.session.topic)}` : ""}</div>
       <div class="study-row-meta">${esc(gradeText(q.session.materialGrade, q.session.materialClass))} · ${esc(levelLabel(q.session.level, S.overview?.settings))} · ${q.questions.length} ${esc(L("study_questions_unit"))}</div>
       ${q.shortfall ? `<div class="study-row-meta">${esc(L("study_shortfall", { got: q.questions.length, want: q.questions.length + q.shortfall }))}</div>` : ""}
+      ${q.endsAt ? `<div class="study-row-meta">${esc(L("study_time_hint", { m: Math.ceil((q.session.timeLimitSeconds || 0) / 60) }))}</div>` : ""}
     </div>
     ${cards}
     <div class="study-submit-bar">
+      ${q.endsAt ? `<span id="study-timer" class="study-timer" role="timer" aria-live="off">${esc(L("study_time_left", { t: formatClock(quizSecondsLeft() ?? 0) }))}</span>` : ""}
       <span id="study-progress" class="study-progress">${esc(L("study_quiz_progress", { a: answered, n: q.questions.length }))}</span>
       <button type="button" id="study-submit-btn" class="primary-btn" data-act="submit">${esc(L("study_submit"))}</button>
     </div>`;
@@ -458,7 +509,9 @@ function renderResult(body) {
       <div class="study-row-meta">${esc(r.player.name)} · ${esc(gradeText(r.session.materialGrade, r.session.materialClass))} · ${esc(L(`study_level_${r.session.level}`))} (${r.weightPercent}%)</div>
       <div class="study-score-main">${esc(L("study_score", { c: r.correct, n: r.total }))}</div>
       <div class="study-score-points">+${fmt(r.points)} <small>${esc(L("study_pts"))}</small></div>
-      <div class="study-row-meta">${esc(L("study_pdf_formula", { base: r.basePoints, correct: r.correct, total: r.total, weight: r.weightPercent }))}</div>
+      <div class="study-row-meta">${esc(pointsFormula(r, L))}</div>
+      ${r.bonusPercent > 0 ? `<div class="study-bonus">${esc(L("study_bonus_line", { b: r.bonusPercent }))}</div>` : ""}
+      ${r.timedOut ? `<div class="study-warn">${esc(L("study_time_up_late"))}</div>` : S.autoSubmittedId === r.session.id ? `<div class="study-warn">${esc(L("study_time_up_auto"))}</div>` : ""}
     </div>
     ${S.explainFailed && S.resultFrom !== "timeline" ? `<div class="study-card"><p>${esc(L("study_explain_failed"))}</p><button type="button" class="secondary-btn" data-act="explain-retry">${esc(L("study_explain_retry"))}</button></div>` : ""}
     <div class="study-actions">
@@ -684,7 +737,10 @@ function openLessonForm(fixedPlayer) {
   const playerById = (id) => players.find((p) => p.id === id) || (fixedPlayer && fixedPlayer.id === id ? fixedPlayer : null);
   const subjects = settings.subjects || [];
   const lessonSettings = settings;
-  const maxPoints = (level) => Math.round((lessonSettings.basePoints * (lessonSettings.weights[level] ?? 100)) / 100);
+  const perQ = lessonSettings.perQuestionPoints ?? 10;
+  const bonus = lessonSettings.perfectBonusPercent ?? 0;
+  const spq = lessonSettings.secondsPerQuestion ?? 0;
+  const maxPoints = (level, count) => computePoints(perQ, count, count, lessonSettings.weights[level] ?? 100, bonus);
   const fixed = !!fixedPlayer;
 
   return openFormDialog({
@@ -735,14 +791,27 @@ function openLessonForm(fixedPlayer) {
         },
         (fixedPlayer || players[0])?.classLevel
       ),
-      { key: "count", label: L("study_count"), type: "select", value: "10", options: COUNTS.map((n) => ({ value: String(n), label: String(n) })) },
+      {
+        key: "count",
+        label: L("study_count"),
+        type: "select",
+        value: "10",
+        options: COUNTS.map((n) => ({ value: String(n), label: String(n) })),
+        help: (v) => {
+          const secs = timeLimitSeconds(Number(v.count || 10), spq);
+          return secs ? L("study_time_estimate", { m: Math.ceil(secs / 60), s: spq }) : L("study_time_none");
+        }
+      },
       {
         key: "level",
         label: L("study_level"),
         type: "select",
         value: "normal",
         options: ["easy", "normal", "hard"].map((lv) => ({ value: lv, label: levelLabel(lv, lessonSettings) })),
-        help: (v) => L("study_max_points", { n: fmt(maxPoints(v.level || "normal")) })
+        help: (v) => {
+          const n = fmt(maxPoints(v.level || "normal", Number(v.count || 10)));
+          return bonus > 0 ? L("study_max_points_bonus", { n, b: bonus }) : L("study_max_points", { n });
+        }
       }
     ],
     extra: fixed
@@ -789,6 +858,8 @@ function openLessonForm(fixedPlayer) {
       answers: new Array(out.res.questions.length).fill(null),
       shortfall: out.res.shortfall || 0
     };
+    armQuizTimer(S.quiz);
+    S.autoSubmittedId = "";
     saveAnswers(S.quiz.sessionId, S.quiz.answers);
     S.view = "quiz";
     render();
@@ -814,6 +885,7 @@ async function resumeLesson(sessionId) {
     answers: loadAnswers(sessionId, res.questions.length),
     shortfall: 0
   };
+  armQuizTimer(S.quiz);
   S.view = "quiz";
   render();
   window.scrollTo(0, 0);
@@ -840,19 +912,28 @@ async function cancelLesson(sessionId) {
 }
 
 // ---------------------------------------------------------------- kumpulkan & hasil
-async function submitQuiz(btn) {
+async function submitQuiz(btn, auto = false) {
   const q = S.quiz;
-  if (!q) return;
+  if (!q || q.submitting) return;
   const unanswered = q.answers.filter((a) => a === null).length;
-  if (unanswered > 0 && !window.confirm(L("study_unanswered_confirm", { n: unanswered }))) return;
-  btn.disabled = true;
-  const old = btn.textContent;
-  btn.textContent = L("study_submit_busy");
+  // waktu habis: kumpulkan langsung tanpa bertanya (yang kosong dihitung salah)
+  if (!auto && unanswered > 0 && !window.confirm(L("study_unanswered_confirm", { n: unanswered }))) return;
+  q.submitting = true;
+  const old = btn ? btn.textContent : "";
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = L("study_submit_busy");
+  }
   const res = await studyCall("session_submit", { playerId: S.player.id, pin: S.pin, sessionId: q.sessionId, answers: q.answers, engine: "auto" });
-  btn.disabled = false;
-  btn.textContent = old;
+  q.submitting = false;
+  const btnNow = $("study-submit-btn");
+  if (btnNow) {
+    btnNow.disabled = false;
+    btnNow.textContent = old || L("study_submit");
+  }
   if (!res.ok) return handleFailure(res);
   clearAnswers(q.sessionId);
+  S.autoSubmittedId = auto ? q.sessionId : "";
   S.quiz = null;
   S.result = res.result;
   S.explainFailed = !!res.explainFailed;
@@ -1624,7 +1705,9 @@ function renderSettings(data) {
 
     <h3 class="sys-subtitle">${esc(L("study_set_points"))}</h3>
     <form id="study-points-form" class="study-set-form">
-      <label class="study-field"><span class="study-field-label">${esc(L("study_set_base"))}</span><input type="number" inputmode="numeric" min="1" name="basePoints" value="${s.basePoints}" /></label>
+      <label class="study-field"><span class="study-field-label">${esc(L("study_set_perq"))}</span><input type="number" inputmode="numeric" min="1" max="10000" name="perQuestionPoints" value="${s.perQuestionPoints}" /></label>
+      <label class="study-field"><span class="study-field-label">${esc(L("study_set_bonus"))}</span><input type="number" inputmode="numeric" min="0" max="100" name="perfectBonusPercent" value="${s.perfectBonusPercent}" /></label>
+      <label class="study-field"><span class="study-field-label">${esc(L("study_set_spq"))}</span><input type="number" inputmode="numeric" min="0" max="600" name="secondsPerQuestion" value="${s.secondsPerQuestion}" /><small class="study-field-help">${esc(L("study_set_spq_help"))}</small></label>
       <label class="study-field"><span class="study-field-label">${esc(L("study_set_w_easy"))}</span><input type="number" inputmode="numeric" min="1" max="1000" name="easy" value="${s.weights.easy}" /></label>
       <label class="study-field"><span class="study-field-label">${esc(L("study_set_w_normal"))}</span><input type="number" inputmode="numeric" min="1" max="1000" name="normal" value="${s.weights.normal}" /></label>
       <label class="study-field"><span class="study-field-label">${esc(L("study_set_w_hard"))}</span><input type="number" inputmode="numeric" min="1" max="1000" name="hard" value="${s.weights.hard}" /></label>
@@ -1696,7 +1779,9 @@ async function onPointsSubmit(e) {
   btn.disabled = true;
   const res = await studyCall("settings_save", {
     parentPin,
-    basePoints: num("basePoints"),
+    perQuestionPoints: num("perQuestionPoints"),
+    perfectBonusPercent: num("perfectBonusPercent"),
+    secondsPerQuestion: num("secondsPerQuestion"),
     weights: { easy: num("easy"), normal: num("normal"), hard: num("hard") },
     subjects: f.elements.subjects.value.split("\n")
   });

@@ -156,3 +156,14 @@ export function materialBlocks(md) {
   flush();
   return out;
 }
+
+// Rumus poin satu pelajaran untuk layar & PDF. Pelajaran lama (perQuestionPoints kosong) memakai teks rumus lama.
+// L(key, vars) = penerjemah teks.
+export function pointsFormula(result, L) {
+  const r = result || {};
+  if (r.perQuestionPoints) {
+    const text = L("study_formula_new", { perq: r.perQuestionPoints, correct: r.correct, weight: r.weightPercent });
+    return r.bonusPercent > 0 ? `${text} ${L("study_formula_bonus", { b: 100 + r.bonusPercent })}` : text;
+  }
+  return L("study_pdf_formula", { base: r.basePoints, correct: r.correct, total: r.total, weight: r.weightPercent });
+}

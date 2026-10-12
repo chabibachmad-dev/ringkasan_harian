@@ -16,6 +16,8 @@ import {
   buildExplainPrompt,
   parseExplanations,
   computePoints,
+  timeLimitSeconds,
+  formatClock,
   buildMaterialPrompt,
   cleanMaterial,
   MATERIAL_MAX_CHARS,
@@ -205,8 +207,17 @@ check(gradeText("SD", 5) === "SD 5" && gradeText("TK", null) === "TK" && gradeLo
 }
 
 // ---------------------------------------------------------------- poin (cermin fungsi SQL)
-check(computePoints(100, 15, 15, 80) === 80 && computePoints(100, 15, 15, 100) === 100 && computePoints(100, 15, 15, 120) === 120, "contoh pengguna: 15/15 easy 80, normal 100, hard 120");
-check(computePoints(100, 10, 15, 100) === 67 && computePoints(100, 0, 10, 120) === 0 && computePoints(100, 5, 0, 100) === 0, "poin sebagian, nol, dan jumlah soal nol");
+check(computePoints(10, 8, 10, 100) === 80 && computePoints(10, 16, 20, 100) === 160, "contoh pengguna: 8/10 = 80, tetapi 16/20 = 160 (jumlah soal berpengaruh)");
+check(computePoints(10, 8, 10, 80) === 64 && computePoints(10, 8, 10, 120) === 96, "bobot level: easy 64, hard 96");
+check(computePoints(10, 10, 10, 100, 10) === 110 && computePoints(10, 9, 10, 100, 10) === 90, "bonus sempurna hanya bila semua benar (10/10 = 110, 9/10 = 90)");
+check(computePoints(10, 20, 20, 120, 10) === 264 && computePoints(10, 27, 30, 100) === 270, "hard 20/20 + bonus = 264; normal 27/30 = 270");
+check(computePoints(10, 0, 10, 120, 10) === 0 && computePoints(10, 5, 0, 100, 10) === 0 && computePoints(10, 10, 10, 100, 0) === 100, "nol benar, jumlah soal nol, bonus 0");
+check(computePoints(7, 3, 5, 100) === 21 && computePoints(5, 7, 10, 80) === 28, "poin per soal lain & pembulatan (7x3 = 21, 5x7x0,8 = 28)");
+
+// ---------------------------------------------------------------- timer
+check(timeLimitSeconds(10, 60) === 600 && timeLimitSeconds(20, 60) === 1200 && timeLimitSeconds(15, 45) === 675, "waktu = jumlah soal x detik per soal");
+check(timeLimitSeconds(10, 0) === null && timeLimitSeconds(0, 60) === null, "0 detik per soal = tanpa timer");
+check(formatClock(600) === "10:00" && formatClock(61) === "1:01" && formatClock(9) === "0:09" && formatClock(0) === "0:00" && formatClock(-5) === "0:00" && formatClock(3723) === "1:02:03", "format hitung mundur");
 
 if (fails) {
   console.log(`\n${fails} GAGAL`);

@@ -24,7 +24,7 @@
 //   session_cancel      { playerId, pin, sessionId }                         -> { ok }   (hanya sesi yang belum dikumpulkan)
 //   redeem              { playerId, pin, itemId }                            -> { redemption }
 //   settings_open       { parentPin? }                                       -> { settings, pendingRedemptions, players }
-//   settings_save       { parentPin?, basePoints, weights:{easy,normal,hard}, subjects:[...] } -> { settings }
+//   settings_save       { parentPin?, perQuestionPoints, perfectBonusPercent, secondsPerQuestion, weights:{easy,normal,hard}, subjects:[...] } -> { settings }
 //   redeem_item_save    { parentPin?, id?, name, cost }                      -> { items }
 //   redeem_item_delete  { parentPin?, id }                                   -> { items }
 //   redeem_mark         { parentPin?, redemptionId, status:"given"|"pending" } -> { ok }
@@ -154,7 +154,9 @@ async function checkParentPin(admin: Admin, parentPin: unknown): Promise<{ setti
 
 // ---------------------------------------------------------------- bentuk data ke klien
 const publicSettings = (s: Row, items: Row[]) => ({
-  basePoints: s.base_points,
+  perQuestionPoints: s.per_question_points,
+  perfectBonusPercent: s.perfect_bonus_percent,
+  secondsPerQuestion: s.seconds_per_question, // 0 = tanpa timer
   weights: { easy: s.weight_easy, normal: s.weight_normal, hard: s.weight_hard },
   subjects: Array.isArray(s.subjects) ? s.subjects : [],
   parentPinSet: !!s.parent_pin_hash,
@@ -191,7 +193,15 @@ const sessionRow = (s: Row) => ({
   weightPercent: s.weight_percent,
   provider: s.provider,
   createdAt: s.created_at,
-  submittedAt: s.submitted_at
+  submittedAt: s.submitted_at,
+  bonusPercent: s.bonus_percent ?? 0,
+  timedOut: !!s.timed_out,
+  timeLimitSeconds: s.time_limit_seconds ?? null,
+  // sisa waktu menurut jam SERVER (detik), supaya jam perangkat yang keliru tidak berpengaruh; null = tanpa timer
+  secondsLeft:
+    s.status === "active" && s.time_limit_seconds
+      ? Math.max(0, Math.ceil((new Date(s.created_at).getTime() + s.time_limit_seconds * 1000 - Date.now()) / 1000))
+      : null
 });
 
 // Hasil lengkap sesi yang SUDAH dikumpulkan (memuat kunci jawaban + pembahasan).
@@ -213,6 +223,9 @@ async function loadResult(admin: Admin, session: Row, player: Row) {
     total: items.length,
     correct: session.correct_count ?? 0,
     basePoints: session.base_points,
+    bonusPercent: session.bonus_percent ?? 0,
+    perQuestionPoints: session.per_question_points ?? null, // null = pelajaran lama (rumus lama)
+    timedOut: !!session.timed_out,
     weightPercent: session.weight_percent,
     points: session.points_awarded ?? 0,
     items
@@ -352,12 +365,16 @@ async function loadOwnedSession(admin: Admin, sessionId: unknown, playerId: stri
 // ---------------------------------------------------------------- validasi setting
 function readSettingsInput(body: Row): { ok: true; value: Row } | { ok: false; error: string } {
   const int = (v: unknown, min: number, max: number) => (typeof v === "number" && Number.isInteger(v) && v >= min && v <= max ? v : null);
-  const base = int(body.basePoints, 1, 100000);
+  const perQ = int(body.perQuestionPoints, 1, 10000);
+  const bonus = int(body.perfectBonusPercent, 0, 100);
+  const spq = int(body.secondsPerQuestion, 0, 600);
   const w = (body.weights ?? {}) as Row;
   const easy = int(w.easy, 1, 1000);
   const normal = int(w.normal, 1, 1000);
   const hard = int(w.hard, 1, 1000);
-  if (base === null) return { ok: false, error: "Poin dasar harus bilangan bulat 1-100000." };
+  if (perQ === null) return { ok: false, error: "Poin per soal harus bilangan bulat 1-10000." };
+  if (bonus === null) return { ok: false, error: "Bonus nilai sempurna harus bilangan bulat 0-100 (persen)." };
+  if (spq === null || (spq !== 0 && spq < 10)) return { ok: false, error: "Waktu per soal harus 0 (tanpa timer) atau 10-600 detik." };
   if (easy === null || normal === null || hard === null) return { ok: false, error: "Bobot level harus bilangan bulat 1-1000 (persen)." };
   const rawSubjects = Array.isArray(body.subjects) ? body.subjects : [];
   const subjects: string[] = [];
@@ -366,7 +383,7 @@ function readSettingsInput(body: Row): { ok: true; value: Row } | { ok: false; e
     if (name && !subjects.some((x) => x.toLowerCase() === name.toLowerCase())) subjects.push(name);
   }
   if (subjects.length === 0 || subjects.length > 30) return { ok: false, error: "Daftar pelajaran harus berisi 1-30 nama." };
-  return { ok: true, value: { base_points: base, weight_easy: easy, weight_normal: normal, weight_hard: hard, subjects, updated_at: new Date().toISOString() } };
+  return { ok: true, value: { per_question_points: perQ, perfect_bonus_percent: bonus, seconds_per_question: spq, weight_easy: easy, weight_normal: normal, weight_hard: hard, subjects, updated_at: new Date().toISOString() } };
 }
 
 // ---------------------------------------------------------------- pembatas pemakaian AI
@@ -571,9 +588,13 @@ Deno.serve(async (req) => {
         return fail(`Gagal membuat soal (${made.questions.length} dari ${count} yang layak). ${made.lastError}`.trim(), 502, { generationFailed: true });
       }
 
+      // timer: jumlah soal x detik per soal (0 = tanpa timer); batas dihitung dari created_at di sisi server
+      const cfg = await loadSettings(admin);
+      const spq = Number(cfg?.seconds_per_question ?? 0);
+      const timeLimit = spq > 0 ? made.questions.length * spq : null;
       const { data: s, error: e1 } = await admin
         .from("study_sessions")
-        .insert({ player_id: p.id, subject, topic: topic || null, material_grade: body.materialGrade, material_class: materialClass, level: body.level, num_questions: made.questions.length, provider: made.provider })
+        .insert({ player_id: p.id, subject, topic: topic || null, material_grade: body.materialGrade, material_class: materialClass, level: body.level, num_questions: made.questions.length, provider: made.provider, time_limit_seconds: timeLimit })
         .select("*")
         .single();
       if (e1 || !s) return fail(e1?.message || "Gagal menyimpan pelajaran.", 500);

@@ -2892,6 +2892,32 @@ mark.chat-search-hit--active {
   font-weight: 700;
 }
 
+.study-timer {
+  padding: 4px 8px;
+  border: 1.5px solid var(--border);
+  border-radius: 8px;
+  font-size: 0.9rem;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* tinggal 1 menit: dibalik (hitam putih terbalik) supaya terasa mendesak tanpa warna */
+.study-timer.is-low {
+  background: var(--accent);
+  color: var(--accent-contrast);
+}
+
+.study-bonus {
+  font-size: 0.85rem;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+}
+
+.study-submit-bar {
+  flex-wrap: wrap;
+}
+
 /* --- hasil --- */
 
 .study-score {

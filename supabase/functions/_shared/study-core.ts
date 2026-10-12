@@ -386,10 +386,28 @@ export function parseExplanations(text: string, validNos: number[]): ParsedExpla
   return out;
 }
 
-// ---------------------------------------------------------------- peringkat poin (cermin fungsi SQL, untuk tes & tampilan)
-export function computePoints(basePoints: number, correct: number, total: number, weightPercent: number): number {
-  if (total <= 0) return 0;
-  return Math.round(((basePoints * correct) / total) * (weightPercent / 100));
+// ---------------------------------------------------------------- poin (cermin fungsi SQL study_submit_session)
+// poin = poin_per_soal x benar x bobot_level% x (100 + bonus)/100, bonus hanya bila SEMUA soal benar.
+// Jumlah soal ikut menentukan hasil: 8/10 dan 16/20 pada level yang sama tidak lagi bernilai sama.
+export function computePoints(perQuestion: number, correct: number, total: number, weightPercent: number, perfectBonusPercent = 0): number {
+  if (total <= 0 || correct <= 0) return 0;
+  const bonus = correct === total ? perfectBonusPercent : 0;
+  return Math.round((perQuestion * correct * weightPercent * (100 + bonus)) / 10000);
+}
+
+// Waktu pelajaran (detik) = jumlah soal x detik per soal; 0 detik per soal = tanpa timer (null).
+export function timeLimitSeconds(numQuestions: number, secondsPerQuestion: number): number | null {
+  return secondsPerQuestion > 0 && numQuestions > 0 ? numQuestions * secondsPerQuestion : null;
+}
+
+// "9:41" / "1:02:03" untuk hitung mundur.
+export function formatClock(totalSeconds: number): string {
+  const t = Math.max(0, Math.floor(totalSeconds));
+  const h = Math.floor(t / 3600);
+  const m = Math.floor((t % 3600) / 60);
+  const sec = t % 60;
+  const mm = h > 0 ? String(m).padStart(2, "0") : String(m);
+  return `${h > 0 ? h + ":" : ""}${mm}:${String(sec).padStart(2, "0")}`;
 }
 
 // ---------------------------------------------------------------- materi pelajaran
