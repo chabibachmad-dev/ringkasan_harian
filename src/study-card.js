@@ -185,17 +185,20 @@ export async function renderRoomCard(d) {
   let y = 215;
   y = paragraph(ctx, d.title, PAD, y, { size: 58, bold: true, maxLines: 2, gap: 1.2 });
   y = paragraph(ctx, d.info, PAD, y + 4, { size: 30, color: GRAY, maxLines: 2 });
-  if (d.creator) y = paragraph(ctx, d.creator, PAD, y + 2, { size: 28, color: GRAY, maxLines: 1 });
+  if (d.creator) {
+    const cr = String(d.creator);
+    y = paragraph(ctx, cr.charAt(0).toUpperCase() + cr.slice(1), PAD, y + 2, { size: 28, color: GRAY, maxLines: 1 });
+  }
 
   // kotak pemenang
-  const boxY = y + 24;
+  const boxY = y + 10;
   ctx.fillStyle = INK;
   ctx.fillRect(PAD, boxY, W - PAD * 2, d.winnerSub ? 170 : 130);
   text(ctx, d.winner, W / 2, boxY + 82, { size: 54, bold: true, color: PAPER, align: "center", maxW: W - PAD * 2 - 40 });
   if (d.winnerSub) text(ctx, d.winnerSub, W / 2, boxY + 132, { size: 32, color: PAPER, align: "center", maxW: W - PAD * 2 - 40 });
 
   // tabel
-  let ty = boxY + (d.winnerSub ? 170 : 130) + 70;
+  let ty = boxY + (d.winnerSub ? 170 : 130) + 58;
   const xRank = PAD + 8;
   const xName = PAD + 90;
   const xScore = 660;

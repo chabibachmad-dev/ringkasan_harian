@@ -8,7 +8,7 @@ import { clearDeviceLogin, isDeviceToken, readDeviceLogin, saveDeviceLogin, stud
 import { openFormDialog } from "./study-form.js";
 import { fileToAvatarBase64 } from "./study-avatar.js";
 import { renderAiMarkdown, typesetMath } from "./markdown.js";
-import { buildStudyPdf, shareOrSaveStudyPdf, buildMaterialPdf, shareOrSaveMaterialPdf } from "./study-pdf.js";
+import { buildStudyPdf, shareOrSaveStudyPdf, buildMaterialPdf, shareOrSaveMaterialPdf, buildRoomPdf, shareOrSaveRoomPdf } from "./study-pdf.js";
 import { pointsFormula, studyCardFileName } from "./study-text.js";
 import { renderLessonCard, renderRoomCard, shareOrSaveCard } from "./study-card.js";
 import { allowedClasses, allowedMaterialGrades, classesOf, computePoints, formatClock, gradeText, PRACTICE_QUESTIONS as PRACTICE_COUNT, timeLimitSeconds } from "../supabase/functions/_shared/study-core.ts";
@@ -775,6 +775,7 @@ async function onBodyClick(e) {
   if (act === "share-pdf") return sharePdf(btn);
   if (act === "share-card") return shareLessonCard(btn);
   if (act === "room-card") return shareRoomCard(btn);
+  if (act === "room-pdf") return shareRoomPdf(btn);
   if (act === "to-profile") {
     S.result = null;
     S.view = "profile";
@@ -1486,6 +1487,21 @@ function shareLessonCard(btn) {
       footer: L("study_card_footer", { name: L("brand") })
     });
   return shareCardSafely(btn, make, studyCardFileName(r.player?.name, s.subject, when), `${L("study_pdf_title")}: ${s.subject}`);
+}
+
+async function shareRoomPdf(btn) {
+  const room = S.view === "roomresult" ? S.rr?.room : S.room?.state?.room;
+  const results = S.view === "roomresult" ? S.rr?.results : S.room?.state?.results;
+  if (!room) return;
+  btn.disabled = true;
+  try {
+    const doc = buildRoomPdf(room, results || [], L, { locale: locale(), minutes: roomMinutes(room), fmtClock: formatClock });
+    await shareOrSaveRoomPdf(doc, room, `${L("study_kind_competition")}: ${room.subject}`);
+  } catch (err) {
+    window.alert(`${L("study_pdf_failed")} (${err instanceof Error ? err.message : String(err)})`);
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 function shareRoomCard(btn) {
@@ -2859,6 +2875,7 @@ function renderRoom(body) {
     ${roomCappedNote(st.results, meId, st.daily)}
     <div class="study-actions">
       <button type="button" class="primary-btn" data-act="room-card">${esc(L("study_share_card"))}</button>
+      <button type="button" class="secondary-btn" data-act="room-pdf">${esc(L("study_share_pdf"))}</button>
       <button type="button" class="secondary-btn" data-act="room-back">${esc(L("study_room_back"))}</button>
     </div>`;
 }
@@ -2940,7 +2957,7 @@ function renderRoomResult(body) {
       ${r.winnerName ? `<div class="study-row-meta">${esc(L("study_room_bonus_line", { b: fmt(r.winBonus) }))}</div>` : ""}
     </div>
     ${roomTableHtml(rr.results || [], S.viewer?.id)}
-    <div class="study-actions"><button type="button" class="primary-btn" data-act="room-card">${esc(L("study_share_card"))}</button></div>
+    <div class="study-actions"><button type="button" class="primary-btn" data-act="room-card">${esc(L("study_share_card"))}</button><button type="button" class="secondary-btn" data-act="room-pdf">${esc(L("study_share_pdf"))}</button></div>
     <p class="study-hint">${esc(L("study_pub_table_hint"))}</p>`;
 }
 

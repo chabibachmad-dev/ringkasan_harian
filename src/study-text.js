@@ -108,6 +108,12 @@ export function studyPdfFileName(playerName, subject, date = new Date()) {
   return `Hasil_${slug(playerName) || "pemain"}_${slug(subject) || "pelajaran"}_${d}.pdf`;
 }
 
+// Nama berkas PDF hasil kompetisi, mis. "Kompetisi_Matematika_2026-10-12.pdf".
+export function roomPdfFileName(subject, date = new Date()) {
+  const slug = (s, n) => String(s ?? "").normalize("NFKD").replace(/[\u0300-\u036f]/g, "").replace(/[^\p{L}\p{N}]+/gu, "_").replace(/^_+|_+$/g, "").slice(0, n);
+  return `Kompetisi_${slug(subject, 30) || "pelajaran"}_${date.toISOString().slice(0, 10)}.pdf`;
+}
+
 // Nama berkas kartu gambar, mis. "Kartu_Ali_Matematika_2026-10-12.png" atau "Kartu_Kompetisi_Matematika_2026-10-12.png".
 export function studyCardFileName(first, second, date = new Date()) {
   const slug = (s, n) => String(s ?? "").normalize("NFKD").replace(/[̀-ͯ]/g, "").replace(/[^\p{L}\p{N}]+/gu, "_").replace(/^_+|_+$/g, "").slice(0, n);
