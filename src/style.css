@@ -3522,3 +3522,9 @@ button.study-trow:active {
   font-size: 1.15rem;
   font-weight: 800;
 }
+
+.study-viewer-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 14px;
+}

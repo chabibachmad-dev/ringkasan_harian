@@ -174,6 +174,27 @@ export async function verifyPin(pin: string, saltHex: string, hashHex: string): 
   return diff === 0;
 }
 
+// ---------------------------------------------------------------- token login perangkat
+// Token = "tk_" + 43 karakter base64url (256 bit acak). Server hanya menyimpan hash SHA-256-nya.
+export const DEVICE_TOKEN_RE = /^tk_[A-Za-z0-9_-]{43}$/;
+export const MAX_DEVICE_TOKENS = 8; // perangkat yang boleh masuk bersamaan per pemain (yang terlama dikeluarkan)
+
+export function isDeviceToken(v: unknown): v is string {
+  return typeof v === "string" && DEVICE_TOKEN_RE.test(v);
+}
+
+export function newDeviceToken(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(32));
+  let bin = "";
+  for (const b of bytes) bin += String.fromCharCode(b);
+  return "tk_" + btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+export async function hashDeviceToken(token: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token));
+  return toHex(new Uint8Array(digest));
+}
+
 // Detik sisa penguncian (0 = tidak terkunci).
 export function lockSecondsLeft(lockedUntil: string | null | undefined, nowMs: number): number {
   if (!lockedUntil) return 0;

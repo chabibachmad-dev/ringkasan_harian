@@ -4,7 +4,7 @@
 // Rute (hash): #study
 
 import { t } from "./i18n.js";
-import { studyCall } from "./study-client.js";
+import { clearDeviceLogin, isDeviceToken, readDeviceLogin, saveDeviceLogin, studyCall, studyHooks } from "./study-client.js";
 import { openFormDialog } from "./study-form.js";
 import { renderAiMarkdown, typesetMath } from "./markdown.js";
 import { buildStudyPdf, shareOrSaveStudyPdf, buildMaterialPdf, shareOrSaveMaterialPdf } from "./study-pdf.js";
@@ -113,11 +113,11 @@ export function initStudy(context) {
 export function hideStudyScreen() {
   const el = $("screen-study");
   if (el) el.hidden = true;
-  // keluar dari layar = PIN dilupakan
+  // keluar dari layar: kredensial sesi dilupakan; login perangkat (S.viewer, token) tetap sampai Keluar
   S.pin = "";
   S.player = null;
   S.profile = null;
-  S.viewer = null;
+  if (S.viewer && !isDeviceToken(S.viewer.pin)) S.viewer = null; // PIN mentah tidak disimpan; token perangkat tetap
   S.pub = null;
   S.rr = null;
   S.room = null;
@@ -136,7 +136,6 @@ export function showStudyScreen() {
   S.profile = null;
   S.quiz = null;
   S.result = null;
-  S.viewer = null;
   S.pub = null;
   S.rr = null;
   S.room = null;
@@ -144,6 +143,7 @@ export function showStudyScreen() {
   S.material = null;
   S.feed = newFeed(null, null);
   S.materials = { items: [], hasMore: false, loading: false, loaded: false, error: "" };
+  restoreLogin();
   render();
   loadOverview();
   if (S.tab === "materi") loadMaterials(true);
@@ -369,6 +369,7 @@ function renderHome(body) {
     </div>
     <div class="study-tabs" role="tablist">${tab("timeline", L("study_tab_timeline"))}${tab("board", L("study_tab_board"))}${tab("materi", L("study_tab_materi"))}</div>
     ${S.loading && S.tab === "board" ? `<p class="status-text">${esc(L("study_loading"))}</p>` : ""}
+    ${S.tab === "timeline" ? "" : viewerBarHtml()}
     <div role="tabpanel">${S.tab === "materi" ? materialsHtml() : S.tab === "timeline" ? timelineHtml() : boardHtml}</div>`;
   // kegiatan baru (pelajaran/kompetisi/materi selesai) sejak timeline dimuat: segarkan diam-diam
   if (S.tab === "timeline" && S.feed && S.feed.stale && !S.feed.loading) setTimeout(() => S.feed && loadFeed(S.feed, "refresh"), 0);
@@ -452,6 +453,7 @@ function renderProfile(body) {
       <button type="button" class="primary-btn" data-act="new-lesson-me">${esc(L("study_new_lesson"))}</button>
       <button type="button" class="secondary-btn" data-act="my-timeline">${esc(L("study_tl_my"))}</button>
       <button type="button" class="secondary-btn" data-act="edit-level">${esc(L("study_edit_level"))}</button>
+      <button type="button" class="study-link-btn" data-act="tl-signout">${esc(L("study_logout_device"))}</button>
     </div>
     <h2 class="study-h">${esc(L("study_redeem"))}</h2>
     ${redeem}
@@ -614,6 +616,7 @@ async function onBodyClick(e) {
   if (act === "tl-more") return loadFeed(shownFeed(), "more");
   if (act === "tl-signin") return signInViewer();
   if (act === "tl-signout") return signOutViewer();
+  if (act === "my-profile") return openOwnProfile();
   if (act === "like") return doLike(id);
   if (act === "comments") return toggleComments(id);
   if (act === "comment-send") return sendComment(id);
@@ -660,6 +663,113 @@ function validPinFormat(p) {
   return typeof p === "string" && /^\d{4,6}$/.test(p);
 }
 
+// ---------------------------------------------------------------- login perangkat
+// Pemain yang sudah masuk (S.viewer) tetap masuk di perangkat ini sampai menekan Keluar: peramban menyimpan token dari
+// server (bukan PIN). Token dikirim sebagai pengganti PIN di semua aksi pemain, jadi form tidak perlu minta PIN lagi.
+const validCred = (c) => validPinFormat(c) || isDeviceToken(c);
+
+// Akun yang sedang masuk dengan token perangkat, bila termasuk dalam daftar pemain `list`; selain itu null (form biasa minta pemain + PIN).
+const loggedIn = (list) => (S.viewer && isDeviceToken(S.viewer.pin) ? list.find((p) => p.id === S.viewer.id) || null : null);
+
+// Kredensial (PIN atau token) untuk pemain `pl` yang sudah dikenali.
+const credOf = (pl) => (S.viewer && S.viewer.id === pl.id ? S.viewer.pin : S.player && S.player.id === pl.id ? S.pin : "");
+
+// Setelah PIN terbukti benar: tukar dengan token perangkat, simpan, dan jadikan akun yang masuk. Mengembalikan kredensial
+// yang dipakai selanjutnya (token; atau PIN bila server tidak bisa dihubungi, supaya aksi yang sedang jalan tetap lanjut).
+async function adoptLogin(player, pin) {
+  const base = { id: player.id, name: player.name, grade: player.grade, classLevel: player.classLevel ?? null };
+  if (isDeviceToken(pin)) {
+    S.viewer = { ...base, pin };
+    return pin;
+  }
+  if (S.viewer && S.viewer.id === player.id && isDeviceToken(S.viewer.pin)) return S.viewer.pin;
+  const old = S.viewer && isDeviceToken(S.viewer.pin) ? S.viewer : null;
+  const res = await studyCall("login", { playerId: player.id, pin });
+  if (!res.ok) {
+    S.viewer = { ...base, pin };
+    return pin;
+  }
+  if (old) studyCall("logout", { playerId: old.id, token: old.pin }); // ganti akun: token akun lama dicabut
+  S.viewer = { ...base, pin: res.token };
+  saveDeviceLogin(S.viewer);
+  return res.token;
+}
+
+// Keluar: token dicabut di server, dihapus dari perangkat, dan semua kredensial di memori dilupakan.
+async function logoutDevice() {
+  const v = S.viewer;
+  if (v && isDeviceToken(v.pin)) studyCall("logout", { playerId: v.id, token: v.pin });
+  clearDeviceLogin();
+  forgetViewer();
+  if (S.view === "profile" || S.view === "result") {
+    S.result = null;
+    S.view = "home";
+    S.stack = [];
+    if (S.feed) S.feed.stale = true;
+    render();
+    loadOverview();
+    return;
+  }
+  shownFeed()?.items.forEach((i) => (i.liked = false));
+  render();
+}
+
+// Lupakan akun yang masuk di memori (tanpa menyentuh server / penyimpanan).
+function forgetViewer() {
+  S.viewer = null;
+  if (S.player) {
+    S.player = null;
+    S.pin = "";
+    S.profile = null;
+  }
+}
+
+studyHooks.onTokenInvalid = () => {
+  clearDeviceLogin();
+  if (S.viewer && isDeviceToken(S.viewer.pin)) {
+    S.viewer = null;
+    if (isDeviceToken(S.pin)) S.pin = "";
+    if (!$("screen-study")?.hidden) render();
+  }
+};
+
+// Pulihkan login dari penyimpanan perangkat, lalu cek diam-diam ke server (nama/kelas bisa berubah; token bisa sudah dicabut).
+function restoreLogin() {
+  if (S.viewer) return;
+  const d = readDeviceLogin();
+  if (!d) return;
+  S.viewer = { id: d.id, name: d.name, grade: d.grade, classLevel: d.classLevel, pin: d.token };
+  studyCall("player_verify", { playerId: d.id, pin: d.token }).then((res) => {
+    if (!res.ok) {
+      if (res.status === 404) {
+        clearDeviceLogin();
+        if (S.viewer && S.viewer.id === d.id) S.viewer = null;
+        render();
+      }
+      return;
+    }
+    if (S.viewer && S.viewer.id === d.id && S.viewer.pin === d.token) {
+      S.viewer = { ...res.player, pin: d.token };
+      saveDeviceLogin(S.viewer);
+      render();
+    }
+  });
+}
+
+// Buka profil pribadi akun yang sedang masuk (tanpa PIN).
+function openOwnProfile() {
+  const v = S.viewer;
+  if (!v) return;
+  S.player = { id: v.id, name: v.name, grade: v.grade, classLevel: v.classLevel ?? null };
+  S.pin = v.pin;
+  S.profile = null;
+  S.stack = [];
+  S.pub = null;
+  S.view = "profile";
+  render();
+  loadProfile();
+}
+
 async function openNewPlayerForm() {
   const created = await openFormDialog({
     title: L("study_np_title"),
@@ -691,6 +801,7 @@ async function openNewPlayerForm() {
 function openPlayerPin(playerId) {
   const player = (S.overview?.players || []).find((p) => p.id === playerId);
   if (!player) return;
+  if (S.viewer && S.viewer.id === playerId) return openOwnProfile(); // sudah masuk di perangkat ini
   return openFormDialog({
     title: L("study_pin_title", { name: player.name }),
     okLabel: L("study_open"),
@@ -704,12 +815,11 @@ function openPlayerPin(playerId) {
       if (!res.ok) return { ok: false, error: errText(res) };
       return { ok: true, value: { res, pin: v.pin } };
     }
-  }).then((out) => {
+  }).then(async (out) => {
     if (!out) return;
     S.player = out.res.player;
-    S.pin = out.pin;
+    S.pin = await adoptLogin(out.res.player, out.pin);
     S.profile = out.res;
-    S.viewer = { ...out.res.player, pin: out.pin };
     S.stack = [];
     S.pub = null;
     S.view = "profile";
@@ -799,6 +909,7 @@ function openLessonForm(fixedPlayer) {
   const bonus = lessonSettings.perfectBonusPercent ?? 0;
   const spq = lessonSettings.secondsPerQuestion ?? 0;
   const maxPoints = (level, count) => computePoints(perQ, count, count, lessonSettings.weights[level] ?? 100, bonus);
+  fixedPlayer = fixedPlayer || loggedIn(players); // sudah masuk di perangkat ini: tanpa pilih pemain + PIN
   const fixed = !!fixedPlayer;
 
   return openFormDialog({
@@ -886,8 +997,8 @@ function openLessonForm(fixedPlayer) {
     onSubmit: async (v) => {
       const pl = playerById(fixed ? fixedPlayer.id : v.playerId);
       if (!pl) return { ok: false, error: L("study_pick_player") };
-      const pin = fixed ? S.pin : v.pin;
-      if (!validPinFormat(pin)) return { ok: false, error: L("study_pin_invalid") };
+      const pin = fixed ? credOf(pl) : v.pin;
+      if (!validCred(pin)) return { ok: false, error: L("study_pin_invalid") };
       const subject = v.subject === CUSTOM ? String(v.customSubject || "").trim() : v.subject;
       if (!subject) return { ok: false, error: L("study_subject_required") };
       const res = await studyCall("session_start", {
@@ -908,11 +1019,10 @@ function openLessonForm(fixedPlayer) {
 }
 
 // Setelah sesi dibuat (pelajaran baru atau latihan materi): simpan pemain + PIN dan buka layar soal.
-function enterQuiz(out) {
+async function enterQuiz(out) {
   if (!out) return;
   S.player = { id: out.player.id, name: out.player.name, grade: out.player.grade, classLevel: out.player.classLevel ?? null };
-  S.pin = out.pin;
-  S.viewer = { ...S.player, pin: out.pin };
+  S.pin = await adoptLogin(S.player, out.pin);
   S.quiz = {
     sessionId: out.res.sessionId,
     session: out.res.session,
@@ -949,7 +1059,7 @@ async function openPracticeForm(material) {
   const spq = settings.secondsPerQuestion ?? 0;
   const n = PRACTICE_COUNT;
   const playerById = (id) => players.find((p) => p.id === id);
-  const fixed = null; // selalu minta pemain + PIN (latihan bisa dimulai dari tab Materi tanpa profil terbuka)
+  const fixed = loggedIn(players); // sudah masuk di perangkat ini: tanpa pilih pemain + PIN
   const out = await openFormDialog({
     title: L("study_practice_title"),
     intro: L("study_practice_intro", { title: material.title, n, subject: material.subject, grade: gradeText(material.grade, material.classLevel) }),
@@ -993,8 +1103,8 @@ async function openPracticeForm(material) {
     onSubmit: async (v) => {
       const pl = fixed || playerById(v.playerId);
       if (!pl) return { ok: false, error: L("study_pick_player") };
-      const pin = fixed ? S.pin : v.pin;
-      if (!validPinFormat(pin)) return { ok: false, error: L("study_pin_invalid") };
+      const pin = fixed ? credOf(pl) : v.pin;
+      if (!validCred(pin)) return { ok: false, error: L("study_pin_invalid") };
       const res = await studyCall("session_start", { playerId: pl.id, pin, materialId: material.id, level: v.level, engine: "auto" });
       if (!res.ok) return { ok: false, error: errText(res) };
       return { ok: true, value: { res, player: pl, pin } };
@@ -1359,17 +1469,7 @@ function switchPubTab(sub) {
 function openProfileFromPublic() {
   const o = S.pub?.player;
   if (!o) return;
-  if (S.viewer && S.viewer.id === o.id) {
-    S.player = { id: o.id, name: o.name, grade: o.grade, classLevel: o.classLevel ?? null };
-    S.pin = S.viewer.pin;
-    S.profile = null;
-    S.stack = [];
-    S.pub = null;
-    S.view = "profile";
-    render();
-    loadProfile();
-    return;
-  }
+  if (S.viewer && S.viewer.id === o.id) return openOwnProfile();
   return openPlayerPin(o.id);
 }
 
@@ -1398,13 +1498,18 @@ function openViewerLogin() {
     ],
     onSubmit: async (v) => {
       if (!validPinFormat(v.pin)) return { ok: false, error: L("study_pin_invalid") };
-      const res = await studyCall("player_verify", { playerId: v.playerId, pin: v.pin });
-      if (!res.ok) return { ok: false, error: errText(res) };
-      return { ok: true, value: { player: res.player, pin: v.pin } };
+      const res = await studyCall("login", { playerId: v.playerId, pin: v.pin });
+      if (res.ok) return { ok: true, value: { player: res.player, cred: res.token, persist: true } };
+      // PIN salah / terkunci / pemain tidak ada: tolak. Gangguan lain (mis. function belum di-deploy ulang): masuk tanpa token.
+      if (res.pinWrong || res.locked || res.status === 404 || res.status === 403 || res.status === 429) return { ok: false, error: errText(res) };
+      const old = await studyCall("player_verify", { playerId: v.playerId, pin: v.pin });
+      if (!old.ok) return { ok: false, error: errText(old) };
+      return { ok: true, value: { player: old.player, cred: v.pin, persist: false } };
     }
   }).then((out) => {
     if (!out) return false;
-    S.viewer = { ...out.player, pin: out.pin };
+    S.viewer = { ...out.player, pin: out.cred };
+    if (out.persist) saveDeviceLogin(S.viewer);
     return true;
   });
 }
@@ -1414,9 +1519,7 @@ async function signInViewer() {
 }
 
 function signOutViewer() {
-  S.viewer = null;
-  shownFeed()?.items.forEach((i) => (i.liked = false));
-  render();
+  return logoutDevice();
 }
 
 // Pastikan sudah masuk; bila belum, tampilkan popup. true = siap.
@@ -1430,7 +1533,7 @@ async function ensureViewer() {
 // ---- tampilan
 function viewerBarHtml() {
   if (S.viewer) {
-    return `<div class="study-viewer"><span>${esc(L("study_tl_signed_as", { name: S.viewer.name }))}</span><button type="button" class="study-link-btn" data-act="tl-signout">${esc(L("study_tl_signout"))}</button></div>`;
+    return `<div class="study-viewer"><span>${esc(L("study_tl_signed_as", { name: S.viewer.name }))}</span><span class="study-viewer-actions"><button type="button" class="study-link-btn" data-act="my-profile">${esc(L("study_my_profile"))}</button><button type="button" class="study-link-btn" data-act="tl-signout">${esc(L("study_tl_signout"))}</button></span></div>`;
   }
   return `<div class="study-viewer"><span>${esc(L("study_tl_signed_out"))}</span><button type="button" class="study-link-btn" data-act="tl-signin">${esc(L("study_tl_signin"))}</button></div>`;
 }
@@ -1920,6 +2023,7 @@ function openMaterialCreate() {
   if (players.length === 0) return window.alert(L("study_no_players"));
   const subjects = settings.subjects || [];
   const playerById = (id) => players.find((p) => p.id === id);
+  const me = loggedIn(players); // sudah masuk di perangkat ini: tanpa pilih pemain + PIN
   return openFormDialog({
     title: L("study_mat_create_title"),
     intro: L("study_mat_hint"),
@@ -1927,8 +2031,8 @@ function openMaterialCreate() {
     cancelLabel: L("study_cancel"),
     busyLabel: L("study_mat_generating"),
     fields: [
-      { key: "playerId", label: L("study_player"), type: "select", value: S.viewer?.id || players[0].id, options: players.map((p) => ({ value: p.id, label: `${p.name} (${gradeText(p.grade, p.classLevel)})` })) },
-      { key: "pin", label: L("study_pin"), type: "pin" },
+      { key: "playerId", label: L("study_player"), type: "select", value: me?.id || S.viewer?.id || players[0].id, options: players.map((p) => ({ value: p.id, label: `${p.name} (${gradeText(p.grade, p.classLevel)})` })), show: () => !me },
+      { key: "pin", label: L("study_pin"), type: "pin", show: () => !me },
       {
         key: "grade",
         label: L("study_np_grade"),
@@ -1956,18 +2060,20 @@ function openMaterialCreate() {
       { key: "detail", label: L("study_mat_detail"), type: "textarea", rows: 3, maxlength: MATERIAL_DETAIL_MAX, placeholder: L("study_mat_detail_ph"), help: L("study_mat_detail_help") }
     ],
     onSubmit: async (v) => {
-      if (!validPinFormat(v.pin)) return { ok: false, error: L("study_pin_invalid") };
+      const pid = me ? me.id : v.playerId;
+      const pin = me ? credOf(me) : v.pin;
+      if (!validCred(pin)) return { ok: false, error: L("study_pin_invalid") };
       const subject = v.subject === CUSTOM ? String(v.customSubject || "").trim() : v.subject;
       if (!subject) return { ok: false, error: L("study_subject_required") };
       const detail = String(v.detail || "").replace(/\s+/g, " ").trim();
       if (detail.length < 3) return { ok: false, error: L("study_mat_detail_required") };
-      const res = await studyCall("material_create", { playerId: v.playerId, pin: v.pin, subject, grade: v.grade, classLevel: classValue(v.grade, v.classLevel), detail, engine: "auto" });
+      const res = await studyCall("material_create", { playerId: pid, pin, subject, grade: v.grade, classLevel: classValue(v.grade, v.classLevel), detail, engine: "auto" });
       if (!res.ok) return { ok: false, error: errText(res) };
-      return { ok: true, value: { material: res.material, player: playerById(v.playerId), pin: v.pin } };
+      return { ok: true, value: { material: res.material, player: playerById(pid), pin } };
     }
   }).then(async (out) => {
     if (!out) return;
-    if (out.player) S.viewer = { id: out.player.id, name: out.player.name, grade: out.player.grade, classLevel: out.player.classLevel ?? null, pin: out.pin };
+    if (out.player) await adoptLogin(out.player, out.pin);
     const { material } = out;
     S.materials.items = [{ ...material, content: undefined }, ...S.materials.items.filter((i) => i.id !== material.id)];
     S.materials.loaded = true;
@@ -2206,7 +2312,8 @@ async function joinRoomFlow(roomId) {
   if (!room) return;
   if (!players.length) return window.alert(L("study_no_players"));
   const running = room.status === "running";
-  const first = (S.viewer && players.find((p) => p.id === S.viewer.id)) || players[0];
+  const me = loggedIn(players);
+  const first = me || players[0];
   const out = await openFormDialog({
     title: L(running ? "study_room_enter_title" : "study_room_join_title"),
     intro: L("study_room_join_intro", { subject: `${room.subject}${room.topic ? ` · ${room.topic}` : ""}`, count: room.numQuestions, m: roomMinutes(room) }),
@@ -2214,32 +2321,36 @@ async function joinRoomFlow(roomId) {
     cancelLabel: L("study_cancel"),
     busyLabel: L("study_loading"),
     fields: [
-      { key: "playerId", label: L("study_player"), type: "select", value: first.id, options: players.map((p) => ({ value: p.id, label: `${p.name} (${gradeText(p.grade, p.classLevel)})` })) },
-      { key: "pin", label: L("study_pin"), type: "pin" }
+      { key: "playerId", label: L("study_player"), type: "select", value: first.id, options: players.map((p) => ({ value: p.id, label: `${p.name} (${gradeText(p.grade, p.classLevel)})` })), show: () => !me },
+      { key: "pin", label: L("study_pin"), type: "pin", show: () => !me }
     ],
-    extra: [
-      {
-        label: L("study_forgot_pin"),
-        onClick: (v) => {
-          const pl = players.find((p) => p.id === v.playerId);
-          if (pl) openResetPin(pl);
-        }
-      }
-    ],
+    extra: me
+      ? []
+      : [
+          {
+            label: L("study_forgot_pin"),
+            onClick: (v) => {
+              const pl = players.find((p) => p.id === v.playerId);
+              if (pl) openResetPin(pl);
+            }
+          }
+        ],
     onSubmit: async (v) => {
-      if (!validPinFormat(v.pin)) return { ok: false, error: L("study_pin_invalid") };
+      const pid = me ? me.id : v.playerId;
+      const pin = me ? credOf(me) : v.pin;
+      if (!validCred(pin)) return { ok: false, error: L("study_pin_invalid") };
       // room berjalan: hanya peserta lama yang boleh masuk lagi (room_state); lobi: bergabung (idempotent)
-      const res = await studyCall(running ? "room_state" : "room_join", { playerId: v.playerId, pin: v.pin, roomId });
+      const res = await studyCall(running ? "room_state" : "room_join", { playerId: pid, pin, roomId });
       if (!res.ok) return { ok: false, error: errText(res) };
       if (!res.state.me) return { ok: false, error: L("study_room_not_member") };
-      return { ok: true, value: { state: res.state, player: players.find((p) => p.id === v.playerId), pin: v.pin } };
+      return { ok: true, value: { state: res.state, player: players.find((p) => p.id === pid), pin } };
     }
   });
   if (out) enterRoom(out.state, out.player, out.pin);
 }
 
-function enterRoom(state, player, pin) {
-  S.viewer = { id: player.id, name: player.name, grade: player.grade, classLevel: player.classLevel ?? null, pin };
+async function enterRoom(state, player, pin) {
+  await adoptLogin(player, pin);
   S.room = { id: state.room.id, creds: S.viewer, state: null, busy: false, polling: false, leftQuiz: false };
   S.view = "room";
   window.scrollTo(0, 0);
@@ -2305,15 +2416,16 @@ function openRoomCreate() {
   const subjects = settings.subjects || [];
   const spq = settings.secondsPerQuestion ?? 0;
   const playerById = (id) => players.find((p) => p.id === id);
-  const first = (S.viewer && playerById(S.viewer.id)) || players[0];
+  const me = loggedIn(players);
+  const first = me || players[0];
   return openFormDialog({
     title: L("study_room_create_title"),
     okLabel: L("study_room_create_ok"),
     cancelLabel: L("study_cancel"),
     busyLabel: L("study_room_creating"),
     fields: [
-      { key: "playerId", label: L("study_player"), type: "select", value: first.id, options: players.map((p) => ({ value: p.id, label: `${p.name} (${gradeText(p.grade, p.classLevel)})` })) },
-      { key: "pin", label: L("study_pin"), type: "pin" },
+      { key: "playerId", label: L("study_player"), type: "select", value: first.id, options: players.map((p) => ({ value: p.id, label: `${p.name} (${gradeText(p.grade, p.classLevel)})` })), show: () => !me },
+      { key: "pin", label: L("study_pin"), type: "pin", show: () => !me },
       {
         key: "subject",
         label: L("study_subject"),
@@ -2361,24 +2473,27 @@ function openRoomCreate() {
         help: (v) => (spq ? L("study_room_minutes_help", { m: Math.ceil(timeLimitSeconds(Number(v.count || 10), spq) / 60), s: spq }) : L("study_room_minutes_free"))
       }
     ],
-    extra: [
-      {
-        label: L("study_forgot_pin"),
-        onClick: (v) => {
-          const pl = playerById(v.playerId);
-          if (pl) openResetPin(pl);
-        }
-      }
-    ],
+    extra: me
+      ? []
+      : [
+          {
+            label: L("study_forgot_pin"),
+            onClick: (v) => {
+              const pl = playerById(v.playerId);
+              if (pl) openResetPin(pl);
+            }
+          }
+        ],
     onSubmit: async (v) => {
-      const pl = playerById(v.playerId);
+      const pl = me || playerById(v.playerId);
       if (!pl) return { ok: false, error: L("study_pick_player") };
-      if (!validPinFormat(v.pin)) return { ok: false, error: L("study_pin_invalid") };
+      const pin = me ? credOf(me) : v.pin;
+      if (!validCred(pin)) return { ok: false, error: L("study_pin_invalid") };
       const subject = v.subject === CUSTOM ? String(v.customSubject || "").trim() : v.subject;
       if (!subject) return { ok: false, error: L("study_subject_required") };
       const res = await studyCall("room_create", {
         playerId: pl.id,
-        pin: v.pin,
+        pin,
         subject,
         topic: String(v.topic || "").trim(),
         materialGrade: v.materialGrade,
@@ -2389,7 +2504,7 @@ function openRoomCreate() {
         engine: "auto"
       });
       if (!res.ok) return { ok: false, error: errText(res) };
-      return { ok: true, value: { state: res.state, player: pl, pin: v.pin } };
+      return { ok: true, value: { state: res.state, player: pl, pin } };
     }
   }).then((out) => {
     if (out) enterRoom(out.state, out.player, out.pin);

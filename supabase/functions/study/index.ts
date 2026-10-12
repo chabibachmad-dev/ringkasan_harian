@@ -34,6 +34,9 @@
 //   -- timeline (Facebook-like): lihat kegiatan pemain, suka, komentar, detil. Melihat timeline & komentar tidak perlu PIN;
 //      suka/komentar/detil butuh PIN penonton (viewerId + viewerPin) dan tidak boleh pada kegiatan sendiri (suka/komentar).
 //   player_verify       { playerId, pin }                                    -> { player }   (masuk sebagai penonton)
+//   login               { playerId, pin }                                    -> { token, player }   (login perangkat: simpan token di perangkat; token berlaku sebagai pengganti PIN di semua aksi pemain)
+//   logout              { playerId, token }                                  -> { ok }   (cabut token perangkat ini)
+//   Token tidak valid -> 403 { pinWrong:true, tokenInvalid:true }. Reset PIN oleh orang tua mencabut semua token pemain itu.
 //   feed                { ownerId?, kinds?, viewerId?, viewerPin?, before? } -> { items:[{kind:"lesson"|"competition"|"material", id, at, likeCount, commentCount, liked, ...}], hasMore }
 //                         (tanpa ownerId = timeline global semua pemain; dengan ownerId = kegiatan satu pemain; kinds menyaring jenis)
 //   player_public       { playerId }                                         -> { player:{id,name,grade,classLevel}, stats:{rank,totalPoints,soloPoints,competitionPoints,lessons,competitions,wins,materials} }   (profil publik, tanpa PIN)
@@ -86,6 +89,10 @@ import {
   parseExplanations,
   parseQuestions,
   practiceSource,
+  hashDeviceToken,
+  isDeviceToken,
+  MAX_DEVICE_TOKENS,
+  newDeviceToken,
   PRACTICE_QUESTIONS,
   validCount,
   validPin,
@@ -121,6 +128,16 @@ async function checkPlayerPin(admin: Admin, playerId: unknown, pin: unknown): Pr
   const { data: player, error } = await admin.from("study_players").select("*").eq("id", playerId).maybeSingle();
   if (error) return fail(error.message, 500);
   if (!player) return fail("Pemain tidak ditemukan.", 404);
+  // Token login perangkat menggantikan PIN (tidak ikut penghitung salah-PIN, karena acak 256 bit).
+  if (isDeviceToken(pin)) {
+    const hash = await hashDeviceToken(pin);
+    const { data: t } = await admin.from("study_device_tokens").select("id,last_used_at").eq("player_id", playerId).eq("token_hash", hash).maybeSingle();
+    if (t) {
+      if (Date.now() - Date.parse(t.last_used_at) > 10 * 60 * 1000) await admin.from("study_device_tokens").update({ last_used_at: new Date().toISOString() }).eq("id", t.id);
+      return { player };
+    }
+    return fail("Sesi masuk di perangkat ini sudah berakhir. Masuk lagi dengan PIN.", 403, { pinWrong: true, tokenInvalid: true });
+  }
   const left = lockSecondsLeft(player.pin_locked_until, Date.now());
   if (left > 0) return fail(`PIN terkunci. Coba lagi ${Math.ceil(left / 60)} menit lagi.`, 429, { locked: true, seconds: left });
   if (typeof pin === "string" && validPin(pin) && (await verifyPin(pin, player.pin_salt, player.pin_hash))) {
@@ -709,6 +726,31 @@ Deno.serve(async (req) => {
         .maybeSingle();
       if (error) return fail(error.message, 500);
       if (!data) return fail("Pemain tidak ditemukan.", 404);
+      await admin.from("study_device_tokens").delete().eq("player_id", body.playerId); // PIN baru = semua perangkat harus masuk lagi
+      return json({ ok: true });
+    }
+
+    // ------------------------------------------------------------ login perangkat
+    if (action === "login") {
+      if (isDeviceToken(body.pin)) return fail("Masuk dengan PIN.");
+      const auth = await checkPlayerPin(admin, body.playerId, body.pin);
+      if (auth instanceof Response) return auth;
+      const p = auth.player;
+      const token = newDeviceToken();
+      const { error: te } = await admin.from("study_device_tokens").insert({ player_id: p.id, token_hash: await hashDeviceToken(token) });
+      if (te) return fail(te.message, 500);
+      // batasi jumlah perangkat: yang terlama dikeluarkan
+      const { data: all } = await admin.from("study_device_tokens").select("id").eq("player_id", p.id).order("created_at", { ascending: false });
+      const extra = (all ?? []).slice(MAX_DEVICE_TOKENS).map((r: Row) => r.id);
+      if (extra.length > 0) await admin.from("study_device_tokens").delete().in("id", extra);
+      return json({ ok: true, token, player: { id: p.id, name: p.name, grade: p.grade, classLevel: p.class_level ?? null } });
+    }
+
+    if (action === "logout") {
+      // idempoten: token yang sudah tidak berlaku pun dianggap berhasil keluar
+      if (isUuid(body.playerId) && isDeviceToken(body.token)) {
+        await admin.from("study_device_tokens").delete().eq("player_id", body.playerId).eq("token_hash", await hashDeviceToken(body.token));
+      }
       return json({ ok: true });
     }
 
