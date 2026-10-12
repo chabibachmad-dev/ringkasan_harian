@@ -27,6 +27,76 @@ const fmtDate = (v) => {
   const d = new Date(v);
   return Number.isNaN(d.getTime()) ? "" : d.toLocaleDateString(locale(), { day: "numeric", month: "short", year: "numeric" });
 };
+// ---- batas poin harian (migrasi 0032): data dari server, tampilan di sini
+const weekdayShort = (ymd) => {
+  const [y, m, d] = String(ymd).split("-").map(Number);
+  const dt = new Date(y, (m || 1) - 1, d || 1);
+  return Number.isNaN(dt.getTime()) ? "" : dt.toLocaleDateString(locale(), { weekday: "short" });
+};
+const tzLabel = (tz) => (tz === "Asia/Jakarta" ? "WIB" : tz || "");
+const dailyCapOf = () => {
+  const c = S.overview?.settings?.dailyPointsCap;
+  return typeof c === "number" ? c : null; // null = migrasi 0032 belum dijalankan: fitur disembunyikan
+};
+// simpan poin hari ini pemain di data beranda supaya papan "Hari ini" & bilah penonton ikut terbarui
+function syncToday(playerId, daily) {
+  const p = S.overview?.players?.find((x) => x.id === playerId);
+  if (p && daily && typeof daily.earned === "number") p.todayPoints = daily.earned;
+}
+function todayOf(playerId) {
+  return S.overview?.players?.find((x) => x.id === playerId)?.todayPoints ?? 0;
+}
+function capReached(playerId) {
+  const cap = dailyCapOf();
+  if (!(cap > 0)) return false;
+  if (S.profile?.player?.id === playerId && S.profile.daily) return !!S.profile.daily.reached;
+  return todayOf(playerId) >= cap;
+}
+// Dasbor "poin didapat hari ini": angka, batang kemajuan terhadap batas, rincian, dan grafik 7 hari.
+function dailyCardHtml(d) {
+  if (!d) return "";
+  const cap = Number(d.cap) || 0;
+  const earned = Number(d.earned) || 0;
+  const pct = cap > 0 ? Math.min(100, Math.round((earned / cap) * 100)) : 0;
+  const hist = Array.isArray(d.history) ? d.history : [];
+  const top = Math.max(cap, ...hist.map((h) => Number(h.earned) || 0), 1);
+  const bars = hist
+    .map((h, i) => {
+      const e = Number(h.earned) || 0;
+      const hp = e > 0 ? Math.max(5, Math.round((e / top) * 100)) : 0;
+      return `<li class="study-daily-day ${i === hist.length - 1 ? "is-today" : ""} ${cap > 0 && e >= cap ? "is-full" : ""}" title="${esc(h.date)}: ${esc(fmt(e))}">
+        <span class="study-daily-val">${esc(fmt(e))}</span>
+        <span class="study-daily-barwrap"><span class="study-daily-bar" style="height:${hp}%"></span></span>
+        <span class="study-daily-wd">${esc(weekdayShort(h.date))}</span>
+      </li>`;
+    })
+    .join("");
+  const status =
+    cap <= 0
+      ? L("study_daily_unlimited")
+      : d.reached
+        ? L("study_daily_full", { tz: tzLabel(d.timezone) })
+        : L("study_daily_left", { n: fmt(d.remaining ?? Math.max(0, cap - earned)) });
+  return `
+    <section class="study-daily" aria-label="${esc(L("study_daily_title"))}">
+      <div class="study-daily-head">
+        <div class="study-balance-label">${esc(L("study_daily_title"))}</div>
+        ${cap > 0 && d.reached ? `<span class="study-badge study-badge--solid">${esc(L("study_daily_max"))}</span>` : ""}
+      </div>
+      <div class="study-daily-main"><span class="study-daily-num">${esc(fmt(earned))}</span>${cap > 0 ? `<span class="study-daily-cap">/ ${esc(fmt(cap))} ${esc(L("study_pts"))}</span>` : `<span class="study-daily-cap">${esc(L("study_pts"))}</span>`}</div>
+      ${cap > 0 ? `<div class="study-daily-track" role="progressbar" aria-valuemin="0" aria-valuemax="${cap}" aria-valuenow="${Math.min(earned, cap)}" aria-label="${esc(L("study_daily_title"))}"><span class="study-daily-fill ${d.reached ? "is-full" : ""}" style="width:${pct}%"></span></div>` : ""}
+      <div class="study-row-meta" data-daily-status>${esc(status)}</div>
+      <div class="study-row-meta">${esc(L("study_daily_breakdown", { solo: fmt(d.solo), comp: fmt(d.competition), bonus: fmt(d.bonus) }))}</div>
+      <div class="study-row-meta">${esc(L("study_daily_counts", { s: d.sessions ?? 0, c: d.competitions ?? 0 }))}</div>
+      ${hist.length ? `<div class="study-daily-week-label">${esc(L("study_daily_week"))}</div><ul class="study-daily-week">${bars}</ul>` : ""}
+      ${cap > 0 ? `<p class="study-hint">${esc(L("study_daily_note", { tz: tzLabel(d.timezone) }))}</p>` : ""}
+    </section>`;
+}
+// Satu baris ringkas "Hari ini X/1000" untuk bilah penonton & layar hasil.
+function dailyLine(earned, cap) {
+  return cap > 0 ? L("study_daily_short", { e: fmt(earned), cap: fmt(cap) }) : L("study_daily_short_nocap", { e: fmt(earned) });
+}
+
 const GRADE_LIST = ["TK", "SD", "SMP", "SMA", "S1", "S2", "S3", "Umum"];
 const COUNTS = [5, 10, 15, 20, 25, 30];
 const LETTERS = ["A", "B", "C", "D"];
@@ -34,6 +104,7 @@ const CUSTOM = "__custom";
 
 // view: "home" | "profile" | "quiz" | "result". PIN hanya hidup di memori (hilang saat layar Study ditinggalkan).
 const S = {
+  boardMode: "total", // papan leaderboard: "total" | "today" (poin didapat hari ini)
   avatarBusy: false,
   avatarMsg: "",
   view: "home",
@@ -250,6 +321,7 @@ async function loadProfile() {
   }
   S.profile = res;
   S.player = res.player;
+  syncToday(res.player.id, res.daily);
   render();
 }
 
@@ -364,10 +436,31 @@ function renderHome(body) {
       </button>`
     )
     .join("");
+  const capNow = dailyCapOf();
+  const todayMode = capNow !== null && S.boardMode === "today";
+  const todayRows = players
+    .filter((p) => (p.todayPoints ?? 0) > 0)
+    .sort((a, b) => (b.todayPoints ?? 0) - (a.todayPoints ?? 0) || String(a.name).localeCompare(String(b.name)))
+    .map(
+      (p, i) => `
+      <button type="button" class="study-board-row ${i < 3 ? "is-top" : ""}" data-act="open-public" data-id="${esc(p.id)}">
+        <span class="study-rank">${i + 1}</span>
+        ${avatarHtml(p.id, p.name, "study-avatar--sm", true)}
+        <span class="study-board-main"><span class="study-name">${esc(p.name)}</span><small class="study-board-meta">${esc(gradeText(p.grade, p.classLevel))}${capNow > 0 && p.todayPoints >= capNow ? ` · ${esc(L("study_daily_max"))}` : ""}</small></span>
+        <span class="study-pts">+${fmt(p.todayPoints)}<small>${esc(L("study_pts"))}</small></span>
+      </button>`
+    )
+    .join("");
+  const modeBtn = (id, label) =>
+    `<button type="button" role="tab" class="study-tab ${(todayMode ? "today" : "total") === id ? "is-on" : ""}" aria-selected="${(todayMode ? "today" : "total") === id ? "true" : "false"}" data-act="board-mode" data-mode="${id}">${esc(label)}</button>`;
+  const modeTabs = capNow === null || players.length === 0 ? "" : `<div class="study-tabs study-tabs--sub" role="tablist">${modeBtn("total", L("study_board_total"))}${modeBtn("today", L("study_board_today"))}</div>`;
   const boardHtml =
     players.length === 0
       ? `<p class="status-text">${esc(L("study_board_empty"))}</p>`
-      : `<div class="study-board" role="table">${rows}</div>
+      : todayMode
+        ? `${modeTabs}${todayRows ? `<div class="study-board" role="table">${todayRows}</div>` : `<p class="status-text">${esc(L("study_board_today_empty"))}</p>`}
+      <p class="study-hint">${esc(L(capNow > 0 ? "study_board_today_hint" : "study_board_today_hint_nocap", { cap: fmt(capNow) }))}</p>`
+        : `${modeTabs}<div class="study-board" role="table">${rows}</div>
       <p class="study-hint">${esc(L("study_board_hint"))}</p>`;
   const tab = (id, label) =>
     `<button type="button" role="tab" id="study-tab-${id}" class="study-tab ${S.tab === id ? "is-on" : ""}" aria-selected="${S.tab === id ? "true" : "false"}" data-act="tab" data-tab="${id}">${esc(label)}</button>`;
@@ -437,7 +530,7 @@ function renderProfile(body) {
           if (s.status === "submitted") {
             return `
           <div class="study-row">
-            <div class="study-row-main"><div class="study-row-title">${esc(s.subject)}</div><div class="study-row-meta">${lvl} · ${fmtDate(s.submittedAt)}<br>${esc(L("study_score", { c: s.correctCount, n: s.numQuestions }))} · +${fmt(s.pointsAwarded)} ${esc(L("study_pts"))}</div></div>
+            <div class="study-row-main"><div class="study-row-title">${esc(s.subject)}</div><div class="study-row-meta">${lvl} · ${fmtDate(s.submittedAt)}<br>${esc(L("study_score", { c: s.correctCount, n: s.numQuestions }))} · +${fmt(s.pointsAwarded)} ${esc(L("study_pts"))}${s.pointsRaw > s.pointsAwarded ? ` (${esc(L("study_row_capped", { raw: fmt(s.pointsRaw) }))})` : ""}</div></div>
             <button type="button" class="secondary-btn" data-act="view-result" data-id="${esc(s.id)}">${esc(L("study_view_result"))}</button>
           </div>`;
           }
@@ -466,6 +559,7 @@ function renderProfile(body) {
       <div class="study-balance-value">${fmt(p.balance)}</div>
       <div class="study-row-meta">${esc(L("study_total_earned"))}: ${fmt(p.totalEarned)}</div>
     </div>
+    ${dailyCardHtml(p.daily)}
     <div class="study-actions">
       <button type="button" class="primary-btn" data-act="new-lesson-me">${esc(L("study_new_lesson"))}</button>
       <button type="button" class="secondary-btn" data-act="my-timeline">${esc(L("study_tl_my"))}</button>
@@ -564,6 +658,8 @@ function renderResult(body) {
       <div class="study-score-main">${esc(L("study_score", { c: r.correct, n: r.total }))}</div>
       <div class="study-score-points">+${fmt(r.points)} <small>${esc(L("study_pts"))}</small></div>
       <div class="study-row-meta">${esc(pointsFormula(r, L))}</div>
+      ${r.capped ? `<div class="study-warn" role="status">${esc(L("study_daily_capped_line", { raw: fmt(r.rawPoints), got: fmt(r.points) }))}</div>` : ""}
+      ${r.daily && dailyCapOf() !== null ? `<div class="study-row-meta">${esc(dailyLine(r.daily.earned, r.daily.cap))}</div>` : ""}
       ${r.bonusPercent > 0 ? `<div class="study-bonus">${esc(L("study_bonus_line", { b: r.bonusPercent }))}</div>` : ""}
       ${r.timedOut ? `<div class="study-warn">${esc(L("study_time_up_late"))}</div>` : S.autoSubmittedId === r.session.id ? `<div class="study-warn">${esc(L("study_time_up_auto"))}</div>` : ""}
     </div>
@@ -598,10 +694,17 @@ async function onBodyClick(e) {
   const id = btn.dataset.id;
   if (act === "reload") return loadOverview();
   if (act === "new-player") return openNewPlayerForm();
-  if (act === "new-lesson") return openLessonForm(null);
-  if (act === "new-lesson-me") return openLessonForm(S.player);
+  if (act === "new-lesson" || act === "new-lesson-me") {
+    const who = act === "new-lesson-me" ? S.player : loggedIn(S.overview?.players || []);
+    if (who && capReached(who.id) && !window.confirm(L("study_daily_start_confirm"))) return;
+    return openLessonForm(act === "new-lesson-me" ? S.player : null);
+  }
   if (act === "open-player") return openPlayerPin(id);
   if (act === "tab") return switchTab(btn.dataset.tab);
+  if (act === "board-mode") {
+    S.boardMode = btn.dataset.mode === "today" ? "today" : "total";
+    return render();
+  }
   if (act === "rooms") return openRooms();
   if (act === "rooms-refresh") return loadRooms();
   if (act === "room-new") return openRoomCreate();
@@ -1268,7 +1371,8 @@ async function submitQuiz(btn, auto = false) {
   if (S.feed) S.feed.stale = true;
   S.autoSubmittedId = auto ? q.sessionId : "";
   S.quiz = null;
-  S.result = res.result;
+  S.result = res.daily ? { ...res.result, daily: res.daily } : res.result;
+  syncToday(S.player.id, res.daily);
   S.explainFailed = !!res.explainFailed;
   S.resultFrom = "profile";
     S.view = "result";
@@ -1308,7 +1412,7 @@ async function retryExplain(btn) {
   btn.disabled = false;
   btn.textContent = old;
   if (!res.ok) return handleFailure(res);
-  S.result = res.result;
+  S.result = S.result.daily ? { ...res.result, daily: S.result.daily } : res.result;
   S.explainFailed = !!res.explainFailed;
   render();
 }
@@ -1541,6 +1645,7 @@ async function loadPublic(pub) {
   if (res.ok) {
     pub.player = res.player;
     pub.stats = res.stats;
+    pub.today = res.today || null;
   } else {
     pub.error = errText(res);
   }
@@ -1605,7 +1710,9 @@ function openViewerLogin() {
 }
 
 async function signInViewer() {
-  if (await openViewerLogin()) await refreshFeed(shownFeed());
+  if (!(await openViewerLogin())) return;
+  await refreshFeed(shownFeed());
+  render(); // di tab Leaderboard/Materi tidak ada daftar kegiatan yang disegarkan: gambar ulang supaya bilah "Masuk sebagai ..." muncul
 }
 
 function signOutViewer() {
@@ -1623,7 +1730,9 @@ async function ensureViewer() {
 // ---- tampilan
 function viewerBarHtml() {
   if (S.viewer) {
-    return `<div class="study-viewer"><span>${esc(L("study_tl_signed_as", { name: S.viewer.name }))}</span><span class="study-viewer-actions"><button type="button" class="study-link-btn" data-act="my-profile">${esc(L("study_my_profile"))}</button><button type="button" class="study-link-btn" data-act="tl-signout">${esc(L("study_tl_signout"))}</button></span></div>`;
+    const cap = dailyCapOf();
+    const today = cap === null ? "" : ` · ${esc(dailyLine(todayOf(S.viewer.id), cap))}`;
+    return `<div class="study-viewer"><span>${esc(L("study_tl_signed_as", { name: S.viewer.name }))}${today}</span><span class="study-viewer-actions"><button type="button" class="study-link-btn" data-act="my-profile">${esc(L("study_my_profile"))}</button><button type="button" class="study-link-btn" data-act="tl-signout">${esc(L("study_tl_signout"))}</button></span></div>`;
   }
   return `<div class="study-viewer"><span>${esc(L("study_tl_signed_out"))}</span><button type="button" class="study-link-btn" data-act="tl-signin">${esc(L("study_tl_signin"))}</button></div>`;
 }
@@ -1850,6 +1959,7 @@ function renderPublic(body) {
         <div class="study-profile-name">${esc(o.name)}${you}</div>
         <div class="study-row-meta">${esc(gradeText(o.grade, o.classLevel))}</div>
         <div class="study-row-meta">${esc(L("study_tl_rank", { n: st.rank ?? "-" }))} · ${fmt(st.totalPoints)} ${esc(L("study_pts"))}</div>
+        ${pub.today ? `<div class="study-row-meta">${esc(L("study_pub_today", { line: dailyLine(pub.today.earned, pub.today.cap) }))}</div>` : ""}
       </div>
       ${avatarHtml(o.id, o.name, "study-avatar--xl")}
     </div>
@@ -2625,7 +2735,7 @@ function roomTableHtml(results, meId) {
         <span class="study-tcell-main"><strong>${esc(r.name)}</strong><small>${esc(gradeText(r.grade, r.classLevel))}${r.timedOut ? ` · ${esc(L("study_room_timedout"))}` : ""}</small></span>
         <span>${r.correct}/${r.total}</span>
         <span>${r.seconds == null ? "-" : esc(formatClock(r.seconds))}</span>
-        <span class="study-pts">${fmt(total)}${r.bonus > 0 ? `<small>${esc(L("study_room_bonus", { b: fmt(r.bonus) }))}</small>` : ""}</span>
+        <span class="study-pts">${fmt(total)}${r.bonus > 0 ? `<small>${esc(L("study_room_bonus", { b: fmt(r.bonus) }))}</small>` : ""}${r.capped ? `<small>${esc(L("study_room_capped_small"))}</small>` : ""}</span>
       </button>`;
     })
     .join("");
@@ -2633,6 +2743,19 @@ function roomTableHtml(results, meId) {
     <div class="study-trow study-thead" role="row"><span>#</span><span>${esc(L("study_col_name"))}</span><span>${esc(L("study_col_score"))}</span><span>${esc(L("study_col_time"))}</span><span>${esc(L("study_col_points"))}</span></div>
     ${rows}
   </div>`;
+}
+
+// Catatan untuk peserta yang poin kompetisinya dipotong batas harian + posisi poin hari ini.
+function roomCappedNote(results, meId, daily) {
+  const mine = (results || []).find((x) => x.playerId === meId);
+  if (!mine) return "";
+  const lines = [];
+  if (mine.capped) lines.push(`<div class="study-warn" role="status">${esc(L("study_daily_capped_line", { raw: fmt(mine.pointsRaw + mine.bonusRaw), got: fmt(mine.points + mine.bonus) }))}</div>`);
+  if (daily && dailyCapOf() !== null) {
+    syncToday(meId, daily);
+    lines.push(`<div class="study-row-meta">${esc(dailyLine(daily.earned, daily.cap))}</div>`);
+  }
+  return lines.length ? `<div class="study-card">${lines.join("")}</div>` : "";
 }
 
 function roomInfoHtml(r) {
@@ -2713,6 +2836,7 @@ function renderRoom(body) {
       ${r.winnerName ? `<div class="study-row-meta">${esc(L("study_room_bonus_line", { b: fmt(r.winBonus) }))}</div>` : ""}
     </div>
     ${roomTableHtml(st.results || [], meId)}
+    ${roomCappedNote(st.results, meId, st.daily)}
     <div class="study-actions">
       <button type="button" class="primary-btn" data-act="room-card">${esc(L("study_share_card"))}</button>
       <button type="button" class="secondary-btn" data-act="room-back">${esc(L("study_room_back"))}</button>
@@ -2876,6 +3000,7 @@ function renderSettings(data) {
       <label class="study-field"><span class="study-field-label">${esc(L("study_set_bonus"))}</span><input type="number" inputmode="numeric" min="0" max="100" name="perfectBonusPercent" value="${s.perfectBonusPercent}" /></label>
       <label class="study-field"><span class="study-field-label">${esc(L("study_set_spq"))}</span><input type="number" inputmode="numeric" min="0" max="600" name="secondsPerQuestion" value="${s.secondsPerQuestion}" /><small class="study-field-help">${esc(L("study_set_spq_help"))}</small></label>
       <label class="study-field"><span class="study-field-label">${esc(L("study_set_winbonus"))}</span><input type="number" inputmode="numeric" min="0" max="1000" name="competitionWinBonus" value="${s.competitionWinBonus ?? 10}" /></label>
+      ${typeof s.dailyPointsCap === "number" ? `<label class="study-field"><span class="study-field-label">${esc(L("study_set_dailycap"))}</span><input type="number" inputmode="numeric" min="0" max="1000000" name="dailyPointsCap" value="${s.dailyPointsCap}" /><small class="study-field-help">${esc(L("study_set_dailycap_help"))}</small></label>` : ""}
       <label class="study-field"><span class="study-field-label">${esc(L("study_set_w_easy"))}</span><input type="number" inputmode="numeric" min="1" max="1000" name="easy" value="${s.weights.easy}" /></label>
       <label class="study-field"><span class="study-field-label">${esc(L("study_set_w_normal"))}</span><input type="number" inputmode="numeric" min="1" max="1000" name="normal" value="${s.weights.normal}" /></label>
       <label class="study-field"><span class="study-field-label">${esc(L("study_set_w_hard"))}</span><input type="number" inputmode="numeric" min="1" max="1000" name="hard" value="${s.weights.hard}" /></label>
@@ -2951,6 +3076,7 @@ async function onPointsSubmit(e) {
     perfectBonusPercent: num("perfectBonusPercent"),
     secondsPerQuestion: num("secondsPerQuestion"),
     competitionWinBonus: num("competitionWinBonus"),
+    ...(f.elements.dailyPointsCap ? { dailyPointsCap: num("dailyPointsCap") } : {}),
     weights: { easy: num("easy"), normal: num("normal"), hard: num("hard") },
     subjects: f.elements.subjects.value.split("\n")
   });

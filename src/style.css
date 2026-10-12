@@ -3732,3 +3732,119 @@ button.study-trow:active {
   width: 14px;
   height: 14px;
 }
+
+/* ---- Study: batas poin harian + dasbor "poin didapat hari ini" ---- */
+.study-daily {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0 0 12px;
+  padding: 4px 2px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.study-daily-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.study-daily-main {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.study-daily-num {
+  font-size: 2.2rem;
+  font-weight: 800;
+  line-height: 1.1;
+}
+
+.study-daily-cap {
+  font-size: 0.9rem;
+  color: var(--text-muted);
+}
+
+.study-daily-track {
+  height: 12px;
+  border: 1.5px solid var(--border);
+  border-radius: 999px;
+  overflow: hidden;
+  background: transparent;
+}
+
+.study-daily-fill {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  border-radius: 999px;
+  transition: width 0.4s ease;
+}
+
+.study-daily-fill.is-full {
+  background: repeating-linear-gradient(45deg, var(--accent) 0 6px, var(--bg) 6px 9px);
+}
+
+.study-daily-week-label {
+  margin-top: 8px;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+}
+
+.study-daily-week {
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.study-daily-day {
+  flex: 1 1 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  font-size: 0.64rem;
+  color: var(--text-muted);
+}
+
+.study-daily-barwrap {
+  display: flex;
+  align-items: flex-end;
+  width: 100%;
+  height: 54px;
+  border-bottom: 1.5px solid var(--border);
+}
+
+.study-daily-bar {
+  display: block;
+  width: 100%;
+  border: 1.5px solid var(--border);
+  border-bottom: 0;
+  border-radius: 4px 4px 0 0;
+  background: transparent;
+  min-height: 0;
+}
+
+.study-daily-day.is-today .study-daily-bar {
+  background: var(--accent);
+}
+
+.study-daily-day.is-today {
+  color: var(--text);
+  font-weight: 700;
+}
+
+.study-daily-day.is-full .study-daily-bar {
+  background: repeating-linear-gradient(45deg, var(--accent) 0 4px, var(--bg) 4px 7px);
+}
+
+.study-daily-val {
+  font-variant-numeric: tabular-nums;
+}

@@ -17,6 +17,8 @@ begin
   return study_submit_session(sid, ans);
 end $$;
 
+-- Batas poin harian (0032) dimatikan di berkas ini: satu pemain 'Pts' mengerjakan banyak pelajaran dalam sehari dan yang diuji di sini rumus poinnya. Batas harian diuji di study_daily.sql.
+do $$ begin if exists (select 1 from information_schema.columns where table_name='study_settings' and column_name='daily_points_cap') then execute 'update study_settings set daily_points_cap = 0 where id = 1'; end if; end $$;
 insert into study_players(name,grade,pin_salt,pin_hash) values ('Pts','SD','s','h');
 
 select pg_temp.chk('seed setting 10 poin/soal, bonus 10%, 60 dtk/soal',

@@ -11,10 +11,13 @@
 // (fungsi study_submit_session), BUKAN oleh AI; AI hanya membuat soal dan menulis pembahasan.
 //
 // Body request (semua: { "action": "...", ... }); respons selalu { ok: boolean, ... }:
-//   overview            -> { players: [{id,name,grade,classLevel,sessionsDone,totalPoints,balance}], settings, grades }
+//   overview            -> { players: [{id,name,grade,classLevel,sessionsDone,totalPoints,balance,todayPoints}], settings, grades }
+//                         BATAS POIN HARIAN (migrasi 0032): settings.dailyPointsCap (0 = tanpa batas; null = migrasi belum dijalankan). Poin yang DIDAPAT
+//                         (pelajaran, kompetisi, bonus pemenang) per hari (zona Asia/Jakarta) dipotong sampai batas; redeem/hukuman tidak membuka jatah lagi.
+//                         todayPoints = poin didapat hari ini. Hasil pelajaran membawa rawPoints/capped; session_submit & player_profile membawa daily.
 //   player_create       { name, grade, classLevel?, pin }                    -> { player }   (classLevel wajib untuk SD/SMP/SMA: SD 1-6, SMP 7-9, SMA 10-12)
 //   player_update_level { playerId, pin, grade, classLevel?, parentPin? }    -> { player }   (naik kelas / ralat; PIN orang tua bila sudah dibuat)
-//   player_profile      { playerId, pin }                                    -> { player, balance, totalEarned, sessions, redemptions, penalties, allowedGrades }
+//   player_profile      { playerId, pin }                                    -> { player, balance, totalEarned, daily, sessions, redemptions, penalties, allowedGrades }   (daily = dasbor poin hari ini, null bila migrasi 0032 belum ada)
 //   pin_reset           { playerId, newPin, parentPin? }                     -> { ok }
 //   session_start       { playerId, pin, subject, topic?, materialGrade, materialClass?, level, count, engine? }
 //                       ATAU latihan dari materi: { playerId, pin, materialId, level, engine? } (10 soal dari isi materi; pelajaran/tingkat/kelas diambil dari materi)
@@ -25,7 +28,7 @@
 //   session_cancel      { playerId, pin, sessionId }                         -> { ok }   (hanya sesi yang belum dikumpulkan)
 //   redeem              { playerId, pin, itemId }                            -> { redemption }
 //   settings_open       { parentPin? }                                       -> { settings, pendingRedemptions, players }
-//   settings_save       { parentPin?, perQuestionPoints, perfectBonusPercent, secondsPerQuestion, competitionWinBonus, weights:{easy,normal,hard}, subjects:[...] } -> { settings }
+//   settings_save       { parentPin?, perQuestionPoints, perfectBonusPercent, secondsPerQuestion, competitionWinBonus, dailyPointsCap?, weights:{easy,normal,hard}, subjects:[...] } -> { settings }   (dailyPointsCap 0-1000000, 0 = tanpa batas; dihilangkan = tidak diubah)
 //   redeem_item_save    { parentPin?, id?, name, cost }                      -> { items }
 //   redeem_item_delete  { parentPin?, id }                                   -> { items }
 //   redeem_mark         { parentPin?, redemptionId, status:"given"|"pending" } -> { ok }
@@ -42,7 +45,7 @@
 //   Token tidak valid -> 403 { pinWrong:true, tokenInvalid:true }. Reset PIN oleh orang tua mencabut semua token pemain itu.
 //   feed                { ownerId?, kinds?, viewerId?, viewerPin?, before? } -> { items:[{kind:"lesson"|"competition"|"material", id, at, likeCount, commentCount, liked, ...}], hasMore }
 //                         (tanpa ownerId = timeline global semua pemain; dengan ownerId = kegiatan satu pemain; kinds menyaring jenis)
-//   player_public       { playerId }                                         -> { player:{id,name,grade,classLevel}, stats:{rank,totalPoints,soloPoints,competitionPoints,lessons,competitions,wins,materials} }   (profil publik, tanpa PIN)
+//   player_public       { playerId }                                         -> { player:{id,name,grade,classLevel}, stats:{rank,totalPoints,soloPoints,competitionPoints,lessons,competitions,wins,materials}, today:{earned,cap,reached}|null }   (profil publik, tanpa PIN)
 //   like_toggle         { viewerId, viewerPin, kind?, targetId }             -> { liked, count }   (kind: lesson (bawaan, boleh pakai sessionId) | competition | material)
 //   comment_list        { kind?, targetId }                                  -> { comments:[{id,playerId,name,grade,body,createdAt}] }
 //   comment_add         { viewerId, viewerPin, kind?, targetId, body }       -> { comment, count }
@@ -202,6 +205,7 @@ const publicSettings = (s: Row, items: Row[]) => ({
   perfectBonusPercent: s.perfect_bonus_percent,
   secondsPerQuestion: s.seconds_per_question, // 0 = tanpa timer
   competitionWinBonus: s.competition_win_bonus,
+  dailyPointsCap: typeof s.daily_points_cap === "number" ? s.daily_points_cap : null, // 0 = tanpa batas; null = migrasi 0032 belum dijalankan
   weights: { easy: s.weight_easy, normal: s.weight_normal, hard: s.weight_hard },
   subjects: Array.isArray(s.subjects) ? s.subjects : [],
   parentPinSet: !!s.parent_pin_hash,
@@ -216,6 +220,12 @@ async function loadItems(admin: Admin): Promise<Row[]> {
 async function loadSettings(admin: Admin): Promise<Row | null> {
   const { data } = await admin.from("study_settings").select("*").eq("id", 1).maybeSingle();
   return data ?? null;
+}
+
+// Dasbor poin hari ini (fungsi study_daily, migrasi 0032). null bila migrasi belum dijalankan.
+async function loadDaily(admin: Admin, playerId: string): Promise<Row | null> {
+  const { data, error } = await admin.rpc("study_daily", { p_player: playerId });
+  return error || !data ? null : (data as Row);
 }
 
 // Kelas dari klien: bilangan bulat atau kosong (null). Nilai lain -> NaN supaya ditolak validClass.
@@ -241,6 +251,7 @@ const sessionRow = (s: Row) => ({
   provider: s.provider,
   createdAt: s.created_at,
   submittedAt: s.submitted_at,
+  pointsRaw: s.points_raw ?? null, // sebelum dipotong batas harian (null = tidak dipotong / pelajaran lama)
   bonusPercent: s.bonus_percent ?? 0,
   timedOut: !!s.timed_out,
   timeLimitSeconds: s.time_limit_seconds ?? null,
@@ -275,6 +286,8 @@ async function loadResult(admin: Admin, session: Row, player: Row) {
     timedOut: !!session.timed_out,
     weightPercent: session.weight_percent,
     points: session.points_awarded ?? 0,
+    rawPoints: session.points_raw ?? session.points_awarded ?? 0, // sebelum dipotong batas harian
+    capped: (session.points_raw ?? 0) > (session.points_awarded ?? 0),
     items
   };
 }
@@ -416,6 +429,7 @@ function readSettingsInput(body: Row): { ok: true; value: Row } | { ok: false; e
   const bonus = int(body.perfectBonusPercent, 0, 100);
   const spq = int(body.secondsPerQuestion, 0, 600);
   const winBonus = int(body.competitionWinBonus, 0, 1000);
+  const cap = body.dailyPointsCap === undefined || body.dailyPointsCap === null ? undefined : int(body.dailyPointsCap, 0, 1_000_000);
   const w = (body.weights ?? {}) as Row;
   const easy = int(w.easy, 1, 1000);
   const normal = int(w.normal, 1, 1000);
@@ -423,6 +437,7 @@ function readSettingsInput(body: Row): { ok: true; value: Row } | { ok: false; e
   if (perQ === null) return { ok: false, error: "Poin per soal harus bilangan bulat 1-10000." };
   if (bonus === null) return { ok: false, error: "Bonus nilai sempurna harus bilangan bulat 0-100 (persen)." };
   if (winBonus === null) return { ok: false, error: "Bonus pemenang kompetisi harus bilangan bulat 0-1000." };
+  if (cap === null) return { ok: false, error: "Batas poin harian harus bilangan bulat 0-1.000.000 (0 = tanpa batas)." };
   if (spq === null || (spq !== 0 && spq < 10)) return { ok: false, error: "Waktu per soal harus 0 (tanpa timer) atau 10-600 detik." };
   if (easy === null || normal === null || hard === null) return { ok: false, error: "Bobot level harus bilangan bulat 1-1000 (persen)." };
   const rawSubjects = Array.isArray(body.subjects) ? body.subjects : [];
@@ -432,7 +447,7 @@ function readSettingsInput(body: Row): { ok: true; value: Row } | { ok: false; e
     if (name && !subjects.some((x) => x.toLowerCase() === name.toLowerCase())) subjects.push(name);
   }
   if (subjects.length === 0 || subjects.length > 30) return { ok: false, error: "Daftar pelajaran harus berisi 1-30 nama." };
-  return { ok: true, value: { per_question_points: perQ, perfect_bonus_percent: bonus, seconds_per_question: spq, competition_win_bonus: winBonus, weight_easy: easy, weight_normal: normal, weight_hard: hard, subjects, updated_at: new Date().toISOString() } };
+  return { ok: true, value: { per_question_points: perQ, perfect_bonus_percent: bonus, seconds_per_question: spq, competition_win_bonus: winBonus, ...(cap === undefined ? {} : { daily_points_cap: cap }), weight_easy: easy, weight_normal: normal, weight_hard: hard, subjects, updated_at: new Date().toISOString() } };
 }
 
 // ---------------------------------------------------------------- pembatas pemakaian AI
@@ -601,6 +616,9 @@ async function roomResults(admin: Admin, room: Row): Promise<Row[]> {
     seconds: rp.submitted_at && startedMs ? Math.max(0, Math.round((new Date(rp.submitted_at).getTime() - startedMs) / 1000)) : null,
     points: rp.points_awarded ?? 0,
     bonus: rp.bonus_points ?? 0,
+    pointsRaw: rp.points_raw ?? rp.points_awarded ?? 0, // sebelum dipotong batas harian
+    bonusRaw: rp.bonus_raw ?? rp.bonus_points ?? 0,
+    capped: (rp.points_raw ?? 0) > (rp.points_awarded ?? 0) || (rp.bonus_raw ?? 0) > (rp.bonus_points ?? 0),
     timedOut: !!rp.timed_out
   }));
 }
@@ -629,7 +647,8 @@ async function roomState(admin: Admin, room: Row, me: string | null) {
     })),
     me: mine ? { submitted: !!mine.submitted_at } : null,
     questions,
-    results: room.status === "finished" ? await roomResults(admin, room) : null
+    results: room.status === "finished" ? await roomResults(admin, room) : null,
+    daily: room.status === "finished" && mine ? await loadDaily(admin, me as string) : null
   };
 }
 
@@ -651,14 +670,16 @@ Deno.serve(async (req) => {
   try {
     // ------------------------------------------------------------ overview
     if (action === "overview") {
-      const [{ data: board, error }, settings, items, av] = await Promise.all([admin.rpc("study_leaderboard"), loadSettings(admin), loadItems(admin), admin.from("study_players").select("id,avatar_ver")]);
+      const [{ data: board, error }, settings, items, av, today] = await Promise.all([admin.rpc("study_leaderboard"), loadSettings(admin), loadItems(admin), admin.from("study_players").select("id,avatar_ver"), admin.rpc("study_today_points")]);
       if (error) return fail(error.message, 500);
       // avatar_ver ada setelah migrasi 0031; sebelum itu kueri ini gagal dan foto dianggap tidak ada
       const avById = new Map<string, unknown>((av.error ? [] : av.data ?? []).map((r: Row) => [r.id as string, r.avatar_ver] as [string, unknown]));
+      // poin didapat hari ini per pemain (migrasi 0032); sebelum itu fungsinya tidak ada dan semua dianggap 0
+      const todayById = new Map<string, number>((today.error ? [] : (today.data ?? []) as Row[]).map((r: Row) => [r.player_id as string, Number(r.earned) || 0] as [string, number]));
       if (!settings) return fail("Setting Study belum ada. Jalankan migrasi 0023_study.sql.", 500);
       return json({
         ok: true,
-        players: (board ?? []).map((p: Row) => ({ id: p.id, name: p.name, grade: p.grade, classLevel: p.class_level ?? null, sessionsDone: p.sessions_done, competitions: p.competitions ?? 0, wins: p.wins ?? 0, totalPoints: p.total_points, balance: p.balance, avatarUrl: avatarUrl(p.id, avById.get(p.id)) })),
+        players: (board ?? []).map((p: Row) => ({ id: p.id, name: p.name, grade: p.grade, classLevel: p.class_level ?? null, sessionsDone: p.sessions_done, competitions: p.competitions ?? 0, wins: p.wins ?? 0, totalPoints: p.total_points, balance: p.balance, todayPoints: todayById.get(p.id) ?? 0, avatarUrl: avatarUrl(p.id, avById.get(p.id)) })),
         settings: publicSettings(settings, items),
         grades: GRADES
       });
@@ -702,12 +723,13 @@ Deno.serve(async (req) => {
       const auth = await checkPlayerPin(admin, body.playerId, body.pin);
       if (auth instanceof Response) return auth;
       const p = auth.player;
-      const [bal, sessions, reds, ledger, items] = await Promise.all([
+      const [bal, sessions, reds, ledger, items, daily] = await Promise.all([
         admin.rpc("study_balance", { p_player: p.id }),
         admin.from("study_sessions").select("*").eq("player_id", p.id).order("created_at", { ascending: false }).limit(50),
         admin.from("study_redemptions").select("*").eq("player_id", p.id).order("created_at", { ascending: false }).limit(100),
         admin.from("study_ledger").select("kind,points,note,meta,created_at").eq("player_id", p.id).in("kind", ["session", "competition", "competition_bonus", "penalty"]).order("created_at", { ascending: false }).limit(300),
-        loadItems(admin)
+        loadItems(admin),
+        loadDaily(admin, p.id)
       ]);
       const ledgerRows = (ledger.data ?? []) as Row[];
       const totalEarned = ledgerRows.filter((l) => l.kind !== "penalty").reduce((a, l) => a + l.points, 0);
@@ -716,6 +738,7 @@ Deno.serve(async (req) => {
         player: { id: p.id, name: p.name, grade: p.grade, classLevel: p.class_level ?? null },
         balance: bal.data ?? 0,
         totalEarned,
+        daily,
         sessions: (sessions.data ?? []).map(sessionRow),
         redemptions: (reds.data ?? []).map((r: Row) => ({ id: r.id, itemName: r.item_name, cost: r.cost, status: r.status, createdAt: r.created_at, givenAt: r.given_at })),
         penalties: ledgerRows.filter((l) => l.kind === "penalty").slice(0, 50).map((l) => ({ points: -l.points, requested: l.meta?.requested ?? -l.points, reason: l.note, createdAt: l.created_at })),
@@ -894,7 +917,7 @@ Deno.serve(async (req) => {
       wireReporters(admin);
       const { data: fresh } = await admin.from("study_sessions").select("*").eq("id", owned.session.id).single();
       const missing = await explainQuestions(admin, fresh ?? owned.session, parseEngine(body.engine));
-      return json({ ok: true, explainFailed: missing > 0, result: await loadResult(admin, fresh ?? owned.session, auth.player) });
+      return json({ ok: true, explainFailed: missing > 0, result: await loadResult(admin, fresh ?? owned.session, auth.player), daily: await loadDaily(admin, auth.player.id) });
     }
 
     if (action === "session_explain") {
@@ -1079,7 +1102,9 @@ Deno.serve(async (req) => {
       if (!p) return fail("Pemain tidak ditemukan.", 404);
       const { data: stats, error } = await admin.rpc("study_player_stats", { p_player: p.id });
       if (error) return fail(error.message, 500);
-      return json({ ok: true, player: { id: p.id, name: p.name, grade: p.grade, classLevel: p.class_level ?? null }, stats });
+      const d = await loadDaily(admin, p.id);
+      const today = d ? { earned: d.earned, cap: d.cap, reached: d.reached } : null;
+      return json({ ok: true, player: { id: p.id, name: p.name, grade: p.grade, classLevel: p.class_level ?? null }, stats, today });
     }
 
     // ------------------------------------------------------------ suka / batal suka
