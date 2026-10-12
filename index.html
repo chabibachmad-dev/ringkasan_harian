@@ -64,6 +64,10 @@
               <span id="menu-quran-icon" class="menu-thumb"></span>
               <span class="menu-caption" data-i18n="menu_s_quran">Al-Qur'an</span>
             </button>
+            <button type="button" id="menu-study" class="menu-item">
+              <span id="menu-study-icon" class="menu-thumb"></span>
+              <span class="menu-caption" data-i18n="menu_s_study">Study</span>
+            </button>
             <button type="button" id="menu-kb" class="menu-item">
               <span id="menu-kb-icon" class="menu-thumb"></span>
               <span class="menu-caption" data-i18n="menu_s_kb">Dokumen</span>
@@ -337,6 +341,18 @@
             <button type="button" id="quran-nav-next" class="secondary-btn" data-i18n="quran_next">Berikutnya ›</button>
           </div>
         </div>
+      </section>
+
+      <!-- Layar Study: latihan soal pilihan ganda buatan AI + poin, leaderboard, redeem (lihat src/study.js). -->
+      <section id="screen-study" class="screen" hidden>
+        <header class="topbar detail-topbar">
+          <div class="detail-topbar-row">
+            <button id="study-back-btn" class="icon-btn" title="Kembali" aria-label="Kembali">←</button>
+            <h1 id="study-title" class="detail-title">Study</h1>
+            <button id="study-settings-btn" class="icon-btn" title="Setting" aria-label="Setting" data-i18n-title="study_settings" data-i18n-aria-label="study_settings"><span id="study-settings-icon"></span></button>
+          </div>
+        </header>
+        <main class="content" id="study-body"></main>
       </section>
 
       <!-- Popup kode akses -->

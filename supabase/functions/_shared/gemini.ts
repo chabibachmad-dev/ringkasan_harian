@@ -702,3 +702,79 @@ export async function generateChatReply(
     }
   }
 }
+
+// ================================================================
+// Keluaran terstruktur (JSON) -- dipakai Edge Function `study` untuk membuat soal & pembahasan.
+// Urutan sama seperti chat: Gemini dulu (rotasi key + model cadangan), lalu Groq/OpenRouter bila Gemini gagal total.
+// Tanpa Google Search (soal dibuat dari pengetahuan model). Jawaban dikembalikan sebagai TEKS; pemanggil yang mem-parse
+// dan memvalidasi (Groq/OpenRouter tidak dipaksa berformat JSON, jadi pemanggil harus siap menolak keluaran jelek).
+// ================================================================
+export interface JsonTextResult {
+  text: string;
+  tokensUsed: number;
+  costUsd: number;
+  // Diisi hanya kalau datang dari penyedia cadangan ("groq/llama-...", "openrouter/...").
+  provider?: string;
+}
+
+export async function generateJsonText(
+  system: string,
+  prompt: string,
+  apiKeyOrKeys: string | string[],
+  options: { temperature?: number; engine?: "auto" | "gemini" | "groq" | "openrouter" } = {}
+): Promise<JsonTextResult> {
+  const apiKeys = Array.isArray(apiKeyOrKeys) ? apiKeyOrKeys : [apiKeyOrKeys];
+  const temperature = options.temperature ?? 0.7;
+  const primaryModel = Deno.env.get("GEMINI_MODEL") || DEFAULT_MODEL;
+  const fallbackModel = Deno.env.get("GEMINI_MODEL_FALLBACK") || DEFAULT_FALLBACK_MODEL;
+
+  const viaGemini = async (): Promise<JsonTextResult> => {
+    const buildBody = () =>
+      JSON.stringify({
+        system_instruction: { parts: [{ text: system }] },
+        contents: [{ role: "user", parts: [{ text: prompt }] }],
+        generationConfig: { temperature, responseMimeType: "application/json" }
+      });
+    const steps = [{ model: primaryModel, maxAttempts: MAX_ATTEMPTS - 1 }];
+    if (fallbackModel !== primaryModel) steps.push({ model: fallbackModel, maxAttempts: MAX_ATTEMPTS - 1 });
+    const { data, model } = await callGeminiWithModelFallback(apiKeys, buildBody, steps, "study");
+    const text = extractGeminiText(data);
+    if (!text.trim()) throw new Error(`Respons Gemini (study) kosong: ${JSON.stringify(data).slice(0, 300)}`);
+    const tokensUsed = data?.usageMetadata?.totalTokenCount ?? 0;
+    const costUsd = tokensUsed > 0 ? estimateCostUsd(model, tokensUsed * 0.7, tokensUsed * 0.3) : 0;
+    return { text: text.trim(), tokensUsed, costUsd };
+  };
+
+  const chain = getFallbackChain();
+  const viaFallback = async (only?: string): Promise<JsonTextResult> => {
+    const r = await chain.generate({ system, messages: [{ role: "user", content: prompt }], temperature: Math.min(temperature, 0.7), only });
+    return { text: r.text, tokensUsed: 0, costUsd: 0, provider: `${r.provider}/${r.model}` };
+  };
+
+  const engine = options.engine ?? "auto";
+  if (engine === "gemini") {
+    if (apiKeys.length === 0) throw new Error("Agent Gemini dipilih tetapi tidak ada API key Gemini.");
+    return await viaGemini();
+  }
+  if (engine === "groq" || engine === "openrouter") {
+    if (!chain.has(engine)) throw new Error(`Agent ${engine === "groq" ? "Groq" : "OpenRouter"} dipilih tetapi API key-nya belum diatur di server.`);
+    return await viaFallback(engine);
+  }
+  if (apiKeys.length === 0) {
+    if (!chain.available()) throw new Error("Tidak ada API key Gemini maupun penyedia cadangan.");
+    return await viaFallback();
+  }
+  if (!chain.available()) return await viaGemini();
+  try {
+    return await viaGemini();
+  } catch (geminiErr) {
+    try {
+      const out = await viaFallback();
+      console.log(`[Cadangan] study dijawab ${out.provider} (Gemini gagal: ${String((geminiErr as Error)?.message || geminiErr).slice(0, 120)})`);
+      return out;
+    } catch (fbErr) {
+      console.error(`[Cadangan] study juga gagal: ${fbErr instanceof Error ? fbErr.message : String(fbErr)}`);
+      throw geminiErr;
+    }
+  }
+}

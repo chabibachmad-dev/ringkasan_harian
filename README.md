@@ -256,3 +256,30 @@ Obrolan di *Chat dengan AI* yang **tidak ditandai Saved** dihapus otomatis bila 
 Pasang: jalankan `supabase/migrations/0018_chat_saved_retention.sql` di SQL Editor **sebelum** men-deploy Edge Function `chat` yang baru (menambah kolom `saved`, tabel `chat_retention_settings`, dan fungsi `purge_old_chats()`). Penghapusan jalan tiap jam lewat pg_cron bila aktif, dan juga otomatis saat daftar obrolan dibuka. **Masa tenggang:** aturan baru efektif 7 hari setelah migrasi dijalankan, supaya obrolan lama sempat ditandai Saved. Ubah lama simpan: `update public.chat_retention_settings set days = 14 where id = 'main';` — matikan praktis dengan `days = 3650`.
 
 **Gemini membaca dokumen lewat indeks laptop.** Jalankan `supabase/migrations/0019_kb_retrievals.sql`, deploy ulang Edge Function `chat`, lalu pasang file bot baru di laptop (detail: `wa-bot/README.md` bagian 9b). Bila laptop mati, chat otomatis memakai jalur lama.
+
+## Menu Study (belajar, poin, tukar hadiah)
+
+Menu **Study** di beranda: pemain mendaftar (nama, grade TK–S3/Umum, PIN), memilih pelajaran, menjawab soal pilihan ganda A–D, lalu poin dihitung dan setiap nomor diberi pembahasan. Papan peringkat tampil saat masuk, poin terbesar di paling atas.
+
+**Pasang (sekali saja):**
+
+1. Jalankan migrasi `supabase/migrations/0023_study.sql` (SQL Editor, atau `npx supabase db push`).
+2. Deploy fungsi baru: `npx supabase functions deploy study` (sama seperti fungsi lain).
+3. Deploy ulang fungsi `chat` (`npx supabase functions deploy chat`) karena `_shared/gemini.ts` ikut berubah, lalu push frontend ke GitHub seperti biasa.
+
+Tidak ada secret baru. Fungsi `study` memakai `CHAT_ACCESS_CODE` dan kunci AI yang sudah ada (urutan: Gemini lebih dulu, lalu Groq/OpenRouter).
+
+**Cara kerja singkat**
+
+- Poin dihitung oleh database, bukan AI: `poin dasar x (benar / jumlah soal) x bobot level`, dibulatkan. Contoh 15/15 di Easy = 100 x 80% = 80; Hard = 120. AI hanya membuat soal dan menulis pembahasan. Kunci jawaban tidak dikirim ke layar sebelum dikumpulkan.
+- Peringkat memakai **total poin yang pernah didapat** (tidak turun saat ditukar atau kena hukuman). Saldo yang bisa ditukar ditampilkan di profil pemain.
+- Grade materi: tidak boleh lebih rendah dari grade pemain (urutan TK < SD < SMP < SMA < S1 < S2 < S3). Pemain "Umum" boleh semua tingkat; materi "Umum" selalu boleh.
+- Tukar hadiah: poin langsung berkurang, status **Menunggu** sampai orang tua menandai **Sudah diberikan** (di Setting).
+- Hukuman: orang tua mengisi nama pemain, jumlah poin, dan alasan. Saldo tidak pernah turun di bawah 0 (bila diminta lebih besar, yang terpotong hanya sebesar saldo dan itu dijelaskan).
+- **Setting** (ikon roda gigi di halaman Study): poin dasar, bobot Easy/Normal/Hard, daftar mata pelajaran, tambah/ubah/hapus hadiah beserta ambang poinnya, hukuman, tandai hadiah diberikan, dan PIN orang tua.
+- **PIN orang tua** menjaga reset PIN pemain, Setting, hukuman, dan penandaan hadiah. Selama belum dibuat, area itu terbuka (ada peringatan di Setting, sebaiknya segera dibuat). Kalau lupa PIN orang tua, ulang lewat SQL Editor: `update study_settings set parent_pin_salt = null, parent_pin_hash = null where id = 1;`
+- PIN pemain terkunci 5 menit setelah 5 kali salah.
+- Batas: maksimal 30 soal per pelajaran (dibuat per 10 soal), maksimal 3 pelajaran belum selesai per pemain, dan soal yang gagal sebagian tetap dipakai bila minimal 80% dari yang diminta.
+- PDF hasil memakai font standar: teks Arab diganti `[teks Arab]` dan rumus ditulis sebagai teks biasa.
+
+**Uji:** `cd wa-bot && npm test` (logika murni), dan untuk database: `psql -d <db> -f supabase/migrations/0023_study.sql && psql -d <db> -f supabase/tests/study_points.sql` (kolom `gagal` harus 0).

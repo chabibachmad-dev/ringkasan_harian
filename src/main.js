@@ -36,7 +36,8 @@ import {
   ICON_PULSE,
   ICON_PRAYER,
   ICON_BOOK,
-  ICON_LOCATE
+  ICON_LOCATE,
+  ICON_STUDY
 } from "./icons.js";
 import {
   initFeatures,
@@ -45,6 +46,7 @@ import {
   stopFeatures,
   hideFeatureScreens
 } from "./features.js";
+import { initStudy, showStudyScreen, hideStudyScreen, rerenderStudy } from "./study.js";
 import { registerServiceWorker } from "./push.js";
 import {
   getStoredChatCode,
@@ -210,6 +212,8 @@ const els = {
   menuAboutBtn: document.getElementById("menu-about"),
   menuPrayerBtn: document.getElementById("menu-prayer"),
   menuPrayerIcon: document.getElementById("menu-prayer-icon"),
+  menuStudyBtn: document.getElementById("menu-study"),
+  menuStudyIcon: document.getElementById("menu-study-icon"),
   menuQuranBtn: document.getElementById("menu-quran"),
   menuQuranIcon: document.getElementById("menu-quran-icon"),
   menuAboutIcon: document.getElementById("menu-about-icon"),
@@ -1438,8 +1442,17 @@ function handleRoute() {
   // atau rute WhatsApp (#wa, #wa/<jid yang di-encode>).
   const match = location.hash.match(/^#d\/([0-9a-zA-Z_-]{1,60})$/);
   const waMatch = location.hash.match(/^#wa(?:\/(.+))?$/);
+  // Ganti bahasa saat layar Study terbuka: cukup gambar ulang (jangan reset ujian/PIN yang sedang berjalan).
+  if (location.hash === "#study" && !document.getElementById("screen-study").hidden) {
+    rerenderStudy();
+    return;
+  }
   stopFeatures();
-  if (location.hash === "#prayer") {
+  if (location.hash === "#study") {
+    stopWaPolling();
+    hideAllScreens();
+    showStudyScreen();
+  } else if (location.hash === "#prayer") {
     stopWaPolling();
     hideAllScreens();
     showPrayerScreen();
@@ -1517,6 +1530,7 @@ function hideAllScreens() {
   els.screenDetail.hidden = true;
   els.screenWaList.hidden = true;
   els.screenWaDetail.hidden = true;
+  hideStudyScreen();
   hideFeatureScreens();
 }
 
@@ -3027,6 +3041,8 @@ function wireEvents() {
   els.menuAboutIcon.innerHTML = ICON_INFO;
   els.menuPrayerIcon.innerHTML = ICON_PRAYER;
   els.menuQuranIcon.innerHTML = ICON_BOOK;
+  els.menuStudyIcon.innerHTML = ICON_STUDY;
+  document.getElementById("study-settings-icon").innerHTML = ICON_SETTINGS;
   document.getElementById("prayer-refresh-icon").innerHTML = ICON_LOCATE;
 
   // ---------- Menu titik-3 PER-PESAN (di dalam obrolan): salin / hapus ----------
@@ -3351,6 +3367,11 @@ function wireEvents() {
     location.hash = "prayer";
   });
 
+  els.menuStudyBtn.addEventListener("click", () => {
+    closeSettingsDialog();
+    location.hash = "study";
+  });
+
   els.menuQuranBtn.addEventListener("click", () => {
     closeSettingsDialog();
     location.hash = "quran";
@@ -3529,6 +3550,15 @@ async function main() {
   applyLang();
   wireEvents();
   initFeatures({ getLang: () => state.lang, getCode: () => state.chatCode });
+  initStudy({
+    getLang: () => state.lang,
+    askCode: () => openChatCodeDialog(),
+    // Server menolak kode akses yang tersimpan: lupakan supaya diminta ulang.
+    onUnauthorized: () => {
+      state.chatCode = "";
+      clearStoredChatCode();
+    }
+  });
   fixStickyHeaderOnIOSKeyboard();
   await registerServiceWorker();
   await initChat();
