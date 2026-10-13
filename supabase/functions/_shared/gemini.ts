@@ -940,6 +940,7 @@ export async function synthesizeSpeech(
           const data = await attempt();
           const wav = extractTtsAudio(data);
           if (!wav) throw new Error("Jawaban TTS tanpa audio.");
+          if (wav.length < 9000) throw new Error("Audio TTS terlalu pendek/kosong."); // < ±0,1 detik: model kadang membalas hampir hening
           await reportKeyEvent({ keyHint: geminiKeyHint(apiKey), kind: "success", model });
           return { wavBase64: wav, model };
         } catch (err) {

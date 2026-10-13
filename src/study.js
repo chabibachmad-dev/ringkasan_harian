@@ -3557,8 +3557,14 @@ function sayTurn(sp, turn, onEnd) {
     if (settled) return;
     if (S.speak !== sp) return;
     if (!res.ok || !res.audio) {
-      ttsDownUntil = Date.now() + (res.dailyLimit || res.status === 429 ? 60 : 5) * 60_000;
+      // kuota harian habis: jangan mencoba lagi lama; batas per menit: sebentar; gangguan lain: 1 menit. Pemain diberi tahu kenapa suaranya berganti.
+      const quota = !!(res.ttsQuota || res.dailyLimit || res.status === 429);
+      ttsDownUntil = Date.now() + (res.ttsDaily || res.dailyLimit ? 60 : quota ? 2 : 1) * 60_000;
       clearLoading();
+      if (S.speak === sp && tok === speechToken()) {
+        sp.status = L(quota ? "study_speak_tts_quota" : "study_speak_tts_fail");
+        if (S.view === "speak") paintSpeak();
+      }
       return fallback();
     }
     if (ttsCache.size >= 12) ttsCache.delete(ttsCache.keys().next().value);
@@ -4028,6 +4034,13 @@ function listenBrowser(sp) {
         sp.switching = true;
         sp.prefs.forceRecord = true;
         saveSpeakPrefs(sp.prefs);
+        return;
+      }
+      if (code !== "stalled" && code !== "nospeech" && code !== "denied" && recorderSupported() && !sp.prefs.forceRecord) {
+        // pengenalan suara peramban gagal (mis. Android/Brave/Samsung: "network", "service-not-allowed", "audio-capture"): coba mode rekam
+        // + server untuk sesi ini saja (tidak diingat; kalau memang izin mikrofon ditolak, mode rekam akan menampilkan pesan izin)
+        sp.switching = true;
+        sp.prefs.forceRecord = true;
         return;
       }
       sp.status = code === "stalled" ? L("study_speak_mic_stuck") : code === "nospeech" && sp.hands ? "" : sttErrorText(code);

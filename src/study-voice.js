@@ -9,7 +9,7 @@ export const synthSupported = () => typeof window !== "undefined" && "speechSynt
 // ---------------------------------------------------------------- pengenalan suara bawaan peramban
 // Mulai mendengarkan satu ucapan. Mengembalikan { stop() }.
 //   onText(teks, final) dipanggil terus selama bicara; onEnd() sekali saat selesai; onError(kode) bila gagal
-//   kode: "denied" (izin mikrofon ditolak) | "nospeech" (tak terdengar) | "unsupported" | "stalled" (mesin tak merespons) | kode asli lain.
+//   kode: "denied" (izin mikrofon ditolak) | "service" (layanan suara peramban tak tersedia) | "nospeech" (tak terdengar) | "unsupported" | "stalled" (mesin tak merespons) | kode asli lain.
 export function startListening({ lang = "en-US", onText, onEnd, onError, stallMs = 6000 }) {
   const Ctor = recognitionCtor();
   if (!Ctor) {
@@ -64,7 +64,8 @@ export function startListening({ lang = "en-US", onText, onEnd, onError, stallMs
   rec.onerror = (e) => {
     const code = e?.error || "error";
     if (code === "aborted") return;
-    if (code === "not-allowed" || code === "service-not-allowed") onError?.("denied");
+    if (code === "not-allowed") onError?.("denied");
+    else if (code === "service-not-allowed") onError?.("service"); // layanan suara peramban tidak tersedia (bukan izin mikrofon)
     else if (code === "no-speech") onError?.("nospeech");
     else onError?.(code);
   };

@@ -1693,7 +1693,9 @@ Deno.serve(async (req) => {
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         console.error("study speak_tts:", msg);
-        return fail(`Suara tutor tidak tersedia. ${msg}`.slice(0, 300), 502, { generationFailed: true });
+        // kuota Gemini habis (429 / RESOURCE_EXHAUSTED / semua key sedang istirahat): aplikasi memakai suara perangkat lebih lama & memberi tahu pemain
+        const quota = /429|quota|exhaust|batas kuota|rate.?limit|PerDay/i.test(msg);
+        return fail(`Suara tutor tidak tersedia. ${msg}`.slice(0, 300), quota ? 429 : 502, { generationFailed: true, ttsQuota: quota, ttsDaily: quota && /PerDay|harian|daily/i.test(msg) });
       }
     }
 
