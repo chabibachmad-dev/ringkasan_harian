@@ -72,7 +72,7 @@
 //   -- SPEAKING (migrasi 0035): mengobrol bahasa Inggris dengan tutor AI (suara/ketik di peramban). Tanpa poin. Riwayat disimpan 7 hari. Butuh PIN/token pemain.
 //   speak_start         { playerId, pin, scenario, topic?, lang?, engine? }   -> { session, turns:[pembuka tutor] }   (scenario: free|intro|school|restaurant|shopping|travel|hobbies|interview|custom (+topic); lang "id"|"en" = bahasa tip koreksi)
 //   speak_turn          { playerId, pin, sessionId, text, lang?, engine? }    -> { userTurn:{idx,body,correction,tip}, aiTurn:{idx,body}, userTurns, full, ended }   (maks 30 giliran/sesi, 80/hari/pemain; ended=true bila pemain berpamitan: tutor membalas salam & percakapan diakhiri otomatis)
-//   speak_transcribe    { playerId, pin, sessionId, audio (base64 WAV 16-bit mono), mime:"audio/wav" } -> { text }   (suara -> teks lewat Gemini; teks kosong = tak ada ucapan jelas)
+//   speak_transcribe    { playerId, pin, sessionId, audio (base64 WAV 16-bit mono), mime:"audio/wav" } -> { text }   (suara -> teks: Groq Whisper dulu bila GROQ_API_KEYS ada, cadangan Gemini; teks kosong = tak ada ucapan jelas)
 //   speak_tts           { playerId, pin, sessionId, idx }                     -> { audio (base64 WAV 24 kHz), mime }   (suara tutor natural lewat Gemini TTS; hanya giliran tutor tersimpan; galat = aplikasi memakai suara perangkat)
 //   speak_end           { playerId, pin, sessionId }                          -> { ok }
 //   speak_delete        { playerId, pin, sessionId }                          -> { ok }
@@ -89,6 +89,7 @@
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { corsHeaders } from "../_shared/cors.ts";
 import { getGeminiApiKeys, generateJsonText, setGeminiKeyReporter, synthesizeSpeech, transcribeAudio } from "../_shared/gemini.ts";
+import { getGroqSttKeys, transcribeWithGroq } from "../_shared/groq-stt.ts";
 import { setFallbackReporter } from "../_shared/llm-fallback.ts";
 import {
   GRADES,
@@ -1655,13 +1656,37 @@ Deno.serve(async (req) => {
       if (limit) return limit;
       wireReporters(admin);
       try {
+        // Mesin utama: Groq Whisper (gratis, longgar). Gagal/habis/tak ada key -> cadangan Gemini.
+        const groqKeys = getGroqSttKeys();
+        if (groqKeys.length > 0) {
+          try {
+            const g = await transcribeWithGroq(audio, mime, groqKeys, {
+              language: "en",
+              prompt: "An Indonesian learner practising English conversation with a tutor. Transcribe exactly what was said."
+            });
+            return json({ ok: true, text: g.text, engine: "groq" });
+          } catch (gErr) {
+            console.error("study speak_transcribe groq gagal, pakai Gemini:", gErr instanceof Error ? gErr.message : String(gErr));
+          }
+        }
         const r = await transcribeAudio(audio, mime, getGeminiApiKeys());
         await recordTokens(admin, r.tokensUsed, r.costUsd);
-        return json({ ok: true, text: r.text });
+        return json({ ok: true, text: r.text, engine: "gemini" });
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         console.error("study speak_transcribe:", msg);
-        return fail(`Gagal mengubah suara jadi teks. ${msg}`.trim(), 502, { generationFailed: true });
+        // kuota Gemini habis: pesan ramah (bukan galat mentah dari Google); pemain bisa mengetik jawabannya
+        if (/429|quota|exhaust|batas kuota|rate.?limit|PerDay/i.test(msg)) {
+          const daily = /PerDay|harian|daily/i.test(msg);
+          return fail(
+            daily
+              ? "Kuota gratis pengenal suara hari ini sudah habis. Ketik jawabanmu dulu, atau coba lagi besok."
+              : "Pengenal suara sedang penuh. Tunggu sebentar lalu coba lagi, atau ketik jawabanmu.",
+            429,
+            { generationFailed: true, sttQuota: true, sttDaily: daily }
+          );
+        }
+        return fail(`Gagal mengubah suara jadi teks. ${msg}`.slice(0, 200).trim(), 502, { generationFailed: true });
       }
     }
 

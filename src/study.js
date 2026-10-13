@@ -10,7 +10,7 @@ import { fileToAvatarBase64 } from "./study-avatar.js";
 import { renderAiMarkdown, typesetMath } from "./markdown.js";
 import { buildStudyPdf, shareOrSaveStudyPdf, buildMaterialPdf, shareOrSaveMaterialPdf, buildRoomPdf, shareOrSaveRoomPdf } from "./study-pdf.js";
 import { pointsFormula, studyCardFileName } from "./study-text.js";
-import { recognitionSupported, synthSupported, startListening, speakText, stopSpeaking, unlockSpeech, recorderSupported, startRecording, releaseMic, micHeld, playWav, speechToken, audioPlayable } from "./study-voice.js";
+import { recognitionSupported, synthSupported, startListening, speakText, stopSpeaking, unlockSpeech, recorderSupported, startRecording, releaseMic, micHeld, idleAudio, playWav, speechToken, audioPlayable } from "./study-voice.js";
 import { renderLessonCard, renderRoomCard, shareOrSaveCard } from "./study-card.js";
 import { allowedClasses, allowedMaterialGrades, classesOf, computePoints, formatClock, gradeText, PRACTICE_QUESTIONS as PRACTICE_COUNT, timeLimitSeconds } from "../supabase/functions/_shared/study-core.ts";
 
@@ -193,6 +193,17 @@ export function initStudy(context) {
   $("study-notif-btn")?.addEventListener("click", () => openNotifications());
   $("study-body")?.addEventListener("click", onBodyClick);
   startMicSweep();
+  let lastUnlock = 0;
+  const touchUnlock = () => {
+    // setiap sentuhan di layar Speaking menyegarkan "kunci" suara (iOS membatalkannya setelah beberapa saat / setelah memakai mikrofon)
+    if (!S.speak || (S.view !== "speak" && S.view !== "speaklist")) return;
+    const now = Date.now();
+    if (now - lastUnlock < 2500) return;
+    lastUnlock = now;
+    unlockSpeech();
+  };
+  document.addEventListener("pointerup", touchUnlock, { capture: true, passive: true });
+  document.addEventListener("touchend", touchUnlock, { capture: true, passive: true });
   $("study-body")?.addEventListener("change", onBodyChange);
   $("study-body")?.addEventListener("input", onBodyInput);
   $("study-body")?.addEventListener("keydown", (e) => {
@@ -3493,15 +3504,17 @@ let micSweepTimer = 0;
 function startMicSweep() {
   if (micSweepTimer || typeof document === "undefined") return;
   micSweepTimer = setInterval(() => {
-    if (!micHeld()) return;
     const sp = S.speak;
-    if (!sp || S.view !== "speak" || (!sp.listening && !sp.hands)) releaseMic();
+    if (micHeld() && (!sp || S.view !== "speak" || (!sp.listening && !sp.hands))) releaseMic();
+    // di luar layar percakapan / percakapan sudah selesai: tutup juga sesi audio iPhone supaya pil oranye mikrofon benar-benar padam
+    if (!micHeld() && (!sp || S.view !== "speak" || sp.session?.endedAt)) idleAudio();
   }, 1500);
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden || !S.speak) return;
     const sp = S.speak;
     const wasOn = sp.listening || sp.hands;
     stopSpeakIO();
+    idleAudio();
     if (wasOn) sp.status = L("study_speak_paused_bg");
     if (S.view === "speak") paintSpeak();
   });
@@ -3536,7 +3549,10 @@ function sayTurn(sp, turn, onEnd) {
     if (S.speak !== sp || tok !== speechToken()) return;
     const ok = await playWav(wav, { onEnd });
     if (!ok && S.speak === sp && tok === speechToken()) {
+      // perangkat memblokir pemutaran otomatis (iOS tanpa ketukan terbaru): coba suara perangkat, dan beri tahu cara memutar manual
       ttsDownUntil = Date.now() + 5 * 60_000;
+      sp.status = L("study_speak_audio_blocked");
+      if (S.view === "speak") paintSpeak();
       if (!speakText(turn.body, { onEnd })) onEnd?.();
     }
   };
@@ -3719,6 +3735,7 @@ function openSpeakNew() {
       { key: "topic", label: L("study_speak_topic_label"), type: "text", maxlength: 100, placeholder: L("study_speak_topic_ph"), show: (v) => v.scenario === "custom" }
     ],
     onSubmit: async (v) => {
+      unlockSpeech(); // ketukan "Mulai" masih berlaku: buka kunci suara supaya sapaan pembuka tutor bisa langsung berbunyi (iPhone)
       const topic = String(v.topic || "").trim();
       if (v.scenario === "custom" && topic.length < 3) return { ok: false, error: L("study_speak_topic_required") };
       const res = await speakCall("speak_start", { scenario: v.scenario, topic, lang: speakLang(), engine: "auto" });

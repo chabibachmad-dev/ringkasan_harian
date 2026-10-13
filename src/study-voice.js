@@ -144,7 +144,25 @@ export const speechToken = () => speakToken;
 // iOS/Safari hanya mengizinkan suara bila diminta dari sentuhan pengguna. Panggil fungsi ini DI DALAM penangan klik/ketuk:
 // satu ucapan hening membuka "kunci" sehingga balasan tutor berikutnya (yang datang setelah menunggu server) bisa langsung berbunyi.
 // Sekaligus menyiapkan AudioContext untuk rekam suara.
+const SILENT_WAV = "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAIlYAAESsAAACABAAZGF0YQAAAAA=";
+let sharedAudio = null; // satu elemen <audio> yang dibuka kuncinya di ketukan pemain, dipakai ulang untuk suara dari server (cadangan iOS)
+function getSharedAudio() {
+  if (!sharedAudio && typeof Audio !== "undefined") sharedAudio = new Audio();
+  return sharedAudio;
+}
+
 export function unlockSpeech() {
+  try {
+    const a = getSharedAudio();
+    if (a && !(curAudio && !curAudio.paused && !curAudio.ended)) {
+      a.src = SILENT_WAV;
+      a.muted = false;
+      const pr = a.play();
+      if (pr && pr.catch) pr.catch(() => {});
+    }
+  } catch {
+    /* abaikan */
+  }
   try {
     const ac = getAudioContext();
     if (ac) {
@@ -254,7 +272,10 @@ export async function playWav(b64, { onEnd } = {}) {
     if (finished) return;
     finished = true;
     clearTimeout(guard);
-    if (curStop === stop) curStop = null;
+    if (curStop === stop) {
+      curStop = null;
+      curSource = null;
+    }
     if (natural && token === speakToken) onEnd?.();
   };
   const stop = () => {
@@ -275,7 +296,7 @@ export async function playWav(b64, { onEnd } = {}) {
   const ac = getAudioContext();
   if (ac) {
     try {
-      if (ac.state === "suspended") await ac.resume();
+      if (ac.state !== "running") await Promise.race([ac.resume(), new Promise((r) => setTimeout(r, 800))]);
       if (ac.state === "running") {
         const buf = await decodeAudio(ac, b64ToArrayBuffer(b64));
         if (token !== speakToken) return false;
@@ -295,12 +316,13 @@ export async function playWav(b64, { onEnd } = {}) {
   }
   if (token !== speakToken) return false;
   try {
-    const a = new Audio(`data:audio/wav;base64,${b64}`);
+    const a = getSharedAudio() || new Audio();
     a.onended = () => done(true);
     a.onerror = () => done(true);
     curAudio = a;
     curStop = stop;
     guard = setTimeout(() => done(true), 30000);
+    a.src = `data:audio/wav;base64,${b64}`;
     await a.play();
     return true;
   } catch {
@@ -326,7 +348,7 @@ function getAudioContext() {
   const Ctor = audioCtxCtor();
   if (!Ctor) return null;
   if (!sharedAc || sharedAc.state === "closed") sharedAc = new Ctor();
-  if (sharedAc.state === "suspended") sharedAc.resume?.().catch?.(() => {});
+  if (sharedAc.state !== "running") sharedAc.resume?.().catch?.(() => {}); // juga "interrupted" (Safari iOS setelah memakai mikrofon)
   return sharedAc;
 }
 
@@ -334,15 +356,38 @@ export const recorderSupported = () =>
   typeof navigator !== "undefined" && !!navigator.mediaDevices?.getUserMedia && typeof window.MediaRecorder !== "undefined" && !!audioCtxCtor();
 
 // Mikrofon dipertahankan selama percakapan otomatis berjalan (menghindari izin diminta ulang tiap giliran); lepaskan lewat releaseMic().
+// Semua aliran yang pernah dibuka dicatat (liveStreams): dua permintaan getUserMedia yang berdekatan atau pelepasan di tengah menunggu izin
+// dulu bisa menyisakan aliran "yatim" yang tidak pernah dihentikan -> iPhone terus menampilkan titik/pil oranye walau percakapan selesai.
 let micStream = null;
 let micNodes = [];
-export const micHeld = () => !!micStream;
-export function releaseMic() {
+let micPending = null; // permintaan getUserMedia yang sedang menunggu (dipakai bersama agar tidak membuka dua aliran)
+let micEpoch = 0; // naik tiap releaseMic(): permintaan yang datang terlambat setelah pelepasan langsung dihentikan
+const liveStreams = new Set();
+export const micHeld = () => !!micStream || liveStreams.size > 0 || !!micPending;
+function stopStream(st) {
   try {
-    micStream?.getTracks().forEach((t) => t.stop());
+    st.getTracks().forEach((t) => {
+      try {
+        t.stop();
+      } catch {
+        /* abaikan */
+      }
+      try {
+        st.removeTrack(t);
+      } catch {
+        /* abaikan */
+      }
+    });
   } catch {
     /* abaikan */
   }
+  liveStreams.delete(st);
+}
+export function releaseMic() {
+  micEpoch++;
+  micPending = null;
+  for (const st of [...liveStreams]) stopStream(st);
+  if (micStream) stopStream(micStream);
   micStream = null;
   // putuskan simpul analisis dari AudioContext bersama; kalau tidak, iOS bisa tetap menandai mikrofon "aktif"
   for (const n of micNodes) {
@@ -354,10 +399,41 @@ export function releaseMic() {
   }
   micNodes = [];
 }
-async function acquireMic() {
-  if (micStream && micStream.getAudioTracks().some((t) => t.readyState === "live")) return micStream;
-  micStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
-  return micStream;
+// Tutup AudioContext bersama saat tidak dipakai (iOS menahan sesi audio "rekam+putar" selama konteks hidup setelah mikrofon dipakai).
+// Aman: ketukan berikutnya (unlockSpeech) membuat konteks baru. Tidak menutup bila ada suara yang sedang diputar.
+export function idleAudio() {
+  if (!isAppleTouch() || !sharedAc || sharedAc.state === "closed" || curSource || (curAudio && !curAudio.paused && !curAudio.ended)) return;
+  const ac = sharedAc;
+  sharedAc = null;
+  try {
+    ac.close?.().catch?.(() => {});
+  } catch {
+    /* abaikan */
+  }
+}
+function acquireMic() {
+  if (micStream && micStream.getAudioTracks().some((t) => t.readyState === "live")) return Promise.resolve(micStream);
+  if (micPending) return micPending;
+  const epoch = micEpoch;
+  const req = navigator.mediaDevices
+    .getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } })
+    .then((st) => {
+      if (epoch !== micEpoch) {
+        // mikrofon sudah dilepas selagi menunggu izin: hentikan aliran ini sekarang juga
+        st.getTracks().forEach((t) => t.stop());
+        const err = new Error("cancelled");
+        err.name = "Cancelled";
+        throw err;
+      }
+      liveStreams.add(st);
+      micStream = st;
+      return st;
+    })
+    .finally(() => {
+      if (micPending === req) micPending = null;
+    });
+  micPending = req;
+  return req;
 }
 
 function pickRecorderType() {
@@ -536,7 +612,16 @@ export function startRecording({ maxMs = 20000, silenceMs = 1400, noSpeechMs = 9
     })
     .catch((err) => {
       const name = err && err.name;
-      fail(name === "NotAllowedError" || name === "SecurityError" || name === "PermissionDeniedError" ? "denied" : name === "NotFoundError" ? "unsupported" : name || "error");
+      if (name === "Cancelled") {
+        // mikrofon dilepas selagi menunggu izin: aliran sudah dihentikan di acquireMic; jangan melepas lagi (bisa membatalkan permintaan baru)
+        if (finished) return;
+        finished = true;
+        clearTimeout(timer);
+        clearInterval(vad);
+        onError?.("nospeech");
+        return;
+      }
+      fail(name === "NotAllowedError" || name === "SecurityError" || name === "PermissionDeniedError" ? "denied" : name === "NotFoundError" ? "unsupported" : name === "Cancelled" ? "nospeech" : name || "error");
     });
   return handle;
 }

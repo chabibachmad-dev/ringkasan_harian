@@ -16,7 +16,13 @@
 //   TELEGRAM_OWNER_IDS=123456789            (id chat pemilik, boleh beberapa dipisah koma)
 //   TELEGRAM_MIRROR_NOTIFICATIONS=true      (false = notifikasi tidak ikut dikirim ke Telegram)
 //   TELEGRAM_HISTORY_LIMIT=12               (jumlah pesan terakhir yang dikirim ke AI sebagai konteks obrolan)
+//   VOICE_MAX_SECONDS=180                   (pesan suara lebih panjang dari ini ditolak; lihat voice-input.js untuk kunci STT)
+//   TELEGRAM_SPEAK_MAX_TURNS=30             (batas giliran satu sesi /speak)   TELEGRAM_SPEAK_IDLE_MIN=60 (sesi /speak kedaluwarsa bila diam sekian menit)
+// Balasan suara (voice note) & tutor Inggris: lihat voice-output.js (butuh ffmpeg) dan tutor.js.
 // ================================================================
+
+import { voiceToCommand, describeError } from "./voice-input.js";
+import { isFarewellFor, formatTutorMessage, TUTOR_STT_HINT, TUTOR_STT_HINT_ID, TUTOR_TEXT_MAX, TUTOR_TEXT_MAX_ID } from "./tutor.js";
 
 const API = "https://api.telegram.org";
 const MAX_TEXT = 3500; // batas Telegram 4096; disisakan ruang untuk tag HTML hasil konversi
@@ -35,6 +41,9 @@ export function readTelegramConfig(env = process.env) {
     ownerIds,
     mirror: String(env.TELEGRAM_MIRROR_NOTIFICATIONS ?? "true").trim().toLowerCase() !== "false",
     historyLimit: Math.max(2, Math.min(40, Math.floor(num(env.TELEGRAM_HISTORY_LIMIT, 12)))),
+    voiceMaxSeconds: Math.max(5, Math.min(600, Math.floor(num(env.VOICE_MAX_SECONDS, 180)))),
+    speakMaxTurns: Math.max(3, Math.min(100, Math.floor(num(env.TELEGRAM_SPEAK_MAX_TURNS, 30)))),
+    speakIdleMin: Math.max(5, Math.min(1440, Math.floor(num(env.TELEGRAM_SPEAK_IDLE_MIN, 60)))),
     pollTimeoutSec: 30
   };
 }
@@ -127,6 +136,9 @@ const HELP = [
   "Halo, ini Ayyubi di Telegram.",
   "",
   "Ketik biasa untuk ngobrol dengan AI (Gemini, bisa cari web & Dokumen Pengetahuan).",
+  "🎤 Kirim PESAN SUARA (tahan tombol mikrofon) untuk ngobrol atau merekam SiMAB: bot menuliskan apa yang ia dengar, lalu menjalankannya seperti pesan teks. Contoh saat merekam: \"Pembelian ATK, tanggal 5 Oktober 2026, jumlah satu juta lima ratus ribu rupiah\".",
+  "🔊 Balasan suara: /suara auto (default: dibalas suara bila kamu kirim suara), /suara on (selalu), /suara off. Butuh ffmpeg di laptop bot.",
+  "🎙️ Latihan ngobrol Inggris: /speak [topik] — kirim suara berbahasa Inggris, tutor membalas dengan suara + koreksi singkat. Ngobrol santai berbahasa Indonesia: /speak id [topik]. Akhiri dengan /selesai atau ucapkan perpisahan (goodbye / sampai jumpa).",
   "",
   "Perintah:",
   "/simab <perintah>  — SiMAB (pagu, cek, perjadin, sbm, rpd, rekam). Boleh juga tulis \"simab ...\" tanpa garis miring.",
@@ -135,6 +147,8 @@ const HELP = [
   "/ringkasan  — ringkasan percakapan WhatsApp hari ini",
   "/peraturan  — pantau peraturan terbaru (\"/peraturan semua\" = tampilkan semua hasil)",
   "/baru  — mulai obrolan baru (lupakan konteks sebelumnya)",
+  "/speak [topik]  — mulai latihan ngobrol Inggris dengan tutor (suara)   /speak id [topik]  — ngobrol santai bahasa Indonesia   /selesai  — akhiri",
+  "/suara [auto|on|off]  — atur balasan suara untuk obrolan biasa",
   "/id  — tampilkan id chat ini"
 ].join("\n");
 
@@ -156,6 +170,9 @@ export function createTelegram({ config, deps = {}, fetchImpl = globalThis.fetch
   const pairingSeen = new Map(); // chatId -> waktu balasan pairing terakhir
   const ignoredLogged = new Set();
   const lastKeyboard = new Map(); // chatId -> message_id pesan yang masih membawa tombol
+  const voiceModes = new Map(); // chatId -> "auto" | "on" | "off" (balasan suara untuk obrolan biasa)
+  const tutorSessions = new Map(); // chatId -> { topic, turns:[{role,body}], userTurns, lastAt }
+  const voiceNoteAt = new Map(); // jenis catatan -> kapan terakhir dikirim (supaya tidak berisik)
   let running = false;
   let stopped = false;
   let offset = 0;
@@ -180,6 +197,29 @@ export function createTelegram({ config, deps = {}, fetchImpl = globalThis.fetch
         const err = new Error(`Telegram ${method}: ${data?.description || `HTTP ${res.status}`}`);
         err.status = data?.error_code || res.status;
         err.retryAfter = data?.parameters?.retry_after;
+        throw err;
+      }
+      return data.result;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** Panggilan Bot API dengan berkas (multipart), mis. sendVoice. */
+  async function apiForm(method, form, { timeoutMs = 45_000 } = {}) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    try {
+      const res = await fetchImpl(`${API}/bot${config.token}/${method}`, { method: "POST", body: form, signal: ctrl.signal });
+      let data = null;
+      try {
+        data = await res.json();
+      } catch {
+        /* bukan JSON */
+      }
+      if (!data || data.ok !== true) {
+        const err = new Error(`Telegram ${method}: ${data?.description || `HTTP ${res.status}`}`);
+        err.status = data?.error_code || res.status;
         throw err;
       }
       return data.result;
@@ -241,14 +281,164 @@ export function createTelegram({ config, deps = {}, fetchImpl = globalThis.fetch
     histories.set(chatId, list);
   };
 
-  async function withTyping(chatId, fn) {
-    const tick = () => api("sendChatAction", { chat_id: chatId, action: "typing" }, { timeoutMs: 8000 }).catch(() => {});
+  const withTyping = (chatId, fn) => withAction(chatId, "typing", fn);
+  async function withAction(chatId, action, fn) {
+    const tick = () => api("sendChatAction", { chat_id: chatId, action }, { timeoutMs: 8000 }).catch(() => {});
     tick();
     const timer = setInterval(tick, 4500);
     try {
       return await fn();
     } finally {
       clearInterval(timer);
+    }
+  }
+
+  // ---------------------------------------------------------------- balasan SUARA (voice note)
+  async function sendVoice(chatId, ogg) {
+    const form = new FormData();
+    form.append("chat_id", String(chatId));
+    form.append("voice", new Blob([ogg], { type: "audio/ogg" }), "voice.ogg");
+    return apiForm("sendVoice", form);
+  }
+
+  async function noteOnce(chatId, kind, text, everyMs) {
+    const k = `${chatId}|${kind}`;
+    if (Date.now() - (voiceNoteAt.get(k) || 0) < everyMs) return;
+    voiceNoteAt.set(k, Date.now());
+    await send(chatId, text).catch(() => {});
+  }
+
+  /** Ucapkan `text` sebagai voice note. true bila terkirim; false bila tidak (teks sudah terkirim terpisah, jadi tidak fatal). */
+  async function trySpeak(chatId, text) {
+    if (!deps.speak) return false;
+    try {
+      const out = await withAction(chatId, "record_voice", () => deps.speak(text));
+      if (!out?.ogg) return false;
+      await sendVoice(chatId, out.ogg);
+      return true;
+    } catch (e) {
+      if (e?.code === "ffmpeg") await noteOnce(chatId, "ffmpeg", `🔇 Balasan suara belum bisa: ${e.message} Pasang dengan: sudo apt install ffmpeg (lalu tunggu semenit). Sementara saya balas teks saja.`, 6 * 3600_000);
+      else if (e?.quota) await noteOnce(chatId, "quota", "🔇 Kuota suara Gemini sedang habis, jadi kali ini saya balas teks saja. Coba lagi nanti.", 30 * 60_000);
+      else log.error?.(`✈️ [Telegram] suara gagal dikirim: ${e?.message || e}`);
+      return false;
+    }
+  }
+
+  async function getVoiceMode(chatId) {
+    if (voiceModes.has(chatId)) return voiceModes.get(chatId);
+    let mode = "auto";
+    try {
+      const v = await deps.state?.get?.(`telegram_voice:${chatId}`);
+      if (v === "on" || v === "off" || v === "auto") mode = v;
+    } catch {
+      /* pakai bawaan */
+    }
+    voiceModes.set(chatId, mode);
+    return mode;
+  }
+
+  async function handleVoiceCommand(chatId, arg) {
+    const a = arg.toLowerCase();
+    const map = { on: "on", aktif: "on", nyala: "on", selalu: "on", off: "off", mati: "off", matikan: "off", auto: "auto", otomatis: "auto" };
+    const mode = map[a];
+    const label = { auto: "otomatis (dibalas suara bila kamu kirim suara)", on: "selalu dibalas suara", off: "mati (hanya teks)" };
+    if (!mode) {
+      const cur = await getVoiceMode(chatId);
+      return void (await send(chatId, `🔊 Balasan suara: ${label[cur]}.
+
+Ubah: /suara auto • /suara on • /suara off`));
+    }
+    voiceModes.set(chatId, mode);
+    try {
+      await deps.state?.set?.(`telegram_voice:${chatId}`, mode);
+    } catch {
+      /* hanya berlaku sampai restart */
+    }
+    let extra = "";
+    if (mode !== "off") {
+      const vc = deps.voiceCheck ? await deps.voiceCheck().catch(() => ({ ok: false, reason: "pengecekan gagal" })) : { ok: !!deps.speak, reason: "suara belum diatur di bot" };
+      if (!vc.ok) extra = `
+
+⚠️ Tapi suara belum bisa dibuat sekarang: ${vc.reason}. Sampai beres saya balas teks saja.`;
+    }
+    await send(chatId, `🔊 Balasan suara: ${label[mode]}.${extra}`);
+  }
+
+  // ---------------------------------------------------------------- tutor Inggris (/speak)
+  function tutorActive(chatId) {
+    const s = tutorSessions.get(chatId);
+    if (!s) return false;
+    if (Date.now() - s.lastAt > config.speakIdleMin * 60_000) {
+      tutorSessions.delete(chatId);
+      return false;
+    }
+    return true;
+  }
+
+  /** "/speak id soal liburan" -> { lang: "id", topic: "soal liburan" }; "/speak ordering coffee" -> { lang: "en", topic: "ordering coffee" }. */
+  function parseSpeakArg(arg) {
+    const m = /^(id|indonesia|indo|en|inggris|english)\b[\s:,-]*([\s\S]*)$/i.exec(String(arg || "").trim());
+    if (!m) return { lang: "en", topic: String(arg || "").trim() };
+    return { lang: /^(id|indonesia|indo)$/i.test(m[1]) ? "id" : "en", topic: m[2].trim() };
+  }
+
+  async function startTutor(chatId, arg) {
+    if (!deps.tutor) return void (await send(chatId, "Mode Speaking belum tersedia: isi GEMINI_API_KEYS di .env bot lalu restart."));
+    const { lang, topic } = parseSpeakArg(arg);
+    const id = lang === "id";
+    const session = { lang, topic: topic.slice(0, 100), turns: [], userTurns: 0, lastAt: Date.now() };
+    const vc = deps.voiceCheck ? await deps.voiceCheck().catch(() => ({ ok: false, reason: "pengecekan gagal" })) : { ok: !!deps.speak, reason: "suara belum diatur di bot" };
+    const intro = [
+      id ? `🎙️ Mode ngobrol bahasa Indonesia aktif${session.topic ? ` — topik: ${session.topic}` : ""}.` : `🎙️ Mode Speaking aktif${session.topic ? ` — topik: ${session.topic}` : ""}.`,
+      id
+        ? deps.transcribe ? "Balas dengan pesan suara (tahan tombol mikrofon), atau ketik. Aku membalas dengan suara, tanpa koreksi." : "Ketik pesanmu (suara masuk belum aktif: isi GROQ_API_KEYS). Aku membalas dengan teks."
+        : deps.transcribe ? "Balas dengan pesan suara berbahasa Inggris (tahan tombol mikrofon), atau ketik. Aku membalas dengan suara + koreksi singkat." : "Ketik jawabanmu dalam bahasa Inggris (suara masuk belum aktif: isi GROQ_API_KEYS). Aku membalas dengan koreksi singkat.",
+      id ? "Akhiri dengan /selesai atau ucapkan perpisahan (sampai jumpa, dadah, aku pamit dulu)." : "Akhiri dengan /selesai atau ucapkan goodbye.",
+      vc.ok ? "" : `🔇 Suara tutor belum bisa dibuat: ${vc.reason}. Sementara tutor membalas teks.`
+    ]
+      .filter((x) => x !== "")
+      .join("\n");
+    await send(chatId, intro).catch(() => {});
+    try {
+      const out = await withTyping(chatId, () => deps.tutor({ topic: session.topic, lang, history: [], userText: null, farewell: false }));
+      session.turns.push({ role: "ai", body: out.reply });
+      session.lastAt = Date.now();
+      tutorSessions.set(chatId, session);
+      await send(chatId, formatTutorMessage({ reply: out.reply, correction: "", tip: "" }));
+      await trySpeak(chatId, out.reply);
+    } catch (e) {
+      log.error?.(`✈️ [Telegram/Speak] gagal memulai: ${e?.message || e}`);
+      await send(chatId, `⚠️ Tutor gagal memulai: ${String(e?.message || e).slice(0, 300)}\nCoba /speak${id ? " id" : ""} lagi sebentar lagi.`).catch(() => {});
+    }
+  }
+
+  async function endTutor(chatId, note = null) {
+    const s = tutorSessions.get(chatId);
+    tutorSessions.delete(chatId);
+    if (!s) return void (await send(chatId, "Tidak ada sesi Speaking yang sedang berjalan. Mulai dengan /speak."));
+    await send(chatId, note || (s.lang === "id" ? `🏁 Sesi ngobrol selesai (${s.userTurns} giliran). Seru! /speak id untuk mulai lagi.` : `🏁 Sesi Speaking selesai (${s.userTurns} giliran). Mantap! /speak untuk mulai lagi.`));
+  }
+
+  async function handleTutorTurn(chatId, text) {
+    const s = tutorSessions.get(chatId);
+    if (!s) return;
+    const id = s.lang === "id";
+    const clean = String(text).replace(/\s+/g, " ").trim().slice(0, id ? TUTOR_TEXT_MAX_ID : TUTOR_TEXT_MAX);
+    if (!clean) return;
+    const farewell = isFarewellFor(clean, s.lang);
+    try {
+      let out = await withTyping(chatId, () => deps.tutor({ topic: s.topic, lang: s.lang, history: [...s.turns], userText: clean, farewell }));
+      if (id) out = { reply: out.reply, correction: "", tip: "" }; // ngobrol Indonesia: tidak ada koreksi
+      s.turns.push({ role: "user", body: clean }, { role: "ai", body: out.reply });
+      s.userTurns += 1;
+      s.lastAt = Date.now();
+      await send(chatId, formatTutorMessage(out));
+      await trySpeak(chatId, out.reply);
+      if (farewell) return void (await endTutor(chatId));
+      if (s.userTurns >= config.speakMaxTurns) return void (await endTutor(chatId, `🏁 Batas ${config.speakMaxTurns} giliran tercapai, sesi selesai. ${id ? "Seru! /speak id" : "Hebat! /speak"} untuk mulai sesi baru.`));
+    } catch (e) {
+      log.error?.(`✈️ [Telegram/Speak] gagal membalas: ${e?.message || e}`);
+      await send(chatId, `⚠️ ${id ? "Rani" : "Tutor"} gagal membalas: ${String(e?.message || e).slice(0, 300)}\nKirim lagi ucapanmu, atau /selesai.`).catch(() => {});
     }
   }
 
@@ -287,8 +477,81 @@ export function createTelegram({ config, deps = {}, fetchImpl = globalThis.fetch
     await runSimab(chatId, data.slice(3));
   }
 
+  /** Unduh berkas Telegram (suara) ke Buffer. Batas Bot API: 20 MB. Gangguan jaringan sesaat dicoba ulang (maks 3 kali). */
+  async function downloadFile(fileId) {
+    let info = null;
+    let lastErr = null;
+    for (let attempt = 0; attempt < 3 && !info; attempt++) {
+      try {
+        info = await api("getFile", { file_id: fileId }, { timeoutMs: 15_000 });
+      } catch (e) {
+        lastErr = e;
+        if (e?.status && e.status < 500 && e.status !== 429) break; // 4xx: percuma diulang
+        if (attempt < 2) await sleep(700 * (attempt + 1));
+      }
+    }
+    if (!info) throw new Error(`gagal meminta berkas suara ke Telegram: ${describeError(lastErr)}`);
+    if (!info.file_path) throw new Error("berkas tidak ditemukan di Telegram");
+    lastErr = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 45_000);
+      try {
+        const res = await fetchImpl(`${API}/file/bot${config.token}/${info.file_path}`, { signal: ctrl.signal });
+        if (!res.ok) {
+          const err = new Error(`unduh berkas gagal (HTTP ${res.status})`);
+          err.status = res.status;
+          throw err;
+        }
+        return Buffer.from(await res.arrayBuffer());
+      } catch (e) {
+        lastErr = e;
+        if (e?.status && e.status < 500 && e.status !== 429) break;
+        if (attempt < 2) await sleep(700 * (attempt + 1));
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+    throw new Error(`unduh berkas suara dari Telegram gagal: ${describeError(lastErr)}`);
+  }
+
+  /** Pesan suara pemilik: ubah jadi teks, tampilkan apa yang terdengar, lalu proses seperti pesan teks (obrolan / SiMAB). */
+  async function handleOwnerVoice(chatId, voice) {
+    if (!deps.transcribe) return void (await send(chatId, "Pesan suara belum aktif: isi GROQ_API_KEYS (atau GEMINI_API_KEYS) di .env bot lalu restart."));
+    if (Number(voice.duration) > config.voiceMaxSeconds) return void (await send(chatId, `Pesan suaranya terlalu panjang (${voice.duration} dtk). Maksimal ${config.voiceMaxSeconds} detik; pecah jadi beberapa pesan.`));
+    if (Number(voice.file_size) > 19 * 1024 * 1024) return void (await send(chatId, "Berkas suaranya terlalu besar (maks 20 MB)."));
+    let heard = "";
+    const simabKey = `tg:${chatId}`;
+    const inTutor = tutorActive(chatId) && !(deps.simab?.enabled && deps.simab.hasSession?.(simabKey));
+    const tutorLang = inTutor ? tutorSessions.get(chatId).lang : null;
+    try {
+      const out = await withTyping(chatId, async () => {
+        const buffer = await downloadFile(voice.file_id);
+        // sesi /speak: bahasa ucapan mengikuti sesi (Inggris, atau "id" = Indonesia tanpa kosakata SiMAB)
+        const mime = voice.mime_type || "audio/ogg";
+        return deps.transcribe(buffer, inTutor ? (tutorLang === "id" ? { mime, language: "id", hint: TUTOR_STT_HINT_ID } : { mime, language: "en", hint: TUTOR_STT_HINT }) : { mime });
+      });
+      heard = String(out?.text ?? "").trim();
+    } catch (e) {
+      log.error?.(`✈️ [Telegram] suara gagal diubah jadi teks: ${e?.message || e}`);
+      return void (await send(chatId, `⚠️ ${String(e?.message || e).slice(0, 300)}`).catch(() => {}));
+    }
+    if (!heard) return void (await send(chatId, "🎤 Suaranya tidak terdengar jelas. Coba rekam lagi lebih dekat ke mikrofon."));
+    if (inTutor) {
+      await send(chatId, `🎤 “${heard}”`).catch(() => {});
+      return handleTutorTurn(chatId, heard);
+    }
+    const key = `tg:${chatId}`;
+    const inSession = !!(deps.simab?.enabled && deps.simab.hasSession?.(key));
+    const cmd = voiceToCommand(heard, { inSession });
+    const shown = cmd.changed && cmd.text ? `🎤 “${heard}”\n➡️ ${cmd.text.replace(/\n/g, " ⏎ ")}` : `🎤 “${heard}”`;
+    await send(chatId, shown).catch(() => {});
+    if (!cmd.text) return;
+    return handleOwnerText(chatId, cmd.text, { viaVoice: true });
+  }
+
   /** Satu pesan dari pemilik -> balasan. Dipisah dari polling supaya mudah dites. */
-  async function handleOwnerText(chatId, rawText) {
+  async function handleOwnerText(chatId, rawText, { viaVoice = false } = {}) {
     const text = String(rawText ?? "").trim();
     if (!text) return;
     const key = `tg:${chatId}`;
@@ -303,6 +566,10 @@ export function createTelegram({ config, deps = {}, fetchImpl = globalThis.fetch
       histories.delete(chatId);
       return void (await reply("Oke, obrolan baru. Konteks sebelumnya dilupakan."));
     }
+
+    if (name === "speak") return startTutor(chatId, arg);
+    if (name === "selesai" || name === "stop") return endTutor(chatId);
+    if (name === "suara") return handleVoiceCommand(chatId, arg);
 
     // SiMAB: "/simab ..." atau "simab ..." atau lanjutan sesi "simab rekam" yang sedang aktif
     const simab = deps.simab;
@@ -341,6 +608,9 @@ export function createTelegram({ config, deps = {}, fetchImpl = globalThis.fetch
 
     if (cmd && name) return void (await reply(`Perintah /${name} tidak dikenal.\n\n${HELP}`));
 
+    // latihan Speaking sedang berjalan: pesan biasa = ucapan untuk tutor
+    if (tutorActive(chatId)) return handleTutorTurn(chatId, text);
+
     // obrolan biasa dengan AI
     pushHistory(chatId, "user", text);
     try {
@@ -349,6 +619,8 @@ export function createTelegram({ config, deps = {}, fetchImpl = globalThis.fetch
       if (!out) throw new Error("jawaban kosong");
       pushHistory(chatId, "model", out);
       await reply(out);
+      const mode = await getVoiceMode(chatId);
+      if (mode === "on" || (mode === "auto" && viaVoice)) await trySpeak(chatId, out);
     } catch (e) {
       // buang pesan pengguna yang gagal dijawab supaya riwayat tidak berakhir di giliran "user" ganda
       const h = histories.get(chatId) || [];
@@ -381,8 +653,9 @@ export function createTelegram({ config, deps = {}, fetchImpl = globalThis.fetch
       }
       return;
     }
+    if (m.voice || m.audio) return handleOwnerVoice(chatId, m.voice || m.audio);
     if (typeof m.text !== "string") {
-      await send(chatId, "Untuk sekarang bot hanya membaca pesan teks.").catch(() => {});
+      await send(chatId, "Bot membaca pesan teks dan pesan suara (tahan tombol mikrofon).").catch(() => {});
       return;
     }
     await handleOwnerText(chatId, m.text);
@@ -459,6 +732,9 @@ export function createTelegram({ config, deps = {}, fetchImpl = globalThis.fetch
           { command: "ringkasan", description: "Ringkasan percakapan WhatsApp hari ini" },
           { command: "peraturan", description: "Pantau peraturan terbaru" },
           { command: "baru", description: "Mulai obrolan baru" },
+          { command: "speak", description: "Ngobrol dengan tutor suara: Inggris, atau \"/speak id\" Indonesia" },
+          { command: "selesai", description: "Akhiri sesi Speaking" },
+          { command: "suara", description: "Atur balasan suara: auto / on / off" },
           { command: "help", description: "Bantuan" }
         ]
       }).catch(() => {});
@@ -474,5 +750,5 @@ export function createTelegram({ config, deps = {}, fetchImpl = globalThis.fetch
 
   const describe = () => (!enabled ? "mati (isi TELEGRAM_BOT_TOKEN di .env buat menyalakan)" : owners.size === 0 ? "AKTIF tapi mode pairing (isi TELEGRAM_OWNER_IDS)" : `AKTIF (${owners.size} pemilik, notifikasi ${config.mirror ? "ikut dikirim" : "tidak dikirim"} ke Telegram)`);
 
-  return { enabled, mirror: config.mirror, start, stop, send, sendOwner, handleOwnerText, handleUpdate, describe, hasOwners: () => owners.size > 0 };
+  return { enabled, mirror: config.mirror, start, stop, send, sendOwner, handleOwnerText, handleOwnerVoice, handleUpdate, describe, hasOwners: () => owners.size > 0 };
 }

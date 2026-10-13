@@ -1,6 +1,7 @@
 // Tes logika murni menu Study (supabase/functions/_shared/study-core.ts).
 //   node test-study.mjs      (butuh Node 22.18+ yang bisa memuat .ts langsung)
 import { extractTtsAudio, pcmToWav, getTtsModels } from "../supabase/functions/_shared/gemini.ts";
+import { getGroqSttKeys, pickSpeechText, transcribeWithGroq } from "../supabase/functions/_shared/groq-stt.ts";
 import {
   parseAvatarImage,
   SPEAK_SCENARIOS,
@@ -345,6 +346,40 @@ check(formatClock(600) === "10:00" && formatClock(61) === "1:01" && formatClock(
   check(getTtsModels().length >= 3 && getTtsModels()[0].includes("tts"), "tts: daftar model bawaan tersedia");
   globalThis.Deno = { env: { get: (k) => (k === "GEMINI_TTS_MODELS" ? " a-tts , b-tts " : "") } };
   check(getTtsModels().join("|") === "a-tts|b-tts", "tts: GEMINI_TTS_MODELS mengganti daftar model");
+}
+
+// ---- suara -> teks lewat Groq Whisper di server aplikasi (cadangan Gemini)
+{
+  globalThis.Deno = { env: { get: () => "" } };
+  check(getGroqSttKeys((n) => (n === "GROQ_API_KEYS" ? " k1 , k2 ,," : undefined)).join("|") === "k1|k2", "groq stt: GROQ_API_KEYS dipecah & dirapikan");
+  check(getGroqSttKeys((n) => (n === "GROQ_API_KEY" ? "solo" : undefined)).join("|") === "solo", "groq stt: GROQ_API_KEY tunggal diterima");
+  check(getGroqSttKeys(() => undefined).length === 0, "groq stt: tanpa key -> daftar kosong");
+  check(pickSpeechText({ text: " hello  there " }) === "hello there", "groq stt: teks polos dirapikan");
+  check(pickSpeechText({ segments: [{ text: " I like pizza", no_speech_prob: 0.01, avg_logprob: -0.2 }, { text: " Thank you.", no_speech_prob: 0.9, avg_logprob: -1.5 }] }) === "I like pizza", "groq stt: segmen hening (halusinasi) dibuang");
+  check(pickSpeechText({ segments: [{ text: " Thank you.", no_speech_prob: 0.95, avg_logprob: -1.2 }] }) === "", "groq stt: hanya segmen hening -> kosong");
+  const calls = [];
+  let t = 1000;
+  const mk = (statuses) => async (url, init) => {
+    const key = init.headers.Authorization.replace("Bearer ", "");
+    calls.push({ url, key, form: init.body });
+    const st = statuses[key] ?? 200;
+    return { ok: st === 200, status: st, text: async () => (st === 200 ? JSON.stringify({ text: "good morning", segments: [] }) : "quota") };
+  };
+  const wav = Buffer.from("RIFFxxxxWAVEfmt ").toString("base64");
+  const r1 = await transcribeWithGroq(wav, "audio/wav", ["bad", "good"], { fetchImpl: mk({ bad: 429 }), now: () => t });
+  check(r1.text === "good morning" && calls.length === 2 && calls[0].key === "bad" && calls[1].key === "good", "groq stt: key kena 429 dilewati, key berikutnya dipakai");
+  check(calls[1].url.includes("api.groq.com/openai/v1/audio/transcriptions") && calls[1].form.get("model") === "whisper-large-v3-turbo" && calls[1].form.get("language") === "en", "groq stt: alamat, model, bahasa benar");
+  calls.length = 0;
+  await transcribeWithGroq(wav, "audio/wav", ["bad", "good"], { fetchImpl: mk({ bad: 429 }), now: () => t + 1000 });
+  check(calls.length === 1 && calls[0].key === "good", "groq stt: key yang baru kena 429 diistirahatkan (tidak dicoba lagi)");
+  calls.length = 0;
+  let err = "";
+  try {
+    await transcribeWithGroq(wav, "audio/wav", ["x1"], { fetchImpl: mk({ x1: 500 }), now: () => t + 500000 });
+  } catch (e) {
+    err = e.message;
+  }
+  check(/Groq STT error 500/.test(err), "groq stt: semua key gagal -> melempar galat yang jelas");
 }
 
 // ---- kata perpisahan -> percakapan selesai otomatis

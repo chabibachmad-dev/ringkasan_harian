@@ -38,6 +38,9 @@ import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import { createSimab, SIMAB_OLLAMA_SYSTEM } from "./simab.js";
 import { createTelegram, readTelegramConfig } from "./telegram.js";
+import { createTranscriber, readSttConfig } from "./voice-input.js";
+import { createSpeaker, readTtsConfig } from "./voice-output.js";
+import { buildTutorSystemPrompt, buildTutorUserPrompt, parseTutorReply } from "./tutor.js";
 import { createAppAgentWorker } from "./app-agent.js";
 import { createFallbackChain, readFallbackConfig } from "./llm-fallback.js";
 import { createWebSearch, readSearchConfig } from "./web-search.js";
@@ -3093,13 +3096,41 @@ async function buildBotStatusText() {
   lines.push(`📋 Ringkasan harian: ${WA_DAILY_SUMMARY_ENABLED ? `aktif (setelah ${String(WA_DAILY_SUMMARY_HOUR).padStart(2, "0")}:00 ${WA_TIMEZONE_LABEL}${summarySentDate ? `, terakhir terkirim ${summarySentDate}` : ""})` : "mati"}`);
   lines.push(`📜 Pantauan peraturan: ${regMonitor.describe()}`);
   lines.push(`✈️ Telegram: ${telegram.describe()}`);
+  lines.push(`🎤 Pesan suara Telegram: ${transcriber.available() ? `aktif (${sttConfig.groqKeys.length ? `Groq Whisper ${sttConfig.groqModel}` : ""}${sttConfig.groqKeys.length && sttConfig.geminiKeys.length ? " + " : ""}${sttConfig.geminiKeys.length ? "cadangan Gemini" : ""})` : "mati (isi GROQ_API_KEYS atau GEMINI_API_KEYS)"}`);
+  {
+    const vo = await checkVoiceOutput().catch(() => ({ ok: false, reason: "pengecekan gagal" }));
+    lines.push(`🔊 Balasan suara & /speak Telegram: ${vo.ok ? `aktif (Gemini TTS, suara ${ttsConfig.voice}, ffmpeg ok)` : `belum bisa (${vo.reason})`}`);
+  }
   return lines.join("\n");
 }
 
+const sttConfig = readSttConfig(process.env);
+const transcriber = createTranscriber({ config: sttConfig });
+// Balasan suara (Gemini TTS -> OGG/Opus via ffmpeg) & tutor Inggris untuk /speak di Telegram
+const ttsConfig = readTtsConfig(process.env);
+const speaker = createSpeaker({ config: ttsConfig });
+async function generateTutorTurn({ topic, lang = "en", history, userText, farewell }) {
+  if (GEMINI_API_KEYS.length === 0 && !llmFallback.available()) throw new Error("AI belum diatur: isi GEMINI_API_KEYS di .env bot lalu restart.");
+  const prompt = buildTutorUserPrompt(history, userText, farewell, lang);
+  const data = await geminiGenerateWithRotation(buildTutorSystemPrompt({ topic, lang }), [{ role: "user", parts: [{ text: prompt }] }], { useSearch: false });
+  const parsed = parseTutorReply(extractGeminiText(data).trim(), userText || "");
+  if (!parsed) throw new Error("Tutor tidak menghasilkan balasan.");
+  return lang === "id" ? { reply: parsed.reply, correction: "", tip: "" } : parsed;
+}
+async function checkVoiceOutput() {
+  if (!speaker.available()) return { ok: false, reason: "GEMINI_API_KEYS belum diisi di .env bot" };
+  const st = await speaker.checkFfmpeg();
+  if (st === "ok") return { ok: true };
+  return { ok: false, reason: st === "noopus" ? "ffmpeg terpasang tapi tanpa libopus (pasang ffmpeg versi lengkap)" : "ffmpeg belum terpasang (sudo apt install ffmpeg)" };
+}
 const telegram = createTelegram({
   config: readTelegramConfig(process.env),
   deps: {
     chat: (history) => generateTelegramReply(history),
+    transcribe: transcriber.available() ? (buffer, opts) => transcriber.transcribe(buffer, opts) : null,
+    tutor: GEMINI_API_KEYS.length > 0 || llmFallback.available() ? generateTutorTurn : null,
+    speak: speaker.available() ? (text) => speaker.speak(text) : null,
+    voiceCheck: checkVoiceOutput,
     simab,
     summary: () => buildDailySummaryText(zonedParts(Date.now(), WA_TIMEZONE).dateStr, { allowAi: true }),
     regNow: (opts) => regMonitor.runNow(opts),

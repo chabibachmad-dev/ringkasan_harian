@@ -282,5 +282,344 @@ const msg = (chat, text, extra = {}) => ({ update_id: 1, message: { chat: { id: 
   check(off.describe().includes("mati") && createTelegram({ config: cfg({ ownerIds: [] }), fetchImpl: f, log: quiet }).describe().includes("pairing"), "describe: mati / pairing");
 }
 
+// ---- pesan suara
+{
+  const f0 = fakeApi();
+  const f = async (url, init) => {
+    const u = String(url);
+    if (u.includes("/file/bot")) return { ok: true, status: 200, arrayBuffer: async () => new Uint8Array([79, 103, 103, 83]).buffer };
+    if (u.endsWith("/getFile")) { f.getFiles.push(JSON.parse(init.body).file_id); return { status: 200, json: async () => ({ ok: true, result: { file_path: "voice/file_1.oga" } }) }; }
+    return f0(url, init);
+  };
+  f.getFiles = [];
+  f.texts = f0.texts;
+  f.calls = f0.calls;
+  const heard = { text: "" };
+  const got = [];
+  let session = false;
+  const simab = { enabled: true, hasSession: (k) => session && k === "tg:111", run: async (text) => { got.push(`simab:${text}`); if (/rekam/.test(text)) session = true; return "ok simab"; } };
+  const tg = createTelegram({
+    config: cfg({ voiceMaxSeconds: 60 }),
+    deps: { chat: async (h, t) => { got.push(`chat:${t}`); return "balasan ai"; }, simab, transcribe: async (buf, o) => { got.push(`stt:${buf.length}:${o.mime}`); return { text: heard.text, engine: "groq" }; } },
+    fetchImpl: f, log: quiet
+  });
+  const voice = (extra = {}) => ({ update_id: 9, message: { chat: { id: 111, type: "private" }, voice: { file_id: "F1", duration: 5, mime_type: "audio/ogg", file_size: 4000, ...extra } } });
+
+  heard.text = "Apa kabar hari ini?";
+  await tg.handleUpdate(voice());
+  check(f.getFiles[0] === "F1" && got[0] === "stt:4:audio/ogg" && got[1] === "chat:Apa kabar hari ini?", "suara: diunduh, diubah jadi teks, lalu diproses sebagai obrolan biasa");
+  check(f.texts(111)[0].includes("🎤") && f.texts(111)[0].includes("Apa kabar hari ini?") && f.texts(111)[1] === "balasan ai", "suara: bot menampilkan apa yang terdengar sebelum menjawab");
+
+  heard.text = "Si mab rekam Umum.";
+  await tg.handleUpdate(voice());
+  check(got.includes("simab:simab rekam Umum") && session === true, "suara: 'Si mab rekam Umum' -> perintah simab rekam umum, sesi mulai");
+  check(f.texts(111).some((t) => t.includes("➡️") && t.includes("simab rekam Umum")), "suara: hasil penyesuaian ditampilkan (➡️)");
+
+  heard.text = "Nomor tiga.";
+  await tg.handleUpdate(voice());
+  check(got.includes("simab:3"), "suara: dalam sesi SiMAB 'Nomor tiga' -> 3");
+  heard.text = "Pembelian ATK, tanggal lima Oktober dua ribu dua puluh enam, jumlah satu juta lima ratus ribu rupiah";
+  await tg.handleUpdate(voice());
+  check(got.includes("simab:Pembelian ATK\n5 Oktober 2026\n1500000"), "suara: dalam sesi SiMAB uraian+tanggal+jumlah -> tiga baris");
+
+  const nBefore = got.length;
+  await tg.handleUpdate(voice({ duration: 300 }));
+  check(got.length === nBefore && f.texts(111).at(-1).includes("terlalu panjang"), "suara: terlalu panjang ditolak sebelum diunduh");
+  heard.text = "";
+  await tg.handleUpdate(voice());
+  check(f.texts(111).at(-1).includes("tidak terdengar jelas"), "suara: tanpa ucapan jelas -> minta rekam ulang, tidak diproses");
+  await tg.handleUpdate({ update_id: 10, message: { chat: { id: 222, type: "private" }, voice: { file_id: "X", duration: 3 } } });
+  check(!f.getFiles.includes("X"), "keamanan: suara dari chat selain pemilik diabaikan (tidak diunduh)");
+  const tgOff = createTelegram({ config: cfg(), deps: { chat: async () => "x" }, fetchImpl: f, log: quiet });
+  await tgOff.handleUpdate(voice());
+  check(f.texts(111).at(-1).includes("belum aktif"), "suara: tanpa kunci STT -> pesan belum aktif");
+  const tgFail = createTelegram({ config: cfg(), deps: { chat: async () => "x", transcribe: async () => { throw new Error("Gagal mengubah suara jadi teks (500)"); } }, fetchImpl: f, log: quiet });
+  await tgFail.handleUpdate(voice());
+  check(f.texts(111).at(-1).includes("Gagal mengubah suara jadi teks"), "suara: galat transkripsi disampaikan ke pemilik");
+
+  // unduhan berkas suara: gangguan jaringan sesaat dicoba ulang, kegagalan tetap menyebut sebab aslinya
+  const netErr = () => Object.assign(new TypeError("fetch failed"), { cause: Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" }) });
+  let dl = 0;
+  const fFlaky = async (url, init) => {
+    if (String(url).includes("/file/bot")) {
+      dl++;
+      if (dl <= 2) throw netErr();
+      return { ok: true, status: 200, arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer };
+    }
+    return f(url, init);
+  };
+  const sizes = [];
+  const sleeps = [];
+  const tgFlaky = createTelegram({ config: cfg(), deps: { chat: async () => "ok", transcribe: async (buf) => { sizes.push(buf.length); return { text: "halo", engine: "groq" }; } }, fetchImpl: fFlaky, log: quiet, sleep: async (ms) => { sleeps.push(ms); } });
+  await tgFlaky.handleUpdate(voice());
+  check(dl === 3 && sizes[0] === 3, "suara: unduhan gagal dua kali lalu berhasil -> tetap diproses (dicoba ulang)");
+  check(sleeps.length >= 2, "suara: ada jeda antar percobaan unduh");
+
+  let dl2 = 0;
+  const fDead = async (url, init) => {
+    if (String(url).includes("/file/bot")) { dl2++; throw netErr(); }
+    return f(url, init);
+  };
+  const errLog = [];
+  const tgDead = createTelegram({ config: cfg(), deps: { chat: async () => "x", transcribe: async () => ({ text: "x" }) }, fetchImpl: fDead, log: { ...quiet, error: (m) => errLog.push(m) }, sleep: async () => {} });
+  await tgDead.handleUpdate(voice());
+  check(dl2 === 3, "suara: unduhan selalu gagal -> berhenti setelah 3 percobaan");
+  check(/ECONNRESET/.test(f.texts(111).at(-1)) && /unduh berkas suara/.test(f.texts(111).at(-1)), "suara: pesan ke pemilik memuat sebab asli (ECONNRESET)");
+  check(errLog.some((m) => m.includes("ECONNRESET")), "suara: log memuat sebab asli");
+
+  let dl3 = 0;
+  const f404 = async (url, init) => {
+    if (String(url).includes("/file/bot")) { dl3++; return { ok: false, status: 404, arrayBuffer: async () => new ArrayBuffer(0) }; }
+    return f(url, init);
+  };
+  const tg404 = createTelegram({ config: cfg(), deps: { chat: async () => "x", transcribe: async () => ({ text: "x" }) }, fetchImpl: f404, log: quiet, sleep: async () => {} });
+  await tg404.handleUpdate(voice());
+  check(dl3 === 1, "suara: HTTP 404 pada unduhan tidak diulang");
+}
+
+// ---- balasan suara (/suara) dan tutor Inggris (/speak)
+{
+  const f0 = fakeApi();
+  const f = async (url, init) => {
+    const u = String(url);
+    if (u.includes("/file/bot")) return { ok: true, status: 200, arrayBuffer: async () => new Uint8Array([79, 103, 103, 83]).buffer };
+    if (u.endsWith("/getFile")) return { status: 200, json: async () => ({ ok: true, result: { file_path: "voice/f.oga" } }) };
+    if (u.endsWith("/sendVoice")) {
+      const fd = init.body;
+      f.voices.push({ chat: fd.get("chat_id"), size: fd.get("voice").size, type: fd.get("voice").type });
+      if (f.failVoice) return { status: 400, json: async () => ({ ok: false, error_code: 400, description: "Bad Request: wrong file" }) };
+      return { status: 200, json: async () => ({ ok: true, result: { message_id: 5 } }) };
+    }
+    return f0(url, init);
+  };
+  f.voices = [];
+  f.failVoice = false;
+  f.texts = f0.texts;
+  f.calls = f0.calls;
+  const store = new Map();
+  const spoken = [];
+  const speakImpl = { err: null };
+  const stt = [];
+  const tutorCalls = [];
+  const tutorState = { fail: false };
+  const deps = {
+    chat: async (h, t) => "Jawaban panjang dari AI. Ini kalimat kedua.",
+    transcribe: async (buf, o) => { stt.push(o); return { text: f.heard, engine: "groq" }; },
+    speak: async (text) => { spoken.push(text); if (speakImpl.err) throw speakImpl.err; return { ogg: Buffer.alloc(1200, 1), text }; },
+    voiceCheck: async () => ({ ok: true }),
+    tutor: async (a) => {
+      tutorCalls.push(a);
+      if (tutorState.fail) throw new Error("AI sibuk");
+      if (a.userText === null) return { reply: "Hi! What did you do today?", correction: "", tip: "" };
+      if (a.farewell) return { reply: "Bye! Take care.", correction: "", tip: "" };
+      return a.userText.includes("go to market") ? { reply: "Oh, you went to the market? Nice.", correction: "I went to the market yesterday.", tip: "Gunakan went untuk lampau." } : { reply: "Cool, tell me more.", correction: "", tip: "" };
+    },
+    state: { get: async (k) => store.get(k) ?? null, set: async (k, v) => { store.set(k, v); } }
+  };
+  const tg = createTelegram({ config: cfg({ voiceMaxSeconds: 60, speakMaxTurns: 3, speakIdleMin: 60 }), deps, fetchImpl: f, log: quiet });
+  const T = (text) => tg.handleUpdate(msg(111, text));
+  const V = (heard) => { f.heard = heard; return tg.handleUpdate({ update_id: 9, message: { chat: { id: 111, type: "private" }, voice: { file_id: "F", duration: 4, mime_type: "audio/ogg", file_size: 3000 } } }); };
+
+  // /suara
+  await T("/suara");
+  check(f.texts(111).at(-1).includes("otomatis") && f.texts(111).at(-1).includes("/suara on"), "suara: tanpa argumen menampilkan mode (bawaan otomatis)");
+  await T("hai");
+  check(f.voices.length === 0, "suara auto: teks biasa dibalas teks saja (tanpa voice)");
+  await V("Apa kabar?");
+  check(f.voices.length === 1 && f.voices[0].chat === "111" && f.voices[0].type === "audio/ogg" && f.voices[0].size === 1200, "suara auto: kirim suara -> dibalas voice note OGG");
+  check(spoken.at(-1) === "Jawaban panjang dari AI. Ini kalimat kedua." && f.texts(111).at(-1) === "Jawaban panjang dari AI. Ini kalimat kedua.", "suara auto: teks lengkap tetap dikirim, suara membacakan jawaban");
+  await T("/suara off");
+  check(store.get("telegram_voice:111") === "off" && f.texts(111).at(-1).includes("mati"), "suara off: disimpan di bot_state");
+  const n0 = f.voices.length;
+  await V("Halo lagi");
+  check(f.voices.length === n0, "suara off: kirim suara pun dibalas teks saja");
+  await T("/suara on");
+  await T("tes teks");
+  check(f.voices.length === n0 + 1 && store.get("telegram_voice:111") === "on", "suara on: teks biasa pun dibalas voice");
+  await T("/suara nyala");
+  check(f.texts(111).at(-1).includes("selalu dibalas suara"), "suara: kata 'nyala' dikenali");
+  // mode tersimpan terbaca setelah restart
+  store.set("telegram_voice:111", "off");
+  const tg2 = createTelegram({ config: cfg(), deps, fetchImpl: f, log: quiet });
+  const n1 = f.voices.length;
+  await tg2.handleUpdate(msg(111, "tes setelah restart"));
+  check(f.voices.length === n1, "suara: mode dibaca dari bot_state saat bot dinyalakan ulang");
+  // SiMAB tidak dibacakan
+  store.set("telegram_voice:111", "on");
+  const tg3 = createTelegram({ config: cfg(), deps: { ...deps, simab: { enabled: true, hasSession: () => false, run: async () => "hasil simab" } }, fetchImpl: f, log: quiet });
+  const n2 = f.voices.length;
+  await tg3.handleUpdate(msg(111, "simab pagu"));
+  check(f.voices.length === n2, "suara: jawaban SiMAB tidak dibacakan");
+
+  // gagal membuat suara
+  const fx = fakeApi();
+  speakImpl.err = Object.assign(new Error("ffmpeg belum terpasang."), { code: "ffmpeg" });
+  const tgF = createTelegram({ config: cfg(), deps: { ...deps, state: { get: async () => "on", set: async () => {} } }, fetchImpl: f, log: quiet });
+  const before = f.texts(111).length;
+  await tgF.handleUpdate(msg(111, "tes ffmpeg"));
+  await tgF.handleUpdate(msg(111, "tes ffmpeg lagi"));
+  const added = f.texts(111).slice(before);
+  check(added.filter((t) => t.includes("Pasang dengan: sudo apt install ffmpeg")).length === 1 && added.filter((t) => t === "Jawaban panjang dari AI. Ini kalimat kedua.").length === 2, "suara: ffmpeg tak ada -> teks tetap terkirim, petunjuk pasang hanya sekali");
+  speakImpl.err = Object.assign(new Error("Kuota suara Gemini sedang habis."), { quota: true });
+  const b2 = f.texts(111).length;
+  await tgF.handleUpdate(msg(111, "tes kuota"));
+  await tgF.handleUpdate(msg(111, "tes kuota 2"));
+  const add2 = f.texts(111).slice(b2);
+  check(add2.filter((t) => t.includes("Kuota suara Gemini sedang habis")).length === 1 && add2.filter((t) => t === "Jawaban panjang dari AI. Ini kalimat kedua.").length === 2, "suara: kuota habis -> teks tetap terkirim, pemberitahuan tidak berulang");
+  speakImpl.err = null;
+  f.failVoice = true;
+  const b3 = f.texts(111).length;
+  await tgF.handleUpdate(msg(111, "tes gagal kirim"));
+  check(f.texts(111).slice(b3).includes("Jawaban panjang dari AI. Ini kalimat kedua."), "suara: sendVoice ditolak Telegram -> teks tetap terkirim, tidak crash");
+  f.failVoice = false;
+
+  // /speak
+  store.set("telegram_voice:111", "off");
+  const nv = f.voices.length;
+  await T("/speak ordering coffee");
+  check(tutorCalls.at(-1).userText === null && tutorCalls.at(-1).topic === "ordering coffee", "speak: sesi dimulai dengan topik & meminta pembuka");
+  check(f.texts(111).some((t) => t.includes("Mode Speaking aktif") && t.includes("ordering coffee") && t.includes("/selesai")), "speak: pesan pembuka menjelaskan cara memakai");
+  check(f.texts(111).at(-1) === "💬 Hi! What did you do today?" && f.voices.length === nv + 1 && spoken.at(-1) === "Hi! What did you do today?", "speak: sapaan tutor dikirim teks + voice (walau /suara off)");
+
+  await V("I go to market yesterday");
+  check(stt.at(-1).language === "en" && /English/.test(stt.at(-1).hint), "speak: suara masuk diubah jadi teks dengan bahasa Inggris");
+  check(f.texts(111).some((t) => t === "🎤 “I go to market yesterday”"), "speak: ucapan yang terdengar ditampilkan");
+  check(tutorCalls.at(-1).userText === "I go to market yesterday" && tutorCalls.at(-1).history.length === 1, "speak: tutor menerima ucapan + riwayat");
+  check(f.texts(111).at(-1) === "💬 Oh, you went to the market? Nice.\n\n✏️ Lebih baik: I went to the market yesterday.\n💡 Gunakan went untuk lampau.", "speak: balasan memuat koreksi & tips (teks)");
+  check(spoken.at(-1) === "Oh, you went to the market? Nice." && !spoken.at(-1).includes("Lebih baik"), "speak: yang diucapkan hanya balasan tutor, bukan koreksi");
+
+  await T("I like coffee");
+  check(tutorCalls.at(-1).userText === "I like coffee" && tutorCalls.at(-1).history.length === 3, "speak: ketikan juga diterima sebagai ucapan");
+  check(f.texts(111).at(-1).startsWith("💬 Cool"), "speak: ketikan dibalas tutor (bukan obrolan AI biasa)");
+
+  // batas giliran (speakMaxTurns=3): giliran ke-3 -> selesai
+  await T("one more thing");
+  check(f.texts(111).at(-1).includes("Batas 3 giliran tercapai"), "speak: batas giliran -> sesi selesai otomatis");
+  await T("masih ngobrol?");
+  check(f.texts(111).at(-1) === "Jawaban panjang dari AI. Ini kalimat kedua.", "speak: setelah selesai pesan biasa kembali ke obrolan AI");
+
+  // perpisahan
+  await T("/speak");
+  await V("Okay, goodbye!");
+  check(tutorCalls.at(-1).farewell === true && f.texts(111).some((t) => t === "💬 Bye! Take care."), "speak: ucapan perpisahan -> tutor menutup");
+  check(f.texts(111).at(-1).includes("Sesi Speaking selesai"), "speak: perpisahan mengakhiri sesi otomatis");
+
+  // /selesai
+  await T("/selesai");
+  check(f.texts(111).at(-1).includes("Tidak ada sesi Speaking"), "selesai: tanpa sesi -> pemberitahuan");
+  await T("/speak");
+  await T("/selesai");
+  check(f.texts(111).at(-1).includes("Sesi Speaking selesai"), "selesai: mengakhiri sesi");
+  await T("hai lagi");
+  check(f.texts(111).at(-1) === "Jawaban panjang dari AI. Ini kalimat kedua.", "selesai: kembali ke obrolan biasa");
+
+  // tutor gagal
+  await T("/speak");
+  tutorState.fail = true;
+  await T("I am here");
+  check(f.texts(111).at(-1).includes("Tutor gagal membalas") && f.texts(111).at(-1).includes("AI sibuk"), "speak: tutor gagal -> pesan jelas");
+  tutorState.fail = false;
+  await T("I am here again");
+  check(tutorCalls.at(-1).history.length === 1, "speak: giliran yang gagal tidak masuk riwayat (bisa dicoba lagi)");
+  await T("/selesai");
+
+  // tutor di tengah sesi SiMAB tidak mengganggu; sesi kedaluwarsa
+  let t = Date.now();
+  const realNow = Date.now;
+  await T("/speak");
+  Date.now = () => t + 61 * 60_000;
+  await T("masih di sini?");
+  Date.now = realNow;
+  check(f.texts(111).at(-1) === "Jawaban panjang dari AI. Ini kalimat kedua.", "speak: sesi diam > 60 menit kedaluwarsa -> kembali ke obrolan biasa");
+
+  // tanpa tutor / tanpa suara masuk
+  const tgN = createTelegram({ config: cfg(), deps: { chat: async () => "x" }, fetchImpl: f, log: quiet });
+  await tgN.handleUpdate(msg(111, "/speak"));
+  check(f.texts(111).at(-1).includes("belum tersedia"), "speak: tanpa tutor -> pesan belum tersedia");
+  const tgNV = createTelegram({ config: cfg(), deps: { ...deps, transcribe: null }, fetchImpl: f, log: quiet });
+  await tgNV.handleUpdate(msg(111, "/speak"));
+  check(f.texts(111).some((t) => t.includes("suara masuk belum aktif")), "speak: tanpa STT -> diberi tahu cukup mengetik");
+  await tgNV.handleUpdate(msg(111, "/selesai"));
+
+  // perintah dari pemilik lain tidak menyentuh sesi
+  await tg.handleUpdate({ update_id: 3, message: { chat: { id: 222, type: "private" }, text: "/speak" } });
+  check(!f.texts(222).length, "keamanan: /speak dari chat selain pemilik diabaikan");
+}
+
+
+// ---- /speak id (ngobrol Indonesia)
+{
+  const f0 = fakeApi();
+  const f = async (url, init) => {
+    const u = String(url);
+    if (u.includes("/file/bot")) return { ok: true, status: 200, arrayBuffer: async () => new Uint8Array([79, 103, 103, 83]).buffer };
+    if (u.endsWith("/getFile")) return { status: 200, json: async () => ({ ok: true, result: { file_path: "voice/f.oga" } }) };
+    if (u.endsWith("/sendVoice")) { f.voices++; return { status: 200, json: async () => ({ ok: true, result: { message_id: 5 } }) }; }
+    return f0(url, init);
+  };
+  f.voices = 0;
+  f.texts = f0.texts;
+  const stt = [];
+  const calls = [];
+  const spoken = [];
+  const deps = {
+    chat: async () => "obrolan biasa",
+    transcribe: async (buf, o) => { stt.push(o); return { text: f.heard, engine: "groq" }; },
+    speak: async (text) => { spoken.push(text); return { ogg: Buffer.alloc(900, 1), text }; },
+    voiceCheck: async () => ({ ok: true }),
+    tutor: async (a) => {
+      calls.push(a);
+      if (a.userText === null) return { reply: "Hai! Lagi ngapain hari ini?", correction: "", tip: "" };
+      if (a.farewell) return { reply: "Dadah, sampai ketemu lagi ya.", correction: "salah", tip: "salah juga" };
+      return { reply: "Wah seru, ceritain dong.", correction: "Koreksi yang tidak boleh tampil.", tip: "Tip yang tidak boleh tampil." };
+    },
+    state: { get: async () => null, set: async () => {} }
+  };
+  const tg = createTelegram({ config: cfg({ speakMaxTurns: 5, speakIdleMin: 60, voiceMaxSeconds: 60 }), deps, fetchImpl: f, log: quiet });
+  const T = (text) => tg.handleUpdate(msg(111, text));
+  const V = (heard) => { f.heard = heard; return tg.handleUpdate({ update_id: 9, message: { chat: { id: 111, type: "private" }, voice: { file_id: "F", duration: 4, mime_type: "audio/ogg", file_size: 3000 } } }); };
+
+  await T("/speak id soal liburan");
+  check(calls.at(-1).lang === "id" && calls.at(-1).topic === "soal liburan" && calls.at(-1).userText === null, "speak id: bahasa id, topik 'soal liburan', minta pembuka");
+  check(f.texts(111).some((t) => t.includes("Mode ngobrol bahasa Indonesia aktif") && t.includes("soal liburan") && t.includes("tanpa koreksi")), "speak id: pesan pembuka berbahasa Indonesia");
+  check(f.texts(111).at(-1) === "💬 Hai! Lagi ngapain hari ini?" && spoken.at(-1) === "Hai! Lagi ngapain hari ini?" && f.voices === 1, "speak id: sapaan Rani dikirim teks + voice");
+
+  await V("Aku baru pulang kerja nih");
+  check(stt.at(-1).language === "id" && /bahasa Indonesia/.test(stt.at(-1).hint) && !/SiMAB/.test(stt.at(-1).hint), "speak id: suara masuk diubah jadi teks berbahasa Indonesia (tanpa kosakata SiMAB)");
+  check(f.texts(111).some((t) => t === "🎤 “Aku baru pulang kerja nih”"), "speak id: ucapan yang terdengar ditampilkan");
+  check(calls.at(-1).lang === "id" && calls.at(-1).history.length === 1 && calls.at(-1).farewell === false, "speak id: tutor menerima bahasa & riwayat");
+  check(f.texts(111).at(-1) === "💬 Wah seru, ceritain dong." && !f.texts(111).at(-1).includes("Koreksi") && !f.texts(111).at(-1).includes("Tip"), "speak id: tidak ada koreksi/tip walau model mengirimnya");
+
+  await T("Selamat malam!");
+  check(calls.at(-1).farewell === false && f.texts(111).at(-1).startsWith("💬"), "speak id: 'Selamat malam!' bukan perpisahan");
+  await T("Udahan dulu ya, aku pamit");
+  check(calls.at(-1).farewell === true && f.texts(111).some((t) => t === "💬 Dadah, sampai ketemu lagi ya.") && !f.texts(111).some((t) => t.includes("salah")), "speak id: pamit Indonesia -> Rani menutup, tanpa koreksi");
+  check(f.texts(111).at(-1).includes("Sesi ngobrol selesai") && f.texts(111).at(-1).includes("/speak id"), "speak id: sesi selesai otomatis dengan pesan Indonesia");
+  await T("masih ada?");
+  check(f.texts(111).at(-1) === "obrolan biasa", "speak id: setelah selesai kembali ke obrolan AI biasa");
+
+  // /speak id tanpa topik, /selesai
+  await T("/speak id");
+  check(calls.at(-1).lang === "id" && calls.at(-1).topic === "", "speak id: tanpa topik");
+  await T("/selesai");
+  check(f.texts(111).at(-1).includes("Sesi ngobrol selesai"), "selesai: pesan sesi Indonesia");
+
+  // variasi penulisan & bawaan tetap Inggris
+  await T("/speak indonesia hobi");
+  check(calls.at(-1).lang === "id" && calls.at(-1).topic === "hobi", "speak: 'indonesia' = id");
+  await T("/selesai");
+  await T("/speak en ordering food");
+  check(calls.at(-1).lang === "en" && calls.at(-1).topic === "ordering food", "speak: 'en' = Inggris dengan topik");
+  await T("/selesai");
+  await T("/speak identity and culture");
+  check(calls.at(-1).lang === "en" && calls.at(-1).topic === "identity and culture", "speak: kata 'identity' bukan kode bahasa 'id'");
+  await V("I like coffee");
+  check(stt.at(-1).language === "en", "speak: sesi Inggris tetap memakai pengenal suara Inggris");
+  await T("/selesai");
+  await T("/speak");
+  check(calls.at(-1).lang === "en" && calls.at(-1).topic === "", "speak: tanpa argumen = Inggris");
+  await T("/selesai");
+}
+
 if (fails) { console.log(`\n${fails} GAGAL`); process.exit(1); }
 console.log("\nsemua ok");
