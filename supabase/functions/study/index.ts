@@ -71,7 +71,7 @@
 //   room_result         { roomId }                                           -> { room, results:[{rank,name,grade,classLevel,correct,seconds,points,bonus,timedOut}] }   (publik, hanya room selesai)
 //   -- SPEAKING (migrasi 0035): mengobrol bahasa Inggris dengan tutor AI (suara/ketik di peramban). Tanpa poin. Riwayat disimpan 7 hari. Butuh PIN/token pemain.
 //   speak_start         { playerId, pin, scenario, topic?, lang?, engine? }   -> { session, turns:[pembuka tutor] }   (scenario: free|intro|school|restaurant|shopping|travel|hobbies|interview|custom (+topic); lang "id"|"en" = bahasa tip koreksi)
-//   speak_turn          { playerId, pin, sessionId, text, lang?, engine? }    -> { userTurn:{idx,body,correction,tip}, aiTurn:{idx,body}, userTurns, full }   (maks 30 giliran/sesi, 80/hari/pemain)
+//   speak_turn          { playerId, pin, sessionId, text, lang?, engine? }    -> { userTurn:{idx,body,correction,tip}, aiTurn:{idx,body}, userTurns, full, ended }   (maks 30 giliran/sesi, 80/hari/pemain; ended=true bila pemain berpamitan: tutor membalas salam & percakapan diakhiri otomatis)
 //   speak_transcribe    { playerId, pin, sessionId, audio (base64 WAV 16-bit mono), mime:"audio/wav" } -> { text }   (suara -> teks lewat Gemini; teks kosong = tak ada ucapan jelas)
 //   speak_tts           { playerId, pin, sessionId, idx }                     -> { audio (base64 WAV 24 kHz), mime }   (suara tutor natural lewat Gemini TTS; hanya giliran tutor tersimpan; galat = aplikasi memakai suara perangkat)
 //   speak_end           { playerId, pin, sessionId }                          -> { ok }
@@ -127,6 +127,7 @@ import {
   SPEAK_PER_PLAYER_DAY,
   buildSpeakSystemPrompt,
   buildSpeakUserPrompt,
+  isFarewell,
   cleanSpeakText,
   parseSpeakReply,
   validSpeakScenario,
@@ -761,12 +762,13 @@ async function askSpeakTutor(
   spec: { scenario: string; topic: string; lang: "id" | "en" },
   history: { role: "user" | "ai"; body: string }[],
   userText: string | null,
-  engine: Engine
+  engine: Engine,
+  farewell = false
 ): Promise<{ reply: string; correction: string; tip: string; provider: string } | { error: string }> {
   wireReporters(admin);
   const keys = getGeminiApiKeys();
   const system = buildSpeakSystemPrompt({ scenario: spec.scenario, topic: spec.topic, grade: p.grade, classLevel: p.class_level ?? null, lang: spec.lang });
-  const user = buildSpeakUserPrompt(history, userText);
+  const user = buildSpeakUserPrompt(history, userText, farewell);
   let lastError = "";
   let tokens = 0;
   let cost = 0;
@@ -1618,7 +1620,8 @@ Deno.serve(async (req) => {
       const history = ((rows ?? []) as Row[]).map((r) => ({ role: r.role as "user" | "ai", body: String(r.body) }));
       const nextIdx = ((rows ?? []) as Row[]).reduce((m, r) => Math.max(m, r.idx), -1) + 1;
       const lang = body.lang === "en" ? "en" : "id";
-      const made = await askSpeakTutor(admin, p, { scenario: sess.scenario, topic: sess.topic ?? "", lang }, history, text, parseEngine(body.engine));
+      const bye = isFarewell(text); // pamit -> tutor membalas salam perpisahan & percakapan diakhiri otomatis
+      const made = await askSpeakTutor(admin, p, { scenario: sess.scenario, topic: sess.topic ?? "", lang }, history, text, parseEngine(body.engine), bye);
       if ("error" in made) return fail(`Tutor AI belum menjawab. ${made.error}`.trim(), 502, { generationFailed: true });
       const { error: ierr } = await admin.from("study_speak_turns").insert([
         { session_id: sess.id, idx: nextIdx, role: "user", body: text, correction: made.correction || null, tip: made.tip || null },
@@ -1626,13 +1629,14 @@ Deno.serve(async (req) => {
       ]);
       if (ierr) return fail(ierr.code === "23505" ? "Ada ucapan lain yang sedang diproses. Coba lagi." : ierr.message, ierr.code === "23505" ? 409 : 500);
       const userTurns = (sess.user_turns ?? 0) + 1;
-      await admin.from("study_speak_sessions").update({ user_turns: userTurns, updated_at: new Date().toISOString(), provider: made.provider }).eq("id", sess.id);
+      await admin.from("study_speak_sessions").update({ user_turns: userTurns, updated_at: new Date().toISOString(), provider: made.provider, ...(bye ? { ended_at: new Date().toISOString() } : {}) }).eq("id", sess.id);
       return json({
         ok: true,
         userTurn: { idx: nextIdx, role: "user", body: text, correction: made.correction || null, tip: made.tip || null },
         aiTurn: { idx: nextIdx + 1, role: "ai", body: made.reply, correction: null, tip: null },
         userTurns,
-        full: userTurns >= SPEAK_MAX_TURNS
+        full: userTurns >= SPEAK_MAX_TURNS,
+        ended: bye
       });
     }
 

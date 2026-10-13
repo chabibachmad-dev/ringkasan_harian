@@ -3897,7 +3897,21 @@ async function speakSend() {
     if (S.speak === sp && sp.hands && S.view === "speak" && !sp.session.endedAt) resumeLoop(sp);
     else if (S.speak === sp && !sp.hands) releaseMic();
   };
-  if (res.full) releaseMic(); // percakapan selesai: mikrofon dimatikan sekarang, tidak menunggu suara tutor selesai
+  if (res.full || res.ended) releaseMic(); // percakapan selesai: mikrofon dimatikan sekarang, tidak menunggu suara tutor selesai
+  if (res.ended) {
+    // pemain berpamitan: server sudah mengakhiri percakapan. Tutor tetap mengucapkan salam perpisahannya, lalu tampil pesan selesai.
+    sp.hands = false;
+    sp.session.endedAt = sp.session.endedAt || new Date().toISOString();
+    const bye = () => {
+      if (S.speak !== sp) return;
+      sp.status = L("study_speak_bye_done");
+      if (S.view === "speak") paintSpeak();
+    };
+    if (S.view === "speak") paintSpeak();
+    if (sp.prefs.voice && voiceOk()) sayTurn(sp, res.aiTurn, bye);
+    else bye();
+    return;
+  }
   if (sp.prefs.voice && voiceOk()) sayTurn(sp, res.aiTurn, resume);
   else resume();
 }

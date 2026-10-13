@@ -11,6 +11,7 @@ import {
   speakLevelGuide,
   buildSpeakSystemPrompt,
   buildSpeakUserPrompt,
+  isFarewell,
   parseSpeakReply,
   AVATAR_MAX_BYTES,
   allowedMaterialGrades,
@@ -344,6 +345,15 @@ check(formatClock(600) === "10:00" && formatClock(61) === "1:01" && formatClock(
   check(getTtsModels().length >= 3 && getTtsModels()[0].includes("tts"), "tts: daftar model bawaan tersedia");
   globalThis.Deno = { env: { get: (k) => (k === "GEMINI_TTS_MODELS" ? " a-tts , b-tts " : "") } };
   check(getTtsModels().join("|") === "a-tts|b-tts", "tts: GEMINI_TTS_MODELS mengganti daftar model");
+}
+
+// ---- kata perpisahan -> percakapan selesai otomatis
+{
+  const yes = ["Goodbye!", "bye", "Bye bye, see you tomorrow", "Good bye teacher", "Okay, see you later.", "Thank you so much, see you next time", "I have to go now", "I gotta go. Bye!", "That's all for today", "Let's stop here", "Take care!", "Good night", "Thanks for the chat. Have a nice day!", "I like pizza. Anyway, goodbye", "talk to you later", "sampai jumpa", "I'm done for today", "I must go home"];
+  const no = ["I like to say goodbye to my friends every day because it is polite and kind to them", "How do you say goodbye in French?", "What does bye mean", "I have to go to school tomorrow", "I go to the market with my mother", "I saw you yesterday at school", "My favorite song is Goodbye Yellow Brick Road", "Can we practice the word goodbye?", "I want to go to Bali", "I take care of my little sister", "The night is beautiful and I love the stars", ""];
+  for (const t of yes) check(isFarewell(t) === true, `perpisahan: "${t}" -> selesai`);
+  for (const t of no) check(isFarewell(t) === false, `bukan perpisahan: "${t}"`);
+  check(/SAYING GOODBYE/.test(buildSpeakUserPrompt([{ role: "ai", body: "Hi" }], "bye", true)) && !/SAYING GOODBYE/.test(buildSpeakUserPrompt([{ role: "ai", body: "Hi" }], "bye")), "perpisahan: prompt tutor diminta menutup dengan satu salam hangat tanpa pertanyaan baru");
 }
 
 if (fails) {
