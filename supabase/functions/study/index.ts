@@ -72,6 +72,7 @@
 //   -- SPEAKING (migrasi 0035): mengobrol bahasa Inggris dengan tutor AI (suara/ketik di peramban). Tanpa poin. Riwayat disimpan 7 hari. Butuh PIN/token pemain.
 //   speak_start         { playerId, pin, scenario, topic?, lang?, engine? }   -> { session, turns:[pembuka tutor] }   (scenario: free|intro|school|restaurant|shopping|travel|hobbies|interview|custom (+topic); lang "id"|"en" = bahasa tip koreksi)
 //   speak_turn          { playerId, pin, sessionId, text, lang?, engine? }    -> { userTurn:{idx,body,correction,tip}, aiTurn:{idx,body}, userTurns, full }   (maks 30 giliran/sesi, 80/hari/pemain)
+//   speak_transcribe    { playerId, pin, sessionId, audio (base64 WAV 16-bit mono), mime:"audio/wav" } -> { text }   (suara -> teks lewat Gemini; teks kosong = tak ada ucapan jelas)
 //   speak_end           { playerId, pin, sessionId }                          -> { ok }
 //   speak_delete        { playerId, pin, sessionId }                          -> { ok }
 //   speak_list          { playerId, pin }                                     -> { sessions:[{id,scenario,topic,title,userTurns,createdAt,updatedAt,endedAt,expiresAt}], keepDays }
@@ -85,7 +86,7 @@
 
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { corsHeaders } from "../_shared/cors.ts";
-import { getGeminiApiKeys, generateJsonText, setGeminiKeyReporter } from "../_shared/gemini.ts";
+import { getGeminiApiKeys, generateJsonText, setGeminiKeyReporter, transcribeAudio } from "../_shared/gemini.ts";
 import { setFallbackReporter } from "../_shared/llm-fallback.ts";
 import {
   GRADES,
@@ -694,6 +695,7 @@ async function roomState(admin: Admin, room: Row, me: string | null) {
 // ---------------------------------------------------------------- speaking: bantu
 const SPEAK_SESSIONS_PER_DAY = 20; // sesi baru per pemain per 24 jam (mencegah memboroskan kuota AI dengan buka-tutup sesi)
 const SPEAK_LIST_MAX = 30;
+const SPEAK_AUDIO_MAX_B64 = 1_400_000; // rekaman WAV 16 kHz mono ±20 detik ≈ 640 KB -> base64 ≈ 855 KB
 const speakSince = () => new Date(Date.now() - SPEAK_KEEP_DAYS * 24 * 3600 * 1000).toISOString();
 // Tabel speaking belum ada (migrasi 0035 belum dijalankan): fitur dianggap belum tersedia, bukan galat.
 const speakMissing = (e: { code?: string; message?: string } | null | undefined) =>
@@ -751,7 +753,7 @@ async function askSpeakTutor(
   let out: { reply: string; correction: string; tip: string; provider: string } | null = null;
   for (let attempt = 0; attempt < 2 && !out; attempt++) {
     try {
-      const r = await generateJsonText(system, user, keys, { temperature: 0.8, engine });
+      const r = await generateJsonText(system, user, keys, { temperature: 0.95, engine });
       tokens += r.tokensUsed;
       cost += r.costUsd;
       const parsed = parseSpeakReply(r.text, userText ?? undefined);
@@ -1612,6 +1614,31 @@ Deno.serve(async (req) => {
         userTurns,
         full: userTurns >= SPEAK_MAX_TURNS
       });
+    }
+
+    // ------------------------------------------------------------ speaking: suara -> teks (cadangan bila peramban tak punya pengenalan suara)
+    if (action === "speak_transcribe") {
+      const auth = await checkPlayerPin(admin, body.playerId, body.pin);
+      if (auth instanceof Response) return auth;
+      const loaded = await loadSpeakSession(admin, body.sessionId, auth.player.id);
+      if (loaded instanceof Response) return loaded;
+      if (loaded.session.ended_at) return fail("Percakapan ini sudah diakhiri.", 409, { ended: true });
+      const audio = typeof body.audio === "string" ? body.audio : "";
+      const mime = body.mime === "audio/wav" || body.mime === "audio/x-wav" ? "audio/wav" : "";
+      if (!mime) return fail("Format rekaman tidak didukung.");
+      if (audio.length < 200 || audio.length > SPEAK_AUDIO_MAX_B64 || !/^[A-Za-z0-9+/]+={0,2}$/.test(audio)) return fail("Rekaman tidak valid atau terlalu panjang (maksimal ±20 detik).");
+      const limit = await checkSpeakLimits(admin, auth.player.id);
+      if (limit) return limit;
+      wireReporters(admin);
+      try {
+        const r = await transcribeAudio(audio, mime, getGeminiApiKeys());
+        await recordTokens(admin, r.tokensUsed, r.costUsd);
+        return json({ ok: true, text: r.text });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error("study speak_transcribe:", msg);
+        return fail(`Gagal mengubah suara jadi teks. ${msg}`.trim(), 502, { generationFailed: true });
+      }
     }
 
     // ------------------------------------------------------------ speaking: akhiri / hapus / daftar / buka

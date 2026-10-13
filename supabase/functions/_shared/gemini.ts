@@ -779,3 +779,35 @@ export async function generateJsonText(
     }
   }
 }
+
+// Ubah rekaman suara pemain (bahasa Inggris) menjadi teks lewat Gemini (audio inline, WAV/MP3/OGG/FLAC/AAC <= ~1 MB).
+// Dipakai latihan Speaking sebagai cadangan bila peramban tidak punya pengenalan suara yang bisa diandalkan (mis. iPad/iPhone).
+// Mengembalikan teks apa adanya (kesalahan ucapan/grammar TIDAK diperbaiki); string kosong bila tidak ada ucapan yang jelas.
+export async function transcribeAudio(
+  audioBase64: string,
+  mimeType: string,
+  apiKeys: string[]
+): Promise<{ text: string; tokensUsed: number; costUsd: number }> {
+  if (apiKeys.length === 0) throw new Error("Tidak ada API key Gemini untuk mengubah suara jadi teks.");
+  const primaryModel = Deno.env.get("GEMINI_MODEL") || DEFAULT_MODEL;
+  const fallbackModel = Deno.env.get("GEMINI_MODEL_FALLBACK") || DEFAULT_FALLBACK_MODEL;
+  const system =
+    "You are a speech-to-text transcriber for an English-speaking practice app. The speaker is an Indonesian learner speaking English. " +
+    "Transcribe EXACTLY what was said, word for word, as plain text. Do NOT correct grammar or pronunciation, do NOT translate, do NOT answer the speaker, " +
+    "and do NOT add quotes, labels or commentary. If there is no intelligible speech, output exactly: <silence>";
+  const buildBody = () =>
+    JSON.stringify({
+      system_instruction: { parts: [{ text: system }] },
+      contents: [{ role: "user", parts: [{ text: "Transcribe this audio." }, { inline_data: { mime_type: mimeType, data: audioBase64 } }] }],
+      generationConfig: { temperature: 0 }
+    });
+  const steps = [{ model: primaryModel, maxAttempts: MAX_ATTEMPTS - 1 }];
+  if (fallbackModel !== primaryModel) steps.push({ model: fallbackModel, maxAttempts: MAX_ATTEMPTS - 1 });
+  const { data, model } = await callGeminiWithModelFallback(apiKeys, buildBody, steps, "study");
+  let text = extractGeminiText(data).trim();
+  if (/^<?\s*silence\s*>?\.?$/i.test(text)) text = "";
+  text = text.replace(/^["“”']+|["“”']+$/g, "").replace(/\s+/g, " ").trim().slice(0, 600);
+  const tokensUsed = data?.usageMetadata?.totalTokenCount ?? 0;
+  const costUsd = tokensUsed > 0 ? estimateCostUsd(model, tokensUsed * 0.9, tokensUsed * 0.1) : 0;
+  return { text, tokensUsed, costUsd };
+}

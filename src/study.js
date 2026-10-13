@@ -10,7 +10,7 @@ import { fileToAvatarBase64 } from "./study-avatar.js";
 import { renderAiMarkdown, typesetMath } from "./markdown.js";
 import { buildStudyPdf, shareOrSaveStudyPdf, buildMaterialPdf, shareOrSaveMaterialPdf, buildRoomPdf, shareOrSaveRoomPdf } from "./study-pdf.js";
 import { pointsFormula, studyCardFileName } from "./study-text.js";
-import { recognitionSupported, synthSupported, startListening, speakText, stopSpeaking } from "./study-voice.js";
+import { recognitionSupported, synthSupported, startListening, speakText, stopSpeaking, unlockSpeech, recorderSupported, startRecording, releaseMic } from "./study-voice.js";
 import { renderLessonCard, renderRoomCard, shareOrSaveCard } from "./study-card.js";
 import { allowedClasses, allowedMaterialGrades, classesOf, computePoints, formatClock, gradeText, PRACTICE_QUESTIONS as PRACTICE_COUNT, timeLimitSeconds } from "../supabase/functions/_shared/study-core.ts";
 
@@ -197,6 +197,7 @@ export function initStudy(context) {
   $("study-body")?.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.isComposing && e.target?.id === "study-speak-input") {
       e.preventDefault();
+      unlockSpeech();
       speakSend();
     }
   });
@@ -743,6 +744,7 @@ async function onBodyClick(e) {
   if (!btn || btn.disabled) return;
   const act = btn.dataset.act;
   const id = btn.dataset.id;
+  if (act.startsWith("speak")) unlockSpeech(); // suara tutor baru boleh berbunyi otomatis setelah sentuhan pengguna (iOS/Safari)
   if (act === "reload") return loadOverview();
   if (act === "new-player") return openNewPlayerForm();
   if (act === "new-lesson" || act === "new-lesson-me") {
@@ -3442,9 +3444,9 @@ const MIC_SVG = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" str
 function readSpeakPrefs() {
   try {
     const p = JSON.parse(localStorage.getItem(SPEAK_PREF_KEY) || "{}");
-    return { voice: p.voice !== false, auto: p.auto !== false };
+    return { voice: p.voice !== false, auto: p.auto !== false, hands: p.hands !== false, forceRecord: p.forceRecord === true };
   } catch (_e) {
-    return { voice: true, auto: true };
+    return { voice: true, auto: true, hands: true, forceRecord: false };
   }
 }
 function saveSpeakPrefs(prefs) {
@@ -3460,15 +3462,20 @@ const speakLang = () => (ctx.getLang() === "id" ? "id" : "en");
 
 function stopSpeakIO() {
   const sp = S.speak;
-  if (sp?.recog) {
-    try {
-      sp.recog.stop();
-    } catch (_e) {
-      /* abaikan */
-    }
-    sp.recog = null;
+  if (sp) {
+    sp.hands = false;
+    sp.switching = false;
     sp.listening = false;
+    if (sp.recog) {
+      try {
+        sp.recog.stop();
+      } catch (_e) {
+        /* abaikan */
+      }
+      sp.recog = null;
+    }
   }
+  releaseMic();
   stopSpeaking();
 }
 
@@ -3531,7 +3538,7 @@ async function openSpeak() {
 
 function enterSpeak(player, creds, firstList) {
   pushView();
-  S.speak = { player, creds, list: [], loaded: false, loading: false, error: "", unavailable: false, session: null, turns: [], busy: false, pending: null, listening: false, heard: "", draft: "", status: "", recog: null, prefs: readSpeakPrefs() };
+  S.speak = { player, creds, list: [], loaded: false, loading: false, error: "", unavailable: false, session: null, turns: [], busy: false, pending: null, listening: false, transcribing: false, hands: false, switching: false, mode: "", misses: 0, lastErr: "", heard: "", draft: "", status: "", recog: null, prefs: readSpeakPrefs() };
   S.view = "speaklist";
   render();
   window.scrollTo(0, 0);
@@ -3632,6 +3639,9 @@ function showSpeakChat(session, turns) {
   sp.busy = false;
   sp.pending = null;
   sp.listening = false;
+  sp.transcribing = false;
+  sp.hands = false;
+  sp.misses = 0;
   sp.heard = "";
   sp.draft = "";
   sp.status = "";
@@ -3671,7 +3681,7 @@ async function deleteSpeakSession(id) {
 function renderSpeakChat(body) {
   const sp = S.speak;
   if (!sp?.session) return;
-  const micOk = recognitionSupported();
+  const micOk = recognitionSupported() || recorderSupported();
   body.innerHTML = `
     <div class="study-card study-speak-head">
       <div class="study-row-title">${esc(speakLabel(sp.session))}</div>
@@ -3686,6 +3696,7 @@ function renderSpeakChat(body) {
     </div>
     <div class="study-speak-opts">
       ${synthSupported() ? `<label><input type="checkbox" data-speak-pref="voice" ${sp.prefs.voice ? "checked" : ""}> ${esc(L("study_speak_voice"))}</label>` : ""}
+      ${micOk ? `<label><input type="checkbox" data-speak-pref="hands" ${sp.prefs.hands ? "checked" : ""}> ${esc(L("study_speak_hands"))}</label>` : ""}
       ${micOk ? `<label><input type="checkbox" data-speak-pref="auto" ${sp.prefs.auto ? "checked" : ""}> ${esc(L("study_speak_auto"))}</label>` : ""}
     </div>
     ${micOk ? "" : `<p class="study-hint">${esc(L("study_speak_mic_unsupported"))}</p>`}
@@ -3718,19 +3729,20 @@ function paintSpeak() {
   const cnt = $("study-speak-count");
   if (cnt) cnt.textContent = L("study_speak_turns", { n: sp.session.userTurns ?? 0, m: sp.session.maxTurns ?? 30 });
   const status = $("study-speak-status");
-  if (status) status.textContent = sp.listening ? L("study_speak_listening") : sp.status || (ended ? L("study_speak_view_only") : full ? L("study_speak_full", { m: sp.session.maxTurns ?? 30 }) : "");
+  if (status) status.textContent = sp.listening ? L(sp.mode === "record" ? "study_speak_recording" : "study_speak_listening") : sp.transcribing ? L("study_speak_transcribing") : sp.status || (ended ? L("study_speak_view_only") : full ? L("study_speak_full", { m: sp.session.maxTurns ?? 30 }) : "");
   const locked = ended || full;
   const input = $("study-speak-input");
   const send = $("study-speak-send");
   const mic = $("study-speak-mic");
-  if (input) input.disabled = locked || sp.busy;
-  if (send) send.disabled = locked || sp.busy;
+  if (input) input.disabled = locked || sp.busy || sp.transcribing;
+  if (send) send.disabled = locked || sp.busy || sp.transcribing;
   if (mic) {
-    mic.disabled = locked || sp.busy;
-    mic.setAttribute("aria-pressed", sp.listening ? "true" : "false");
-    mic.classList.toggle("is-on", !!sp.listening);
+    // percakapan otomatis berjalan (tutor sedang bicara / berpikir): tombol menjadi "Jeda" dan tetap bisa ditekan
+    mic.disabled = locked || (!sp.hands && (sp.busy || sp.transcribing));
+    mic.setAttribute("aria-pressed", sp.listening || sp.hands ? "true" : "false");
+    mic.classList.toggle("is-on", !!(sp.listening || sp.hands));
     const label = mic.querySelector("span");
-    if (label) label.textContent = sp.listening ? L("study_speak_mic_stop") : L("study_speak_mic");
+    if (label) label.textContent = sp.listening ? L("study_speak_mic_stop") : sp.hands ? L("study_speak_mic_pause") : L("study_speak_mic");
   }
   const endBtn = $("study-speak-end");
   if (endBtn) endBtn.hidden = ended;
@@ -3767,6 +3779,8 @@ async function speakSend() {
     if (speakAuthFailed(res)) return;
     if (res.ended) sp.session.endedAt = sp.session.endedAt || new Date().toISOString();
     if (res.sessionFull) sp.session.userTurns = sp.session.maxTurns;
+    sp.hands = false; // galat: hentikan percakapan otomatis supaya pemain bisa memeriksa dan mengirim ulang
+    releaseMic();
     sp.status = L("study_speak_failed", { e: errText(res) });
     return S.view === "speak" ? paintSpeak() : undefined;
   }
@@ -3774,28 +3788,113 @@ async function speakSend() {
   sp.session.userTurns = res.userTurns;
   sp.status = "";
   sp.draft = "";
+  sp.misses = 0;
   const box = $("study-speak-input");
   if (box) box.value = "";
   if (S.view === "speak") paintSpeak();
-  if (sp.prefs.voice) speakText(res.aiTurn.body);
+  if (res.full) sp.hands = false;
+  // percakapan otomatis: setelah tutor selesai bicara, mic menyala sendiri
+  const resume = () => {
+    if (S.speak === sp && sp.hands && S.view === "speak" && !sp.session.endedAt) resumeLoop(sp);
+    else if (S.speak === sp && !sp.hands) releaseMic();
+  };
+  if (sp.prefs.voice && synthSupported()) {
+    if (!speakText(res.aiTurn.body, { onEnd: resume })) resume();
+  } else resume();
 }
 
+// Giliran mendengarkan berikutnya dalam percakapan otomatis. Keadaan dicek ULANG saat timer berbunyi: pemain bisa menekan Jeda di antaranya.
+function resumeLoop(sp) {
+  setTimeout(() => {
+    if (S.speak === sp && sp.hands) listenNow();
+  }, 350);
+}
+
+// Tombol mic: mulai (dan bila "percakapan otomatis" aktif, mulai putaran otomatis), selesai bicara, atau jeda putaran otomatis.
 function speakMic() {
   const sp = S.speak;
-  if (!sp?.session || sp.busy || sp.session.endedAt) return;
+  if (!sp?.session || sp.session.endedAt) return;
   if (sp.listening) {
+    sp.hands = false; // menekan Berhenti = selesai bicara sekarang dan hentikan putaran otomatis
     sp.recog?.stop();
     return;
   }
-  if (!recognitionSupported()) {
+  if (sp.hands) {
+    sp.hands = false; // Jeda
+    releaseMic();
+    stopSpeaking();
+    sp.status = "";
+    return paintSpeak();
+  }
+  if (sp.busy || sp.transcribing) return;
+  sp.hands = !!sp.prefs.hands;
+  sp.misses = 0;
+  listenNow();
+}
+
+function pickStt(sp) {
+  if (recognitionSupported() && !(sp.prefs.forceRecord && recorderSupported())) return "browser";
+  if (recorderSupported()) return "record";
+  return "";
+}
+
+// Satu putaran mendengarkan. Dipanggil dari tombol mic dan (percakapan otomatis) setelah tutor selesai bicara.
+function listenNow() {
+  const sp = S.speak;
+  if (!sp?.session || S.view !== "speak" || sp.busy || sp.listening || sp.transcribing || sp.session.endedAt) return;
+  if ((sp.session.userTurns ?? 0) >= (sp.session.maxTurns ?? 30)) {
+    sp.hands = false;
+    return paintSpeak();
+  }
+  const mode = pickStt(sp);
+  if (!mode) {
+    sp.hands = false;
     sp.status = L("study_speak_mic_unsupported");
     return paintSpeak();
   }
   stopSpeaking();
   sp.status = "";
   sp.heard = "";
+  sp.lastErr = "";
   sp.listening = true;
+  sp.mode = mode;
   paintSpeak();
+  if (mode === "browser") listenBrowser(sp);
+  else listenRecord(sp);
+}
+
+const sttErrorText = (code) =>
+  code === "denied" ? L("study_speak_mic_denied") : code === "nospeech" ? L("study_speak_mic_nospeech") : code === "unsupported" ? L("study_speak_mic_unsupported") : L("study_speak_mic_error", { e: code });
+
+// Tidak ada ucapan terdengar: percakapan otomatis mencoba lagi beberapa kali, lalu berhenti dengan pesan.
+function handsMiss(sp) {
+  if (S.speak !== sp) return;
+  if (!sp.hands) return releaseMic();
+  sp.misses++;
+  if (sp.misses >= 3) {
+    sp.hands = false;
+    releaseMic();
+    sp.status = L("study_speak_hands_idle");
+    if (S.view === "speak") paintSpeak();
+    return;
+  }
+  setTimeout(() => {
+    if (S.speak === sp && sp.hands) listenNow();
+  }, 300);
+}
+
+// Ucapan sudah menjadi teks: isi kotak, lalu kirim (otomatis bila percakapan otomatis / kirim otomatis aktif).
+function heardText(sp, text) {
+  sp.misses = 0;
+  sp.heard = text;
+  sp.draft = text;
+  const box = $("study-speak-input");
+  if (box) box.value = text;
+  if (sp.hands || sp.prefs.auto) speakSend();
+  else if (S.view === "speak") paintSpeak();
+}
+
+function listenBrowser(sp) {
   sp.recog = startListening({
     lang: "en-US",
     onText: (txt) => {
@@ -3807,21 +3906,86 @@ function speakMic() {
     },
     onError: (code) => {
       if (S.speak !== sp) return;
-      sp.status = code === "denied" ? L("study_speak_mic_denied") : code === "nospeech" ? L("study_speak_mic_nospeech") : code === "unsupported" ? L("study_speak_mic_unsupported") : L("study_speak_mic_error", { e: code });
+      sp.lastErr = code;
+      if (code === "stalled" && recorderSupported()) {
+        // mesin pengenalan peramban tidak merespons (mis. iPad/iPhone): ingat dan beralih ke mode rekam
+        sp.switching = true;
+        sp.prefs.forceRecord = true;
+        saveSpeakPrefs(sp.prefs);
+        return;
+      }
+      sp.status = code === "stalled" ? L("study_speak_mic_stuck") : code === "nospeech" && sp.hands ? "" : sttErrorText(code);
     },
     onEnd: () => {
       if (S.speak !== sp) return;
       sp.listening = false;
       sp.recog = null;
+      if (sp.switching) {
+        sp.switching = false;
+        return listenNow();
+      }
       if (S.view === "speak") paintSpeak();
-      if (sp.heard && sp.prefs.auto) speakSend();
+      if (sp.heard) return heardText(sp, sp.heard);
+      if (sp.lastErr && sp.lastErr !== "nospeech") {
+        sp.hands = false; // izin ditolak / galat lain: hentikan putaran otomatis
+        releaseMic();
+        return;
+      }
+      handsMiss(sp);
+    }
+  });
+}
+
+function listenRecord(sp) {
+  sp.recog = startRecording({
+    keepMic: sp.hands,
+    onDone: async ({ wavBase64 }) => {
+      if (S.speak !== sp) return;
+      sp.listening = false;
+      sp.recog = null;
+      sp.transcribing = true;
+      if (S.view === "speak") paintSpeak();
+      const sid = sp.session?.id;
+      const res = await speakCall("speak_transcribe", { sessionId: sid, audio: wavBase64, mime: "audio/wav" });
+      if (S.speak !== sp || sp.session?.id !== sid) return;
+      sp.transcribing = false;
+      if (!res.ok) {
+        if (speakAuthFailed(res)) return;
+        sp.hands = false;
+        releaseMic();
+        sp.status = L("study_speak_stt_failed", { e: errText(res) });
+        return S.view === "speak" ? paintSpeak() : undefined;
+      }
+      if (!res.text) {
+        sp.status = sp.hands ? "" : L("study_speak_mic_nospeech");
+        if (S.view === "speak") paintSpeak();
+        return handsMiss(sp);
+      }
+      heardText(sp, res.text);
+    },
+    onError: (code) => {
+      if (S.speak !== sp) return;
+      sp.listening = false;
+      sp.recog = null;
+      if (code === "nospeech") {
+        sp.status = sp.hands ? "" : L("study_speak_mic_nospeech");
+        if (S.view === "speak") paintSpeak();
+        return handsMiss(sp);
+      }
+      sp.hands = false;
+      releaseMic();
+      sp.status = sttErrorText(code);
+      if (S.view === "speak") paintSpeak();
     }
   });
 }
 
 function speakReplay(i) {
-  const t = S.speak?.turns.find((x) => x.idx === Number(i));
-  if (t) speakText(t.body);
+  const sp = S.speak;
+  const t = sp?.turns.find((x) => x.idx === Number(i));
+  if (!t) return;
+  if (sp.listening) return;
+  speakText(t.body, { onEnd: () => S.speak === sp && sp.hands && S.view === "speak" && resumeLoop(sp) });
 }
 
 async function endSpeakSession() {
@@ -3844,4 +4008,9 @@ function onSpeakPref(input) {
   sp.prefs[input.dataset.speakPref] = input.checked;
   saveSpeakPrefs(sp.prefs);
   if (input.dataset.speakPref === "voice" && !input.checked) stopSpeaking();
+  if (input.dataset.speakPref === "hands" && !input.checked && sp.hands) {
+    sp.hands = false;
+    releaseMic();
+    paintSpeak();
+  }
 }
