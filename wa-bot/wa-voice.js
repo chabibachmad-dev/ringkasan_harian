@@ -2,11 +2,14 @@
 // Suara di WhatsApp: tutor /speak untuk pemilik + bantuan membaca voice note.
 // Tanpa efek samping ke jaringan (semua lewat dependensi yang disuntikkan), jadi mudah dites: test-wa-voice.mjs.
 //
-//   readWaVoiceConfig(env)  -> { speakMaxTurns, speakIdleMin, fromOthers, inGroups }
+//   readWaVoiceConfig(env)  -> { speakMaxTurns, speakIdleMin, fromOthers, inGroups, speakText }
 //   audioOf(content)        -> { seconds, mime, bytes } bila pesan berisi audio/voice note, selain itu null
 //   createWaTutor({ tutor, speak, voiceCheck, config, log })
 //       .active(jid) .sttOptions(jid) .handle(jid, text, io) .start(jid, arg, io) .end(jid, io)
 //   io = { send(text), voice(ogg Buffer), busy(kind) -> stop() }   (kind: "typing" | "voice")
+//
+// Bawaan sesi /speak = SUARA SAJA (tanpa echo transkrip & tanpa teks balasan); teks hanya muncul bila suara gagal,
+// atau lewat /teks on, atau WA_SPEAK_TEXT=true. /koreksi menampilkan koreksi giliran terakhir.
 //
 // Aturan emas: yang diproses hanya pesan PEMILIK untuk tutor. Voice note orang lain hanya diubah jadi teks
 // (lalu masuk jalur auto-reply biasa), tidak pernah memulai /speak.
@@ -28,7 +31,8 @@ export function readWaVoiceConfig(env = process.env) {
     speakMaxTurns: Math.max(3, Math.min(100, Math.floor(num(env.WA_SPEAK_MAX_TURNS, 30)))),
     speakIdleMin: Math.max(5, Math.min(1440, Math.floor(num(env.WA_SPEAK_IDLE_MIN, 60)))),
     fromOthers: flag(env.WA_VOICE_FROM_OTHERS, true), // voice note kontak lain diubah jadi teks lalu dijawab auto-reply
-    inGroups: flag(env.WA_VOICE_IN_GROUPS, true) // voice note di grup yang membalas (reply) pesan bot
+    inGroups: flag(env.WA_VOICE_IN_GROUPS, true), // voice note di grup yang membalas (reply) pesan bot
+    speakText: flag(env.WA_SPEAK_TEXT, false) // false (bawaan) = tutor SUARA SAJA; true = balasan tutor juga dikirim sebagai teks
   };
 }
 
@@ -91,11 +95,24 @@ export function createWaTutor({ tutor, speak = null, voiceCheck = null, hasTrans
     }
   }
 
+  /** Kirim balasan tutor. Suara saja bila sesi tidak minta teks; bila suara gagal, teks dikirim sebagai cadangan. */
+  async function deliver(jid, s, out, io) {
+    const text = formatTutorMessage(out);
+    s.fix = out.correction ? { correction: out.correction, tip: out.tip || "" } : null;
+    if (s.text) {
+      await io.send(text).catch(() => {});
+      await trySpeak(jid, out.reply, io);
+      return;
+    }
+    const spoke = await trySpeak(jid, out.reply, io);
+    if (!spoke) await io.send(text).catch(() => {});
+  }
+
   async function start(jid, arg, io) {
     if (!tutor) return void (await io.send("Mode Speaking belum tersedia: isi GEMINI_API_KEYS di .env bot lalu restart."));
     const { lang, topic } = parseSpeakArg(arg);
     const id = lang === "id";
-    const session = { lang, topic: topic.slice(0, 100), turns: [], userTurns: 0, lastAt: now() };
+    const session = { lang, topic: topic.slice(0, 100), turns: [], userTurns: 0, lastAt: now(), text: !!config.speakText, fix: null };
     const vc = voiceCheck ? await voiceCheck().catch(() => ({ ok: false, reason: "pengecekan gagal" })) : { ok: !!speak, reason: "suara belum diatur di bot" };
     const intro = [
       id ? `🎙️ Mode ngobrol bahasa Indonesia aktif${session.topic ? ` — topik: ${session.topic}` : ""}.` : `🎙️ Mode Speaking aktif${session.topic ? ` — topik: ${session.topic}` : ""}.`,
@@ -103,7 +120,7 @@ export function createWaTutor({ tutor, speak = null, voiceCheck = null, hasTrans
         ? hasTranscriber ? "Balas dengan voice note (tahan ikon mikrofon), atau ketik. Aku membalas dengan suara, tanpa koreksi." : "Ketik pesanmu (suara masuk belum aktif: isi GROQ_API_KEYS). Aku membalas dengan teks."
         : hasTranscriber ? "Balas dengan voice note berbahasa Inggris (tahan ikon mikrofon), atau ketik. Aku membalas dengan suara + koreksi singkat." : "Ketik jawabanmu dalam bahasa Inggris (suara masuk belum aktif: isi GROQ_API_KEYS). Aku membalas dengan koreksi singkat.",
       id ? "Akhiri dengan /selesai atau ucapkan perpisahan (sampai jumpa, dadah, aku pamit dulu)." : "Akhiri dengan /selesai atau ucapkan goodbye.",
-      vc.ok ? "" : `🔇 Suara tutor belum bisa dibuat: ${vc.reason}. Sementara tutor membalas teks.`
+      vc.ok ? (session.text ? "" : id ? "Mode suara saja: balasanku tidak ditulis. /teks on bila mau teks juga." : "Mode suara saja: balasanku tidak ditulis. /teks on bila mau teks juga, /koreksi untuk koreksi terakhir.") : `🔇 Suara tutor belum bisa dibuat: ${vc.reason}. Sementara tutor membalas teks.`
     ]
       .filter((x) => x !== "")
       .join("\n");
@@ -115,8 +132,7 @@ export function createWaTutor({ tutor, speak = null, voiceCheck = null, hasTrans
       session.lastAt = now();
       sessions.set(jid, session);
       stop?.();
-      await io.send(formatTutorMessage({ reply: out.reply, correction: "", tip: "" }));
-      await trySpeak(jid, out.reply, io);
+      await deliver(jid, session, { reply: out.reply, correction: "", tip: "" }, io);
     } catch (e) {
       stop?.();
       log.error?.(`💬 [WA/Speak] gagal memulai: ${e?.message || e}`);
@@ -146,8 +162,7 @@ export function createWaTutor({ tutor, speak = null, voiceCheck = null, hasTrans
       s.turns.push({ role: "user", body: clean }, { role: "ai", body: out.reply });
       s.userTurns += 1;
       s.lastAt = now();
-      await io.send(formatTutorMessage(out));
-      await trySpeak(jid, out.reply, io);
+      await deliver(jid, s, out, io);
       if (farewell) return void (await end(jid, io));
       if (s.userTurns >= config.speakMaxTurns) return void (await end(jid, io, `🏁 Batas ${config.speakMaxTurns} giliran tercapai, sesi selesai. ${id ? "Seru! /speak id" : "Hebat! /speak"} untuk mulai sesi baru.`));
     } catch (e) {
@@ -164,11 +179,24 @@ export function createWaTutor({ tutor, speak = null, voiceCheck = null, hasTrans
   async function handle(jid, rawText, io) {
     const text = String(rawText ?? "").trim();
     if (!text) return false;
-    const cmd = /^\/(speak|selesai|stop)\b[\s:,-]*([\s\S]*)$/i.exec(text);
+    const cmd = /^\/(speak|selesai|stop|teks|koreksi)\b[\s:,-]*([\s\S]*)$/i.exec(text);
     if (cmd) {
       const name = cmd[1].toLowerCase();
       if (name === "speak") await start(jid, cmd[2], io);
-      else await end(jid, io);
+      else if (name === "teks" || name === "koreksi") {
+        if (!active(jid)) await io.send("Tidak ada sesi Speaking yang sedang berjalan. Mulai dengan /speak.").catch(() => {});
+        else if (name === "teks") {
+          const s = sessions.get(jid);
+          const a = cmd[2].trim().toLowerCase();
+          if (["on", "aktif", "nyala", "ya"].includes(a)) s.text = true;
+          else if (["off", "mati", "tidak"].includes(a)) s.text = false;
+          else s.text = !s.text;
+          await io.send(s.text ? "📝 Balasan tutor sekarang juga ditulis. /teks off untuk suara saja." : "🔊 Balasan tutor sekarang suara saja. /teks on bila mau teks juga.").catch(() => {});
+        } else {
+          const s = sessions.get(jid);
+          await io.send(s.fix ? `✏️ Lebih baik: ${s.fix.correction}${s.fix.tip ? `\n💡 ${s.fix.tip}` : ""}` : "Belum ada koreksi dari giliran terakhir. Ucapanmu sudah bagus!").catch(() => {});
+        }
+      } else await end(jid, io);
       return true;
     }
     if (/^\//.test(text)) return false; // perintah lain (/ringkasan, dst.) tetap milik jalurnya
@@ -179,5 +207,10 @@ export function createWaTutor({ tutor, speak = null, voiceCheck = null, hasTrans
     return false;
   }
 
-  return { active, sttOptions, handle, start, end, turn };
+  /** true bila transkrip ucapan pemilik boleh di-echo (🎤 “...”); suara-saja = false. */
+  function showText(jid) {
+    return !!sessions.get(jid)?.text;
+  }
+
+  return { active, sttOptions, showText, handle, start, end, turn };
 }

@@ -613,3 +613,14 @@ Tes: `node test-ollama-http.mjs`.
 - **Pesan nyangkut status "pending" lama di aplikasi** -- cek bot masih
   jalan (`pm2 status` atau terminalnya masih terbuka) dan tersambung
   (`✅ WhatsApp tersambung` muncul di log terakhir).
+
+
+## Tutor /speak: suara saja
+
+Selama sesi `/speak` (WhatsApp dan Telegram), bawaannya **suara saja**: ucapanmu tidak di-echo (`🎤 “...”`) dan balasan tutor tidak ditulis. Teks hanya muncul sebagai cadangan bila suara tutor gagal dibuat (kuota Gemini TTS habis, ffmpeg bermasalah).
+
+- `/teks on` / `/teks off` (atau `/teks` untuk bolak-balik): tampilkan teks balasan + echo ucapanmu selama sesi.
+- `/koreksi`: tampilkan koreksi dan tips giliran terakhir (kelas Inggris).
+- Bawaan global lewat `.env`: `WA_SPEAK_TEXT=true` / `TELEGRAM_SPEAK_TEXT=true`.
+- Putar otomatis tidak bisa dipaksa oleh bot: itu perilaku aplikasi WhatsApp/Telegram di HP. Untuk putar-otomatis sungguhan pakai halaman Speaking di aplikasi.
+- `TUTOR_AI_ORDER` (bawaan `fallback-first`): tutor memakai Groq/OpenRouter dulu, Gemini sebagai cadangan; `gemini-first` membalik urutannya.

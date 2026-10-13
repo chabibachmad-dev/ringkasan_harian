@@ -30,7 +30,7 @@ const quiet = { log() {}, warn() {}, error() {} };
 }
 
 // ---- sesi tutor
-function harness({ speak = async () => ({ ogg: Buffer.from("ogg-data") }), tutor, voiceCheck = async () => ({ ok: true }), maxTurns = 30, clock } = {}) {
+function harness({ speak = async () => ({ ogg: Buffer.from("ogg-data") }), tutor, voiceCheck = async () => ({ ok: true }), maxTurns = 30, clock, cfgOver = {} } = {}) {
   const sent = [];
   const voices = [];
   const busy = [];
@@ -38,7 +38,7 @@ function harness({ speak = async () => ({ ogg: Buffer.from("ogg-data") }), tutor
   const calls = [];
   const t = tutor ?? (async (a) => { calls.push(a); return { reply: a.userText ? `Nice, ${a.userText}` : "Hello! What did you do today?", correction: a.userText ? "I go -> I went" : "", tip: "" }; });
   const tutorFn = async (a) => { calls.push(a); return t(a); };
-  const w = createWaTutor({ tutor: tutorFn, speak, voiceCheck, hasTranscriber: true, config: { speakMaxTurns: maxTurns, speakIdleMin: 60 }, log: quiet, now: clock });
+  const w = createWaTutor({ tutor: tutorFn, speak, voiceCheck, hasTranscriber: true, config: { speakMaxTurns: maxTurns, speakIdleMin: 60, speakText: true, ...cfgOver }, log: quiet, now: clock });
   return { w, sent, voices, busy, io, calls };
 }
 const J = "628111@s.whatsapp.net";
@@ -124,6 +124,38 @@ const J = "628111@s.whatsapp.net";
   const h = harness();
   await h.w.handle(J, "/speak", h.io);
   check(h.w.active(J) && !h.w.active("628999@s.whatsapp.net"), "tutor: sesi per chat");
+}
+
+// ---- suara saja (bawaan): tanpa teks balasan & tanpa echo; teks hanya sebagai cadangan
+{
+  const h = harness({ cfgOver: { speakText: false } });
+  await h.w.handle(J, "/speak ordering coffee", h.io);
+  check(h.sent.length === 1 && h.sent[0].includes("Mode suara saja") && h.voices.length === 1, "suara-saja: hanya pembuka + 1 voice (tanpa teks sapaan)");
+  check(h.w.showText(J) === false, "suara-saja: transkrip tidak di-echo");
+  await h.w.handle(J, "I go to cafe yesterday", h.io);
+  check(h.sent.length === 1 && h.voices.length === 2, "suara-saja: giliran dibalas voice saja, tanpa teks");
+  await h.w.handle(J, "/koreksi", h.io);
+  check(h.sent.at(-1).includes("I go -> I went"), "suara-saja: /koreksi menampilkan koreksi terakhir");
+  await h.w.handle(J, "/teks on", h.io);
+  check(h.w.showText(J) === true && h.sent.at(-1).includes("juga ditulis"), "suara-saja: /teks on menyalakan teks");
+  const n = h.sent.length;
+  await h.w.handle(J, "next", h.io);
+  check(h.sent.length === n + 1 && h.voices.length === 3, "teks on: teks + voice");
+  await h.w.handle(J, "/teks", h.io);
+  check(h.w.showText(J) === false, "/teks tanpa argumen = bolak-balik");
+  await h.w.handle(J, "/selesai", h.io);
+  await h.w.handle(J, "/koreksi", h.io);
+  check(h.sent.at(-1).includes("Tidak ada sesi"), "/koreksi tanpa sesi -> pemberitahuan");
+}
+{
+  const h = harness({ cfgOver: { speakText: false }, speak: async () => { throw Object.assign(new Error("habis"), { quota: true }); } });
+  await h.w.handle(J, "/speak", h.io);
+  check(h.sent.some((t) => t.includes("Hello!")), "suara-saja: suara gagal -> teks sapaan jadi cadangan");
+  await h.w.handle(J, "I go to cafe yesterday", h.io);
+  check(h.sent.some((t) => t.includes("✏️")), "suara-saja: suara gagal -> teks + koreksi jadi cadangan");
+}
+{
+  check(readWaVoiceConfig({}).speakText === false && readWaVoiceConfig({ WA_SPEAK_TEXT: "true" }).speakText === true, "config: WA_SPEAK_TEXT");
 }
 
 if (fails) { console.log(`\n${fails} GAGAL`); process.exit(1); }

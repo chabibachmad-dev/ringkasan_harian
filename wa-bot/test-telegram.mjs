@@ -62,7 +62,7 @@ function fakeApi({ failHtml = false, failSendTo = new Set(), getMe = { ok: true,
   f.texts = (chat) => calls.filter((c) => c.method === "sendMessage" && (!chat || String(c.body.chat_id) === String(chat))).map((c) => c.body.text);
   return f;
 }
-const cfg = (o = {}) => ({ token: "T", enabled: true, ownerIds: ["111"], mirror: true, historyLimit: 4, pollTimeoutSec: 1, ...o });
+const cfg = (o = {}) => ({ token: "T", enabled: true, ownerIds: ["111"], mirror: true, historyLimit: 4, pollTimeoutSec: 1, speakText: true, ...o });
 const msg = (chat, text, extra = {}) => ({ update_id: 1, message: { chat: { id: Number(chat), type: "private" }, text, ...extra } });
 
 // ---- mode pairing & pemilik
@@ -619,6 +619,53 @@ const msg = (chat, text, extra = {}) => ({ update_id: 1, message: { chat: { id: 
   await T("/speak");
   check(calls.at(-1).lang === "en" && calls.at(-1).topic === "", "speak: tanpa argumen = Inggris");
   await T("/selesai");
+}
+
+// ---- /speak suara saja (bawaan): tanpa teks balasan & tanpa echo; teks hanya sebagai cadangan
+for (const mode of ["ok", "gagal"]) {
+  const f0 = fakeApi();
+  const f = async (url, init) => {
+    const u = String(url);
+    if (u.includes("/file/bot")) return { ok: true, status: 200, arrayBuffer: async () => new Uint8Array([79, 103, 103, 83]).buffer };
+    if (u.endsWith("/getFile")) return { status: 200, json: async () => ({ ok: true, result: { file_path: "voice/f.oga" } }) };
+    if (u.endsWith("/sendVoice")) { f.voices++; return { status: 200, json: async () => ({ ok: true, result: { message_id: 5 } }) }; }
+    return f0(url, init);
+  };
+  f.voices = 0;
+  f.texts = f0.texts;
+  const deps = {
+    chat: async () => "obrolan biasa",
+    transcribe: async () => ({ text: f.heard, engine: "groq" }),
+    speak: async (text) => { if (mode === "gagal") throw Object.assign(new Error("habis"), { quota: true }); return { ogg: Buffer.alloc(900, 1), text }; },
+    voiceCheck: async () => ({ ok: true }),
+    tutor: async (a) => (a.userText === null ? { reply: "Hello there!", correction: "", tip: "" } : { reply: "Nice one.", correction: "I went", tip: "Past tense" }),
+    state: { get: async () => null, set: async () => {} }
+  };
+  const tg = createTelegram({ config: cfg({ speakText: false, speakMaxTurns: 5, speakIdleMin: 60, voiceMaxSeconds: 60 }), deps, fetchImpl: f, log: quiet });
+  const T = (text) => tg.handleUpdate(msg(111, text));
+  const V = (heard) => { f.heard = heard; return tg.handleUpdate({ update_id: 9, message: { chat: { id: 111, type: "private" }, voice: { file_id: "F", duration: 4, mime_type: "audio/ogg", file_size: 3000 } } }); };
+  await T("/speak");
+  if (mode === "ok") {
+    check(f.voices === 1 && !f.texts(111).some((t) => t.includes("Hello there!")), "suara-saja TG: sapaan hanya voice");
+    check(f.texts(111).some((t) => t.includes("Mode suara saja")), "suara-saja TG: pembuka menjelaskan mode");
+    const n = f.texts(111).length;
+    await V("I go yesterday");
+    check(f.voices === 2 && f.texts(111).length === n, "suara-saja TG: ucapan tidak di-echo, balasan tidak ditulis");
+    await T("/koreksi");
+    check(f.texts(111).at(-1).includes("I went") && f.texts(111).at(-1).includes("Past tense"), "suara-saja TG: /koreksi");
+    await T("/teks on");
+    check(f.texts(111).at(-1).includes("juga ditulis"), "suara-saja TG: /teks on");
+    await V("second");
+    check(f.texts(111).some((t) => t === "🎤 “second”") && f.texts(111).some((t) => t.startsWith("💬 Nice one.")), "suara-saja TG: teks on -> echo + teks");
+    await T("/selesai");
+    await T("/koreksi");
+    check(f.texts(111).at(-1).includes("Tidak ada sesi"), "suara-saja TG: /koreksi tanpa sesi");
+  } else {
+    check(f.texts(111).some((t) => t.includes("Hello there!")), "suara-saja TG: suara gagal -> teks sapaan jadi cadangan");
+    await T("I go yesterday");
+    check(f.texts(111).some((t) => t.includes("Nice one.") && t.includes("✏️")), "suara-saja TG: suara gagal -> teks + koreksi cadangan");
+    await T("/selesai");
+  }
 }
 
 if (fails) { console.log(`\n${fails} GAGAL`); process.exit(1); }

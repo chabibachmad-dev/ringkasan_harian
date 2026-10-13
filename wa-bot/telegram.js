@@ -17,7 +17,7 @@
 //   TELEGRAM_MIRROR_NOTIFICATIONS=true      (false = notifikasi tidak ikut dikirim ke Telegram)
 //   TELEGRAM_HISTORY_LIMIT=12               (jumlah pesan terakhir yang dikirim ke AI sebagai konteks obrolan)
 //   VOICE_MAX_SECONDS=180                   (pesan suara lebih panjang dari ini ditolak; lihat voice-input.js untuk kunci STT)
-//   TELEGRAM_SPEAK_MAX_TURNS=30             (batas giliran satu sesi /speak)   TELEGRAM_SPEAK_IDLE_MIN=60 (sesi /speak kedaluwarsa bila diam sekian menit)
+//   TELEGRAM_SPEAK_TEXT=false  (bawaan: tutor /speak SUARA SAJA; true = balasan juga ditulis)   TELEGRAM_SPEAK_MAX_TURNS=30             (batas giliran satu sesi /speak)   TELEGRAM_SPEAK_IDLE_MIN=60 (sesi /speak kedaluwarsa bila diam sekian menit)
 // Balasan suara (voice note) & tutor Inggris: lihat voice-output.js (butuh ffmpeg) dan tutor.js.
 // ================================================================
 
@@ -44,6 +44,7 @@ export function readTelegramConfig(env = process.env) {
     voiceMaxSeconds: Math.max(5, Math.min(600, Math.floor(num(env.VOICE_MAX_SECONDS, 180)))),
     speakMaxTurns: Math.max(3, Math.min(100, Math.floor(num(env.TELEGRAM_SPEAK_MAX_TURNS, 30)))),
     speakIdleMin: Math.max(5, Math.min(1440, Math.floor(num(env.TELEGRAM_SPEAK_IDLE_MIN, 60)))),
+    speakText: !["", "false", "0", "off", "no", "tidak", "mati"].includes(String(env.TELEGRAM_SPEAK_TEXT ?? "").trim().toLowerCase()), // bawaan false = tutor SUARA SAJA
     pollTimeoutSec: 30
   };
 }
@@ -138,7 +139,7 @@ const HELP = [
   "Ketik biasa untuk ngobrol dengan AI (Gemini, bisa cari web & Dokumen Pengetahuan).",
   "🎤 Kirim PESAN SUARA (tahan tombol mikrofon) untuk ngobrol atau merekam SiMAB: bot menuliskan apa yang ia dengar, lalu menjalankannya seperti pesan teks. Contoh saat merekam: \"Pembelian ATK, tanggal 5 Oktober 2026, jumlah satu juta lima ratus ribu rupiah\".",
   "🔊 Balasan suara: /suara auto (default: dibalas suara bila kamu kirim suara), /suara on (selalu), /suara off. Butuh ffmpeg di laptop bot.",
-  "🎙️ Latihan ngobrol Inggris: /speak [topik] — kirim suara berbahasa Inggris, tutor membalas dengan suara + koreksi singkat. Ngobrol santai berbahasa Indonesia: /speak id [topik]. Akhiri dengan /selesai atau ucapkan perpisahan (goodbye / sampai jumpa).",
+  "🎙️ Latihan ngobrol Inggris: /speak [topik] — kirim suara berbahasa Inggris, tutor membalas dengan SUARA SAJA (tanpa teks; /koreksi menampilkan koreksi terakhir, /teks on bila mau teks juga). Ngobrol santai berbahasa Indonesia: /speak id [topik]. Akhiri dengan /selesai atau ucapkan perpisahan (goodbye / sampai jumpa).",
   "",
   "Perintah:",
   "/simab <perintah>  — SiMAB (pagu, cek, perjadin, sbm, rpd, rekam). Boleh juga tulis \"simab ...\" tanpa garis miring.",
@@ -382,11 +383,24 @@ Ubah: /suara auto • /suara on • /suara off`));
     return { lang: /^(id|indonesia|indo)$/i.test(m[1]) ? "id" : "en", topic: m[2].trim() };
   }
 
+  /** Kirim balasan tutor. Suara saja bila sesi tidak minta teks; bila suara gagal, teks dikirim sebagai cadangan. */
+  async function deliverTutor(chatId, s, out) {
+    const text = formatTutorMessage(out);
+    s.fix = out.correction ? { correction: out.correction, tip: out.tip || "" } : null;
+    if (s.text) {
+      await send(chatId, text);
+      await trySpeak(chatId, out.reply);
+      return;
+    }
+    const spoke = await trySpeak(chatId, out.reply);
+    if (!spoke) await send(chatId, text);
+  }
+
   async function startTutor(chatId, arg) {
     if (!deps.tutor) return void (await send(chatId, "Mode Speaking belum tersedia: isi GEMINI_API_KEYS di .env bot lalu restart."));
     const { lang, topic } = parseSpeakArg(arg);
     const id = lang === "id";
-    const session = { lang, topic: topic.slice(0, 100), turns: [], userTurns: 0, lastAt: Date.now() };
+    const session = { lang, topic: topic.slice(0, 100), turns: [], userTurns: 0, lastAt: Date.now(), text: !!config.speakText, fix: null };
     const vc = deps.voiceCheck ? await deps.voiceCheck().catch(() => ({ ok: false, reason: "pengecekan gagal" })) : { ok: !!deps.speak, reason: "suara belum diatur di bot" };
     const intro = [
       id ? `🎙️ Mode ngobrol bahasa Indonesia aktif${session.topic ? ` — topik: ${session.topic}` : ""}.` : `🎙️ Mode Speaking aktif${session.topic ? ` — topik: ${session.topic}` : ""}.`,
@@ -394,7 +408,7 @@ Ubah: /suara auto • /suara on • /suara off`));
         ? deps.transcribe ? "Balas dengan pesan suara (tahan tombol mikrofon), atau ketik. Aku membalas dengan suara, tanpa koreksi." : "Ketik pesanmu (suara masuk belum aktif: isi GROQ_API_KEYS). Aku membalas dengan teks."
         : deps.transcribe ? "Balas dengan pesan suara berbahasa Inggris (tahan tombol mikrofon), atau ketik. Aku membalas dengan suara + koreksi singkat." : "Ketik jawabanmu dalam bahasa Inggris (suara masuk belum aktif: isi GROQ_API_KEYS). Aku membalas dengan koreksi singkat.",
       id ? "Akhiri dengan /selesai atau ucapkan perpisahan (sampai jumpa, dadah, aku pamit dulu)." : "Akhiri dengan /selesai atau ucapkan goodbye.",
-      vc.ok ? "" : `🔇 Suara tutor belum bisa dibuat: ${vc.reason}. Sementara tutor membalas teks.`
+      vc.ok ? (session.text ? "" : id ? "Mode suara saja: balasanku tidak ditulis. /teks on bila mau teks juga." : "Mode suara saja: balasanku tidak ditulis. /teks on bila mau teks juga, /koreksi untuk koreksi terakhir.") : `🔇 Suara tutor belum bisa dibuat: ${vc.reason}. Sementara tutor membalas teks.`
     ]
       .filter((x) => x !== "")
       .join("\n");
@@ -404,8 +418,7 @@ Ubah: /suara auto • /suara on • /suara off`));
       session.turns.push({ role: "ai", body: out.reply });
       session.lastAt = Date.now();
       tutorSessions.set(chatId, session);
-      await send(chatId, formatTutorMessage({ reply: out.reply, correction: "", tip: "" }));
-      await trySpeak(chatId, out.reply);
+      await deliverTutor(chatId, session, { reply: out.reply, correction: "", tip: "" });
     } catch (e) {
       log.error?.(`✈️ [Telegram/Speak] gagal memulai: ${e?.message || e}`);
       await send(chatId, `⚠️ Tutor gagal memulai: ${String(e?.message || e).slice(0, 300)}\nCoba /speak${id ? " id" : ""} lagi sebentar lagi.`).catch(() => {});
@@ -432,8 +445,7 @@ Ubah: /suara auto • /suara on • /suara off`));
       s.turns.push({ role: "user", body: clean }, { role: "ai", body: out.reply });
       s.userTurns += 1;
       s.lastAt = Date.now();
-      await send(chatId, formatTutorMessage(out));
-      await trySpeak(chatId, out.reply);
+      await deliverTutor(chatId, s, out);
       if (farewell) return void (await endTutor(chatId));
       if (s.userTurns >= config.speakMaxTurns) return void (await endTutor(chatId, `🏁 Batas ${config.speakMaxTurns} giliran tercapai, sesi selesai. ${id ? "Seru! /speak id" : "Hebat! /speak"} untuk mulai sesi baru.`));
     } catch (e) {
@@ -538,7 +550,7 @@ Ubah: /suara auto • /suara on • /suara off`));
     }
     if (!heard) return void (await send(chatId, "🎤 Suaranya tidak terdengar jelas. Coba rekam lagi lebih dekat ke mikrofon."));
     if (inTutor) {
-      await send(chatId, `🎤 “${heard}”`).catch(() => {});
+      if (tutorSessions.get(chatId)?.text) await send(chatId, `🎤 “${heard}”`).catch(() => {});
       return handleTutorTurn(chatId, heard);
     }
     const key = `tg:${chatId}`;
@@ -569,6 +581,16 @@ Ubah: /suara auto • /suara on • /suara off`));
 
     if (name === "speak") return startTutor(chatId, arg);
     if (name === "selesai" || name === "stop") return endTutor(chatId);
+    if (name === "teks" || name === "koreksi") {
+      if (!tutorActive(chatId)) return void (await reply("Tidak ada sesi Speaking yang sedang berjalan. Mulai dengan /speak."));
+      const s = tutorSessions.get(chatId);
+      if (name === "koreksi") return void (await reply(s.fix ? `✏️ Lebih baik: ${s.fix.correction}${s.fix.tip ? `\n💡 ${s.fix.tip}` : ""}` : "Belum ada koreksi dari giliran terakhir. Ucapanmu sudah bagus!"));
+      const a = arg.toLowerCase();
+      if (["on", "aktif", "nyala", "ya"].includes(a)) s.text = true;
+      else if (["off", "mati", "tidak"].includes(a)) s.text = false;
+      else s.text = !s.text;
+      return void (await reply(s.text ? "📝 Balasan tutor sekarang juga ditulis. /teks off untuk suara saja." : "🔊 Balasan tutor sekarang suara saja. /teks on bila mau teks juga."));
+    }
     if (name === "suara") return handleVoiceCommand(chatId, arg);
 
     // SiMAB: "/simab ..." atau "simab ..." atau lanjutan sesi "simab rekam" yang sedang aktif

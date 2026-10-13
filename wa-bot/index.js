@@ -2831,7 +2831,7 @@ async function handleIncoming(msg, sock) {
         if (r.error) return void (await reply(`⚠️ ${r.error}`));
         if (!r.text) return void (await reply("🎤 Suaranya tidak terdengar jelas. Coba rekam lagi lebih dekat ke mikrofon."));
         if (waTutor.active(jid)) {
-          await reply(`🎤 “${r.text}”`);
+          if (waTutor.showText(jid)) await reply(`🎤 “${r.text}”`);
           text = r.text;
         } else {
           const cmd = voiceToCommand(r.text, { inSession: simab.enabled && simab.hasSession(jid) });
@@ -3212,8 +3212,24 @@ const speaker = createSpeaker({ config: ttsConfig });
 async function generateTutorTurn({ topic, lang = "en", history, userText, farewell }) {
   if (GEMINI_API_KEYS.length === 0 && !llmFallback.available()) throw new Error("AI belum diatur: isi GEMINI_API_KEYS di .env bot lalu restart.");
   const prompt = buildTutorUserPrompt(history, userText, farewell, lang);
-  const data = await geminiGenerateWithRotation(buildTutorSystemPrompt({ topic, lang }), [{ role: "user", parts: [{ text: prompt }] }], { useSearch: false });
-  const parsed = parseTutorReply(extractGeminiText(data).trim(), userText || "");
+  const system = buildTutorSystemPrompt({ topic, lang });
+  // Bawaan: Groq/OpenRouter DULU (cepat, kuota besar), Gemini jadi cadangan. TUTOR_AI_ORDER=gemini-first membalik urutan.
+  const groqFirst = llmFallback.available() && String(process.env.TUTOR_AI_ORDER || "fallback-first").trim().toLowerCase() !== "gemini-first";
+  const viaFallback = async () => (await llmFallback.generate({ system, messages: [{ role: "user", content: prompt }], temperature: 0.6 })).text;
+  const viaGemini = async () => extractGeminiText(await geminiGenerateWithRotation(system, [{ role: "user", parts: [{ text: prompt }] }], { useSearch: false }));
+  const order = groqFirst ? [viaFallback, GEMINI_API_KEYS.length ? viaGemini : null] : [GEMINI_API_KEYS.length ? viaGemini : null, llmFallback.available() ? viaFallback : null];
+  let raw = "";
+  let lastErr = null;
+  for (const fn of order.filter(Boolean)) {
+    try {
+      raw = String(await fn()).trim();
+      if (raw) break;
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  if (!raw) throw lastErr || new Error("Tutor tidak menghasilkan balasan.");
+  const parsed = parseTutorReply(raw, userText || "");
   if (!parsed) throw new Error("Tutor tidak menghasilkan balasan.");
   return lang === "id" ? { reply: parsed.reply, correction: "", tip: "" } : parsed;
 }
