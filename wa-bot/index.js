@@ -30,7 +30,7 @@
 
 import "dotenv/config";
 import { createClient } from "@supabase/supabase-js";
-import makeWASocket, { useMultiFileAuthState, fetchLatestBaileysVersion, DisconnectReason } from "@whiskeysockets/baileys";
+import makeWASocket, { useMultiFileAuthState, fetchLatestBaileysVersion, DisconnectReason, downloadMediaMessage } from "@whiskeysockets/baileys";
 import pino from "pino";
 import qrcode from "qrcode-terminal";
 import * as cheerio from "cheerio";
@@ -38,7 +38,8 @@ import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import { createSimab, SIMAB_OLLAMA_SYSTEM } from "./simab.js";
 import { createTelegram, readTelegramConfig } from "./telegram.js";
-import { createTranscriber, readSttConfig } from "./voice-input.js";
+import { createTranscriber, describeError, readSttConfig, voiceToCommand } from "./voice-input.js";
+import { audioOf, createWaTutor, readWaVoiceConfig } from "./wa-voice.js";
 import { createSpeaker, readTtsConfig } from "./voice-output.js";
 import { buildTutorSystemPrompt, buildTutorUserPrompt, parseTutorReply } from "./tutor.js";
 import { createAppAgentWorker } from "./app-agent.js";
@@ -2574,6 +2575,7 @@ function getMessageContextInfo(m) {
     m.imageMessage?.contextInfo ||
     m.videoMessage?.contextInfo ||
     m.documentMessage?.contextInfo ||
+    m.audioMessage?.contextInfo ||
     null
   );
 }
@@ -2585,8 +2587,11 @@ async function handleGroupMessage(msg, sock) {
   const groupJid = msg.key.remoteJid;
   const content = unwrapMessageContent(msg.message);
   if (!content) return;
-  const rawText = extractText({ message: content });
-  if (!rawText || rawText.startsWith("[")) return;
+  // Voice note di grup tidak bisa me-mention bot; yang dihitung memanggil bot = voice note yang membalas (reply) pesan bot.
+  const groupAudio = audioOf(content);
+  if (groupAudio && !(waVoiceCfg.inGroups && transcriber.available())) return;
+  const rawText = groupAudio ? "" : extractText({ message: content });
+  if (!groupAudio && (!rawText || rawText.startsWith("["))) return;
 
   const ctx = getMessageContextInfo(content);
   const ownJids = getOwnJids(sock);
@@ -2637,8 +2642,8 @@ async function handleGroupMessage(msg, sock) {
 
   const sender = msg.pushName || "Anggota grup";
   const quotedText = ctx?.quotedMessage ? extractText({ message: unwrapMessageContent(ctx.quotedMessage) }) : null;
-  if (!text && !quotedText) return;
-  if (!text) text = "(menandai tanpa pertanyaan, jawab/jelaskan pesan yang dikutip)";
+  if (!groupAudio && !text && !quotedText) return;
+  if (!groupAudio && !text) text = "(menandai tanpa pertanyaan, jawab/jelaskan pesan yang dikutip)";
 
   // --- Jeda per orang (cegah spam & hemat kuota)
   const senderKey = `${groupJid}|${msg.key.participant || sender}`;
@@ -2649,8 +2654,17 @@ async function handleGroupMessage(msg, sock) {
   }
   groupLastAskAt.set(senderKey, Date.now());
 
+  if (groupAudio) {
+    const r = await transcribeWaAudio(sock, msg, content, groupAudio);
+    if (!r.text) {
+      console.log(`👥 [${subject}] voice note ${sender} tidak bisa dibaca${r.error ? ` (${r.error})` : " (tidak terdengar jelas)"}, diabaikan.`);
+      return;
+    }
+    text = r.text;
+  }
+
   const stored =
-    `${sender}: ${text}` +
+    `${sender}: ${groupAudio ? "🎤 " : ""}${text}` +
     (quotedText ? `\n(mengutip: "${quotedText.replace(/\s+/g, " ").slice(0, GROUP_QUOTE_MAX_CHARS)}")` : "");
   const { error } = await supabase.from("whatsapp_messages").insert({
     wa_jid: groupJid,
@@ -2664,7 +2678,7 @@ async function handleGroupMessage(msg, sock) {
     if (error.code !== "23505") console.error("Gagal simpan pesan grup:", error.message);
     return; // 23505 = event terkirim ulang, jangan dijawab dobel
   }
-  console.log(`👥 [${subject}] ${sender} memanggil bot: ${text.slice(0, 60)}`);
+  console.log(`👥 [${subject}] ${sender} memanggil bot${groupAudio ? " (voice note)" : ""}: ${text.slice(0, 60)}`);
 
   if (!(await isAutoReplyEnabledForContact(groupJid))) {
     console.log(`🔕 Auto-reply dimatikan khusus utk grup ${groupJid}, dilewati.`);
@@ -2711,6 +2725,55 @@ async function handleGroupMessage(msg, sock) {
   await deliverAutoReplyText(sock, groupJid, result, "👥 Balasan grup", { quoted: msg, waName: subject || null });
 }
 
+// ---------------- Suara di WhatsApp ----------------
+// Voice note PEMILIK -> teks (lalu diperlakukan seperti ketikan: SiMAB, /speak, dst.). Voice note KONTAK LAIN di chat pribadi
+// (WA_VOICE_FROM_OTHERS) dan balasan-ke-bot di grup (WA_VOICE_IN_GROUPS) diubah jadi teks lalu masuk jalur auto-reply biasa.
+// Logika tutor ada di wa-voice.js.
+const waVoiceCfg = readWaVoiceConfig(process.env);
+
+/** Unduh voice note lalu ubah jadi teks. -> { text } atau { error } (pesan siap tampil). */
+async function transcribeWaAudio(sock, msg, content, audio, sttOpts = {}) {
+  if (!transcriber.available()) return { error: "Pesan suara belum aktif: isi GROQ_API_KEYS (atau GEMINI_API_KEYS) di .env bot lalu restart." };
+  if (audio.seconds > sttConfig.maxSeconds) return { error: `Pesan suaranya terlalu panjang (${audio.seconds} dtk). Maksimal ${sttConfig.maxSeconds} detik; pecah jadi beberapa pesan.` };
+  if (audio.bytes > 19 * 1024 * 1024) return { error: "Berkas suaranya terlalu besar (maks 20 MB)." };
+  try {
+    let buffer = null;
+    let lastErr = null;
+    for (let attempt = 0; attempt < 2 && !buffer; attempt++) {
+      try {
+        buffer = await downloadMediaMessage({ key: msg.key, message: content }, "buffer", {}, { logger: pino({ level: "silent" }), reuploadRequest: sock.updateMediaMessage });
+      } catch (e) {
+        lastErr = e;
+        await new Promise((r) => setTimeout(r, 700));
+      }
+    }
+    if (!buffer) throw new Error(`gagal mengunduh voice note: ${describeError(lastErr)}`);
+    const out = await transcriber.transcribe(buffer, { mime: audio.mime, ...sttOpts });
+    return { text: String(out?.text ?? "").trim() };
+  } catch (e) {
+    console.error(`🎤 [WA] suara gagal diubah jadi teks: ${e instanceof Error ? e.message : String(e)}`);
+    return { error: String(e instanceof Error ? e.message : e).slice(0, 300) };
+  }
+}
+
+/** Jembatan tutor -> WhatsApp: kirim teks, kirim voice note (PTT), dan indikator "mengetik/merekam". */
+function waTutorIo(sock, jid) {
+  return {
+    send: (t) => sock.sendMessage(jid, { text: t }),
+    voice: (ogg) => sock.sendMessage(jid, { audio: ogg, mimetype: "audio/ogg; codecs=opus", ptt: true }),
+    busy: (kind) => {
+      const state = kind === "voice" ? "recording" : "composing";
+      const tick = () => sock.sendPresenceUpdate(state, jid).catch(() => {});
+      tick();
+      const timer = setInterval(tick, 4500);
+      return () => {
+        clearInterval(timer);
+        sock.sendPresenceUpdate("paused", jid).catch(() => {});
+      };
+    }
+  };
+}
+
 async function handleIncoming(msg, sock) {
   const jid = msg.key.remoteJid;
   // "Chat ke diri sendiri" (catatan pribadi) di WhatsApp -- remoteJid-nya
@@ -2751,7 +2814,40 @@ async function handleIncoming(msg, sock) {
   // beneran nyampe & kebaca teksnya, tapi filter ini yang mendrop duluan).
   if (!jid || !(jid.endsWith("@s.whatsapp.net") || jid.endsWith("@lid"))) return;
 
-  const text = extractText(msg);
+  let text = extractText(msg);
+  let viaVoice = false;
+  const audio = audioOf(unwrapMessageContent(msg.message));
+  if (audio && transcriber.available()) {
+    const owner = isOwnerSender(msg, isSelfChat);
+    let eligible = owner;
+    if (!owner && waVoiceCfg.fromOthers && AUTO_REPLY_ACTIVE) {
+      // Hemat kuota suara->teks: hanya kontak yang memang akan dijawab AI (tidak dijeda, tidak dimatikan).
+      eligible = aiPauseRemainingMs(jidUserKeys(jid, msg.key.remoteJidAlt)) === 0 && (await isAutoReplyEnabledForContact(jid));
+    }
+    if (eligible) {
+      const r = await transcribeWaAudio(sock, msg, unwrapMessageContent(msg.message), audio, owner ? waTutor.sttOptions(jid) || {} : {});
+      if (owner) {
+        const reply = (t) => sock.sendMessage(jid, { text: t }, { quoted: msg }).catch(() => {});
+        if (r.error) return void (await reply(`⚠️ ${r.error}`));
+        if (!r.text) return void (await reply("🎤 Suaranya tidak terdengar jelas. Coba rekam lagi lebih dekat ke mikrofon."));
+        if (waTutor.active(jid)) {
+          await reply(`🎤 “${r.text}”`);
+          text = r.text;
+        } else {
+          const cmd = voiceToCommand(r.text, { inSession: simab.enabled && simab.hasSession(jid) });
+          await reply(cmd.changed && cmd.text ? `🎤 “${r.text}”\n➡️ ${cmd.text.replace(/\n/g, " ⏎ ")}` : `🎤 “${r.text}”`);
+          if (!cmd.text) return;
+          text = cmd.text;
+        }
+        viaVoice = true;
+      } else if (r.text) {
+        text = r.text;
+        viaVoice = true;
+      } else if (r.error) {
+        console.log(`🎤 [WA] voice note dari ${jid} tidak bisa dibaca (${r.error}); diperlakukan sebagai pesan suara biasa.`);
+      }
+    }
+  }
   if (!text) return;
 
   if (msg.pushName && !isSelfChat) {
@@ -2782,11 +2878,15 @@ async function handleIncoming(msg, sock) {
     }
   }
 
+  // Tutor suara (/speak, /selesai) hanya untuk pemilik; selama sesi, teks/voice note pemilik = ucapan untuk tutor
+  // (tidak disimpan ke riwayat chat dan tidak memicu auto-reply).
+  if (isOwnerSender(msg, isSelfChat) && (await waTutor.handle(jid, text, waTutorIo(sock, jid)))) return;
+
   const { error } = await supabase.from("whatsapp_messages").insert({
     wa_jid: jid,
     wa_name: msg.pushName || null,
     direction: "in",
-    content: text,
+    content: viaVoice ? `🎤 ${text}` : text,
     status: "received",
     wa_message_id: msg.key.id
   });
@@ -3099,7 +3199,7 @@ async function buildBotStatusText() {
   lines.push(`🎤 Pesan suara Telegram: ${transcriber.available() ? `aktif (${sttConfig.groqKeys.length ? `Groq Whisper ${sttConfig.groqModel}` : ""}${sttConfig.groqKeys.length && sttConfig.geminiKeys.length ? " + " : ""}${sttConfig.geminiKeys.length ? "cadangan Gemini" : ""})` : "mati (isi GROQ_API_KEYS atau GEMINI_API_KEYS)"}`);
   {
     const vo = await checkVoiceOutput().catch(() => ({ ok: false, reason: "pengecekan gagal" }));
-    lines.push(`🔊 Balasan suara & /speak Telegram: ${vo.ok ? `aktif (Gemini TTS, suara ${ttsConfig.voice}, ffmpeg ok)` : `belum bisa (${vo.reason})`}`);
+    lines.push(`🔊 Balasan suara & /speak (Telegram + WhatsApp pemilik): ${vo.ok ? `aktif (Gemini TTS, suara ${ttsConfig.voice}, ffmpeg ok)` : `belum bisa (${vo.reason})`}`);
   }
   return lines.join("\n");
 }
@@ -3123,6 +3223,13 @@ async function checkVoiceOutput() {
   if (st === "ok") return { ok: true };
   return { ok: false, reason: st === "noopus" ? "ffmpeg terpasang tapi tanpa libopus (pasang ffmpeg versi lengkap)" : "ffmpeg belum terpasang (sudo apt install ffmpeg)" };
 }
+const waTutor = createWaTutor({
+  tutor: GEMINI_API_KEYS.length > 0 || llmFallback.available() ? generateTutorTurn : null,
+  speak: speaker.available() ? (text) => speaker.speak(text) : null,
+  voiceCheck: checkVoiceOutput,
+  hasTranscriber: transcriber.available(),
+  config: waVoiceCfg
+});
 const telegram = createTelegram({
   config: readTelegramConfig(process.env),
   deps: {

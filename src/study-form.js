@@ -3,9 +3,11 @@
 //
 // openFormDialog({
 //   title, intro, okLabel, cancelLabel, busyLabel,
-//   fields: [{ key, label, type: "text"|"pin"|"number"|"select"|"textarea"|"note",
+//   fields: [{ key, label, type: "text"|"pin"|"number"|"select"|"textarea"|"note"|"checks",
 //              value, options, placeholder, maxlength, min, max, rows, help,
 //              show: (values) => bool }],
+//   // "checks" = daftar kotak centang: options [{value,label}], value = array nilai yang terpilih awal, allLabel = teks "pilih semua";
+//   //            nilainya (values[key]) berupa array nilai yang tercentang.
 //   // options / help boleh berupa fungsi (values) => ...; onOptionsChange(values) => nilai pilihan saat daftar opsi berubah
 //   extra: [{ label, onClick(values) }],          // tombol tambahan di bawah isian
 //   onSubmit: async (values) => ({ ok: true, value? }) | ({ ok: false, error })
@@ -41,6 +43,10 @@ export function openFormDialog(cfg) {
       const v = {};
       for (const f of fields) {
         const e = els.get(f.key);
+        if (e?.checks) {
+          v[f.key] = e.checks.filter((c) => c.checked).map((c) => c.value);
+          continue;
+        }
         if (!e || !e.input) continue;
         v[f.key] = f.type === "number" ? (e.input.value === "" ? null : Number(e.input.value)) : e.input.value;
       }
@@ -54,6 +60,59 @@ export function openFormDialog(cfg) {
         wrap.innerHTML = `<span class="study-note"></span>`;
         form.appendChild(wrap);
         els.set(f.key, { wrap, input: null, help: wrap.firstChild, f });
+        continue;
+      }
+      if (f.type === "checks") {
+        const box = document.createElement("div");
+        box.className = "study-field";
+        const cap = document.createElement("span");
+        cap.className = "study-field-label";
+        cap.textContent = f.label || "";
+        box.appendChild(cap);
+        const list = document.createElement("div");
+        list.className = "study-checks";
+        list.setAttribute("role", "group");
+        list.setAttribute("aria-label", f.label || "");
+        const opts = val(f.options, {}) || [];
+        const chosen = new Set((f.value || []).map(String));
+        const boxes = [];
+        const mk = (labelText, extraClass) => {
+          const row = document.createElement("label");
+          row.className = `study-check ${extraClass || ""}`.trim();
+          const cb = document.createElement("input");
+          cb.type = "checkbox";
+          const span = document.createElement("span");
+          span.textContent = labelText;
+          row.append(cb, span);
+          list.appendChild(row);
+          return cb;
+        };
+        let allBox = null;
+        if (opts.length > 1) allBox = mk(f.allLabel || "Semua", "study-check--all");
+        for (const o of opts) {
+          const cb = mk(o.label);
+          cb.value = String(o.value);
+          cb.checked = chosen.has(String(o.value));
+          boxes.push(cb);
+        }
+        if (allBox) {
+          const sync = () => {
+            allBox.checked = boxes.length > 0 && boxes.every((b) => b.checked);
+          };
+          allBox.addEventListener("change", () => {
+            for (const b of boxes) b.checked = allBox.checked;
+          });
+          list.addEventListener("change", (ev) => {
+            if (ev.target !== allBox) sync();
+          });
+          sync();
+        }
+        box.appendChild(list);
+        const help = document.createElement("span");
+        help.className = "study-field-help";
+        box.appendChild(help);
+        form.appendChild(box);
+        els.set(f.key, { wrap: box, input: null, checks: boxes, allBox, help, f });
         continue;
       }
       const caption = document.createElement("span");
@@ -161,7 +220,11 @@ export function openFormDialog(cfg) {
       okBtn.disabled = b;
       cancelBtn.disabled = b;
       okBtn.textContent = b ? cfg.busyLabel || "…" : cfg.okLabel || "OK";
-      for (const e of els.values()) if (e.input) e.input.disabled = b;
+      for (const e of els.values()) {
+        if (e.input) e.input.disabled = b;
+        for (const c of e.checks || []) c.disabled = b;
+        if (e.allBox) e.allBox.disabled = b;
+      }
       for (const x of extraBox.querySelectorAll("button")) x.disabled = b;
     };
 

@@ -41,6 +41,8 @@
 //   redeem_item_delete  { parentPin?, id }                                   -> { items }
 //   redeem_mark         { parentPin?, redemptionId, status:"given"|"pending" } -> { ok }
 //   penalty             { parentPin?, playerId, points, reason }             -> { requested, applied, balance }
+//   bonus_give          { parentPin?, playerIds:[uuid], points, name }       -> { given, points, name }   (EXTRA POIN dari orang tua, migrasi 0036: poin 1-1.000.000, nama maks 80 huruf, 1-100 pemain;
+//                                                                              TIDAK dihitung ke batas poin harian, masuk saldo; semua pemain terpilih atau tidak sama sekali)
 //   parent_pin_set      { newPin, parentPin? }                               -> { ok }
 //   -- timeline (Facebook-like): lihat kegiatan pemain, suka, komentar, detil. Melihat timeline & komentar tidak perlu PIN;
 //      suka/komentar/detil butuh PIN penonton (viewerId + viewerPin) dan tidak boleh pada kegiatan sendiri (suka/komentar).
@@ -256,8 +258,10 @@ async function loadSettings(admin: Admin): Promise<Row | null> {
 
 // Dasbor poin hari ini (fungsi study_daily, migrasi 0032). null bila migrasi belum dijalankan.
 async function loadDaily(admin: Admin, playerId: string): Promise<Row | null> {
-  const { data, error } = await admin.rpc("study_daily", { p_player: playerId });
-  return error || !data ? null : (data as Row);
+  const [{ data, error }, extra] = await Promise.all([admin.rpc("study_daily", { p_player: playerId }), admin.rpc("study_bonus_today", { p_player: playerId })]);
+  if (error || !data) return null;
+  // Extra poin dari orang tua hari ini (migrasi 0036); di luar batas harian. null bila migrasi belum dijalankan.
+  return { ...(data as Row), extra: extra.error || typeof extra.data !== "number" ? null : extra.data };
 }
 
 // Pengulangan mata pelajaran yang sama hari ini (migrasi 0033): { count, percent }. percent 100 = pelajaran berikutnya tidak dikurangi.
@@ -867,7 +871,7 @@ Deno.serve(async (req) => {
         admin.rpc("study_balance", { p_player: p.id }),
         admin.from("study_sessions").select("*").eq("player_id", p.id).order("created_at", { ascending: false }).limit(50),
         admin.from("study_redemptions").select("*").eq("player_id", p.id).order("created_at", { ascending: false }).limit(100),
-        admin.from("study_ledger").select("kind,points,note,meta,created_at").eq("player_id", p.id).in("kind", ["session", "competition", "competition_bonus", "penalty"]).order("created_at", { ascending: false }).limit(300),
+        admin.from("study_ledger").select("kind,points,note,meta,created_at").eq("player_id", p.id).in("kind", ["session", "competition", "competition_bonus", "penalty", "bonus"]).order("created_at", { ascending: false }).limit(300),
         loadItems(admin),
         loadDaily(admin, p.id)
       ]);
@@ -881,6 +885,7 @@ Deno.serve(async (req) => {
         daily,
         sessions: (sessions.data ?? []).map(sessionRow),
         redemptions: (reds.data ?? []).map((r: Row) => ({ id: r.id, itemName: r.item_name, cost: r.cost, status: r.status, createdAt: r.created_at, givenAt: r.given_at })),
+        bonuses: ledgerRows.filter((l) => l.kind === "bonus").slice(0, 50).map((l) => ({ points: l.points, name: l.note, createdAt: l.created_at })),
         penalties: ledgerRows.filter((l) => l.kind === "penalty").slice(0, 50).map((l) => ({ points: -l.points, requested: l.meta?.requested ?? -l.points, reason: l.note, createdAt: l.created_at })),
         redeemItems: items,
         allowedGrades: allowedMaterialGrades(p.grade),
@@ -1137,8 +1142,18 @@ Deno.serve(async (req) => {
         admin.from("study_players").select("id,name,grade,class_level").order("name", { ascending: true })
       ]);
       const names = new Map<string, string>((players.data ?? []).map((x: Row) => [x.id, x.name]));
+      // Riwayat extra poin terakhir (per batch): nama, poin per anak, siapa saja. Kosong bila migrasi 0036 belum dijalankan.
+      const { data: bonusRows } = await admin.from("study_ledger").select("player_id,points,note,meta,created_at").eq("kind", "bonus").order("created_at", { ascending: false }).limit(300);
+      const batches = new Map<string, { name: string; points: number; createdAt: string; players: string[] }>();
+      for (const r of (bonusRows ?? []) as Row[]) {
+        const key = String(r.meta?.batch ?? `${r.created_at}|${r.note}|${r.points}`);
+        const b = batches.get(key) ?? { name: r.note ?? "", points: r.points, createdAt: r.created_at, players: [] };
+        b.players.push(names.get(r.player_id) ?? "?");
+        batches.set(key, b);
+      }
       return json({
         ok: true,
+        recentBonuses: [...batches.values()].slice(0, 10),
         settings: publicSettings(par.settings, items),
         pendingRedemptions: (pending.data ?? []).map((r: Row) => ({ id: r.id, playerName: names.get(r.player_id) ?? "?", itemName: r.item_name, cost: r.cost, createdAt: r.created_at })),
         players: (players.data ?? []).map((x: Row) => ({ id: x.id, name: x.name, grade: x.grade, classLevel: x.class_level ?? null }))
@@ -1210,6 +1225,26 @@ Deno.serve(async (req) => {
       if (!reason) return fail("Alasan hukuman wajib diisi.");
       const { data, error } = await admin.rpc("study_apply_penalty", { p_player: body.playerId, p_points: points, p_reason: reason });
       if (error) return fail(/PEMAIN_TIDAK_ADA/.test(error.message) ? "Pemain tidak ditemukan." : error.message, /PEMAIN_TIDAK_ADA/.test(error.message) ? 404 : 500);
+      return json({ ok: true, ...(data as Row) });
+    }
+
+    if (action === "bonus_give") {
+      const par = await checkParentPin(admin, body.parentPin);
+      if (par instanceof Response) return par;
+      const ids = Array.isArray(body.playerIds) ? [...new Set(body.playerIds.filter((x: unknown): x is string => isUuid(x)))] : [];
+      if (ids.length === 0) return fail("Pilih minimal satu pemain.");
+      if (ids.length > 100) return fail("Terlalu banyak pemain dalam satu pemberian (maksimal 100).");
+      const points = body.points;
+      if (typeof points !== "number" || !Number.isInteger(points) || points < 1 || points > 1_000_000) return fail("Poin extra harus bilangan bulat positif (maksimal 1.000.000).");
+      const name = cleanLine(body.name, 80);
+      if (!name) return fail("Nama extra poin wajib diisi.");
+      const { data, error } = await admin.rpc("study_give_bonus", { p_players: ids, p_points: points, p_name: name });
+      if (error) {
+        if (/PEMAIN_TIDAK_ADA/.test(error.message)) return fail("Ada pemain yang tidak ditemukan. Muat ulang daftar lalu coba lagi.", 404);
+        if (/function .*study_give_bonus|does not exist|schema cache/i.test(error.message)) return fail("Fitur extra poin belum aktif: jalankan migrasi 0036_study_parent_bonus.sql di Supabase.", 500);
+        if (/check constraint|study_ledger_kind_check/i.test(error.message)) return fail("Fitur extra poin belum aktif: jalankan migrasi 0036_study_parent_bonus.sql di Supabase.", 500);
+        return fail(error.message, 500);
+      }
       return json({ ok: true, ...(data as Row) });
     }
 

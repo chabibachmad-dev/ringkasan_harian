@@ -94,6 +94,7 @@ function dailyCardHtml(d) {
       <div class="study-row-meta" data-daily-status>${esc(status)}</div>
       <div class="study-row-meta">${esc(L("study_daily_breakdown", { solo: fmt(d.solo), comp: fmt(d.competition), bonus: fmt(d.bonus) }))}</div>
       <div class="study-row-meta">${esc(L("study_daily_counts", { s: d.sessions ?? 0, c: d.competitions ?? 0 }))}</div>
+      ${Number(d.extra) > 0 ? `<div class="study-row-meta">${esc(L("study_daily_extra", { n: fmt(d.extra) }))}</div>` : ""}
       ${subjectsLine}
       ${hist.length ? `<div class="study-daily-week-label">${esc(L("study_daily_week"))}</div><ul class="study-daily-week">${bars}</ul>` : ""}
       ${cap > 0 ? `<p class="study-hint">${esc(L("study_daily_note", { tz: tzLabel(d.timezone) }))}</p>` : ""}
@@ -583,6 +584,18 @@ function renderProfile(body) {
         .join("")
     : "";
 
+  const bonuses = (p.bonuses || []).length
+    ? p.bonuses
+        .map(
+          (x) => `
+        <div class="study-row">
+          <div class="study-row-main"><div class="study-row-title">${esc(x.name || "-")}</div><div class="study-row-meta">${fmtDate(x.createdAt)}</div></div>
+          <span class="study-badge study-badge--solid">+${fmt(x.points)}</span>
+        </div>`
+        )
+        .join("")
+    : "";
+
   const lessons = (p.sessions || []).length
     ? p.sessions
         .map((s) => {
@@ -632,6 +645,7 @@ function renderProfile(body) {
     <h2 class="study-h">${esc(L("study_redeem"))}</h2>
     ${redeem}
     <details class="study-details"><summary>${esc(L("study_redeem_history"))} (${(p.redemptions || []).length})</summary>${redHistory}</details>
+    ${bonuses ? `<details class="study-details"><summary>${esc(L("study_bonuses"))} (${(p.bonuses || []).length})</summary>${bonuses}</details>` : ""}
     ${penalties ? `<details class="study-details"><summary>${esc(L("study_penalties"))} (${(p.penalties || []).length})</summary>${penalties}</details>` : ""}
     <details class="study-details" open><summary>${esc(L("study_lessons"))} (${(p.sessions || []).length})</summary>${lessons}</details>
     ${S.loading ? `<p class="status-text">${esc(L("study_loading"))}</p>` : ""}`;
@@ -3280,6 +3294,22 @@ function renderSettings(data) {
       .join("")}
     <button type="button" class="secondary-btn" data-sact="add-reward">${esc(L("study_set_add_reward"))}</button>
 
+    <h3 class="sys-subtitle">${esc(L("study_set_bonus"))}</h3>
+    <p class="study-hint">${esc(L("study_set_bonus_help"))}</p>
+    <button type="button" class="secondary-btn" data-sact="bonus" ${(data.players || []).length ? "" : "disabled"}>${esc(L("study_set_bonus_btn"))}</button>
+    ${
+      (data.recentBonuses || []).length
+        ? `<details class="study-details"><summary>${esc(L("study_bonus_recent"))} (${data.recentBonuses.length})</summary>${data.recentBonuses
+            .map(
+              (b) => `
+      <div class="study-row">
+        <div class="study-row-main"><div class="study-row-title">${esc(b.name || "-")}</div><div class="study-row-meta">${esc(L("study_bonus_recent_row", { points: fmt(b.points), names: (b.players || []).join(", ") }))} · ${fmtDate(b.createdAt)}</div></div>
+      </div>`
+            )
+            .join("")}</details>`
+        : ""
+    }
+
     <h3 class="sys-subtitle">${esc(L("study_set_penalty"))}</h3>
     <button type="button" class="secondary-btn" data-sact="penalty" ${(data.players || []).length ? "" : "disabled"}>${esc(L("study_set_penalty_btn"))}</button>
 
@@ -3390,6 +3420,42 @@ async function onSettingsClick(e) {
     const res = await studyCall("redeem_mark", { parentPin, redemptionId: id, status: "given" });
     if (!res.ok) return handleFailure(res);
     return reloadSettings();
+  }
+
+  if (act === "bonus") {
+    const players = data.players || [];
+    const out = await openFormDialog({
+      title: L("study_bonus_title"),
+      intro: L("study_set_bonus_help"),
+      okLabel: L("study_bonus_btn"),
+      cancelLabel: L("study_cancel"),
+      busyLabel: L("study_busy_saving"),
+      fields: [
+        { key: "name", label: L("study_bonus_name"), type: "text", maxlength: 80, placeholder: L("study_bonus_name_ph") },
+        { key: "points", label: L("study_bonus_points"), type: "number", min: 1, max: 1000000 },
+        {
+          key: "playerIds",
+          label: L("study_bonus_players"),
+          type: "checks",
+          allLabel: L("study_bonus_all"),
+          options: players.map((p) => ({ value: p.id, label: `${p.name} (${gradeText(p.grade, p.classLevel)})` })),
+          value: players.length === 1 ? [players[0].id] : []
+        }
+      ],
+      onSubmit: async (v) => {
+        if (!String(v.name || "").trim()) return { ok: false, error: L("study_bonus_name_required") };
+        if (!Number.isInteger(v.points) || v.points < 1) return { ok: false, error: L("study_bonus_points_invalid") };
+        if (!(v.playerIds || []).length) return { ok: false, error: L("study_bonus_players_required") };
+        const res = await studyCall("bonus_give", { parentPin, playerIds: v.playerIds, points: v.points, name: String(v.name).trim() });
+        if (!res.ok) return { ok: false, error: errText(res) };
+        return { ok: true, value: res };
+      }
+    });
+    if (out) {
+      window.alert(L("study_bonus_done", { n: out.given, points: fmt(out.points), name: out.name }));
+      return reloadSettings();
+    }
+    return;
   }
 
   if (act === "penalty") {
