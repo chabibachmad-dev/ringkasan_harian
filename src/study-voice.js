@@ -128,6 +128,7 @@ function pickVoice() {
 
 export function stopSpeaking() {
   speakToken++;
+  stopWav();
   try {
     if (synthSupported()) window.speechSynthesis.cancel();
   } catch {
@@ -135,12 +136,23 @@ export function stopSpeaking() {
   }
 }
 
+// Penanda "ucapan ke berapa": berubah tiap stopSpeaking()/ucapan baru. Pemanggil yang menunggu data suara dari server
+// membandingkannya setelah menunggu, supaya suara basi tidak diputar bila pemain sudah menekan Jeda/Kembali.
+export const speechToken = () => speakToken;
+
 // iOS/Safari hanya mengizinkan suara bila diminta dari sentuhan pengguna. Panggil fungsi ini DI DALAM penangan klik/ketuk:
 // satu ucapan hening membuka "kunci" sehingga balasan tutor berikutnya (yang datang setelah menunggu server) bisa langsung berbunyi.
 // Sekaligus menyiapkan AudioContext untuk rekam suara.
 export function unlockSpeech() {
   try {
-    getAudioContext();
+    const ac = getAudioContext();
+    if (ac) {
+      // satu bunyi hening lewat Web Audio membuka kunci pemutaran suara dari server di iOS
+      const src = ac.createBufferSource();
+      src.buffer = ac.createBuffer(1, 1, 22050);
+      src.connect(ac.destination);
+      src.start(0);
+    }
   } catch {
     /* abaikan */
   }
@@ -210,6 +222,94 @@ export function speakText(text, { rate = 1, onEnd } = {}) {
   }
 }
 
+// ---------------------------------------------------------------- suara tutor dari server (WAV, Gemini TTS)
+// Diputar lewat AudioContext bersama (sudah dibuka kuncinya oleh unlockSpeech di ketukan pemain); bila gagal, lewat elemen <audio>.
+let curSource = null;
+let curAudio = null;
+let curStop = null;
+
+export const audioPlayable = () => !!audioCtxCtor() || (typeof Audio !== "undefined");
+
+function stopWav() {
+  const stop = curStop;
+  curStop = null;
+  if (stop) stop();
+}
+
+function b64ToArrayBuffer(b64) {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes.buffer;
+}
+
+// Putar WAV (base64). Mengembalikan Promise<boolean>: true bila mulai diputar; onEnd dipanggil saat selesai (tidak dipanggil bila dihentikan).
+export async function playWav(b64, { onEnd } = {}) {
+  stopWav();
+  const token = speakToken;
+  let finished = false;
+  let guard = 0;
+  const done = (natural) => {
+    if (finished) return;
+    finished = true;
+    clearTimeout(guard);
+    if (curStop === stop) curStop = null;
+    if (natural && token === speakToken) onEnd?.();
+  };
+  const stop = () => {
+    try {
+      curSource?.stop();
+    } catch {
+      /* abaikan */
+    }
+    try {
+      curAudio?.pause();
+    } catch {
+      /* abaikan */
+    }
+    curSource = null;
+    curAudio = null;
+    done(false);
+  };
+  const ac = getAudioContext();
+  if (ac) {
+    try {
+      if (ac.state === "suspended") await ac.resume();
+      if (ac.state === "running") {
+        const buf = await decodeAudio(ac, b64ToArrayBuffer(b64));
+        if (token !== speakToken) return false;
+        const src = ac.createBufferSource();
+        src.buffer = buf;
+        src.connect(ac.destination);
+        src.onended = () => done(true);
+        curSource = src;
+        curStop = stop;
+        guard = setTimeout(() => done(true), buf.duration * 1000 + 1500);
+        src.start(0);
+        return true;
+      }
+    } catch {
+      /* jatuh ke elemen <audio> */
+    }
+  }
+  if (token !== speakToken) return false;
+  try {
+    const a = new Audio(`data:audio/wav;base64,${b64}`);
+    a.onended = () => done(true);
+    a.onerror = () => done(true);
+    curAudio = a;
+    curStop = stop;
+    guard = setTimeout(() => done(true), 30000);
+    await a.play();
+    return true;
+  } catch {
+    curAudio = null;
+    curStop = null;
+    clearTimeout(guard);
+    return false;
+  }
+}
+
 // ---------------------------------------------------------------- rekam suara (cadangan: peramban tanpa pengenalan suara yang andal)
 // Merekam dengan MediaRecorder, berhenti otomatis saat pembicara diam (deteksi hening), lalu diubah ke WAV 16 kHz mono 16-bit
 // di peramban (format yang diterima server di mana pun, termasuk hasil rekam Safari yang berformat MP4/AAC).
@@ -234,6 +334,8 @@ export const recorderSupported = () =>
 
 // Mikrofon dipertahankan selama percakapan otomatis berjalan (menghindari izin diminta ulang tiap giliran); lepaskan lewat releaseMic().
 let micStream = null;
+let micNodes = [];
+export const micHeld = () => !!micStream;
 export function releaseMic() {
   try {
     micStream?.getTracks().forEach((t) => t.stop());
@@ -241,6 +343,15 @@ export function releaseMic() {
     /* abaikan */
   }
   micStream = null;
+  // putuskan simpul analisis dari AudioContext bersama; kalau tidak, iOS bisa tetap menandai mikrofon "aktif"
+  for (const n of micNodes) {
+    try {
+      n.disconnect();
+    } catch {
+      /* abaikan */
+    }
+  }
+  micNodes = [];
 }
 async function acquireMic() {
   if (micStream && micStream.getAudioTracks().some((t) => t.readyState === "live")) return micStream;
@@ -386,6 +497,7 @@ export function startRecording({ maxMs = 20000, silenceMs = 1400, noSpeechMs = 9
         const an = ac.createAnalyser();
         an.fftSize = 1024;
         src.connect(an);
+        micNodes.push(src, an);
         const data = new Uint8Array(an.fftSize);
         const t0 = Date.now();
         let floor = 0;

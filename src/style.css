@@ -4073,3 +4073,20 @@ button.study-trow:active {
   align-items: center;
   gap: 6px;
 }
+
+.study-speak-filter {
+  display: flex;
+  gap: 8px;
+  margin: 4px 0 10px;
+}
+.study-speak-filter .secondary-btn {
+  flex: 1;
+  min-height: 40px;
+}
+.study-speak-filter .secondary-btn.is-on {
+  background: var(--accent);
+  color: var(--accent-contrast);
+}
+.study-speak-row.is-mine {
+  border-left: 3px solid var(--accent);
+}

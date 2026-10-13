@@ -811,3 +811,161 @@ export async function transcribeAudio(
   const costUsd = tokensUsed > 0 ? estimateCostUsd(model, tokensUsed * 0.9, tokensUsed * 0.1) : 0;
   return { text, tokensUsed, costUsd };
 }
+
+// ---------------- Suara tutor (teks -> suara) lewat Gemini TTS ----------------
+// Dipakai latihan Speaking supaya suara tutor jauh lebih natural daripada suara bawaan peramban. Model TTS Gemini punya jalur gratis
+// (kuota per-key, memakai rotasi key yang sama). Format permintaan resmi berubah antar generasi model, jadi dicoba dua bentuk berurutan:
+//   1. Interactions API (/v1beta/interactions, model generasi 3.x)  2. generateContent klasik (responseModalities AUDIO)
+// Mengembalikan WAV (RIFF) 24 kHz mono 16-bit dalam base64. Galat/kuota habis -> melempar; pemanggil jatuh ke suara peramban.
+export const DEFAULT_TTS_MODELS = ["gemini-3.8-flash-lite-tts", "gemini-3.1-flash-tts-preview", "gemini-3.8-flash-tts", "gemini-2.5-flash-preview-tts"];
+const DEFAULT_TTS_VOICE = "Sulafat"; // "Warm"; alternatif: Aoede (Breezy), Achird (Friendly), Zephyr (Bright)
+const TTS_STYLE = "warm, friendly and relaxed, like a young English teacher chatting with a student; natural conversational pace with small pauses";
+
+export function getTtsModels(): string[] {
+  const raw = Deno.env.get("GEMINI_TTS_MODELS") || "";
+  const list = raw.split(",").map((m) => m.trim()).filter(Boolean);
+  return list.length ? list : DEFAULT_TTS_MODELS;
+}
+
+function b64ToBytes(b64: string): Uint8Array {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+function bytesToB64(bytes: Uint8Array): string {
+  let s = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(s);
+}
+
+// PCM 16-bit mono mentah -> WAV (tambah header RIFF 44 byte).
+export function pcmToWav(pcm: Uint8Array, sampleRate = 24000): Uint8Array {
+  const wav = new Uint8Array(44 + pcm.length);
+  const v = new DataView(wav.buffer);
+  const w = (o: number, s: string) => {
+    for (let i = 0; i < s.length; i++) wav[o + i] = s.charCodeAt(i);
+  };
+  w(0, "RIFF");
+  v.setUint32(4, 36 + pcm.length, true);
+  w(8, "WAVE");
+  w(12, "fmt ");
+  v.setUint32(16, 16, true);
+  v.setUint16(20, 1, true);
+  v.setUint16(22, 1, true);
+  v.setUint32(24, sampleRate, true);
+  v.setUint32(28, sampleRate * 2, true);
+  v.setUint16(32, 2, true);
+  v.setUint16(34, 16, true);
+  w(36, "data");
+  v.setUint32(40, pcm.length, true);
+  wav.set(pcm, 44);
+  return wav;
+}
+
+// Ambil audio dari jawaban (kedua bentuk). Mengembalikan WAV base64 atau "" bila tak ada audio.
+export function extractTtsAudio(data: any): string {
+  const found: { data: string; mime: string }[] = [];
+  const walk = (node: any, depth: number) => {
+    if (!node || typeof node !== "object" || depth > 8) return;
+    if (Array.isArray(node)) return node.forEach((n) => walk(n, depth + 1));
+    const inline = node.inlineData ?? node.inline_data;
+    if (inline && typeof inline.data === "string") found.push({ data: inline.data, mime: String(inline.mimeType ?? inline.mime_type ?? "") });
+    else if (typeof node.data === "string" && node.data.length > 200) {
+      found.push({ data: node.data, mime: String(node.mime_type ?? node.mimeType ?? "") });
+    }
+    for (const k of Object.keys(node)) if (k !== "data" && k !== "inlineData" && k !== "inline_data") walk(node[k], depth + 1);
+  };
+  walk(data, 0);
+  const hit = found.find((f) => f.data.length > 200);
+  if (!hit) return "";
+  const bytes = b64ToBytes(hit.data);
+  const isRiff = bytes.length > 12 && bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46;
+  if (isRiff) return hit.data;
+  const rate = Number(/rate=(\d+)/i.exec(hit.mime)?.[1] ?? 24000) || 24000;
+  return bytesToB64(pcmToWav(bytes, rate));
+}
+
+async function ttsRequest(url: string, apiKey: string, body: unknown): Promise<any> {
+  const res = await fetch(url, { method: "POST", headers: { "content-type": "application/json", "x-goog-api-key": apiKey }, body: JSON.stringify(body) });
+  const raw = await res.text();
+  if (!res.ok) throw new GeminiHttpError(res.status, raw.slice(0, 400));
+  try {
+    return JSON.parse(raw);
+  } catch {
+    throw new Error("Jawaban TTS bukan JSON.");
+  }
+}
+
+const deadTtsModels = new Map<string, number>(); // model suara yang tidak ada (404) -> dilewati sementara
+
+export async function synthesizeSpeech(
+  text: string,
+  apiKeys: string[],
+  opts: { voice?: string; style?: string } = {}
+): Promise<{ wavBase64: string; model: string }> {
+  if (apiKeys.length === 0) throw new Error("Tidak ada API key Gemini untuk suara tutor.");
+  const clean = text.replace(/\s+/g, " ").trim().slice(0, 500);
+  if (!clean) throw new Error("Teks kosong.");
+  const voice = opts.voice || Deno.env.get("GEMINI_TTS_VOICE") || DEFAULT_TTS_VOICE;
+  const style = opts.style || TTS_STYLE;
+  let lastErr: unknown;
+  for (const model of getTtsModels()) {
+    if (Date.now() < (deadTtsModels.get(model) ?? 0)) continue;
+    const keys = availableKeysInOrder(apiKeys, "tts", model);
+    if (keys.length === 0) {
+      lastErr = new Error(`Semua API key Gemini sedang kena batas kuota untuk model suara "${model}".`);
+      continue;
+    }
+    for (const apiKey of keys) {
+      const attempts: (() => Promise<any>)[] = [
+        () =>
+          ttsRequest("https://generativelanguage.googleapis.com/v1beta/interactions", apiKey, {
+            model,
+            input: [{ type: "user_input", content: [{ type: "text", text: clean, annotations: [{ type: "speech_metadata", style }] }] }],
+            response_format: { type: "audio", mime_type: "audio/wav", sample_rate: 24000 },
+            generation_config: { speech_config: [{ voice }] }
+          }),
+        () =>
+          ttsRequest(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, apiKey, {
+            contents: [{ role: "user", parts: [{ text: `Say this in a ${style} voice: ${clean}` }] }],
+            generationConfig: { responseModalities: ["AUDIO"], speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: voice } } } }
+          })
+      ];
+      let quota = false;
+      let dead = false;
+      for (const attempt of attempts) {
+        try {
+          const data = await attempt();
+          const wav = extractTtsAudio(data);
+          if (!wav) throw new Error("Jawaban TTS tanpa audio.");
+          await reportKeyEvent({ keyHint: geminiKeyHint(apiKey), kind: "success", model });
+          return { wavBase64: wav, model };
+        } catch (err) {
+          lastErr = err;
+          if (err instanceof GeminiHttpError && err.status === 429) {
+            quota = true;
+            break; // kuota key ini habis untuk model ini: jangan coba bentuk kedua, pindah key
+          }
+          if (err instanceof GeminiHttpError && (err.status === 401 || err.status === 403)) break;
+          if (err instanceof GeminiHttpError && err.status === 404) {
+            // bentuk ini tidak dikenal (atau model tidak ada): coba bentuk kedua; bila keduanya 404, model ditandai tidak tersedia
+            if (attempt === attempts[attempts.length - 1]) dead = true;
+            continue;
+          }
+          console.warn(`TTS "${model}" gagal (${err instanceof Error ? err.message.slice(0, 160) : String(err)}), coba bentuk/model lain...`);
+        }
+      }
+      if (dead) {
+        deadTtsModels.set(model, Date.now() + 30 * 60_000);
+        break;
+      }
+      if (quota) {
+        const info = markKeyExhausted(apiKeys, apiKey, "tts", model, String((lastErr as Error)?.message ?? ""));
+        await reportKeyEvent({ keyHint: geminiKeyHint(apiKey), kind: "exhausted", model, daily: info.daily, exhaustedUntilMs: info.untilMs, error: summarizeGeminiError((lastErr as Error)?.message ?? "") });
+      }
+    }
+  }
+  throw lastErr instanceof Error ? lastErr : new Error("Semua percobaan suara tutor gagal.");
+}

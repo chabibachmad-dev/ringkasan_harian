@@ -10,7 +10,7 @@ import { fileToAvatarBase64 } from "./study-avatar.js";
 import { renderAiMarkdown, typesetMath } from "./markdown.js";
 import { buildStudyPdf, shareOrSaveStudyPdf, buildMaterialPdf, shareOrSaveMaterialPdf, buildRoomPdf, shareOrSaveRoomPdf } from "./study-pdf.js";
 import { pointsFormula, studyCardFileName } from "./study-text.js";
-import { recognitionSupported, synthSupported, startListening, speakText, stopSpeaking, unlockSpeech, recorderSupported, startRecording, releaseMic } from "./study-voice.js";
+import { recognitionSupported, synthSupported, startListening, speakText, stopSpeaking, unlockSpeech, recorderSupported, startRecording, releaseMic, micHeld, playWav, speechToken, audioPlayable } from "./study-voice.js";
 import { renderLessonCard, renderRoomCard, shareOrSaveCard } from "./study-card.js";
 import { allowedClasses, allowedMaterialGrades, classesOf, computePoints, formatClock, gradeText, PRACTICE_QUESTIONS as PRACTICE_COUNT, timeLimitSeconds } from "../supabase/functions/_shared/study-core.ts";
 
@@ -192,6 +192,7 @@ export function initStudy(context) {
   if (bell) bell.innerHTML = BELL_SVG;
   $("study-notif-btn")?.addEventListener("click", () => openNotifications());
   $("study-body")?.addEventListener("click", onBodyClick);
+  startMicSweep();
   $("study-body")?.addEventListener("change", onBodyChange);
   $("study-body")?.addEventListener("input", onBodyInput);
   $("study-body")?.addEventListener("keydown", (e) => {
@@ -765,6 +766,10 @@ async function onBodyClick(e) {
   if (act === "speak-open") return openSpeakSession(id);
   if (act === "speak-del") return deleteSpeakSession(id);
   if (act === "speak-reload") return loadSpeakList();
+  if (act === "speak-filter") {
+    if (S.speak) S.speak.filter = id === "mine" ? "mine" : "all";
+    return render();
+  }
   if (act === "speak-mic") return speakMic();
   if (act === "speak-send") return speakSend();
   if (act === "speak-replay") return speakReplay(btn.dataset.i);
@@ -3444,9 +3449,9 @@ const MIC_SVG = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" str
 function readSpeakPrefs() {
   try {
     const p = JSON.parse(localStorage.getItem(SPEAK_PREF_KEY) || "{}");
-    return { voice: p.voice !== false, auto: p.auto !== false, hands: p.hands !== false, forceRecord: p.forceRecord === true };
+    return { voice: p.voice !== false, auto: p.auto !== false, hands: p.hands !== false, forceRecord: p.forceRecord === true, natural: p.natural !== false };
   } catch (_e) {
-    return { voice: true, auto: true, hands: true, forceRecord: false };
+    return { voice: true, auto: true, hands: true, forceRecord: false, natural: true };
   }
 }
 function saveSpeakPrefs(prefs) {
@@ -3463,9 +3468,11 @@ const speakLang = () => (ctx.getLang() === "id" ? "id" : "en");
 function stopSpeakIO() {
   const sp = S.speak;
   if (sp) {
+    sp.round = (sp.round || 0) + 1; // putaran mendengarkan yang sedang berjalan dibatalkan: hasilnya tidak diproses/dikirim
     sp.hands = false;
     sp.switching = false;
     sp.listening = false;
+    sp.transcribing = false;
     if (sp.recog) {
       try {
         sp.recog.stop();
@@ -3477,6 +3484,87 @@ function stopSpeakIO() {
   }
   releaseMic();
   stopSpeaking();
+}
+
+// ---- mikrofon harus MATI begitu tidak sedang dipakai (iPad menampilkan titik oranye selama aliran mikrofon masih terbuka)
+// Pelepasan utama ada di tiap jalur berhenti; penyapu ini jaring pengaman: mikrofon yang masih terbuka padahal tidak mendengarkan
+// dan bukan sedang dalam putaran otomatis dilepas. Layar disembunyikan / aplikasi ke latar belakang juga menghentikan semuanya.
+let micSweepTimer = 0;
+function startMicSweep() {
+  if (micSweepTimer || typeof document === "undefined") return;
+  micSweepTimer = setInterval(() => {
+    if (!micHeld()) return;
+    const sp = S.speak;
+    if (!sp || S.view !== "speak" || (!sp.listening && !sp.hands)) releaseMic();
+  }, 1500);
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden || !S.speak) return;
+    const sp = S.speak;
+    const wasOn = sp.listening || sp.hands;
+    stopSpeakIO();
+    if (wasOn) sp.status = L("study_speak_paused_bg");
+    if (S.view === "speak") paintSpeak();
+  });
+}
+
+// ---- suara tutor: suara natural dari server (Gemini TTS) bila tersedia, kalau tidak / gagal: suara peramban.
+const ttsCache = new Map();
+let ttsDownUntil = 0;
+const voiceOk = () => synthSupported() || audioPlayable();
+
+// Bacakan satu giliran tutor. onEnd dipanggil setelah selesai (dibatalkan bila pemain menekan Jeda / keluar).
+function sayTurn(sp, turn, onEnd) {
+  stopSpeaking();
+  const tok = speechToken();
+  let settled = false;
+  const fallback = () => {
+    if (settled) return;
+    settled = true;
+    if (S.speak !== sp || tok !== speechToken()) return;
+    if (!speakText(turn.body, { onEnd })) onEnd?.();
+  };
+  const clearLoading = () => {
+    if (S.speak === sp && sp.status === L("study_speak_voice_loading")) {
+      sp.status = "";
+      if (S.view === "speak") paintSpeak();
+    }
+  };
+  const play = async (wav) => {
+    if (settled) return;
+    settled = true;
+    clearLoading();
+    if (S.speak !== sp || tok !== speechToken()) return;
+    const ok = await playWav(wav, { onEnd });
+    if (!ok && S.speak === sp && tok === speechToken()) {
+      ttsDownUntil = Date.now() + 5 * 60_000;
+      if (!speakText(turn.body, { onEnd })) onEnd?.();
+    }
+  };
+  if (sp.prefs.natural === false || Date.now() < ttsDownUntil || !audioPlayable() || !sp.session) return fallback();
+  const key = `${sp.session.id}:${turn.idx}`;
+  if (ttsCache.has(key)) return void play(ttsCache.get(key));
+  sp.status = L("study_speak_voice_loading");
+  if (S.view === "speak") paintSpeak();
+  const timer = setTimeout(() => {
+    // server terlalu lama: jangan membuat pemain menunggu, pakai suara peramban
+    if (settled) return;
+    ttsDownUntil = Date.now() + 2 * 60_000;
+    clearLoading();
+    fallback();
+  }, 9000);
+  speakCall("speak_tts", { sessionId: sp.session.id, idx: turn.idx }).then((res) => {
+    clearTimeout(timer);
+    if (settled) return;
+    if (S.speak !== sp) return;
+    if (!res.ok || !res.audio) {
+      ttsDownUntil = Date.now() + (res.dailyLimit || res.status === 429 ? 60 : 5) * 60_000;
+      clearLoading();
+      return fallback();
+    }
+    if (ttsCache.size >= 12) ttsCache.delete(ttsCache.keys().next().value);
+    ttsCache.set(key, res.audio);
+    play(res.audio);
+  });
 }
 
 // Panggil aksi speak_* dengan kredensial pemain yang sedang berlatih.
@@ -3537,8 +3625,9 @@ async function openSpeak() {
 }
 
 function enterSpeak(player, creds, firstList) {
+  ttsDownUntil = 0; // kunjungan baru: coba suara natural lagi
   pushView();
-  S.speak = { player, creds, list: [], loaded: false, loading: false, error: "", unavailable: false, session: null, turns: [], busy: false, pending: null, listening: false, transcribing: false, hands: false, switching: false, mode: "", misses: 0, lastErr: "", heard: "", draft: "", status: "", recog: null, prefs: readSpeakPrefs() };
+  S.speak = { player, creds, list: [], loaded: false, loading: false, error: "", unavailable: false, session: null, turns: [], busy: false, pending: null, listening: false, transcribing: false, hands: false, switching: false, mode: "", misses: 0, lastErr: "", heard: "", draft: "", status: "", recog: null, round: 0, filter: "all", prefs: readSpeakPrefs() };
   S.view = "speaklist";
   render();
   window.scrollTo(0, 0);
@@ -3577,25 +3666,31 @@ function renderSpeakList(body) {
   const sp = S.speak;
   if (!sp) return;
   const day = 24 * 3600 * 1000;
-  const rows = sp.list
+  const shown = sp.filter === "mine" ? sp.list.filter((s) => s.mine) : sp.list;
+  const rows = shown
     .map((s) => {
       const left = Math.max(0, Math.ceil((new Date(s.expiresAt).getTime() - Date.now()) / day));
-      return `<div class="study-card study-speak-row" data-sid="${esc(s.id)}">
+      const by = s.ownerName ? ` · ${esc(s.mine ? L("study_speak_you") : L("study_speak_by", { n: s.ownerName }))}` : "";
+      return `<div class="study-card study-speak-row${s.mine ? " is-mine" : ""}" data-sid="${esc(s.id)}">
         <div class="study-row-title">${esc(speakLabel(s))}${s.endedAt ? ` <small class="study-badge">${esc(L("study_speak_ended"))}</small>` : ""}</div>
-        <div class="study-row-meta">${esc(L("study_speak_turns", { n: s.userTurns, m: s.maxTurns }))} · ${esc(fmtDateTime(s.updatedAt))} · ${esc(left <= 1 ? L("study_speak_expires_today") : L("study_speak_expires", { d: left }))}</div>
+        <div class="study-row-meta">${esc(L("study_speak_turns", { n: s.userTurns, m: s.maxTurns }))}${by} · ${esc(fmtDateTime(s.updatedAt))} · ${esc(left <= 1 ? L("study_speak_expires_today") : L("study_speak_expires", { d: left }))}</div>
         <div class="study-actions">
-          <button type="button" class="primary-btn" data-act="speak-open" data-id="${esc(s.id)}">${esc(L("study_speak_open"))}</button>
-          <button type="button" class="secondary-btn" data-act="speak-del" data-id="${esc(s.id)}">${esc(L("study_speak_delete"))}</button>
+          <button type="button" class="${s.mine ? "primary-btn" : "secondary-btn"}" data-act="speak-open" data-id="${esc(s.id)}">${esc(s.mine ? L("study_speak_open") : L("study_speak_read"))}</button>
+          ${s.mine ? `<button type="button" class="secondary-btn" data-act="speak-del" data-id="${esc(s.id)}">${esc(L("study_speak_delete"))}</button>` : ""}
         </div>
       </div>`;
     })
     .join("");
+  const filters = `<div class="study-speak-filter" role="group">
+      <button type="button" class="secondary-btn${sp.filter !== "mine" ? " is-on" : ""}" data-act="speak-filter" data-id="all" aria-pressed="${sp.filter !== "mine"}">${esc(L("study_speak_filter_all"))}</button>
+      <button type="button" class="secondary-btn${sp.filter === "mine" ? " is-on" : ""}" data-act="speak-filter" data-id="mine" aria-pressed="${sp.filter === "mine"}">${esc(L("study_speak_filter_mine"))}</button>
+    </div>`;
   body.innerHTML = `
     <p class="study-hint study-hint--top">${esc(L("study_speak_intro", { d: SPEAK_KEEP_DAYS }))}</p>
     ${sp.unavailable ? `<div class="study-warn" role="status">${esc(L("study_speak_unavailable"))}</div>` : `<div class="study-actions"><button type="button" class="primary-btn" data-act="speak-new">${esc(L("study_speak_new"))}</button></div>`}
     ${sp.loading && !sp.loaded ? `<p class="status-text">${esc(L("study_loading"))}</p>` : ""}
     ${sp.error ? `<p class="status-text">${esc(sp.error)} <button type="button" class="secondary-btn" data-act="speak-reload">${esc(L("study_reload"))}</button></p>` : ""}
-    ${sp.loaded && !sp.unavailable ? (sp.list.length ? `<h3 class="study-h">${esc(L("study_speak_history", { d: SPEAK_KEEP_DAYS }))}</h3>${rows}` : `<p class="status-text">${esc(L("study_speak_empty"))}</p>`) : ""}`;
+    ${sp.loaded && !sp.unavailable ? (sp.list.length ? `<h3 class="study-h">${esc(L("study_speak_history", { d: SPEAK_KEEP_DAYS }))}</h3>${filters}${shown.length ? rows : `<p class="status-text">${esc(L("study_speak_empty"))}</p>`}` : `<p class="status-text">${esc(L("study_speak_empty"))}</p>`) : ""}`;
 }
 
 // ---- percakapan baru
@@ -3627,7 +3722,7 @@ function openSpeakNew() {
   }).then((out) => {
     if (!out || S.speak !== sp) return;
     showSpeakChat(out.session, out.turns);
-    if (sp.prefs.voice && out.turns.length) speakText(out.turns[out.turns.length - 1].body);
+    if (sp.prefs.voice && voiceOk() && out.turns.length) sayTurn(sp, out.turns[out.turns.length - 1]);
   });
 }
 
@@ -3684,7 +3779,7 @@ function renderSpeakChat(body) {
   const micOk = recognitionSupported() || recorderSupported();
   body.innerHTML = `
     <div class="study-card study-speak-head">
-      <div class="study-row-title">${esc(speakLabel(sp.session))}</div>
+      <div class="study-row-title">${esc(speakLabel(sp.session))}${sp.session.mine === false && sp.session.ownerName ? ` <small class="study-badge">${esc(L("study_speak_by", { n: sp.session.ownerName }))}</small>` : ""}</div>
       <div class="study-row-meta" id="study-speak-count"></div>
     </div>
     <div id="study-speak-log" class="study-speak-log" role="log" aria-live="polite"></div>
@@ -3695,7 +3790,8 @@ function renderSpeakChat(body) {
       <button type="button" class="primary-btn" id="study-speak-send" data-act="speak-send">${esc(L("study_speak_send"))}</button>
     </div>
     <div class="study-speak-opts">
-      ${synthSupported() ? `<label><input type="checkbox" data-speak-pref="voice" ${sp.prefs.voice ? "checked" : ""}> ${esc(L("study_speak_voice"))}</label>` : ""}
+      ${voiceOk() ? `<label><input type="checkbox" data-speak-pref="voice" ${sp.prefs.voice ? "checked" : ""}> ${esc(L("study_speak_voice"))}</label>` : ""}
+      ${voiceOk() && audioPlayable() ? `<label><input type="checkbox" data-speak-pref="natural" ${sp.prefs.natural !== false ? "checked" : ""}> ${esc(L("study_speak_natural"))}</label>` : ""}
       ${micOk ? `<label><input type="checkbox" data-speak-pref="hands" ${sp.prefs.hands ? "checked" : ""}> ${esc(L("study_speak_hands"))}</label>` : ""}
       ${micOk ? `<label><input type="checkbox" data-speak-pref="auto" ${sp.prefs.auto ? "checked" : ""}> ${esc(L("study_speak_auto"))}</label>` : ""}
     </div>
@@ -3710,17 +3806,20 @@ function renderSpeakChat(body) {
 function bubbleHtml(t) {
   if (t.role === "ai") {
     return `<div class="study-speak-msg is-ai"><div class="study-speak-who">${esc(L("study_speak_tutor"))}</div>
-      <div class="study-speak-bubble"><span>${esc(t.body)}</span>${synthSupported() ? `<button type="button" class="study-speak-replay" data-act="speak-replay" data-i="${t.idx}" aria-label="${esc(L("study_speak_replay"))}">${SPEAKER_SVG}</button>` : ""}</div></div>`;
+      <div class="study-speak-bubble"><span>${esc(t.body)}</span>${voiceOk() ? `<button type="button" class="study-speak-replay" data-act="speak-replay" data-i="${t.idx}" aria-label="${esc(L("study_speak_replay"))}">${SPEAKER_SVG}</button>` : ""}</div></div>`;
   }
   const fix = t.correction ? `<div class="study-speak-fix"><strong>${esc(L("study_speak_better"))}</strong> ${esc(t.correction)}${t.tip ? `<small>${esc(t.tip)}</small>` : ""}</div>` : "";
-  return `<div class="study-speak-msg is-user"><div class="study-speak-who">${esc(L("study_speak_you"))}</div><div class="study-speak-bubble"><span>${esc(t.body)}</span></div>${fix}</div>`;
+  const sess = S.speak?.session;
+  const who = sess && sess.mine === false && sess.ownerName ? sess.ownerName : L("study_speak_you");
+  return `<div class="study-speak-msg is-user"><div class="study-speak-who">${esc(who)}</div><div class="study-speak-bubble"><span>${esc(t.body)}</span></div>${fix}</div>`;
 }
 
 function paintSpeak() {
   const sp = S.speak;
   const log = $("study-speak-log");
   if (!sp?.session || !log) return;
-  const ended = !!sp.session.endedAt;
+  const foreign = sp.session.mine === false; // percakapan pemain lain: hanya dibaca
+  const ended = !!sp.session.endedAt || foreign;
   const full = (sp.session.userTurns ?? 0) >= (sp.session.maxTurns ?? 30);
   let html = sp.turns.map(bubbleHtml).join("");
   if (sp.pending) html += bubbleHtml({ role: "user", body: sp.pending });
@@ -3729,7 +3828,7 @@ function paintSpeak() {
   const cnt = $("study-speak-count");
   if (cnt) cnt.textContent = L("study_speak_turns", { n: sp.session.userTurns ?? 0, m: sp.session.maxTurns ?? 30 });
   const status = $("study-speak-status");
-  if (status) status.textContent = sp.listening ? L(sp.mode === "record" ? "study_speak_recording" : "study_speak_listening") : sp.transcribing ? L("study_speak_transcribing") : sp.status || (ended ? L("study_speak_view_only") : full ? L("study_speak_full", { m: sp.session.maxTurns ?? 30 }) : "");
+  if (status) status.textContent = sp.listening ? L(sp.mode === "record" ? "study_speak_recording" : "study_speak_listening") : sp.transcribing ? L("study_speak_transcribing") : sp.status || (foreign ? L("study_speak_view_other", { n: sp.session.ownerName || "" }) : ended ? L("study_speak_view_only") : full ? L("study_speak_full", { m: sp.session.maxTurns ?? 30 }) : "");
   const locked = ended || full;
   const input = $("study-speak-input");
   const send = $("study-speak-send");
@@ -3798,9 +3897,9 @@ async function speakSend() {
     if (S.speak === sp && sp.hands && S.view === "speak" && !sp.session.endedAt) resumeLoop(sp);
     else if (S.speak === sp && !sp.hands) releaseMic();
   };
-  if (sp.prefs.voice && synthSupported()) {
-    if (!speakText(res.aiTurn.body, { onEnd: resume })) resume();
-  } else resume();
+  if (res.full) releaseMic(); // percakapan selesai: mikrofon dimatikan sekarang, tidak menunggu suara tutor selesai
+  if (sp.prefs.voice && voiceOk()) sayTurn(sp, res.aiTurn, resume);
+  else resume();
 }
 
 // Giliran mendengarkan berikutnya dalam percakapan otomatis. Keadaan dicek ULANG saat timer berbunyi: pemain bisa menekan Jeda di antaranya.
@@ -3844,11 +3943,13 @@ function listenNow() {
   if (!sp?.session || S.view !== "speak" || sp.busy || sp.listening || sp.transcribing || sp.session.endedAt) return;
   if ((sp.session.userTurns ?? 0) >= (sp.session.maxTurns ?? 30)) {
     sp.hands = false;
+    releaseMic();
     return paintSpeak();
   }
   const mode = pickStt(sp);
   if (!mode) {
     sp.hands = false;
+    releaseMic();
     sp.status = L("study_speak_mic_unsupported");
     return paintSpeak();
   }
@@ -3895,17 +3996,18 @@ function heardText(sp, text) {
 }
 
 function listenBrowser(sp) {
+  const round = sp.round || 0;
   sp.recog = startListening({
     lang: "en-US",
     onText: (txt) => {
-      if (S.speak !== sp) return;
+      if (S.speak !== sp || sp.round !== round) return;
       sp.heard = txt;
       sp.draft = txt;
       const box = $("study-speak-input");
       if (box) box.value = txt;
     },
     onError: (code) => {
-      if (S.speak !== sp) return;
+      if (S.speak !== sp || sp.round !== round) return;
       sp.lastErr = code;
       if (code === "stalled" && recorderSupported()) {
         // mesin pengenalan peramban tidak merespons (mis. iPad/iPhone): ingat dan beralih ke mode rekam
@@ -3917,7 +4019,7 @@ function listenBrowser(sp) {
       sp.status = code === "stalled" ? L("study_speak_mic_stuck") : code === "nospeech" && sp.hands ? "" : sttErrorText(code);
     },
     onEnd: () => {
-      if (S.speak !== sp) return;
+      if (S.speak !== sp || sp.round !== round) return;
       sp.listening = false;
       sp.recog = null;
       if (sp.switching) {
@@ -3937,17 +4039,18 @@ function listenBrowser(sp) {
 }
 
 function listenRecord(sp) {
+  const round = sp.round || 0;
   sp.recog = startRecording({
     keepMic: sp.hands,
     onDone: async ({ wavBase64 }) => {
-      if (S.speak !== sp) return;
+      if (S.speak !== sp || sp.round !== round) return;
       sp.listening = false;
       sp.recog = null;
       sp.transcribing = true;
       if (S.view === "speak") paintSpeak();
       const sid = sp.session?.id;
       const res = await speakCall("speak_transcribe", { sessionId: sid, audio: wavBase64, mime: "audio/wav" });
-      if (S.speak !== sp || sp.session?.id !== sid) return;
+      if (S.speak !== sp || sp.session?.id !== sid || sp.round !== round) return;
       sp.transcribing = false;
       if (!res.ok) {
         if (speakAuthFailed(res)) return;
@@ -3964,7 +4067,7 @@ function listenRecord(sp) {
       heardText(sp, res.text);
     },
     onError: (code) => {
-      if (S.speak !== sp) return;
+      if (S.speak !== sp || sp.round !== round) return;
       sp.listening = false;
       sp.recog = null;
       if (code === "nospeech") {
@@ -3985,7 +4088,7 @@ function speakReplay(i) {
   const t = sp?.turns.find((x) => x.idx === Number(i));
   if (!t) return;
   if (sp.listening) return;
-  speakText(t.body, { onEnd: () => S.speak === sp && sp.hands && S.view === "speak" && resumeLoop(sp) });
+  sayTurn(sp, t, () => S.speak === sp && sp.hands && S.view === "speak" && resumeLoop(sp));
 }
 
 async function endSpeakSession() {
@@ -4008,6 +4111,7 @@ function onSpeakPref(input) {
   sp.prefs[input.dataset.speakPref] = input.checked;
   saveSpeakPrefs(sp.prefs);
   if (input.dataset.speakPref === "voice" && !input.checked) stopSpeaking();
+  if (input.dataset.speakPref === "natural" && input.checked) ttsDownUntil = 0;
   if (input.dataset.speakPref === "hands" && !input.checked && sp.hands) {
     sp.hands = false;
     releaseMic();

@@ -1,5 +1,6 @@
 // Tes logika murni menu Study (supabase/functions/_shared/study-core.ts).
 //   node test-study.mjs      (butuh Node 22.18+ yang bisa memuat .ts langsung)
+import { extractTtsAudio, pcmToWav, getTtsModels } from "../supabase/functions/_shared/gemini.ts";
 import {
   parseAvatarImage,
   SPEAK_SCENARIOS,
@@ -322,6 +323,27 @@ check(formatClock(600) === "10:00" && formatClock(61) === "1:01" && formatClock(
   check(r4 && r4.reply === "Just a plain sentence from the model." && r4.correction === "", "speaking: teks biasa dianggap balasan");
   check(parseSpeakReply("") === null && parseSpeakReply("{}") === null && parseSpeakReply('{"reply":""}') === null && parseSpeakReply("{broken") === null, "speaking: keluaran kosong/rusak -> null");
   check(parseSpeakReply('{"response":"Hi there","corrected":"A.","tip":"t"}', "b")?.correction === "A.", "speaking: nama kunci alternatif diterima");
+}
+
+// ---- suara tutor (Gemini TTS): pembungkus WAV + pembacaan jawaban dua bentuk
+{
+  const pcm = new Uint8Array(480); for (let i = 0; i < pcm.length; i++) pcm[i] = i % 251;
+  const wav = pcmToWav(pcm, 24000);
+  const dv = new DataView(wav.buffer);
+  check(wav.length === 44 + 480 && String.fromCharCode(...wav.slice(0, 4)) === "RIFF" && String.fromCharCode(...wav.slice(8, 12)) === "WAVE" && dv.getUint32(24, true) === 24000 && dv.getUint16(22, true) === 1 && dv.getUint16(34, true) === 16 && dv.getUint32(40, true) === 480, "tts: header WAV 24 kHz mono 16-bit benar");
+  const b64 = (u8) => Buffer.from(u8).toString("base64");
+  const fromClassic = extractTtsAudio({ candidates: [{ content: { parts: [{ inlineData: { mimeType: "audio/L16;codec=pcm;rate=24000", data: b64(pcm) } }] } }] });
+  check(fromClassic && Buffer.from(fromClassic, "base64").subarray(0, 4).toString() === "RIFF" && Buffer.from(fromClassic, "base64").length === 524, "tts: bentuk generateContent (PCM) dibungkus jadi WAV");
+  const riff = b64(wav);
+  const fromInter = extractTtsAudio({ steps: [{ type: "model_output", content: [{ type: "audio", mime_type: "audio/wav", data: riff }] }] });
+  check(fromInter === riff, "tts: bentuk Interactions (WAV sudah berheader) dipakai apa adanya");
+  check(extractTtsAudio({ candidates: [{ content: { parts: [{ text: "hi" }] } }] }) === "" && extractTtsAudio(null) === "" && extractTtsAudio({}) === "", "tts: jawaban tanpa audio -> string kosong");
+  const rate16 = extractTtsAudio({ candidates: [{ content: { parts: [{ inline_data: { mime_type: "audio/L16;rate=16000", data: b64(pcm) } }] } }] });
+  check(new DataView(Buffer.from(rate16, "base64").buffer.slice(0)).getUint32(24, true) === 16000 || Buffer.from(rate16, "base64").readUInt32LE(24) === 16000, "tts: laju sampel dibaca dari mime");
+  globalThis.Deno = { env: { get: () => "" } };
+  check(getTtsModels().length >= 3 && getTtsModels()[0].includes("tts"), "tts: daftar model bawaan tersedia");
+  globalThis.Deno = { env: { get: (k) => (k === "GEMINI_TTS_MODELS" ? " a-tts , b-tts " : "") } };
+  check(getTtsModels().join("|") === "a-tts|b-tts", "tts: GEMINI_TTS_MODELS mengganti daftar model");
 }
 
 if (fails) {
