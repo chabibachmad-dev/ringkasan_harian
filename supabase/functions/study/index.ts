@@ -90,7 +90,7 @@
 
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { corsHeaders } from "../_shared/cors.ts";
-import { getGeminiApiKeys, generateJsonText, setGeminiKeyReporter, synthesizeSpeech, transcribeAudio } from "../_shared/gemini.ts";
+import { geminiKeyHint, getGeminiApiKeys, generateJsonText, primeStudyKeysExhausted, setGeminiKeyReporter, synthesizeSpeech, transcribeAudio } from "../_shared/gemini.ts";
 import { getGroqSttKeys, transcribeWithGroq } from "../_shared/groq-stt.ts";
 import { setFallbackReporter } from "../_shared/llm-fallback.ts";
 import {
@@ -355,7 +355,26 @@ async function recordTokens(admin: Admin, tokens: number, cost: number) {
   }
 }
 
-function wireReporters(admin: Admin) {
+// Catatan database "semua key Gemini sudah kena kuota harian" (ditulis chat, study, dan bot WA) dibaca paling sering tiap menit per instance,
+// supaya instance baru tidak menguji satu per satu belasan key/model yang sudah pasti ditolak sebelum pindah ke Groq.
+let primeCheckedAt = 0;
+async function primeGeminiFromDb(admin: Admin) {
+  const keys = getGeminiApiKeys();
+  if (keys.length === 0 || Date.now() - primeCheckedAt < 60_000) return;
+  primeCheckedAt = Date.now();
+  try {
+    const { data } = await admin.from("gemini_key_usage").select("key_hint,exhausted_until").gt("exhausted_until", new Date(Date.now() + 10 * 60_000).toISOString());
+    const until = new Map<string, number>();
+    for (const r of (data ?? []) as Row[]) until.set(r.key_hint, Math.max(until.get(r.key_hint) ?? 0, Date.parse(r.exhausted_until) || 0));
+    const per = keys.map((k) => until.get(geminiKeyHint(k)) ?? 0);
+    if (per.every((u) => u > 0)) primeStudyKeysExhausted(keys, Math.min(...per));
+  } catch {
+    /* catatan tidak terbaca: lanjut seperti biasa */
+  }
+}
+
+async function wireReporters(admin: Admin) {
+  await primeGeminiFromDb(admin);
   setGeminiKeyReporter(async (event) => {
     await admin.rpc("report_gemini_key_event", {
       p_usage_date: pacificDate(),
@@ -770,7 +789,7 @@ async function askSpeakTutor(
   engine: Engine,
   farewell = false
 ): Promise<{ reply: string; correction: string; tip: string; provider: string } | { error: string }> {
-  wireReporters(admin);
+  await wireReporters(admin);
   const keys = getGeminiApiKeys();
   const system = buildSpeakSystemPrompt({ scenario: spec.scenario, topic: spec.topic, grade: p.grade, classLevel: p.class_level ?? null, lang: spec.lang });
   const user = buildSpeakUserPrompt(history, userText, farewell);
@@ -780,7 +799,7 @@ async function askSpeakTutor(
   let out: { reply: string; correction: string; tip: string; provider: string } | null = null;
   for (let attempt = 0; attempt < 2 && !out; attempt++) {
     try {
-      const r = await generateJsonText(system, user, keys, { temperature: 0.95, engine });
+      const r = await generateJsonText(system, user, keys, { temperature: 0.95, engine, budgetMs: 20_000 });
       tokens += r.tokensUsed;
       cost += r.costUsd;
       const parsed = parseSpeakReply(r.text, userText ?? undefined);
@@ -999,7 +1018,7 @@ Deno.serve(async (req) => {
       const slot = await takeGenerationSlot(admin, p.id, "lesson");
       if (slot) return slot;
       const engine = parseEngine(body.engine);
-      wireReporters(admin);
+      await wireReporters(admin);
       const made = await makeQuestions(
         admin,
         { subject, topic: topic || undefined, grade: materialGrade, classLevel: materialClass, level: body.level, count, source: material ? practiceSource(material.content) : undefined },
@@ -1060,7 +1079,7 @@ Deno.serve(async (req) => {
       if (!Array.isArray(body.answers)) return fail("Jawaban tidak valid.");
       const { error } = await admin.rpc("study_submit_session", { p_session: owned.session.id, p_answers: body.answers });
       if (error) return fail(error.message, 500);
-      wireReporters(admin);
+      await wireReporters(admin);
       const { data: fresh } = await admin.from("study_sessions").select("*").eq("id", owned.session.id).single();
       const missing = await explainQuestions(admin, fresh ?? owned.session, parseEngine(body.engine));
       return json({ ok: true, explainFailed: missing > 0, result: await loadResult(admin, fresh ?? owned.session, auth.player), daily: await loadDaily(admin, auth.player.id) });
@@ -1072,7 +1091,7 @@ Deno.serve(async (req) => {
       const owned = await loadOwnedSession(admin, body.sessionId, auth.player.id);
       if (owned instanceof Response) return owned;
       if (owned.session.status !== "submitted") return fail("Pelajaran belum dikumpulkan.", 409);
-      wireReporters(admin);
+      await wireReporters(admin);
       const missing = await explainQuestions(admin, owned.session, parseEngine(body.engine));
       return json({ ok: true, explainFailed: missing > 0, result: await loadResult(admin, owned.session, auth.player) });
     }
@@ -1444,7 +1463,7 @@ Deno.serve(async (req) => {
       const slot = await takeGenerationSlot(admin, p.id, "material");
       if (slot) return slot;
       const engine = parseEngine(body.engine);
-      wireReporters(admin);
+      await wireReporters(admin);
       const keys = getGeminiApiKeys();
       const prompt = buildMaterialPrompt({ subject, grade: body.grade, classLevel: cls, detail });
       let made: { title: string; content: string } | null = null;
@@ -1545,7 +1564,7 @@ Deno.serve(async (req) => {
       const slot = await takeGenerationSlot(admin, p.id, "lesson");
       if (slot) return slot;
       const engine = parseEngine(body.engine);
-      wireReporters(admin);
+      await wireReporters(admin);
       const made = await makeQuestions(admin, { subject, topic: topic || undefined, grade: body.materialGrade, classLevel: materialClass, level: body.level, count }, engine);
       const minOk = Math.max(1, Math.ceil(count * 0.8));
       if (made.questions.length < minOk) {
@@ -1689,7 +1708,7 @@ Deno.serve(async (req) => {
       if (audio.length < 200 || audio.length > SPEAK_AUDIO_MAX_B64 || !/^[A-Za-z0-9+/]+={0,2}$/.test(audio)) return fail("Rekaman tidak valid atau terlalu panjang (maksimal ±20 detik).");
       const limit = await checkSpeakLimits(admin, auth.player.id);
       if (limit) return limit;
-      wireReporters(admin);
+      await wireReporters(admin);
       try {
         // Mesin utama: Groq Whisper (gratis, longgar). Gagal/habis/tak ada key -> cadangan Gemini.
         const groqKeys = getGroqSttKeys();
@@ -1746,7 +1765,7 @@ Deno.serve(async (req) => {
       if (used.n >= SPEAK_TTS_PER_PLAYER_DAY) return fail("Batas suara tutor harian tercapai; memakai suara perangkat.", 429, { dailyLimit: true });
       used.n++;
       speakTtsUse.set(auth.player.id as string, used);
-      wireReporters(admin);
+      await wireReporters(admin);
       try {
         const r = await synthesizeSpeech(String(turn.body), getGeminiApiKeys());
         return json({ ok: true, audio: r.wavBase64, mime: "audio/wav" });

@@ -144,6 +144,7 @@ const S = {
 // ---------------------------------------------------------------- util
 function errText(res) {
   if (res.notDeployed) return L("study_not_deployed");
+  if (res.timeout) return L("study_slow_reply");
   if (res.network) return `${L("study_network")} (${res.message})`;
   if (res.status === 504 || res.status === 546 || res.status === 502 && !res.generationFailed) return L("study_timeout");
   return res.message || "Error";
@@ -3596,11 +3597,29 @@ function sayTurn(sp, turn, onEnd) {
   stopSpeaking();
   const tok = speechToken();
   let settled = false;
+  // Pengaman: sebagian perangkat (iOS) kadang tidak pernah memanggil "selesai bicara". Tanpa ini percakapan otomatis berhenti
+  // menunggu dan mic tidak menyala. Setelah perkiraan lama bicara + jeda, anggap selesai (kecuali pemain sudah menjeda/keluar).
+  const origEnd = onEnd;
+  let finished = false;
+  let watchdog = null;
+  onEnd = () => {
+    if (finished) return;
+    finished = true;
+    clearTimeout(watchdog);
+    origEnd?.();
+  };
+  const arm = () => {
+    clearTimeout(watchdog);
+    watchdog = setTimeout(() => {
+      if (S.speak === sp && tok === speechToken()) onEnd();
+    }, 8000 + Math.min(60_000, String(turn.body || "").length * 90));
+  };
   const fallback = () => {
     if (settled) return;
     settled = true;
     if (S.speak !== sp || tok !== speechToken()) return;
-    if (!speakText(turn.body, { onEnd })) onEnd?.();
+    arm();
+    if (!speakText(turn.body, { onEnd })) onEnd();
   };
   const clearLoading = () => {
     if (S.speak === sp && sp.status === L("study_speak_voice_loading")) {
@@ -3613,13 +3632,14 @@ function sayTurn(sp, turn, onEnd) {
     settled = true;
     clearLoading();
     if (S.speak !== sp || tok !== speechToken()) return;
+    arm();
     const ok = await playWav(wav, { onEnd });
     if (!ok && S.speak === sp && tok === speechToken()) {
       // perangkat memblokir pemutaran otomatis (iOS tanpa ketukan terbaru): coba suara perangkat, dan beri tahu cara memutar manual
       ttsDownUntil = Date.now() + 5 * 60_000;
       sp.status = L("study_speak_audio_blocked");
       if (S.view === "speak") paintSpeak();
-      if (!speakText(turn.body, { onEnd })) onEnd?.();
+      if (!speakText(turn.body, { onEnd })) onEnd();
     }
   };
   if (sp.prefs.natural === false || Date.now() < ttsDownUntil || !audioPlayable() || !sp.session) return fallback();
@@ -3656,9 +3676,11 @@ function sayTurn(sp, turn, onEnd) {
 }
 
 // Panggil aksi speak_* dengan kredensial pemain yang sedang berlatih.
+// Batas tunggu per aksi: AI yang macet tidak boleh mengunci layar (tombol jawab) tanpa akhir.
+const SPEAK_TIMEOUTS = { speak_start: 75_000, speak_turn: 60_000, speak_transcribe: 30_000, speak_tts: 20_000, speak_get: 25_000 };
 function speakCall(action, extra = {}) {
   const sp = S.speak;
-  return studyCall(action, { playerId: sp.player.id, pin: sp.creds.pin, ...extra });
+  return studyCall(action, { playerId: sp.player.id, pin: sp.creds.pin, ...extra }, { timeoutMs: SPEAK_TIMEOUTS[action] || 45_000 });
 }
 
 function speakAuthFailed(res) {
@@ -3965,6 +3987,9 @@ async function speakSend() {
   sp.pending = null;
   if (!res.ok) {
     if (speakAuthFailed(res)) return;
+    // Balasan terlalu lama / jaringan putus: server mungkin tetap menyelesaikan giliran ini. Cek dulu supaya tidak terkirim dobel.
+    if ((res.timeout || res.network) && (await resyncSpeakAfterSend(sp, sid))) return;
+    if (S.speak !== sp || sp.session?.id !== sid) return;
     if (res.ended) sp.session.endedAt = sp.session.endedAt || new Date().toISOString();
     if (res.sessionFull) sp.session.userTurns = sp.session.maxTurns;
     sp.hands = false; // galat: hentikan percakapan otomatis supaya pemain bisa memeriksa dan mengirim ulang
@@ -4003,6 +4028,32 @@ async function speakSend() {
   }
   if (sp.prefs.voice && voiceOk()) sayTurn(sp, res.aiTurn, resume);
   else resume();
+}
+
+// Setelah speak_turn macet: tanya server apakah giliran itu ternyata tercatat. true = ya (layar sudah diperbarui, jangan kirim ulang).
+async function resyncSpeakAfterSend(sp, sid) {
+  sp.hands = false;
+  releaseMic();
+  sp.status = L("study_speak_checking");
+  if (S.view === "speak") paintSpeak();
+  await new Promise((r) => setTimeout(r, 3000));
+  if (S.speak !== sp || sp.session?.id !== sid) return true; // pemain sudah pergi
+  const got = await speakCall("speak_get", { sessionId: sid });
+  if (S.speak !== sp || sp.session?.id !== sid) return true;
+  const t = got.ok && Array.isArray(got.turns) ? got.turns : [];
+  if (t.length >= sp.turns.length + 2 && t[t.length - 1].role === "ai") {
+    sp.turns = t;
+    if (got.session) sp.session = { ...sp.session, ...got.session };
+    sp.status = "";
+    sp.draft = "";
+    sp.misses = 0;
+    const box = $("study-speak-input");
+    if (box) box.value = "";
+    if (S.view === "speak") paintSpeak();
+    if (sp.prefs.voice && voiceOk()) sayTurn(sp, t[t.length - 1]);
+    return true;
+  }
+  return false;
 }
 
 // Giliran mendengarkan berikutnya dalam percakapan otomatis. Keadaan dicek ULANG saat timer berbunyi: pemain bisa menekan Jeda di antaranya.

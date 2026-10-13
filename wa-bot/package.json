@@ -9,7 +9,7 @@
   },
   "scripts": {
     "start": "node index.js",
-    "test": "node test-app-agent.mjs && node test-khatam.mjs && node test-kb.mjs && node test-docguard.mjs && node test-kb-retrieval.mjs && node test-llm-fallback.mjs && node test-web-search.mjs && node test-reg-monitor.mjs && node test-markdown.mjs && node test-engine-routing.mjs && node test-ollama-queue.mjs && node test-ollama-http.mjs && node test-telegram.mjs && node test-voice.mjs && node test-voice-output.mjs && node test-wa-voice.mjs && node test-tutor.mjs && node test-simab-rekam.mjs && node test-study.mjs && node test-study-text.mjs"
+    "test": "node test-app-agent.mjs && node test-khatam.mjs && node test-kb.mjs && node test-docguard.mjs && node test-kb-retrieval.mjs && node test-llm-fallback.mjs && node test-web-search.mjs && node test-reg-monitor.mjs && node test-markdown.mjs && node test-engine-routing.mjs && node test-ollama-queue.mjs && node test-ollama-http.mjs && node test-telegram.mjs && node test-voice.mjs && node test-voice-output.mjs && node test-wa-voice.mjs && node test-tutor.mjs && node test-simab-rekam.mjs && node test-study.mjs && node test-gemini-deadline.mjs && node test-study-text.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.0",

@@ -91,16 +91,22 @@ export async function callGeminiWithRetry(
   maxAttempts: number = MAX_ATTEMPTS,
   // false = 429 langsung dilempar tanpa retry (dipakai waktu ada >1 API key,
   // supaya langsung pindah ke key berikutnya, bukan nunggu 3-15 detik dulu).
-  retryOn429: boolean = true
+  retryOn429: boolean = true,
+  // Batas waktu MUTLAK (Date.now() ms) untuk seluruh panggilan ini termasuk jeda retry. Tanpa ini (chat, ringkasan) perilaku lama:
+  // fetch menunggu selama yang diperlukan Gemini. Dipakai Edge Function `study` supaya Gemini yang lambat/macet cepat dialihkan ke Groq.
+  deadlineMs?: number
 ): Promise<unknown> {
   let lastErr: Error | null = null;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    const res = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: requestBody
-    });
+    let res: Response;
+    try {
+      const signal = deadlineMs ? AbortSignal.timeout(Math.max(1000, deadlineMs - Date.now())) : undefined;
+      res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: requestBody, signal });
+    } catch (e) {
+      if (deadlineMs && (e as Error)?.name && /Abort|Timeout/i.test((e as Error).name)) throw new GeminiHttpError(0, "Gemini terlalu lama menjawab (waktu habis).");
+      throw e;
+    }
 
     if (res.ok) {
       return await res.json();
@@ -116,6 +122,7 @@ export async function callGeminiWithRetry(
     }
 
     const delay = RETRY_DELAYS_MS[attempt - 1] ?? RETRY_DELAYS_MS[RETRY_DELAYS_MS.length - 1];
+    if (deadlineMs && Date.now() + delay >= deadlineMs) throw lastErr; // tidak sempat menunggu retry: lepas ke cadangan
     console.warn(`Gemini API ${res.status}, percobaan ${attempt}/${maxAttempts} gagal, coba lagi dalam ${delay}ms...`);
     await sleep(delay);
   }
@@ -198,7 +205,8 @@ async function callGeminiWithModelFallback(
   apiKeys: string[],
   buildBody: () => string,
   steps: { model: string; maxAttempts: number }[],
-  tag = "plain" // pembeda jalur (mis. "tools" vs "plain") buat catatan key habis
+  tag = "plain", // pembeda jalur (mis. "tools" vs "plain") buat catatan key habis
+  deadlineMs?: number // batas waktu mutlak seluruh rangkaian (lihat callGeminiWithRetry); kosong = tanpa batas
 ): Promise<{ data: GeminiData; model: string }> {
   let lastErr: unknown;
   const multiKey = apiKeys.length > 1;
@@ -210,12 +218,14 @@ async function callGeminiWithModelFallback(
       continue;
     }
     for (const apiKey of candidates) {
+      if (deadlineMs && Date.now() >= deadlineMs) throw lastErr instanceof Error ? lastErr : new GeminiHttpError(0, "Gemini terlalu lama menjawab (waktu habis).");
       try {
         const data = (await callGeminiWithRetry(
           buildGenerateUrl(step.model, apiKey),
           buildBody(),
           step.maxAttempts,
-          !multiKey
+          !multiKey,
+          deadlineMs
         )) as GeminiData;
         await reportKeyEvent({ keyHint: geminiKeyHint(apiKey), kind: "success", model: step.model });
         return { data, model: step.model };
@@ -245,6 +255,7 @@ async function callGeminiWithModelFallback(
           });
           continue; // coba key berikutnya utk step/model yang sama
         }
+        if (deadlineMs && err instanceof GeminiHttpError && err.status === 0) throw err; // waktu habis: model/key lain pun akan lambat, lepas ke cadangan
         console.warn(`Model "${step.model}" gagal (${reason}), lanjut ke opsi berikutnya...`);
         break; // error selain kuota: pindah ke step berikutnya (spt sebelumnya)
       }
@@ -703,6 +714,19 @@ export async function generateChatReply(
   }
 }
 
+// Tandai semua key habis (jalur "study", semua model) sampai untilMs. Dipakai Edge Function `study` setelah membaca catatan database
+// ("semua key sudah kena kuota harian"), supaya instance baru (ingatan kosong) tidak menghabiskan belasan permintaan ditolak
+// sebelum pindah ke penyedia cadangan.
+export function primeStudyKeysExhausted(apiKeys: string[], untilMs: number): void {
+  const primary = Deno.env.get("GEMINI_MODEL") || DEFAULT_MODEL;
+  const fallback = Deno.env.get("GEMINI_MODEL_FALLBACK") || DEFAULT_FALLBACK_MODEL;
+  for (const k of apiKeys) {
+    for (const m of new Set([primary, fallback])) {
+      if ((exhaustedUntil.get(exhaustedId("study", m, k)) ?? 0) < untilMs) exhaustedUntil.set(exhaustedId("study", m, k), untilMs);
+    }
+  }
+}
+
 // ================================================================
 // Keluaran terstruktur (JSON) -- dipakai Edge Function `study` untuk membuat soal & pembahasan.
 // Urutan sama seperti chat: Gemini dulu (rotasi key + model cadangan), lalu Groq/OpenRouter bila Gemini gagal total.
@@ -722,7 +746,16 @@ export async function generateJsonText(
   system: string,
   prompt: string,
   apiKeyOrKeys: string | string[],
-  options: { temperature?: number; engine?: "auto" | "gemini" | "groq" | "openrouter"; plain?: boolean } = {}
+  options: {
+    temperature?: number;
+    engine?: "auto" | "gemini" | "groq" | "openrouter";
+    plain?: boolean;
+    // Batas waktu total untuk jalur Gemini (ms). Lewat dari ini Gemini dilepas dan penyedia cadangan dipakai. Bawaan: env
+    // STUDY_GEMINI_BUDGET_MS atau 45000. 0 = tanpa batas.
+    budgetMs?: number;
+    // "fallback-first" = Groq/OpenRouter dulu, Gemini hanya bila cadangan gagal. Bawaan: env STUDY_AI_ORDER atau "gemini-first".
+    order?: "gemini-first" | "fallback-first";
+  } = {}
 ): Promise<JsonTextResult> {
   const apiKeys = Array.isArray(apiKeyOrKeys) ? apiKeyOrKeys : [apiKeyOrKeys];
   const temperature = options.temperature ?? 0.7;
@@ -738,7 +771,8 @@ export async function generateJsonText(
       });
     const steps = [{ model: primaryModel, maxAttempts: MAX_ATTEMPTS - 1 }];
     if (fallbackModel !== primaryModel) steps.push({ model: fallbackModel, maxAttempts: MAX_ATTEMPTS - 1 });
-    const { data, model } = await callGeminiWithModelFallback(apiKeys, buildBody, steps, "study");
+    const budget = options.budgetMs ?? (Number(Deno.env.get("STUDY_GEMINI_BUDGET_MS")) || 45_000);
+    const { data, model } = await callGeminiWithModelFallback(apiKeys, buildBody, steps, "study", budget > 0 ? Date.now() + budget : undefined);
     const text = extractGeminiText(data);
     if (!text.trim()) throw new Error(`Respons Gemini (study) kosong: ${JSON.stringify(data).slice(0, 300)}`);
     const tokensUsed = data?.usageMetadata?.totalTokenCount ?? 0;
@@ -766,6 +800,15 @@ export async function generateJsonText(
     return await viaFallback();
   }
   if (!chain.available()) return await viaGemini();
+  const order = options.order ?? (Deno.env.get("STUDY_AI_ORDER") === "fallback-first" ? "fallback-first" : "gemini-first");
+  if (order === "fallback-first") {
+    try {
+      return await viaFallback();
+    } catch (fbErr) {
+      console.warn(`[Cadangan] study: cadangan gagal (${String((fbErr as Error)?.message || fbErr).slice(0, 120)}), mencoba Gemini.`);
+      return await viaGemini();
+    }
+  }
   try {
     return await viaGemini();
   } catch (geminiErr) {

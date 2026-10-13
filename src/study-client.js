@@ -41,14 +41,18 @@ export const studyHooks = { onTokenInvalid: null };
 
 // Satu pintu untuk semua aksi. Mengembalikan { ok: true, ...data } atau
 // { ok: false, message, status, pinWrong, locked, seconds, attemptsLeft, insufficient, ... }.
-export async function studyCall(action, params = {}) {
+export async function studyCall(action, params = {}, { timeoutMs = 0 } = {}) {
   const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
   const anonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
+  // timeoutMs > 0: batalkan permintaan bila server terlalu lama (mis. AI macet), supaya layar tidak terkunci menunggu.
+  const ctrl = timeoutMs > 0 && typeof AbortController !== "undefined" ? new AbortController() : null;
+  const timer = ctrl ? setTimeout(() => ctrl.abort(), timeoutMs) : null;
   try {
     const res = await fetch(`${supabaseUrl}/functions/v1/study`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${anonKey}` },
-      body: JSON.stringify({ action, ...params })
+      body: JSON.stringify({ action, ...params }),
+      signal: ctrl ? ctrl.signal : undefined
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok || data.ok === false) {
@@ -64,6 +68,9 @@ export async function studyCall(action, params = {}) {
     }
     return { ok: true, ...data };
   } catch (err) {
+    if (err && err.name === "AbortError") return { ok: false, timeout: true, message: "timeout" };
     return { ok: false, message: err instanceof Error ? err.message : String(err), network: true };
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }
