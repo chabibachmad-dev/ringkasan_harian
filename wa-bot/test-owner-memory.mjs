@@ -58,6 +58,30 @@ const silent = { log() {}, warn() {}, error() {} };
   mem.close();
 }
 
+// ---- pencarian
+{
+  const mem = await openOwnerMemory({ file: ":memory:", log: silent });
+  mem.add("klien PT Maju memakai skema SJPH reguler");
+  mem.add("rapat tiap Selasa jam 9 di kantor");
+  mem.add("PT Maju punya dua lokasi produksi");
+  mem.add("jawaban ringkas saja");
+  check(mem.search("maju").map((n) => n.n).join() === "1,3", "cari: satu kata, nomor = nomor di daftar penuh");
+  check(mem.search("PT  MAJU lokasi").map((n) => n.n).join() === "3", "cari: semua kata harus ada (AND), huruf besar-kecil & spasi ganda tak masalah");
+  check(mem.search("tidak-ada").length === 0 && mem.search("   ").length === 0 && mem.search(undefined).length === 0, "cari: tak ada hasil / kueri kosong -> kosong");
+  const r = handleMemoryCommand(mem, { name: "catatan", arg: "maju" });
+  check(r.includes('2 catatan memuat "maju"') && r.includes("1. klien PT Maju") && r.includes("3. PT Maju punya") && !r.includes("Selasa"), "balasan: /catatan <kata> menampilkan hanya yang cocok dengan nomor aslinya");
+  check(handleMemoryCommand(mem, { name: "catatan", arg: "cari selasa" }).includes("2. rapat tiap Selasa"), "balasan: '/catatan cari <kata>' juga bisa");
+  check(handleMemoryCommand(mem, { name: "catatan", arg: "xyz" }).includes('Tidak ada catatan yang memuat "xyz"'), "balasan: tak ketemu -> pesan jelas");
+  check(handleMemoryCommand(mem, { name: "catatan", arg: "a".repeat(90) }).includes("…"), "balasan: kata cari yang panjang dipotong di pesan");
+  check(handleMemoryCommand(mem, { name: "catatan", arg: "" }).includes("4 catatan"), "balasan: tanpa kata tetap daftar lengkap");
+  const hit = mem.search("maju")[1].n;
+  handleMemoryCommand(mem, { name: "lupa", arg: String(hit) });
+  check(mem.search("maju").length === 1 && mem.count() === 3, "cari -> /lupa <nomor hasil cari> menghapus catatan yang benar");
+  const empty = await openOwnerMemory({ file: ":memory:", log: silent });
+  check(handleMemoryCommand(empty, { name: "catatan", arg: "apa" }).includes("Belum ada catatan"), "balasan: cari saat kosong -> Belum ada catatan");
+  mem.close(); empty.close();
+}
+
 // ---- tahan restart (file di disk)
 {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mem-"));

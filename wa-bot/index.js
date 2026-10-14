@@ -79,6 +79,7 @@ import { createOps, readOpsConfig } from "./ops.js";
 import { ollamaChatStream } from "./ollama-http.js";
 import { createProviderStats, parseProviderCommand } from "./provider-stats.js";
 import { createSkills, parseSkillCommand } from "./skills.js";
+import { createLocalChat, parseLocalChatCommand } from "./local-chat.js";
 import { handleMemoryCommand, openOwnerMemory, parseMemoryCommand } from "./owner-memory.js";
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
@@ -2930,6 +2931,7 @@ async function handleIncoming(msg, sock) {
   // /ingat /catatan /lupa /penyedia (hanya pemilik, bukan di grup): lihat owner-memory.js dan provider-stats.js.
   if (isOwnerSender(msg, isSelfChat) && !isGroupJid(jid) && (await handleWaOwnerLocalCommands(sock, jid, text))) return;
   if (isOwnerSender(msg, isSelfChat) && !isGroupJid(jid) && (await handleWaSkillCommand(sock, jid, text))) return;
+  if (isOwnerSender(msg, isSelfChat) && !isGroupJid(jid) && (await handleWaLocalChatCommand(sock, jid, text))) return;
 
   // Tutor suara (/speak, /selesai) hanya untuk pemilik; selama sesi, teks/voice note pemilik = ucapan untuk tutor
   // (tidak disimpan ke riwayat chat dan tidak memicu auto-reply).
@@ -3350,6 +3352,12 @@ const skills = createSkills({
   callModel: (messages, opts) => enqueueOllamaCall(() => callOllamaChat(messages, opts), { priority: PRIORITY.CHAT, label: "owner-skill" })
 });
 
+// /lokal <pesan>: ngobrol dengan Ollama lokal (privat, memakai catatan pribadi), khusus pemilik. Lihat local-chat.js.
+const localChat = createLocalChat({
+  getMemory: ownerMemoryBlock,
+  callModel: (messages, opts) => enqueueOllamaCall(() => callOllamaChat(messages, opts), { priority: PRIORITY.CHAT, label: "owner-lokal" })
+});
+
 // Perintah laptop dari Telegram (/sistem /log /restart /deploy /migrasi), mati kecuali OPS_ENABLED=true. Lihat ops.js.
 const botStateStore = {
   get: async (key) => {
@@ -3382,6 +3390,23 @@ async function handleWaOwnerLocalCommands(sock, jid, text) {
   if (!mem && !prov) return false;
   const reply = mem ? handleMemoryCommand(ownerMemory, mem) : buildProviderReport({ reset: prov.reset });
   await sock.sendMessage(jid, { text: reply }).catch((e) => console.error("💬 [WA/Lokal] gagal kirim:", e instanceof Error ? e.message : String(e)));
+  return true;
+}
+
+/** /lokal (alias /tanya) dari WhatsApp (hanya pemilik, bukan grup). true = pesan sudah ditangani. */
+async function handleWaLocalChatCommand(sock, jid, text) {
+  const cmd = parseLocalChatCommand(text);
+  if (!cmd) return false;
+  const send = (t) => sock.sendMessage(jid, { text: t }).catch((e) => console.error("💬 [WA/Lokal] gagal kirim:", e instanceof Error ? e.message : String(e)));
+  const stop = waTutorIo(sock, jid).busy("text");
+  try {
+    await send(await localChat.handle(`wa:${jid}`, cmd.text));
+  } catch (e) {
+    console.error("💬 [WA/Lokal] gagal:", e instanceof Error ? e.message : String(e));
+    await send(`⚠️ Ollama lokal gagal menjawab: ${String(e instanceof Error ? e.message : e).slice(0, 200)}\nPastikan Ollama berjalan di laptop.`);
+  } finally {
+    stop();
+  }
   return true;
 }
 
@@ -3445,6 +3470,7 @@ const telegram = createTelegram({
     ops,
     memory: { handle: (cmd) => handleMemoryCommand(ownerMemory, cmd) },
     skills,
+    localChat,
     providers: { report: (opts) => buildProviderReport(opts) },
     state: {
       get: async (key) => {

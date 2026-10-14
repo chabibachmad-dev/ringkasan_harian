@@ -148,9 +148,10 @@ const HELP = [
   "/ringkasan  — ringkasan percakapan WhatsApp hari ini",
   "/peraturan  — pantau peraturan terbaru (\"/peraturan semua\" = tampilkan semua hasil)",
   "/dokumen <pertanyaan>  — tanya dari dokumen lokal di laptop (hasil PDF → MD), dijawab Ollama. \"/dokumen\" saja = daftar dokumen",
+  "/lokal <pesan>  — ngobrol dengan Ollama LOKAL (alias /tanya): percakapan dan catatan pribadimu tidak keluar dari laptop;  /lokal baru  — lupakan percakapan",
   "/skill  — daftar skill (resep tugas buatanmu di wa-bot/skills/*.md);  /skill <nama> <teks>  — jalankan, dijawab Ollama lokal",
   "/penyedia  — status tiap penyedia AI (Gemini, Groq, OpenRouter, Ollama): berhasil/gagal, key yang istirahat",
-  "/ingat <teks>  — simpan catatan pribadi (hanya di laptop, hanya dibaca Ollama lokal);  /catatan  — daftar;  /lupa <nomor|semua>  — hapus",
+  "/ingat <teks>  — simpan catatan pribadi (hanya di laptop, hanya dibaca Ollama lokal);  /catatan  — daftar;  /catatan <kata>  — cari;  /lupa <nomor|semua>  — hapus",
   "/sistem  — kondisi laptop bot (pm2, disk, RAM, Ollama); /log, /restart, /deploy, /migrasi: ketik /ops (perlu OPS_ENABLED=true)",
   "/baru  — mulai obrolan baru (lupakan konteks sebelumnya)",
   "/speak [topik]  — mulai latihan ngobrol Inggris dengan tutor (suara)   /speak id [topik]  — ngobrol santai bahasa Indonesia   /selesai  — akhiri",
@@ -168,6 +169,7 @@ const HELP = [
  *   ops?: { handle(name, arg, {chatId, viaVoice, send}) -> Promise<string|undefined> }   perintah laptop (ops.js)
  *   localDocs?: { ask(q)->Promise<{reply}>, list()->string }   tanya-jawab dokumen lokal (/dokumen), dijawab Ollama
  *   memory?: { handle({name:"ingat"|"catatan"|"lupa", arg}) -> string }   catatan pribadi pemilik (owner-memory.js), hanya dibaca Ollama lokal
+ *   localChat?: { handle(key, arg)->Promise<string>, reset(key) }   obrolan dengan Ollama lokal (/lokal, /tanya; local-chat.js), tidak lewat Gemini
  *   skills?: { list()->string, ask(name, input)->Promise<{reply}> }   skill pemilik (file .md di wa-bot/skills), dijawab Ollama lokal (skills.js)
  *   providers?: { report({reset}) -> string }   status penyedia AI (/penyedia, provider-stats.js)
  *   regNow?({ all, sendTo })          -> Promise            jalankan pantauan peraturan, kirim lewat sendTo(text)
@@ -620,6 +622,7 @@ Ubah: /suara auto • /suara on • /suara off`));
     if (name === "id") return void (await reply(`Id chat ini: ${chatId}`));
     if (name === "baru") {
       histories.delete(chatId);
+      deps.localChat?.reset?.(key);
       return void (await reply("Oke, obrolan baru. Konteks sebelumnya dilupakan."));
     }
 
@@ -650,6 +653,15 @@ Ubah: /suara auto • /suara on • /suara off`));
       return;
     }
 
+    if (name === "lokal" || name === "tanya") {
+      const lc = deps.localChat;
+      if (!lc) return void (await reply("Fitur obrolan lokal belum aktif di bot ini."));
+      try {
+        return void (await reply(await withTyping(chatId, () => lc.handle(key, arg))));
+      } catch (e) {
+        return void (await reply(`⚠️ Ollama lokal gagal menjawab: ${String(e?.message || e).slice(0, 200)}\nPastikan Ollama berjalan di laptop.`));
+      }
+    }
     if (name === "skill" || name === "skil") {
       const sk = deps.skills;
       if (!sk) return void (await reply("Fitur skill belum aktif di bot ini."));
@@ -794,7 +806,7 @@ Ubah: /suara auto • /suara on • /suara off`));
   }
 
   const HANDLER_DEADLINE_MS = 10 * 60_000;
-  const FAST_COMMANDS = new Set(["dokumen", "dok", "doc", "status", "id", "help", "start", "ingat", "catatan", "lupa", "memori", "note", "penyedia", "provider", "skill", "skil"]);
+  const FAST_COMMANDS = new Set(["dokumen", "dok", "doc", "status", "id", "help", "start", "ingat", "catatan", "lupa", "memori", "note", "penyedia", "provider", "skill", "skil", "lokal", "tanya"]);
   function isFastUpdate(u) {
     const m = u?.message;
     if (!m) return false;
@@ -910,6 +922,7 @@ Ubah: /suara auto • /suara on • /suara off`));
           { command: "ringkasan", description: "Ringkasan percakapan WhatsApp hari ini" },
           { command: "peraturan", description: "Pantau peraturan terbaru" },
           { command: "dokumen", description: "Tanya dari dokumen lokal di laptop (dijawab Ollama)" },
+          { command: "lokal", description: "Ngobrol dengan Ollama lokal (privat, memakai catatan pribadi)" },
           { command: "skill", description: "Jalankan skill buatanmu (file .md), dijawab Ollama lokal" },
           { command: "penyedia", description: "Status penyedia AI: Gemini, Groq, OpenRouter, Ollama" },
           { command: "ingat", description: "Simpan catatan pribadi (hanya Ollama lokal); /catatan, /lupa" },

@@ -711,3 +711,9 @@ Instruksi untuk model, bebas, Bahasa Indonesia.
 ```
 
 Batas: file maks 8.000 huruf, masukan maks 6.000 huruf, maks 60 skill. Skill `dokumen: true` tidak memanggil model sama sekali bila tidak ada bagian dokumen yang cocok. Contoh bawaan: `ringkas`, `rapikan-surat`, `laporan-skp`, `tanya-pasal`. Mengirim ulang patch yang berisi skill bernama sama akan menimpa isinya, jadi untuk ubahan sendiri beri nama file yang berbeda.
+
+## Obrolan Ollama lokal (`/lokal`) dan pencarian catatan
+
+**`/lokal <pesan>`** (alias **`/tanya`**) mengobrol dengan Ollama di laptop, di Telegram dan WhatsApp (WhatsApp: chat pribadi saja, bukan grup). Bedanya dengan obrolan biasa di Telegram (dijawab Gemini di cloud): di sini seluruh percakapan dan **catatan pribadi (`/ingat`) hanya diproses Ollama lokal**, tidak keluar dari laptop. Bot mengingat beberapa tanya-jawab terakhir per chat (hanya di memori; hilang saat restart). `/lokal baru` melupakannya, dan `/baru` di Telegram ikut mengosongkannya. Tidak ada pencarian web dan tidak ada dokumen di sini: untuk dokumen pakai `/dokumen`, untuk info terbaru pakai obrolan biasa. Model lokal bisa keliru, jadi untuk angka/peraturan resmi tetap cek ke dokumen.
+
+**`/catatan <kata>`** mencari catatan yang memuat semua kata itu (tak peduli huruf besar-kecil), contoh `/catatan maju sjph`. Nomor di hasil sama dengan nomor di daftar lengkap, jadi bisa langsung `/lupa <nomor>`.

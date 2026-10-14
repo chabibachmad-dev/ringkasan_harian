@@ -34,7 +34,7 @@ export function parseMemoryCommand(text) {
 export const MEMORY_HELP = [
   "🧠 Catatan pribadi (disimpan hanya di laptop, hanya dibaca Ollama lokal):",
   "/ingat <teks>  — simpan satu catatan (maks 300 huruf)",
-  "/catatan  — daftar catatan",
+  "/catatan  — daftar catatan   •   /catatan <kata>  — cari catatan",
   "/lupa <nomor>  — hapus satu catatan   •   /lupa semua  — hapus semuanya",
   "Jangan simpan kata sandi, PIN, atau nomor kartu."
 ].join("\n");
@@ -78,6 +78,20 @@ export async function openOwnerMemory({ file, maxNotes = 50, log = console, now 
     return rows().map((r, i) => ({ n: i + 1, id: r.id, text: r.text, createdAt: r.created_at }));
   }
 
+  /** Cari catatan yang memuat SEMUA kata (tak peduli huruf besar-kecil). Nomor tetap nomor di daftar penuh, jadi cocok untuk /lupa. */
+  function search(query) {
+    const words = String(query ?? "")
+      .toLowerCase()
+      .split(/\s+/)
+      .filter(Boolean)
+      .slice(0, 8);
+    if (words.length === 0) return [];
+    return list().filter((n) => {
+      const t = n.text.toLowerCase();
+      return words.every((w) => t.includes(w));
+    });
+  }
+
   /** which: nomor tampilan (1..n) atau "semua". */
   function remove(which) {
     const all = rows();
@@ -116,7 +130,7 @@ export async function openOwnerMemory({ file, maxNotes = 50, log = console, now 
     }
   }
 
-  return { add, list, remove, promptBlock, close, count: () => rows().length, limit };
+  return { add, list, search, remove, promptBlock, close, count: () => rows().length, limit };
 }
 
 /** Balasan teks untuk perintah memori (dipakai Telegram dan WhatsApp). */
@@ -138,7 +152,16 @@ export function handleMemoryCommand(mem, { name, arg }) {
     if (r.ok) return /^(semua|all)$/i.test(arg) ? `🧹 ${r.removed} catatan dihapus.` : `🧹 Dihapus: ${r.note}`;
     return `Tidak ada catatan nomor ${arg}. Ada ${r.total} catatan; lihat /catatan.`;
   }
-  // catatan
+  // catatan <kata>: cari
+  const query = arg.replace(/^cari\s+/i, "").trim();
+  if (query) {
+    if (mem.count() === 0) return `Belum ada catatan.\n\n${MEMORY_HELP}`;
+    const found = mem.search(query);
+    const shown = query.length > 40 ? `${query.slice(0, 40)}…` : query;
+    if (found.length === 0) return `Tidak ada catatan yang memuat "${shown}". Ketik /catatan untuk melihat semuanya.`;
+    return [`🔎 ${found.length} catatan memuat "${shown}":`, ...found.map((i) => `${i.n}. ${i.text}`), "", "Hapus: /lupa <nomor>"].join("\n");
+  }
+  // catatan: daftar lengkap
   const items = mem.list();
   if (items.length === 0) return `Belum ada catatan.\n\n${MEMORY_HELP}`;
   return [`🧠 ${items.length} catatan (maks ${mem.limit}; hanya di laptop, hanya dibaca Ollama lokal):`, ...items.map((i) => `${i.n}. ${i.text}`), "", "Hapus: /lupa <nomor> atau /lupa semua"].join("\n");
