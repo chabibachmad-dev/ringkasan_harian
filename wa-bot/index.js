@@ -78,6 +78,7 @@ import { createLocalDocs, parseDokumenCommand } from "./local-docs.js";
 import { createOps, readOpsConfig } from "./ops.js";
 import { ollamaChatStream } from "./ollama-http.js";
 import { createProviderStats, parseProviderCommand } from "./provider-stats.js";
+import { createSkills, parseSkillCommand } from "./skills.js";
 import { handleMemoryCommand, openOwnerMemory, parseMemoryCommand } from "./owner-memory.js";
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
@@ -2928,6 +2929,7 @@ async function handleIncoming(msg, sock) {
   if (isOwnerSender(msg, isSelfChat) && !isGroupJid(jid) && (await handleWaDokumenCommand(sock, jid, text))) return;
   // /ingat /catatan /lupa /penyedia (hanya pemilik, bukan di grup): lihat owner-memory.js dan provider-stats.js.
   if (isOwnerSender(msg, isSelfChat) && !isGroupJid(jid) && (await handleWaOwnerLocalCommands(sock, jid, text))) return;
+  if (isOwnerSender(msg, isSelfChat) && !isGroupJid(jid) && (await handleWaSkillCommand(sock, jid, text))) return;
 
   // Tutor suara (/speak, /selesai) hanya untuk pemilik; selama sesi, teks/voice note pemilik = ucapan untuk tutor
   // (tidak disimpan ke riwayat chat dan tidak memicu auto-reply).
@@ -3340,6 +3342,14 @@ const localDocs = createLocalDocs({
   callModel: (messages, opts) => enqueueOllamaCall(() => callOllamaChat(messages, opts), { priority: PRIORITY.CHAT, label: "owner-docs" })
 });
 
+// /skill <nama> <teks>: resep tugas (file .md di wa-bot/skills), khusus pemilik, dijawab Ollama lokal. Lihat skills.js.
+const skills = createSkills({
+  dir: fileURLToPath(new URL("./skills", import.meta.url)),
+  getMemory: ownerMemoryBlock,
+  searchDocs: (q) => (kbIndex ? kbIndex.search(q, { budgetChars: DOC_LOCAL_BUDGET_CHARS, maxChunks: 8, onlyLocal: true }) : []),
+  callModel: (messages, opts) => enqueueOllamaCall(() => callOllamaChat(messages, opts), { priority: PRIORITY.CHAT, label: "owner-skill" })
+});
+
 // Perintah laptop dari Telegram (/sistem /log /restart /deploy /migrasi), mati kecuali OPS_ENABLED=true. Lihat ops.js.
 const botStateStore = {
   get: async (key) => {
@@ -3372,6 +3382,27 @@ async function handleWaOwnerLocalCommands(sock, jid, text) {
   if (!mem && !prov) return false;
   const reply = mem ? handleMemoryCommand(ownerMemory, mem) : buildProviderReport({ reset: prov.reset });
   await sock.sendMessage(jid, { text: reply }).catch((e) => console.error("💬 [WA/Lokal] gagal kirim:", e instanceof Error ? e.message : String(e)));
+  return true;
+}
+
+/** /skill dari WhatsApp (hanya pemilik, bukan grup). true = pesan sudah ditangani. */
+async function handleWaSkillCommand(sock, jid, text) {
+  const cmd = parseSkillCommand(text);
+  if (!cmd) return false;
+  const send = (t) => sock.sendMessage(jid, { text: t }).catch((e) => console.error("💬 [WA/Skill] gagal kirim:", e instanceof Error ? e.message : String(e)));
+  if (cmd.list) {
+    await send(skills.list());
+    return true;
+  }
+  const stop = waTutorIo(sock, jid).busy("text");
+  try {
+    await send((await skills.ask(cmd.name, cmd.input)).reply);
+  } catch (e) {
+    console.error("💬 [WA/Skill] gagal:", e instanceof Error ? e.message : String(e));
+    await send(`⚠️ Skill gagal dijalankan: ${String(e instanceof Error ? e.message : e).slice(0, 200)}\nPastikan Ollama berjalan di laptop.`);
+  } finally {
+    stop();
+  }
   return true;
 }
 
@@ -3413,6 +3444,7 @@ const telegram = createTelegram({
     localDocs,
     ops,
     memory: { handle: (cmd) => handleMemoryCommand(ownerMemory, cmd) },
+    skills,
     providers: { report: (opts) => buildProviderReport(opts) },
     state: {
       get: async (key) => {

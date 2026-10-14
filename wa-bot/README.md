@@ -688,3 +688,26 @@ Dua perintah untuk pemilik, di Telegram dan WhatsApp (WhatsApp: chat pribadi saj
 Contoh: `/ingat jawab singkat, maksimal 5 poin` lalu tanya di chat aplikasi dengan mesin Ollama.
 
 Pengaturan (opsional) ada di bagian 16 `.env.example`: `OWNER_MEMORY_ENABLED`, `OWNER_MEMORY_MAX`, `OWNER_MEMORY_BUDGET_CHARS`, `OWNER_MEMORY_FILE`.
+
+## Skill (`/skill`): resep tugas buatanmu sendiri
+
+Skill adalah file `.md` di folder `wa-bot/skills/` yang berisi instruksi untuk Ollama. Nama file = nama skill. Dipanggil dari Telegram atau WhatsApp (WhatsApp: chat pribadi saja, bukan grup):
+
+- `/skill` — daftar skill
+- `/skill <nama> <teks yang diolah>` — jalankan, contoh: `/skill ringkas <tempel teksnya>` (nama boleh disingkat selama awalannya unik)
+
+Skill **hanya teks**: tidak ada kode yang dijalankan, tidak ada akses berkas, jaringan, atau shell. Dijawab Ollama lokal di laptop (tidak pernah ke Gemini/Groq/OpenRouter), hanya untuk pemilik. Teks masukan diperlakukan sebagai bahan olahan, bukan perintah, jadi instruksi yang menyusup di dalam teks yang kamu tempel diabaikan. Folder dibaca ulang tiap dipakai, jadi skill baru langsung bisa dipakai tanpa restart.
+
+Format file (blok di antara `---` opsional):
+
+```
+---
+deskripsi: Ringkas teks jadi poin-poin     # tampil di daftar
+dokumen: false     # true = sertakan bagian dokumen lokal yang cocok; jawaban diperiksa & diberi "📚 Sumber"
+catatan: true      # true (bawaan) = catatan pribadi /ingat ikut dibaca
+suhu: 0.3          # 0-1; makin kecil makin kaku/konsisten
+---
+Instruksi untuk model, bebas, Bahasa Indonesia.
+```
+
+Batas: file maks 8.000 huruf, masukan maks 6.000 huruf, maks 60 skill. Skill `dokumen: true` tidak memanggil model sama sekali bila tidak ada bagian dokumen yang cocok. Contoh bawaan: `ringkas`, `rapikan-surat`, `laporan-skp`, `tanya-pasal`. Mengirim ulang patch yang berisi skill bernama sama akan menimpa isinya, jadi untuk ubahan sendiri beri nama file yang berbeda.

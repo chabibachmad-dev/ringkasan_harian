@@ -148,6 +148,7 @@ const HELP = [
   "/ringkasan  — ringkasan percakapan WhatsApp hari ini",
   "/peraturan  — pantau peraturan terbaru (\"/peraturan semua\" = tampilkan semua hasil)",
   "/dokumen <pertanyaan>  — tanya dari dokumen lokal di laptop (hasil PDF → MD), dijawab Ollama. \"/dokumen\" saja = daftar dokumen",
+  "/skill  — daftar skill (resep tugas buatanmu di wa-bot/skills/*.md);  /skill <nama> <teks>  — jalankan, dijawab Ollama lokal",
   "/penyedia  — status tiap penyedia AI (Gemini, Groq, OpenRouter, Ollama): berhasil/gagal, key yang istirahat",
   "/ingat <teks>  — simpan catatan pribadi (hanya di laptop, hanya dibaca Ollama lokal);  /catatan  — daftar;  /lupa <nomor|semua>  — hapus",
   "/sistem  — kondisi laptop bot (pm2, disk, RAM, Ollama); /log, /restart, /deploy, /migrasi: ketik /ops (perlu OPS_ENABLED=true)",
@@ -167,6 +168,7 @@ const HELP = [
  *   ops?: { handle(name, arg, {chatId, viaVoice, send}) -> Promise<string|undefined> }   perintah laptop (ops.js)
  *   localDocs?: { ask(q)->Promise<{reply}>, list()->string }   tanya-jawab dokumen lokal (/dokumen), dijawab Ollama
  *   memory?: { handle({name:"ingat"|"catatan"|"lupa", arg}) -> string }   catatan pribadi pemilik (owner-memory.js), hanya dibaca Ollama lokal
+ *   skills?: { list()->string, ask(name, input)->Promise<{reply}> }   skill pemilik (file .md di wa-bot/skills), dijawab Ollama lokal (skills.js)
  *   providers?: { report({reset}) -> string }   status penyedia AI (/penyedia, provider-stats.js)
  *   regNow?({ all, sendTo })          -> Promise            jalankan pantauan peraturan, kirim lewat sendTo(text)
  *   state?: { get(key), set(key, value) }                   penyimpan offset (supaya restart tidak memproses ulang)
@@ -648,6 +650,19 @@ Ubah: /suara auto • /suara on • /suara off`));
       return;
     }
 
+    if (name === "skill" || name === "skil") {
+      const sk = deps.skills;
+      if (!sk) return void (await reply("Fitur skill belum aktif di bot ini."));
+      const first = /^(\S+)(?:\s+([\s\S]*))?$/.exec(arg);
+      if (!first || /^(daftar|list|ls)$/i.test(arg)) return void (await reply(sk.list()));
+      try {
+        const out = await withTyping(chatId, () => sk.ask(first[1].toLowerCase().replace(/^\/+/, ""), (first[2] ?? "").trim()));
+        await reply(out.reply);
+      } catch (e) {
+        await reply(`⚠️ Skill gagal dijalankan: ${String(e?.message || e).slice(0, 200)}\nPastikan Ollama berjalan di laptop.`);
+      }
+      return;
+    }
     if (name === "ingat" || name === "catatan" || name === "lupa" || name === "memori" || name === "note") {
       if (!deps.memory) return void (await reply("Fitur catatan belum aktif di bot ini."));
       try {
@@ -779,7 +794,7 @@ Ubah: /suara auto • /suara on • /suara off`));
   }
 
   const HANDLER_DEADLINE_MS = 10 * 60_000;
-  const FAST_COMMANDS = new Set(["dokumen", "dok", "doc", "status", "id", "help", "start", "ingat", "catatan", "lupa", "memori", "note", "penyedia", "provider"]);
+  const FAST_COMMANDS = new Set(["dokumen", "dok", "doc", "status", "id", "help", "start", "ingat", "catatan", "lupa", "memori", "note", "penyedia", "provider", "skill", "skil"]);
   function isFastUpdate(u) {
     const m = u?.message;
     if (!m) return false;
@@ -895,6 +910,7 @@ Ubah: /suara auto • /suara on • /suara off`));
           { command: "ringkasan", description: "Ringkasan percakapan WhatsApp hari ini" },
           { command: "peraturan", description: "Pantau peraturan terbaru" },
           { command: "dokumen", description: "Tanya dari dokumen lokal di laptop (dijawab Ollama)" },
+          { command: "skill", description: "Jalankan skill buatanmu (file .md), dijawab Ollama lokal" },
           { command: "penyedia", description: "Status penyedia AI: Gemini, Groq, OpenRouter, Ollama" },
           { command: "ingat", description: "Simpan catatan pribadi (hanya Ollama lokal); /catatan, /lupa" },
           { command: "sistem", description: "Kondisi laptop bot; /ops untuk restart, deploy, log" },
