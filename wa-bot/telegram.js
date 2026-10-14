@@ -151,6 +151,7 @@ const HELP = [
   "/pasar  — IHSG, harga emas dunia (Rp/gram), dan kurs USD/IDR sekarang (alias /emas, /ihsg); dikirim otomatis tiap pagi hari kerja. /pasar tes = uji tiap sumber data",
   "/ingatkan <waktu> <teks>  — pengingat pribadi (contoh: /ingatkan besok 09:00 kirim SPJ; /ingatkan tiap tanggal 25 jam 08:00 laporan);  /pengingat  — daftar;  /pengingat batal <nomor>",
   "/kesehatan  — periksa Ollama, disk, memori, WhatsApp, basis data, restart, dan cadangan sekarang (otomatis dipantau; kamu dikabari saat bermasalah dan pulih)",
+  "/nodin  — konsep Nota Dinas LPJ Bendahara (PDF + Word); otomatis tiap tanggal 1. Contoh: /nodin,  /nodin november,  /nodin oktober 2026,  /nodin status",
   "/urutan  — lihat/ubah urutan AI untuk balasan WhatsApp & grup (jalur santai & akurat; contoh: /urutan santai groq,gemini,openrouter,ollama;  /urutan reset)",
   "/cadangan  — status cadangan otomatis (memori, pengingat, skill, sesi WhatsApp);  /cadangan sekarang  — buat sekarang",
   "/lokal <pesan>  — ngobrol dengan Ollama LOKAL (alias /tanya): percakapan dan catatan pribadimu tidak keluar dari laptop;  /lokal baru  — lupakan percakapan",
@@ -176,6 +177,7 @@ const HELP = [
  *   memory?: { handle({name:"ingat"|"catatan"|"lupa", arg}) -> string }   catatan pribadi pemilik (owner-memory.js), hanya dibaca Ollama lokal
  *   reminders?: { handle({name:"ingatkan"|"pengingat", arg}) -> string }   pengingat pribadi (reminders.js)
  *   health?: { report() -> Promise<string> }   papan kesehatan bot (health.js)
+ *   nodin?: { compose(arg) -> Promise<{ok,text,caption?,files?}> }   konsep nota dinas bulanan (nodin.js, /nodin)
  *   aiRoute?: { handle(arg) -> Promise<string> }   urutan penyedia AI balasan WA/grup (ai-route.js, /urutan)
  *   backup?: { status() -> string, run() -> Promise<string> }   cadangan lokal (backup.js)
  *   market?: { report() -> Promise<string>, diagnose?() -> Promise<string> }   /pasar (/emas /ihsg): IHSG, emas dunia, kurs USD/IDR (market-brief.js)
@@ -344,6 +346,48 @@ export function createTelegram({ config, deps = {}, fetchImpl = globalThis.fetch
     form.append("chat_id", String(chatId));
     form.append("voice", new Blob([ogg], { type: "audio/ogg" }), "voice.ogg");
     return apiForm("sendVoice", form);
+  }
+
+  /** Kirim berkas (dokumen) ke satu chat. caption memakai format WhatsApp (diubah ke HTML Telegram, maks 1024 huruf). */
+  async function sendDocument(chatId, file, caption = "") {
+    const form = new FormData();
+    form.append("chat_id", String(chatId));
+    form.append("document", new Blob([file.data], { type: file.mime || "application/octet-stream" }), file.name);
+    if (caption) {
+      form.append("caption", waToTelegramHtml(caption).slice(0, 1000));
+      form.append("parse_mode", "HTML");
+    }
+    return apiForm("sendDocument", form, { timeoutMs: 120_000 });
+  }
+
+  /** Kirim beberapa berkas ke satu chat; keterangan menempel di berkas pertama. */
+  async function sendFiles(chatId, files, caption = "") {
+    let i = 0;
+    for (const f of files) {
+      try {
+        await sendDocument(chatId, f, i === 0 ? caption : "");
+      } catch (e) {
+        // keterangan berformat ditolak (HTML)? kirim ulang tanpa keterangan berformat
+        if (i === 0 && caption && e.status === 400 && /parse entities|can't parse/i.test(e.message)) await sendDocument(chatId, f, "");
+        else throw e;
+      }
+      i += 1;
+    }
+  }
+
+  /** Kirim berkas ke semua pemilik. Mengembalikan jumlah pemilik yang menerima. */
+  async function sendOwnerFiles(files, caption = "") {
+    if (!enabled || owners.size === 0) return 0;
+    let ok = 0;
+    for (const id of owners) {
+      try {
+        await sendFiles(id, files, caption);
+        ok += 1;
+      } catch (e) {
+        log.error?.(`✈️ [Telegram] gagal kirim berkas ke ${id}: ${e?.message || e}`);
+      }
+    }
+    return ok;
   }
 
   async function noteOnce(chatId, kind, text, everyMs) {
@@ -732,6 +776,16 @@ Ubah: /suara auto • /suara on • /suara off`));
         return void (await reply(`⚠️ Urutan AI gagal diproses: ${String(e?.message || e).slice(0, 200)}`));
       }
     }
+    if (name === "nodin" || name === "notadinas") {
+      if (!deps.nodin) return void (await reply("Fitur konsep nota dinas belum aktif di bot ini."));
+      try {
+        const r = await withAction(chatId, "upload_document", () => deps.nodin.compose(arg));
+        if (!r.ok || !r.files?.length) return void (await reply(r.text));
+        return void (await sendFiles(chatId, r.files, r.caption));
+      } catch (e) {
+        return void (await reply(`⚠️ Konsep nota dinas gagal dibuat: ${String(e?.message || e).slice(0, 200)}`));
+      }
+    }
     if (name === "kesehatan" || name === "sehat" || name === "health") {
       if (!deps.health) return void (await reply("Fitur penjaga kesehatan belum aktif di bot ini."));
       try {
@@ -871,7 +925,7 @@ Ubah: /suara auto • /suara on • /suara off`));
   }
 
   const HANDLER_DEADLINE_MS = 10 * 60_000;
-  const FAST_COMMANDS = new Set(["dokumen", "dok", "doc", "status", "id", "help", "start", "ingat", "catatan", "lupa", "memori", "note", "penyedia", "provider", "skill", "skil", "lokal", "tanya", "pasar", "emas", "ihsg", "ingatkan", "remind", "pengingat", "reminder", "cadangan", "backup", "kesehatan", "sehat", "health", "urutan", "route", "rute"]);
+  const FAST_COMMANDS = new Set(["dokumen", "dok", "doc", "status", "id", "help", "start", "ingat", "catatan", "lupa", "memori", "note", "penyedia", "provider", "skill", "skil", "lokal", "tanya", "pasar", "emas", "ihsg", "ingatkan", "remind", "pengingat", "reminder", "cadangan", "backup", "kesehatan", "sehat", "health", "urutan", "route", "rute", "nodin", "notadinas"]);
   function isFastUpdate(u) {
     const m = u?.message;
     if (!m) return false;
@@ -989,6 +1043,7 @@ Ubah: /suara auto • /suara on • /suara off`));
           { command: "dokumen", description: "Tanya dari dokumen lokal di laptop (dijawab Ollama)" },
           { command: "ingatkan", description: "Pengingat pribadi: /ingatkan besok 09:00 kirim SPJ; /pengingat" },
           { command: "kesehatan", description: "Periksa kesehatan bot: Ollama, disk, memori, WhatsApp, cadangan" },
+          { command: "nodin", description: "Konsep Nota Dinas LPJ Bendahara (PDF + Word)" },
           { command: "urutan", description: "Urutan AI untuk balasan WhatsApp & grup (santai/akurat)" },
           { command: "cadangan", description: "Status cadangan otomatis; /cadangan sekarang" },
           { command: "pasar", description: "IHSG, harga emas dunia, dan kurs USD/IDR sekarang" },
@@ -1016,5 +1071,5 @@ Ubah: /suara auto • /suara on • /suara off`));
 
   const describe = () => (!enabled ? "mati (isi TELEGRAM_BOT_TOKEN di .env buat menyalakan)" : owners.size === 0 ? "AKTIF tapi mode pairing (isi TELEGRAM_OWNER_IDS)" : `AKTIF (${owners.size} pemilik, notifikasi ${config.mirror ? "ikut dikirim" : "tidak dikirim"} ke Telegram)`);
 
-  return { enabled, mirror: config.mirror, start, stop, send, sendOwner, handleOwnerText, handleOwnerVoice, handleUpdate, describe, hasOwners: () => owners.size > 0 };
+  return { enabled, mirror: config.mirror, start, stop, send, sendOwner, sendOwnerFiles, handleOwnerText, handleOwnerVoice, handleUpdate, describe, hasOwners: () => owners.size > 0 };
 }

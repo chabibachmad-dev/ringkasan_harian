@@ -67,6 +67,7 @@ import { buildTutorSystemPrompt, buildTutorUserPrompt, parseTutorReply } from ".
 import { createAppAgentWorker } from "./app-agent.js";
 import { createFallbackChain, readFallbackConfig } from "./llm-fallback.js";
 import { classifyRoute, createAiRoute, parseRouteCommand } from "./ai-route.js";
+import { createNodin, parseNodinCommand, readNodinConfig } from "./nodin.js";
 import { createWebSearch, readSearchConfig } from "./web-search.js";
 import { createRegMonitor, readRegMonitorConfig } from "./reg-monitor.js";
 import { createKhatamReminder } from "./khatam.js";
@@ -2998,6 +2999,7 @@ async function handleIncoming(msg, sock) {
   if (isOwnerSender(msg, isSelfChat) && !isGroupJid(jid) && (await handleWaMarketCommand(sock, jid, text))) return;
   if (isOwnerSender(msg, isSelfChat) && !isGroupJid(jid) && (await handleWaReminderBackupCommand(sock, jid, text))) return;
   if (isOwnerSender(msg, isSelfChat) && !isGroupJid(jid) && (await handleWaRouteCommand(sock, jid, text))) return;
+  if (isOwnerSender(msg, isSelfChat) && !isGroupJid(jid) && (await handleWaNodinCommand(sock, jid, text))) return;
 
   // Tutor suara (/speak, /selesai) hanya untuk pemilik; selama sesi, teks/voice note pemilik = ucapan untuk tutor
   // (tidak disimpan ke riwayat chat dan tidak memicu auto-reply).
@@ -3528,6 +3530,70 @@ setInterval(() => {
 }, 60_000);
 console.log(`💾 Cadangan otomatis: ${backup.describe()}`);
 
+/** Kirim berkas ke pemilik: WhatsApp (dokumen) dulu, Telegram ikut; gagal hanya bila KEDUANYA tidak bisa menerima. */
+async function sendFilesToOwner(files, caption = "") {
+  let delivered = 0;
+  let waError = null;
+  if (OWNER_JID && currentSock) {
+    try {
+      await sendWaDocuments(currentSock, OWNER_JID, files, caption);
+      delivered += 1;
+    } catch (err) {
+      waError = err;
+    }
+  }
+  if (telegramCanNotify()) {
+    try {
+      if ((await telegram.sendOwnerFiles(files, caption)) > 0) delivered += 1;
+    } catch {
+      /* dihitung lewat delivered */
+    }
+  }
+  if (delivered === 0) throw waError || new Error("WhatsApp belum tersambung / WA_OWNER_NUMBER kosong (dan Telegram tidak aktif)");
+}
+
+/** Dokumen ke satu chat WhatsApp; keterangan menempel di berkas pertama. */
+async function sendWaDocuments(sock, jid, files, caption = "") {
+  let i = 0;
+  for (const f of files) {
+    await sock.sendMessage(jid, { document: f.data, mimetype: f.mime || "application/octet-stream", fileName: f.name, ...(i === 0 && caption ? { caption } : {}) });
+    i += 1;
+  }
+}
+
+// Konsep Nota Dinas LPJ Bendahara Pengeluaran: dibuat dari templat Word, dikirim otomatis tiap tanggal 1 (PDF + Word) dan lewat /nodin. Lihat nodin.js.
+const nodin = createNodin({
+  config: readNodinConfig(process.env, BOT_DIR),
+  state: botStateStore,
+  sendFiles: sendFilesToOwner,
+  send: sendToOwner,
+  timeZone: WA_TIMEZONE,
+  tzLabel: WA_TIMEZONE_LABEL
+});
+nodin
+  .detect()
+  .catch(() => {})
+  .finally(() => console.log(`📄 Konsep nota dinas: ${nodin.describe()}`));
+setInterval(() => {
+  nodin.check().catch(() => {});
+}, 60_000);
+
+/** /nodin dari WhatsApp (hanya pemilik, bukan grup). true = pesan sudah ditangani. */
+async function handleWaNodinCommand(sock, jid, text) {
+  const cmd = parseNodinCommand(text);
+  if (!cmd) return false;
+  const send = (t) => sock.sendMessage(jid, { text: t }).catch((e) => console.error("💬 [WA/Nodin] gagal kirim:", e instanceof Error ? e.message : String(e)));
+  try {
+    const r = await nodin.compose(cmd.arg);
+    if (!r.ok || !r.files?.length) await send(r.text);
+    else await sendWaDocuments(sock, jid, r.files, r.caption);
+  } catch (e) {
+    console.error("💬 [WA/Nodin] gagal:", e instanceof Error ? e.message : String(e));
+    await send(`⚠️ Konsep nota dinas gagal dibuat: ${String(e instanceof Error ? e.message : e).slice(0, 200)}`);
+  }
+  return true;
+}
+
 // Penjaga kesehatan: Ollama, disk, memori, WhatsApp, basis data, restart berulang, cadangan. Mengabari pemilik saat bermasalah
 // dan saat pulih (sekali per masalah). /kesehatan = papan status sekarang. Lihat health.js.
 const healthConfig = readHealthConfig(process.env);
@@ -3706,6 +3772,7 @@ const telegram = createTelegram({
     backup: { status: () => backup.status(), run: () => backup.runAndFormat() },
     health,
     aiRoute: { handle: (arg) => aiRoute.handle(arg) },
+    nodin,
     localChat,
     providers: { report: (opts) => buildProviderReport(opts) },
     state: {

@@ -844,3 +844,16 @@ Balasan WhatsApp (chat pribadi dan grup) memakai **dua jalur**, tergantung pesan
 **Batas waktu.** Panggilan Gemini untuk balasan WA kini punya batas **25 detik** (sebelumnya tanpa batas, sehingga jaringan buruk bisa membuat balasan menggantung berpuluh detik sampai menit); tugas lain 90 detik. Groq/OpenRouter di jalur ini dibatasi 20 detik per percobaan dan 3 percobaan. Jatah harian (429 "PerDay") tidak lagi diulang 3 detik kemudian di key yang sama; langsung pindah key. Opsional di `.env`: `GEMINI_WA_TIMEOUT_MS` dan `GEMINI_TIMEOUT_MS` (milidetik).
 
 **Membaca log.** Tiap balasan mencatat penyedia dan lamanya, mis. `⏱️ [AI] dijawab groq/llama-3.3-70b-versatile dalam 1.4 dtk (santai: groq > gemini > openrouter)`; kegagalan sebuah penyedia tercatat `⏭️ [AI] gemini gagal dalam 25.0 dtk: … -> lanjut groq`. Dari sini terlihat penyedia mana yang lambat.
+
+## Konsep Nota Dinas LPJ Bendahara tiap tanggal 1 (`/nodin`)
+
+Nota Dinas "Penyampaian Laporan Pertanggungjawaban Bendahara Pengeluaran" hanya berganti nama **bulan** (dan tahun). Bot membuatnya dari templat Word `templates/nota-dinas-lpj.docx`:
+
+- `[Bulan_Laporan]` dan `[Tahun_Laporan]` diisi bot dengan **bulan sebelum tanggal surat** (surat 1 November → Oktober; surat 1 Januari → Desember tahun lalu).
+- `[Nomor_ND]` dan `[Tanggal_ND]` **sengaja dibiarkan**: diisi sistem persuratan saat naskah dibuat. QR tanda tangan juga dibuat sistem persuratan, jadi tidak ada di konsep.
+- Tiap tanggal 1 pukul 07.00 (zona `WA_TIMEZONE`) bot mengirim **PDF + Word** ke WhatsApp dan Telegram pemilik. Hanya sekali per bulan laporan (penanda `nodin_last` di tabel `bot_state`). Bila bot mati pada tanggal 1, dikejar sampai tanggal 5. Gagal 3 kali dalam sehari → kamu dikabari.
+- Kapan saja: `/nodin` (bulan lalu), `/nodin november`, `/nodin oktober 2026`, `/nodin status` (WhatsApp maupun Telegram).
+
+PDF dibuat LibreOffice tanpa tampilan. Pasang sekali di laptop: `sudo apt install libreoffice-writer`, lalu cek `soffice --version`. Tanpa LibreOffice bot tetap mengirim Word (kamu ekspor PDF sendiri) dan memberi tahu alasannya.
+
+**Mengganti isi surat:** buka `templates/nota-dinas-lpj.docx` di Word/LibreOffice, ubah kalimatnya, simpan dengan tetap memuat `[Bulan_Laporan]` dan `[Tahun_Laporan]` (ketik utuh, jangan disisipi format di tengahnya). Atau taruh templat lain dan isi `NODIN_TEMPLATE` di `.env`. Pengaturan lain ada di bagian 22 `.env.example`. Perubahan templat sebaiknya lewat patch/`/deploy` agar tidak tertimpa.
