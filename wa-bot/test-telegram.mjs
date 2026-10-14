@@ -282,6 +282,69 @@ const msg = (chat, text, extra = {}) => ({ update_id: 1, message: { chat: { id: 
   check(off.describe().includes("mati") && createTelegram({ config: cfg({ ownerIds: [] }), fetchImpl: f, log: quiet }).describe().includes("pairing"), "describe: mati / pairing");
 }
 
+// ---- ketahanan jaringan & pesan tidak antre di belakang pekerjaan lambat
+{
+  const netErr = () => { const e = new TypeError("fetch failed"); e.cause = { code: "ECONNRESET" }; return e; };
+  // getMe gagal jaringan 3x lalu berhasil -> start tetap berhasil (dulu: mati permanen)
+  const f0 = fakeApi();
+  let failsLeft = 3;
+  const f = async (url, init) => { if (String(url).endsWith("/getMe") && failsLeft-- > 0) throw netErr(); return f0(url, init); };
+  f.texts = f0.texts; f.calls = f0.calls;
+  const sleeps = [];
+  const tg = createTelegram({ config: cfg(), deps: { chat: async () => "x" }, fetchImpl: f, log: quiet, sleep: async (ms) => void sleeps.push(ms) });
+  f0.onIdle = () => tg.stop();
+  check((await tg.start()) === true && sleeps.slice(0, 3).join() === "2000,4000,8000", "start: galat jaringan sesaat dicoba ulang (backoff 2/4/8 dtk), lalu tersambung");
+  await new Promise((r) => setTimeout(r, 30));
+
+  // semua percobaan gagal -> menyerah setelah 12x, tidak polling
+  const fAll = async () => { throw netErr(); };
+  const sl2 = [];
+  const tgAll = createTelegram({ config: cfg(), deps: {}, fetchImpl: fAll, log: quiet, sleep: async (ms) => void sl2.push(ms) });
+  check((await tgAll.start()) === false && sl2.length === 11 && Math.max(...sl2) === 30000, "start: gagal terus -> menyerah setelah 12 percobaan (jeda maks 30 dtk)");
+
+  // log menyebut penyebab asli ("fetch failed" saja tidak cukup untuk diagnosis)
+  const warns = [];
+  const logW = { log() {}, error() {}, warn: (m) => warns.push(m) };
+  const fPoll = async (url) => { if (String(url).endsWith("/getUpdates")) { const e = new TypeError("fetch failed"); e.cause = { code: "ETIMEDOUT", message: "connect ETIMEDOUT 149.154.166.110:443" }; throw e; } return f0(url, {}); };
+  fPoll.texts = f0.texts; fPoll.calls = f0.calls;
+  let n = 0;
+  const tgP = createTelegram({ config: cfg(), deps: {}, fetchImpl: fPoll, log: logW, sleep: async () => { if (++n > 2) tgP.stop(); } });
+  await tgP.start();
+  await new Promise((r) => setTimeout(r, 30));
+  check(warns.some((m) => m.includes("polling gagal") && m.includes("ETIMEDOUT")), "log: polling gagal menyebut kode penyebab (ETIMEDOUT)");
+
+  // sendMessage: galat jaringan sesaat dicoba ulang; galat HTTP (403) tidak
+  const f1 = fakeApi();
+  let nf = 1;
+  const fs1 = async (url, init) => { if (String(url).endsWith("/sendMessage") && nf-- > 0) throw netErr(); return f1(url, init); };
+  fs1.texts = f1.texts;
+  const tg1 = createTelegram({ config: cfg(), deps: { chat: async () => "ok" }, fetchImpl: fs1, log: quiet, sleep: async () => {} });
+  await tg1.handleOwnerText("111", "/id");
+  check(f1.texts(111).length === 1 && f1.texts(111)[0].includes("111"), "kirim: 'fetch failed' sesaat dicoba ulang dan terkirim satu kali");
+  const f2 = fakeApi({ failSendTo: new Set(["111"]) });
+  const tg2 = createTelegram({ config: cfg(), deps: { chat: async () => "ok" }, fetchImpl: f2, log: quiet, sleep: async () => {} });
+  await tg2.handleOwnerText("111", "/id").catch(() => {});
+  check(f2.calls.filter((c) => c.method === "sendMessage").length === 1, "kirim: galat HTTP 403 tidak diulang");
+
+  // obrolan lambat tidak menahan perintah laptop / dokumen
+  const slow = { release: null };
+  const gate = new Promise((r) => (slow.release = r));
+  const fq = fakeApi({ queue: [[
+    { update_id: 20, message: { chat: { id: 111, type: "private" }, text: "pertanyaan lambat" } },
+    { update_id: 21, message: { chat: { id: 111, type: "private" }, text: "/sistem" } },
+    { update_id: 22, message: { chat: { id: 111, type: "private" }, text: "/dokumen apa" } }
+  ]] });
+  const ops = { commands: ["sistem"], handle: async (n) => `ops ${n}`, handleDocument: async () => undefined };
+  const tgq = createTelegram({ config: cfg(), deps: { chat: async () => { await gate; return "jawaban lambat"; }, ops, localDocs: { list: () => "d", ask: async (q) => ({ reply: `dok ${q}` }) } }, fetchImpl: fq, log: quiet, sleep: async () => {} });
+  fq.onIdle = () => tgq.stop();
+  await tgq.start();
+  await new Promise((r) => setTimeout(r, 60));
+  check(fq.texts(111).includes("ops sistem") && fq.texts(111).includes("dok apa") && !fq.texts(111).includes("jawaban lambat"), "polling: /sistem dan /dokumen dijawab saat obrolan AI masih berjalan");
+  slow.release();
+  await new Promise((r) => setTimeout(r, 30));
+  check(fq.texts(111).includes("jawaban lambat"), "polling: obrolan lambat tetap selesai dan terkirim");
+}
+
 // ---- pesan suara
 {
   const f0 = fakeApi();

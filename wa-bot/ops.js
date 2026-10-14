@@ -64,6 +64,8 @@ export function readOpsConfig(env = process.env, baseDir = process.cwd()) {
       .map((s) => s.trim())
       .filter((s) => /^-?\d+$/.test(s)),
     botDir: path.resolve(baseDir),
+    // argumen tambahan untuk `supabase db push` (mis. "--yes" bila CLI-mu bertanya konfirmasi); hanya opsi sederhana yang diterima
+    dbPushArgs: String(env.OPS_DB_PUSH_ARGS || "").split(/\s+/).filter((x) => /^--?[a-z][a-z0-9-]*(=[A-Za-z0-9_.:-]+)?$/i.test(x)),
     patchEnabled: flag(env.OPS_PATCH_ENABLED, true),
     gitEnabled: flag(env.OPS_GIT_ENABLED, true),
     patchPrefix: (String(env.OPS_PATCH_PREFIX || "patch").toLowerCase().replace(/[^a-z0-9_-]/g, "") || "patch"),
@@ -427,12 +429,19 @@ export function createOps({ config, deps = {}, env = process.env, now = () => Da
       label: "tes otomatis",
       send,
       fn: async () => {
-        const r = await run("npm", ["test"], { cwd: config.botDir, timeoutMs: config.testTimeoutSec * 1000 });
+        // Lingkungan BERSIH: tes tidak butuh rahasia, dan nilai .env bot (mis. TUTOR_AI_ORDER, WA_SPEAK_TEXT) bisa mengubah hasil tes.
+        const testEnv = {};
+        for (const k of ["PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "TMPDIR", "TZ", "NVM_DIR", "NVM_BIN", "NODE_PATH"]) if (env[k] !== undefined) testEnv[k] = env[k];
+        const r = await run("npm", ["test"], { cwd: config.botDir, timeoutMs: config.testTimeoutSec * 1000, env: testEnv });
         const out = mask(`${r.stdout}\n${r.stderr}`);
-        const fails = out.split("\n").filter((l) => /\bFAIL\b|GAGAL|Error:/i.test(l)).slice(0, 10);
+        // Tes mencetak ratusan baris "ok: ..." (sebagian berisi kata "gagal" sebagai nama tes). Buang baris "ok:" dan
+        // tampilkan sisanya: baris FAIL di depan, lalu ekor keluaran (jejak galat, ringkasan, pesan npm).
+        const rest = out.split("\n").map((l) => l.trimEnd()).filter((l) => l.trim() && !/^ok:/.test(l));
+        const fails = rest.filter((l) => /^FAIL\b/.test(l)).slice(0, 10);
+        const tailLines = rest.filter((l) => !fails.includes(l)).slice(-18);
         const ok = r.code === 0 && !r.error && !r.timedOut;
         if (ok) return { ok, text: `✅ Semua tes lulus.\n${block(tail(out.trim().split("\n").filter(Boolean).slice(-3).join("\n"), 300))}` };
-        return { ok, text: `❌ Tes gagal${r.timedOut ? ` (lewat ${config.testTimeoutSec} detik)` : r.error ? `: ${r.error}` : ` (kode ${r.code})`}.${fails.length ? `\n${block(fails.join("\n"))}` : `\n${block(tail(out.trim(), 1200))}`}\nJangan /restart dulu; /urungkan mengembalikan patch terakhir.` };
+        return { ok, text: `❌ Tes gagal${r.timedOut ? ` (lewat ${config.testTimeoutSec} detik)` : r.error ? `: ${r.error}` : ` (kode ${r.code})`}.\n${block(tail([...fails, ...(fails.length && tailLines.length ? ["…"] : []), ...tailLines].join("\n"), 2400))}\nJangan /restart dulu; /urungkan mengembalikan patch terakhir.` };
       }
     });
     return undefined;
@@ -623,14 +632,14 @@ export function createOps({ config, deps = {}, env = process.env, now = () => Da
       if (/^terapkan$/i.test(a)) {
         return ask(chatId, async (snd) => {
           await snd("⏳ Menerapkan migrasi (db push)…");
-          startJob({ chatId, label: "migrasi db push", cmd: "npx", args: ["supabase", "db", "push"], timeoutSec: config.deployTimeoutSec, send: snd, okText: "Migrasi selesai" });
+          startJob({ chatId, label: "migrasi db push", cmd: "npx", args: ["supabase", "db", "push", ...config.dbPushArgs], timeoutSec: config.deployTimeoutSec, send: snd, okText: "Migrasi selesai" });
         }, "terapkan migrasi (npx supabase db push)");
       }
       if (a) return "Pakai: /migrasi (pratinjau) atau /migrasi terapkan.";
       await send?.("⏳ Memeriksa migrasi yang belum diterapkan…");
       busy = "pratinjau migrasi";
       try {
-        const r = await run("npx", ["supabase", "db", "push", "--dry-run"], { cwd: config.projectDir, timeoutMs: config.deployTimeoutSec * 1000 });
+        const r = await run("npx", ["supabase", "db", "push", "--dry-run", ...config.dbPushArgs], { cwd: config.projectDir, timeoutMs: config.deployTimeoutSec * 1000 });
         const out = mask(`${r.stdout}\n${r.stderr}`).trim();
         audit(chatId, `PRATINJAU migrasi kode=${r.code}`);
         if (r.error) return `⚠️ Gagal: ${r.error}`;

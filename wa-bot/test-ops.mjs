@@ -157,6 +157,16 @@ function makeOps(over = {}) {
   check(calls.filter((x) => x.cmd === "npx")[1].args.join(" ") === "supabase db push" && sent.at(-1).startsWith("✅ Migrasi selesai"), "migrasi terapkan: db push dijalankan setelah konfirmasi");
 }
 
+// ---- /migrasi dengan OPS_DB_PUSH_ARGS
+{
+  const { ops, h, calls } = makeOps({ cfg: { OPS_DB_PUSH_ARGS: "--yes --password=rahasia;rm --linked $(x)" } });
+  await h("migrasi");
+  await h("migrasi", "terapkan"); await h("ya", "5500"); await ops.whenIdle();
+  const npx = calls.filter((x) => x.cmd === "npx");
+  check(npx[0].args.join(" ") === "supabase db push --dry-run --yes --linked" && npx[1].args.join(" ") === "supabase db push --yes --linked", "migrasi: OPS_DB_PUSH_ARGS ikut; opsi aneh (; $() ) dibuang");
+  check(readOpsConfig({}, "/x/wa-bot").dbPushArgs.length === 0, "migrasi: tanpa OPS_DB_PUSH_ARGS tidak ada argumen tambahan");
+}
+
 // ---- audit
 {
   const log = fs.readFileSync(auditFile, "utf8");

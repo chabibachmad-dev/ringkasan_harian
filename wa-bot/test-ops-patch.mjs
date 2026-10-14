@@ -116,7 +116,7 @@ fs.mkdirSync(path.join(tmp, "luar")); fs.symlinkSync(path.join(tmp, "luar"), pat
 }
 
 // ---- ops: patch lewat handleDocument
-const baseEnv = { ...process.env, HOME: tmp, GIT_AUTHOR_NAME: "T", GIT_AUTHOR_EMAIL: "t@x.id", GIT_COMMITTER_NAME: "T", GIT_COMMITTER_EMAIL: "t@x.id", GIT_CONFIG_NOSYSTEM: "1" };
+const baseEnv = { ...process.env, FAKE_SECRET_API_KEY: "zzzzzzzzzzzzzzzz", TUTOR_AI_ORDER: "gemini-first", HOME: tmp, GIT_AUTHOR_NAME: "T", GIT_AUTHOR_EMAIL: "t@x.id", GIT_COMMITTER_NAME: "T", GIT_COMMITTER_EMAIL: "t@x.id", GIT_CONFIG_NOSYSTEM: "1" };
 function makeOps(over = {}) {
   const calls = [];
   const sent = [];
@@ -168,10 +168,21 @@ function makeOps(over = {}) {
 {
   const ok = makeOps({ run: async () => ({ code: 0, stdout: "a\nSEMUA TES LULUS\n", stderr: "" }) });
   await ok.h("tes"); await ok.ops.whenIdle();
+  check(ok.calls[0].o.env.PATH && ok.calls[0].o.env.FAKE_SECRET_API_KEY === undefined && ok.calls[0].o.env.TUTOR_AI_ORDER === undefined, "tes: npm test dijalankan dengan lingkungan bersih (tanpa rahasia / pengaturan .env bot)");
   check(ok.calls[0].c === "npm" && ok.calls[0].a.join() === "test" && ok.calls[0].o.cwd === path.join(proj, "wa-bot") && ok.sent.at(-1).startsWith("✅ Semua tes lulus"), "tes: npm test di folder wa-bot, lulus");
   const bad = makeOps({ run: async () => ({ code: 1, stdout: "ok: a\nFAIL: sesuatu rusak\n", stderr: "" }) });
   await bad.h("tes"); await bad.ops.whenIdle();
   check(bad.sent.at(-1).startsWith("❌ Tes gagal") && bad.sent.at(-1).includes("FAIL: sesuatu rusak"), "tes: gagal -> baris FAIL ditampilkan");
+}
+
+{
+  // regresi (laporan dari laptop pemilik): baris "ok: ... gagal ..." tidak boleh menutupi kegagalan sebenarnya
+  const okLines = Array.from({ length: 40 }, (_, i) => `ok: tidak ada balasan palsu saat gagal ${i}`).join("\n");
+  const stdout = `${okLines}\nFAIL: kasus yang sungguh rusak\n${okLines}\n\n1 TES GAGAL`;
+  const t = makeOps({ run: async () => ({ code: 1, stdout, stderr: "node:internal/x\nAssertionError: boom\n    at file:///x/test-a.mjs:5:1\nnpm error code 1" }) });
+  await t.h("tes"); await t.ops.whenIdle();
+  const m = t.sent.at(-1);
+  check(m.includes("FAIL: kasus yang sungguh rusak") && m.includes("AssertionError: boom") && m.includes("npm error code 1") && m.includes("1 TES GAGAL") && !/ok: tidak ada balasan palsu/.test(m), "tes: kegagalan nyata + jejak galat tampil, baris 'ok: ...gagal...' disaring");
 }
 
 // ---- git sungguhan

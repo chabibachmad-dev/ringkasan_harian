@@ -29,6 +29,27 @@
 // app WhatsApp biasa bisa bikin salah satu sisi ke-logout/bentrok.
 
 import "dotenv/config";
+import dns from "node:dns";
+import net from "node:net";
+
+// Jaringan rumahan sering membuat fetch() gagal ("fetch failed") ke Telegram/Supabase/Gemini: Node mencoba IPv6 dan IPv4 bergantian
+// dengan batas waktu bawaan hanya 250 ms per percobaan, dan IPv6 yang rusak membuat koneksi macet. Dua pelonggaran (aman, bisa dimatikan):
+//   NET_IPV4_FIRST=false          pakai urutan DNS bawaan (bawaan bot: IPv4 dulu)
+//   NET_ATTEMPT_TIMEOUT_MS=3000   batas waktu tiap percobaan alamat (bawaan Node 250)
+const NET_IPV4_FIRST = !["0", "false", "off", "tidak", "no"].includes(String(process.env.NET_IPV4_FIRST ?? "").trim().toLowerCase());
+const NET_ATTEMPT_TIMEOUT_MS = Math.max(250, Math.min(20000, Number(process.env.NET_ATTEMPT_TIMEOUT_MS) || 3000));
+// "Happy eyeballs" bawaan Node SELALU mencoba alamat IPv6 lebih dulu (selang-seling dengan IPv4), apa pun urutan DNS-nya. Pada jaringan
+// dengan IPv6 yang rusak (DNS memberi IPv6 tapi rutenya buntu) koneksi ke Telegram jadi ETIMEDOUT padahal `curl -4` normal.
+// Bawaan bot: matikan happy eyeballs, jadi Node memakai alamat pertama dari DNS (IPv4 karena NET_IPV4_FIRST). NET_AUTOSELECT_FAMILY=true mengembalikannya.
+const NET_AUTOSELECT = ["1", "true", "on", "ya", "yes"].includes(String(process.env.NET_AUTOSELECT_FAMILY ?? "").trim().toLowerCase());
+try {
+  if (NET_IPV4_FIRST) dns.setDefaultResultOrder("ipv4first");
+  net.setDefaultAutoSelectFamily?.(NET_AUTOSELECT);
+  net.setDefaultAutoSelectFamilyAttemptTimeout?.(NET_ATTEMPT_TIMEOUT_MS);
+  console.log(`🌐 Jaringan: ${NET_IPV4_FIRST ? "IPv4 dulu" : "urutan DNS bawaan"}, ${NET_AUTOSELECT ? `happy eyeballs aktif (batas ${NET_ATTEMPT_TIMEOUT_MS} ms/alamat)` : "satu alamat per koneksi (happy eyeballs mati)"}`);
+} catch (err) {
+  console.warn("🌐 Gagal mengatur opsi jaringan:", err instanceof Error ? err.message : String(err));
+}
 import { createClient } from "@supabase/supabase-js";
 import makeWASocket, { useMultiFileAuthState, fetchLatestBaileysVersion, DisconnectReason, downloadMediaMessage } from "@whiskeysockets/baileys";
 import pino from "pino";
@@ -3359,7 +3380,7 @@ async function mirrorToTelegram(text) {
 }
 telegram
   .start()
-  .then(() => ops.announceStartup((chatId, text) => telegram.send(chatId, text)))
+  .then((connected) => (connected ? ops.announceStartup((chatId, text) => telegram.send(chatId, text)) : false))
   .catch((err) => console.error("✈️ [Telegram] gagal mulai:", err instanceof Error ? err.message : String(err)));
 if (ops.enabled()) console.log("🛠️ Perintah laptop dari Telegram: AKTIF (/sistem /log /restart /deploy /migrasi, dengan konfirmasi)");
 console.log(`✈️ Telegram untuk pemilik: ${telegram.describe()}`);

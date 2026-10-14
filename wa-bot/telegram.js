@@ -182,7 +182,28 @@ export function createTelegram({ config, deps = {}, fetchImpl = globalThis.fetch
   let stopped = false;
   let offset = 0;
 
-  async function api(method, payload = {}, { timeoutMs = 20_000 } = {}) {
+  // Galat jaringan sesaat ("fetch failed", ECONNRESET, DNS) di laptop rumahan: permintaan umumnya belum sampai ke Telegram,
+  // jadi aman diulang. Timeout (abort) TIDAK diulang karena pesan bisa saja sudah terkirim.
+  function isTransientNetworkError(e) {
+    if (!e || e.status || e.name === "AbortError") return false;
+    const code = e.cause?.code || e.code;
+    return e instanceof TypeError || ["ECONNRESET", "ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN", "ETIMEDOUT", "ENETUNREACH", "EHOSTUNREACH", "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_SOCKET"].includes(code);
+  }
+
+  async function api(method, payload = {}, opts = {}) {
+    const maxRetries = method === "getUpdates" ? 0 : 2; // polling punya backoff sendiri
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await apiOnce(method, payload, opts);
+      } catch (e) {
+        if (attempt >= maxRetries || !isTransientNetworkError(e)) throw e;
+        log.warn?.(`✈️ [Telegram] ${method}: ${describeError(e)} — mencoba lagi (${attempt + 1}/${maxRetries})`);
+        await sleep(600 * (attempt + 1) ** 2);
+      }
+    }
+  }
+
+  async function apiOnce(method, payload = {}, { timeoutMs = 20_000 } = {}) {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), timeoutMs);
     try {
@@ -735,7 +756,46 @@ Ubah: /suara auto • /suara on • /suara off`));
     }
   }
 
+  const HANDLER_DEADLINE_MS = 10 * 60_000;
+  const FAST_COMMANDS = new Set(["dokumen", "dok", "doc", "status", "id", "help", "start"]);
+  function isFastUpdate(u) {
+    const m = u?.message;
+    if (!m) return false;
+    if (m.document && deps.ops?.handleDocument) return true;
+    const c = typeof m.text === "string" ? /^\/([a-z_]+)/i.exec(m.text) : null;
+    if (!c) return false;
+    const name = c[1].toLowerCase();
+    return FAST_COMMANDS.has(name) || (deps.ops?.commands || []).includes(name);
+  }
+
+  const chains = new Map(); // chatId -> rantai penanganan pesan biasa (berurutan)
+  function dispatchUpdate(u) {
+    const run = () => handleUpdate(u).catch((e) => log.error?.(`✈️ [Telegram] gagal memproses pesan: ${e?.message || e}`));
+    if (isFastUpdate(u)) return void run();
+    const key = String(u?.message?.chat?.id ?? u?.callback_query?.message?.chat?.id ?? "x");
+    const guarded = () => {
+      // Batas pengaman: satu penanganan yang macet tidak boleh menahan pesan berikutnya selamanya.
+      let timer;
+      return Promise.race([
+        run(),
+        new Promise((resolve) => {
+          timer = setTimeout(() => {
+            log.error?.("✈️ [Telegram] penanganan pesan melewati batas waktu 10 menit; lanjut ke pesan berikutnya.");
+            resolve();
+          }, HANDLER_DEADLINE_MS);
+          timer.unref?.();
+        })
+      ]).finally(() => clearTimeout(timer));
+    };
+    const next = (chains.get(key) || Promise.resolve()).then(guarded);
+    chains.set(key, next);
+    next.finally(() => {
+      if (chains.get(key) === next) chains.delete(key);
+    });
+  }
+
   async function pollLoop() {
+    log.log?.(`✈️ [Telegram] mulai menerima pesan (offset ${offset}).`);
     let backoff = 2000;
     while (!stopped) {
       try {
@@ -744,11 +804,10 @@ Ubah: /suara auto • /suara on • /suara off`));
         for (const u of updates) {
           if (stopped) break;
           offset = Math.max(offset, u.update_id + 1);
-          try {
-            await handleUpdate(u);
-          } catch (e) {
-            log.error?.(`✈️ [Telegram] gagal memproses pesan: ${e?.message || e}`);
-          }
+          // Polling TIDAK menunggu penanganan pesan: pesan biasa antre berurutan per chat (urutan percakapan terjaga),
+          // sedangkan /restart, /sistem, /log, /ya, /dokumen, zip patch, dll. jalan langsung. Dulu semuanya dijalankan satu per satu
+          // di dalam loop polling, jadi satu jawaban AI/dokumen yang lambat (atau jaringan buruk) membuat bot terasa "beku".
+          dispatchUpdate(u);
         }
         if (updates.length > 0) {
           try {
@@ -768,7 +827,7 @@ Ubah: /suara auto • /suara on • /suara off`));
           await sleep(30_000);
           continue;
         }
-        log.warn?.(`✈️ [Telegram] polling gagal (${e?.message || e}), coba lagi ${Math.round(backoff / 1000)} detik.`);
+        log.warn?.(`✈️ [Telegram] polling gagal (${describeError(e)}), coba lagi ${Math.round(backoff / 1000)} detik.`);
         await sleep(backoff);
         backoff = Math.min(backoff * 2, 60_000);
       }
@@ -778,11 +837,29 @@ Ubah: /suara auto • /suara on • /suara off`));
   async function start() {
     if (!enabled || running) return false;
     running = true;
-    try {
-      const me = await api("getMe");
-      log.log?.(`✈️ Telegram: bot @${me.username} terhubung${owners.size ? ` (pemilik: ${[...owners].join(", ")})` : " -- MODE PAIRING: kirim pesan apa saja ke bot untuk melihat id chat-mu, lalu isi TELEGRAM_OWNER_IDS di .env"}.`);
-    } catch (e) {
-      log.error?.(`✈️ [Telegram] gagal terhubung: ${e?.message || e}. Telegram tidak aktif sampai bot di-restart.`);
+    // Jaringan sering belum siap tepat saat bot baru menyala (mis. setelah /restart): coba lagi beberapa menit.
+    // Token ditolak (401/404) langsung menyerah. Dulu satu "fetch failed" saja mematikan Telegram sampai restart berikutnya.
+    const MAX_CONNECT_TRIES = 12;
+    let connected = false;
+    for (let attempt = 1; attempt <= MAX_CONNECT_TRIES && !stopped; attempt++) {
+      try {
+        const me = await apiOnce("getMe");
+        log.log?.(`✈️ Telegram: bot @${me.username} terhubung${owners.size ? ` (pemilik: ${[...owners].join(", ")})` : " -- MODE PAIRING: kirim pesan apa saja ke bot untuk melihat id chat-mu, lalu isi TELEGRAM_OWNER_IDS di .env"}.`);
+        connected = true;
+        break;
+      } catch (e) {
+        const fatal = e?.status === 401 || e?.status === 404;
+        if (fatal || attempt === MAX_CONNECT_TRIES) {
+          log.error?.(`✈️ [Telegram] gagal terhubung: ${describeError(e)}. Telegram tidak aktif sampai bot di-restart.`);
+          running = false;
+          return false;
+        }
+        const wait = Math.min(2000 * 2 ** (attempt - 1), 30_000);
+        log.warn?.(`✈️ [Telegram] belum bisa terhubung (${describeError(e)}); percobaan ${attempt}/${MAX_CONNECT_TRIES}, ulangi ${Math.round(wait / 1000)} detik lagi.`);
+        await sleep(wait);
+      }
+    }
+    if (!connected) {
       running = false;
       return false;
     }
