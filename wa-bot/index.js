@@ -56,6 +56,7 @@ import pino from "pino";
 import qrcode from "qrcode-terminal";
 import * as cheerio from "cheerio";
 import fs from "node:fs";
+import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createSimab, SIMAB_OLLAMA_SYSTEM } from "./simab.js";
 import { createTelegram, readTelegramConfig } from "./telegram.js";
@@ -82,6 +83,8 @@ import { createSkillAdmin, createSkills, parseSkillCommand } from "./skills.js";
 import { createLocalChat, parseLocalChatCommand } from "./local-chat.js";
 import { createMarketBrief, createMarketData, parseMarketCommand, readMarketBriefConfig } from "./market-brief.js";
 import { handleMemoryCommand, openOwnerMemory, parseMemoryCommand } from "./owner-memory.js";
+import { createReminders, openReminderStore, parseReminderCommand } from "./reminders.js";
+import { createBackup, parseBackupCommand, readBackupConfig } from "./backup.js";
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -2934,6 +2937,7 @@ async function handleIncoming(msg, sock) {
   if (isOwnerSender(msg, isSelfChat) && !isGroupJid(jid) && (await handleWaSkillCommand(sock, jid, text))) return;
   if (isOwnerSender(msg, isSelfChat) && !isGroupJid(jid) && (await handleWaLocalChatCommand(sock, jid, text))) return;
   if (isOwnerSender(msg, isSelfChat) && !isGroupJid(jid) && (await handleWaMarketCommand(sock, jid, text))) return;
+  if (isOwnerSender(msg, isSelfChat) && !isGroupJid(jid) && (await handleWaReminderBackupCommand(sock, jid, text))) return;
 
   // Tutor suara (/speak, /selesai) hanya untuk pemilik; selama sesi, teks/voice note pemilik = ucapan untuk tutor
   // (tidak disimpan ke riwayat chat dan tidak memicu auto-reply).
@@ -3257,6 +3261,8 @@ async function buildBotStatusText() {
   lines.push(`📋 Ringkasan harian: ${WA_DAILY_SUMMARY_ENABLED ? `aktif (setelah ${String(WA_DAILY_SUMMARY_HOUR).padStart(2, "0")}:00 ${WA_TIMEZONE_LABEL}${summarySentDate ? `, terakhir terkirim ${summarySentDate}` : ""})` : "mati"}`);
   lines.push(`📜 Pantauan peraturan: ${regMonitor.describe()}`);
   lines.push(`📈 Pasar pagi (IHSG, emas): ${marketBrief.describe()}`);
+  lines.push(`⏰ Pengingat: ${reminders.describe()}`);
+  lines.push(`💾 Cadangan: ${backup.describe()}`);
   lines.push(`✈️ Telegram: ${telegram.describe()}`);
   lines.push(`🎤 Pesan suara Telegram: ${transcriber.available() ? `aktif (${sttConfig.groqKeys.length ? `Groq Whisper ${sttConfig.groqModel}` : ""}${sttConfig.groqKeys.length && sttConfig.geminiKeys.length ? " + " : ""}${sttConfig.geminiKeys.length ? "cadangan Gemini" : ""})` : "mati (isi GROQ_API_KEYS atau GEMINI_API_KEYS)"}`);
   {
@@ -3310,12 +3316,13 @@ const waTutor = createWaTutor({
 });
 // Catatan pribadi pemilik (/ingat /catatan /lupa): SQLite lokal, hanya disisipkan ke prompt Ollama milik pemilik
 // (chat aplikasi + /dokumen). Tidak pernah ke Gemini/Groq/OpenRouter dan tidak ke balasan otomatis untuk kontak. Lihat owner-memory.js.
+const OWNER_MEMORY_FILE = process.env.OWNER_MEMORY_FILE?.trim() || fileURLToPath(new URL("./memori.sqlite", import.meta.url));
 const OWNER_MEMORY_BUDGET_CHARS = Math.max(300, Math.min(4000, Number(process.env.OWNER_MEMORY_BUDGET_CHARS) || 1200));
 let ownerMemory = null;
 if (!["0", "false", "off", "tidak", "no"].includes(String(process.env.OWNER_MEMORY_ENABLED ?? "true").trim().toLowerCase())) {
   try {
     ownerMemory = await openOwnerMemory({
-      file: process.env.OWNER_MEMORY_FILE?.trim() || fileURLToPath(new URL("./memori.sqlite", import.meta.url)),
+      file: OWNER_MEMORY_FILE,
       maxNotes: Number(process.env.OWNER_MEMORY_MAX) || 50
     });
     if (ownerMemory) console.log(`🧠 Catatan pribadi: AKTIF (${ownerMemory.count()} catatan; hanya dibaca Ollama lokal)`);
@@ -3386,32 +3393,72 @@ const ops = createOps({
   }
 });
 
+/** Kirim ke pemilik: WhatsApp dulu, Telegram ikut; gagal hanya bila KEDUANYA tidak bisa menerima. Dipakai pasar pagi, pengingat, dan cadangan. */
+async function sendToOwner(text) {
+  let delivered = 0;
+  let waError = null;
+  if (OWNER_JID && currentSock) {
+    try {
+      await currentSock.sendMessage(OWNER_JID, { text });
+      delivered += 1;
+    } catch (err) {
+      waError = err;
+    }
+  }
+  if (await mirrorToTelegram(text)) delivered += 1;
+  if (delivered === 0) throw waError || new Error("WhatsApp belum tersambung / WA_OWNER_NUMBER kosong (dan Telegram tidak aktif)");
+}
+
 // Pemeriksaan pasar tiap pagi (IHSG, emas dunia, kurs) + /pasar. Sumber ganda (xaus.com, ExchangeRate-API, Yahoo, Stooq), tanpa API key. Lihat market-brief.js.
 const marketBrief = createMarketBrief({
   config: readMarketBriefConfig(process.env),
   data: createMarketData({ config: readMarketBriefConfig(process.env) }),
   state: botStateStore,
-  send: async (text) => {
-    // sama seperti pantauan peraturan: WhatsApp dulu, Telegram ikut; gagal hanya bila KEDUANYA tidak bisa menerima
-    let delivered = 0;
-    let waError = null;
-    if (OWNER_JID && currentSock) {
-      try {
-        await currentSock.sendMessage(OWNER_JID, { text });
-        delivered += 1;
-      } catch (err) {
-        waError = err;
-      }
-    }
-    if (await mirrorToTelegram(text)) delivered += 1;
-    if (delivered === 0) throw waError || new Error("WhatsApp belum tersambung / WA_OWNER_NUMBER kosong (dan Telegram tidak aktif)");
-  },
+  send: sendToOwner,
   timeZone: WA_TIMEZONE
 });
 setInterval(() => {
   marketBrief.check().catch(() => {});
 }, 60_000);
 console.log(`📈 Pasar pagi (IHSG, emas): ${marketBrief.describe()}`);
+
+// Pengingat pribadi (/ingatkan, /pengingat): SQLite lokal, dikirim ke WhatsApp + Telegram pemilik. Lihat reminders.js.
+const REMINDERS_FILE = process.env.REMINDERS_FILE?.trim() || fileURLToPath(new URL("./pengingat.sqlite", import.meta.url));
+let reminderStore = null;
+if (!["0", "false", "off", "tidak", "no"].includes(String(process.env.REMINDERS_ENABLED ?? "true").trim().toLowerCase())) {
+  try {
+    reminderStore = await openReminderStore({ file: REMINDERS_FILE });
+  } catch (err) {
+    console.warn(`⏰ Pengingat tidak aktif: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+const reminders = createReminders({ store: reminderStore, send: sendToOwner, timeZone: WA_TIMEZONE, tzLabel: WA_TIMEZONE_LABEL });
+setInterval(() => {
+  reminders.check().catch(() => {});
+}, 30_000);
+console.log(`⏰ Pengingat: ${reminders.describe()}`);
+
+// Cadangan otomatis tiap malam (catatan, pengingat, skill, sesi WhatsApp) ke folder bertanggal di laptop. Lihat backup.js.
+const BOT_DIR = fileURLToPath(new URL(".", import.meta.url));
+const backupConfig = readBackupConfig(process.env);
+const backup = createBackup({
+  config: backupConfig,
+  sources: [
+    { name: "catatan", kind: "sqlite", path: OWNER_MEMORY_FILE },
+    { name: "pengingat", kind: "sqlite", path: REMINDERS_FILE },
+    { name: "skill", kind: "dir", path: fileURLToPath(new URL("./skills", import.meta.url)) },
+    { name: "sesi WhatsApp", kind: "auth", path: path.resolve("auth_session") }, // sama dengan useMultiFileAuthState("auth_session")
+    ...(backupConfig.includeEnv ? [{ name: ".env", kind: "file", path: path.resolve(".env") }] : [])
+  ],
+  timeZone: WA_TIMEZONE,
+  tzLabel: WA_TIMEZONE_LABEL,
+  notify: sendToOwner,
+  projectDir: path.resolve(BOT_DIR, "..")
+});
+setInterval(() => {
+  backup.check().catch(() => {});
+}, 60_000);
+console.log(`💾 Cadangan otomatis: ${backup.describe()}`);
 
 // /skill baru|lihat|hapus dari Telegram: perubahan minta konfirmasi "/ya <kode>" lewat ops (butuh OPS_ENABLED=true). Lihat skills.js.
 const skillAdmin = createSkillAdmin({ skills, confirm: (chatId, o) => ops.confirmAction(chatId, o) });
@@ -3439,6 +3486,21 @@ async function handleWaMarketCommand(sock, jid, text) {
     await send(`⚠️ Gagal mengambil data pasar: ${String(e instanceof Error ? e.message : e).slice(0, 200)}`);
   } finally {
     stop();
+  }
+  return true;
+}
+
+/** /ingatkan /pengingat /cadangan dari WhatsApp (hanya pemilik, bukan grup). true = pesan sudah ditangani. */
+async function handleWaReminderBackupCommand(sock, jid, text) {
+  const rem = parseReminderCommand(text);
+  const bak = rem ? null : parseBackupCommand(text);
+  if (!rem && !bak) return false;
+  const send = (t) => sock.sendMessage(jid, { text: t }).catch((e) => console.error("💬 [WA/Pengingat] gagal kirim:", e instanceof Error ? e.message : String(e)));
+  try {
+    await send(rem ? reminders.handle(rem) : bak.now ? await backup.runAndFormat() : backup.status());
+  } catch (e) {
+    console.error("💬 [WA/Pengingat] gagal:", e instanceof Error ? e.message : String(e));
+    await send(`⚠️ Perintah gagal diproses: ${String(e instanceof Error ? e.message : e).slice(0, 200)}`);
   }
   return true;
 }
@@ -3530,6 +3592,8 @@ const telegram = createTelegram({
     skills,
     skillAdmin,
     market: { report: async () => (await marketBrief.report()).text, diagnose: () => marketBrief.diagnose() },
+    reminders,
+    backup: { status: () => backup.status(), run: () => backup.runAndFormat() },
     localChat,
     providers: { report: (opts) => buildProviderReport(opts) },
     state: {

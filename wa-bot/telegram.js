@@ -149,6 +149,8 @@ const HELP = [
   "/peraturan  — pantau peraturan terbaru (\"/peraturan semua\" = tampilkan semua hasil)",
   "/dokumen <pertanyaan>  — tanya dari dokumen lokal di laptop (hasil PDF → MD), dijawab Ollama. \"/dokumen\" saja = daftar dokumen",
   "/pasar  — IHSG, harga emas dunia (Rp/gram), dan kurs USD/IDR sekarang (alias /emas, /ihsg); dikirim otomatis tiap pagi hari kerja. /pasar tes = uji tiap sumber data",
+  "/ingatkan <waktu> <teks>  — pengingat pribadi (contoh: /ingatkan besok 09:00 kirim SPJ; /ingatkan tiap tanggal 25 jam 08:00 laporan);  /pengingat  — daftar;  /pengingat batal <nomor>",
+  "/cadangan  — status cadangan otomatis (memori, pengingat, skill, sesi WhatsApp);  /cadangan sekarang  — buat sekarang",
   "/lokal <pesan>  — ngobrol dengan Ollama LOKAL (alias /tanya): percakapan dan catatan pribadimu tidak keluar dari laptop;  /lokal baru  — lupakan percakapan",
   "/skill  — daftar skill (resep tugas buatanmu);  /skill <nama> <teks>  — jalankan, dijawab Ollama lokal;  /skill baru <nama> …  — buat skill dari sini;  /skill lihat|hapus <nama>",
   "/penyedia  — status tiap penyedia AI (Gemini, Groq, OpenRouter, Ollama): berhasil/gagal, key yang istirahat",
@@ -170,6 +172,8 @@ const HELP = [
  *   ops?: { handle(name, arg, {chatId, viaVoice, send}) -> Promise<string|undefined> }   perintah laptop (ops.js)
  *   localDocs?: { ask(q)->Promise<{reply}>, list()->string }   tanya-jawab dokumen lokal (/dokumen), dijawab Ollama
  *   memory?: { handle({name:"ingat"|"catatan"|"lupa", arg}) -> string }   catatan pribadi pemilik (owner-memory.js), hanya dibaca Ollama lokal
+ *   reminders?: { handle({name:"ingatkan"|"pengingat", arg}) -> string }   pengingat pribadi (reminders.js)
+ *   backup?: { status() -> string, run() -> Promise<string> }   cadangan lokal (backup.js)
  *   market?: { report() -> Promise<string>, diagnose?() -> Promise<string> }   /pasar (/emas /ihsg): IHSG, emas dunia, kurs USD/IDR (market-brief.js)
  *   skillAdmin?: { handle(sub, rest, {chatId, viaVoice}) -> string }   /skill baru|lihat|hapus (skills.js); perubahan lewat konfirmasi ops
  *   localChat?: { handle(key, arg)->Promise<string>, reset(key) }   obrolan dengan Ollama lokal (/lokal, /tanya; local-chat.js), tidak lewat Gemini
@@ -707,6 +711,24 @@ Ubah: /suara auto • /suara on • /suara off`));
         return void (await reply(`⚠️ Catatan gagal diproses: ${String(e?.message || e).slice(0, 200)}`));
       }
     }
+    if (name === "ingatkan" || name === "remind" || name === "pengingat" || name === "reminder") {
+      if (!deps.reminders) return void (await reply("Fitur pengingat belum aktif di bot ini."));
+      try {
+        const remName = name === "ingatkan" || name === "remind" ? "ingatkan" : "pengingat";
+        return void (await reply(deps.reminders.handle({ name: remName, arg })));
+      } catch (e) {
+        return void (await reply(`⚠️ Pengingat gagal diproses: ${String(e?.message || e).slice(0, 200)}`));
+      }
+    }
+    if (name === "cadangan" || name === "backup") {
+      if (!deps.backup) return void (await reply("Fitur cadangan belum aktif di bot ini."));
+      try {
+        const now = /^(sekarang|now|buat|jalankan|run)$/i.test(String(arg || "").trim());
+        return void (await reply(await withTyping(chatId, () => (now ? deps.backup.run() : deps.backup.status()))));
+      } catch (e) {
+        return void (await reply(`⚠️ Cadangan gagal diproses: ${String(e?.message || e).slice(0, 200)}`));
+      }
+    }
     if (name === "penyedia" || name === "provider") {
       if (!deps.providers) return void (await reply("Status penyedia belum tersedia."));
       try {
@@ -829,7 +851,7 @@ Ubah: /suara auto • /suara on • /suara off`));
   }
 
   const HANDLER_DEADLINE_MS = 10 * 60_000;
-  const FAST_COMMANDS = new Set(["dokumen", "dok", "doc", "status", "id", "help", "start", "ingat", "catatan", "lupa", "memori", "note", "penyedia", "provider", "skill", "skil", "lokal", "tanya", "pasar", "emas", "ihsg"]);
+  const FAST_COMMANDS = new Set(["dokumen", "dok", "doc", "status", "id", "help", "start", "ingat", "catatan", "lupa", "memori", "note", "penyedia", "provider", "skill", "skil", "lokal", "tanya", "pasar", "emas", "ihsg", "ingatkan", "remind", "pengingat", "reminder", "cadangan", "backup"]);
   function isFastUpdate(u) {
     const m = u?.message;
     if (!m) return false;
@@ -945,6 +967,8 @@ Ubah: /suara auto • /suara on • /suara off`));
           { command: "ringkasan", description: "Ringkasan percakapan WhatsApp hari ini" },
           { command: "peraturan", description: "Pantau peraturan terbaru" },
           { command: "dokumen", description: "Tanya dari dokumen lokal di laptop (dijawab Ollama)" },
+          { command: "ingatkan", description: "Pengingat pribadi: /ingatkan besok 09:00 kirim SPJ; /pengingat" },
+          { command: "cadangan", description: "Status cadangan otomatis; /cadangan sekarang" },
           { command: "pasar", description: "IHSG, harga emas dunia, dan kurs USD/IDR sekarang" },
           { command: "lokal", description: "Ngobrol dengan Ollama lokal (privat, memakai catatan pribadi)" },
           { command: "skill", description: "Jalankan skill buatanmu (file .md), dijawab Ollama lokal" },

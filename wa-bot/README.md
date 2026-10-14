@@ -736,7 +736,8 @@ Baris pertama setelah `baru` adalah nama skill. Baris-baris pembuka `deskripsi:`
 
 Tiap pagi di hari kerja (bawaan 07:30 sesuai `WA_TIMEZONE`, Senin sampai Jumat) bot mengirim ke WhatsApp dan Telegram pemilik: IHSG, harga emas dunia (US$/oz dan perkiraan Rp/gram), dan kurs USD/IDR, masing-masing dengan selisih dari penutupan sebelumnya. **`/pasar`** (alias `/emas`, `/ihsg`) menampilkannya kapan saja, di Telegram dan WhatsApp (chat pribadi).
 
-- **Sumber (berlapis, tanpa API key dan tanpa biaya):** tiap data punya sumber cadangan. IHSG: Yahoo Finance, lalu Stooq. Emas dunia: xaus.com, lalu Yahoo, lalu Stooq. Kurs USD/IDR: ExchangeRate-API (open.er-api.com, diperbarui harian; wajib menyebut atribusinya, sudah tampil di laporan), lalu Yahoo, lalu Stooq. Bila satu sumber gagal (mis. Yahoo membalas HTTP 429 karena membatasi permintaan), sumber berikutnya dicoba otomatis dan sumber yang terakhir berhasil dicoba lebih dulu. Permintaan ke Yahoo diantre dengan jeda dan hasil disimpan 5 menit supaya tidak memicu pembatasan. Semuanya sumber tidak resmi, jadi bisa berubah atau sesekali tertunda. Bila satu bagian gagal dibaca, bagian itu ditulis "data tidak terbaca (alasan tiap sumber)" dan sisanya tetap tampil; angka tidak pernah ditebak. Angka yang tidak masuk akal ditolak.
+- **Sumber (berlapis, tanpa API key dan tanpa biaya):** tiap data punya sumber cadangan. IHSG: Yahoo Finance, lalu Stooq (butuh API key gratis, lihat di bawah), lalu halaman Google Finance (COMPOSITE:IDX). Emas dunia: xaus.com, lalu Yahoo, lalu Stooq. Kurs USD/IDR: ExchangeRate-API (open.er-api.com, diperbarui harian; wajib menyebut atribusinya, sudah tampil di laporan), lalu Yahoo, lalu Stooq. Bila satu sumber gagal (mis. Yahoo membalas HTTP 429 karena membatasi permintaan), sumber berikutnya dicoba otomatis dan sumber yang terakhir berhasil dicoba lebih dulu. Permintaan ke Yahoo diantre dengan jeda dan hasil disimpan 5 menit supaya tidak memicu pembatasan. Semuanya sumber tidak resmi, jadi bisa berubah atau sesekali tertunda. Bila satu bagian gagal dibaca, bagian itu ditulis "data tidak terbaca (alasan tiap sumber)" dan sisanya tetap tampil; angka tidak pernah ditebak. Angka yang tidak masuk akal ditolak.
+- **Stooq API key:** sejak April 2026 Stooq mewajibkan key. Buka `https://stooq.com/q/d/?s=^jci&get_apikey` di browser, isi captcha, lalu salin nilai `apikey=` dari tautan CSV di bagian bawah halaman ke `MARKET_STOOQ_APIKEY` di `.env`. Tanpa key, Stooq dilewati. Google Finance dibaca dari halaman webnya (tanpa key), jadi bisa rusak bila Google mengubah tampilannya; sumber ini tidak menyebut waktu data, dan laporan memberi tahu hal itu.
 - **`/pasar tes`:** mencoba SEMUA sumber satu per satu dan menampilkan OK/GAGAL beserta alasannya. Pakai ini bila ada bagian yang "tidak terbaca", lalu kirim hasilnya agar sumbernya bisa diganti.
 - **Selisih:** xaus.com dan ExchangeRate-API tidak memberi "penutupan sebelumnya". Untuk emas dan kurs, selisih dihitung terhadap angka laporan terakhir (disimpan di `bot_state`) dan diberi keterangan tanggalnya.
 - **Tanggal data:** tiap laporan menyebut tanggal penutupan terakhir IHSG; bila lebih dari 4 hari lalu diberi peringatan (libur panjang atau data tertunda). Di pagi hari yang IHSG-nya belum buka, angka yang tampil adalah penutupan hari bursa sebelumnya.
@@ -744,3 +745,57 @@ Tiap pagi di hari kerja (bawaan 07:30 sesuai `WA_TIMEZONE`, Senin sampai Jumat) 
 - **Privasi:** hanya meminta data pasar ke sumber di atas (alamat IP laptop terlihat oleh mereka seperti pengunjung biasa); tidak ada data pribadi yang dikirim.
 
 Pengaturan di bagian 17 `.env.example`: `MARKET_BRIEF_ENABLED`, `MARKET_BRIEF_TIME`, `MARKET_BRIEF_DAYS`, `MARKET_BRIEF_LATE_MIN`, simbol Yahoo/Stooq, dan batas waktu. Untuk mematikan kiriman otomatis: `MARKET_BRIEF_ENABLED=false` (`/pasar` tetap bisa dipakai).
+
+## Pengingat pribadi (`/ingatkan`, `/pengingat`)
+
+Pengingat yang dikirim ke WhatsApp **dan** Telegram pemilik pada waktunya. Disimpan di SQLite lokal (`wa-bot/pengingat.sqlite`, tidak ikut Git), tanpa AI dan tanpa layanan luar.
+
+```
+/ingatkan 30 menit lagi cek oven
+/ingatkan besok 09:00 kirim SPJ
+/ingatkan jumat jam 14.30 rapat
+/ingatkan 25 okt 08:00 bayar pajak
+/ingatkan tiap tanggal 25 jam 08:00 laporan bulanan
+/ingatkan tiap senin 07:30 apel
+/ingatkan tiap hari 21:00 kunci pintu
+/pengingat                 daftar (tiap pengingat punya nomor)
+/pengingat batal 3         batalkan satu     |   /pengingat batal semua
+```
+
+- **Waktu** mengikuti `WA_TIMEZONE`. Jam tidak disebut = 08:00 (balasan bot menyebutnya terus terang). "pagi/siang/sore/malam" tanpa jam = 07:00/12:00/16:00/20:00; "jam 9 malam" = 21:00. Tanggal tanpa tahun yang sudah lewat dianggap tahun depan; tanggal 29-31 untuk jadwal bulanan jatuh di akhir bulan pada bulan yang lebih pendek.
+- **Bot mati saat waktunya:** begitu menyala, pengingat yang terlewat tetap dikirim dengan keterangan "terlambat". Pengingat berulang yang terlewat beberapa kali dikirim sekali, lalu lanjut ke jadwal berikutnya.
+- **Kirim gagal** (WhatsApp putus dan Telegram juga tidak bisa): pengingat tidak hilang, dicoba lagi tiap 2 menit.
+- **Batas:** 100 pengingat aktif, 200 huruf per pengingat, paling jauh sekitar 400 hari ke depan. Teks yang tampak seperti rahasia (key, kata sandi, PIN, nomor kartu) ditolak karena pengingat dikirim lewat WhatsApp/Telegram.
+- Hanya pemilik (Telegram: id pemilik; WhatsApp: nomor pemilik, bukan grup). Pengaturan: bagian 18 `.env.example`.
+
+## Cadangan otomatis (`/cadangan`)
+
+Tiap hari (bawaan 02:30) bot menyalin data yang **hanya ada di laptop** ke folder bertanggal, lalu menghapus yang lebih lama dari 7 cadangan terakhir.
+
+| Yang dicadangkan | Catatan |
+| --- | --- |
+| `memori.sqlite` (catatan `/ingat`) dan `pengingat.sqlite` | disalin dengan `VACUUM INTO` (konsisten walau bot sedang menulis), lalu diperiksa integritasnya |
+| `skills/` | resep skill (.md) |
+| `auth_session/` | sesi WhatsApp; tanpa ini harus pairing ulang. `creds.json` diperiksa utuh; kalau terbaca setengah ditulis, disalin ulang |
+| `.env` | **hanya** bila `BACKUP_INCLUDE_ENV=true` (berisi key rahasia) |
+
+- **Perintah:** `/cadangan` (status dan daftar), `/cadangan sekarang` (buat sekarang). Di Telegram dan WhatsApp pemilik.
+- **Aman:** disalin ke folder sementara dulu, baru diganti nama bila SEMUA sumber berhasil. Bila ada yang gagal, cadangan lama tidak disentuh dan kamu dikabari (setelah 3 percobaan, selang 30 menit). Rotasi hanya menghapus folder berpola tanggal yang berisi `manifest.json` di dalam folder cadangan. Folder dibuat 0700.
+- **Lokasi:** bawaan `~/cadangan-ayyubi`. Disk yang sama melindungi dari berkas rusak atau terhapus, **bukan** dari disk rusak/laptop hilang; arahkan `BACKUP_DIR` ke disk eksternal atau folder yang disinkronkan bila bisa. Folder ini berisi sesi WhatsApp: jangan dibagikan dan jangan masuk Git (bot memperingatkan bila folder ada di dalam proyek).
+- **Tidak bergantung pada Supabase:** penanda "sudah dicadangkan hari ini" dibaca dari isi folder. Bot baru menyala lewat jam cadangan dan belum ada cadangan hari itu -> langsung dibuat.
+
+### Memulihkan dari cadangan (manual, sengaja tidak otomatis)
+
+```bash
+pm2 stop wa-bot
+cd ~/ringkasan_harian/wa-bot
+B=~/cadangan-ayyubi/2026-10-14_0230          # pilih folder cadangan yang diinginkan
+cp "$B/memori.sqlite" memori.sqlite           # catatan
+cp "$B/pengingat.sqlite" pengingat.sqlite     # pengingat
+rm -f memori.sqlite-wal memori.sqlite-shm pengingat.sqlite-wal pengingat.sqlite-shm
+cp -r "$B/skills/." skills/                   # skill
+rm -rf auth_session && cp -r "$B/auth_session" auth_session   # sesi WhatsApp
+pm2 start wa-bot
+```
+
+Pulihkan hanya bagian yang diperlukan. Memulihkan `auth_session` memakai sesi lama: bila WhatsApp sudah mencabut tautan perangkat itu, bot tetap minta pairing ulang.

@@ -18,3 +18,6 @@ wa-bot/memori.sqlite*
 
 # Arsip skill yang ditimpa/dihapus lewat /skill (hanya di laptop)
 wa-bot/skills/.terhapus/
+
+# Pengingat pribadi (/ingatkan) -- hanya di laptop, jangan ke GitHub
+wa-bot/pengingat.sqlite*
