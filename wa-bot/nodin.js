@@ -83,6 +83,7 @@ export function parseNodinArg(arg, nowParts) {
   const text = String(arg || "").trim().toLowerCase();
   if (!text) return { kind: "default", period: defaultPeriod(nowParts) };
   if (/^(status|info|jadwal)$/.test(text)) return { kind: "status" };
+  if (/^(cek|periksa|diagnosa|tes|test)$/.test(text)) return { kind: "check" };
   let month = 0;
   let year = 0;
   const iso = text.match(/^(\d{4})[-/](\d{1,2})$/);
@@ -266,30 +267,35 @@ export function defaultWorkDirs() {
 const oneLine = (t, n = 160) => String(t || "").replace(/\s+/g, " ").trim().slice(0, n);
 
 /** .docx (Buffer) -> .pdf (Buffer). Memakai profil LibreOffice sementara supaya tidak bentrok dengan LibreOffice yang sedang terbuka. */
-export async function docxToPdf(docxBuf, { soffice, exec = run, timeoutMs = 120_000, baseDirs = defaultWorkDirs() } = {}) {
+export async function docxToPdf(docxBuf, { soffice, exec = run, timeoutMs = 120_000, baseDirs = defaultWorkDirs(), ext = "docx" } = {}) {
   const problems = [];
+  // Percobaan kedua di folder yang sama memaksa penyaring impor Word, bila LibreOffice gagal mengenali berkasnya.
+  const variants = ext === "docx" ? [[], ["--infilter=MS Word 2007 XML"]] : [[]];
   for (const base of baseDirs) {
-    let dir = "";
-    try {
-      fs.mkdirSync(base, { recursive: true });
-      dir = fs.mkdtempSync(path.join(base, "nodin-"));
-      const input = path.join(dir, "nota.docx");
-      fs.writeFileSync(input, docxBuf);
-      const profile = `file://${path.join(dir, "profil").split(path.sep).join("/")}`;
-      const r = await exec(soffice, [`-env:UserInstallation=${profile}`, "--headless", "--norestore", "--convert-to", "pdf", "--outdir", dir, input], { timeoutMs });
-      const out = path.join(dir, "nota.pdf");
-      if (fs.existsSync(out)) return fs.readFileSync(out);
-      problems.push(`${base}: PDF tidak terbentuk${oneLine(`${r?.stdout || ""} ${r?.stderr || ""}`) ? ` (${oneLine(`${r?.stdout || ""} ${r?.stderr || ""}`)})` : ""}`);
-    } catch (e) {
-      problems.push(`${base}: ${oneLine(e?.stderr || e?.message || e)}`);
-    } finally {
-      if (dir) fs.rmSync(dir, { recursive: true, force: true });
+    for (const extra of variants) {
+      let dir = "";
+      try {
+        fs.mkdirSync(base, { recursive: true });
+        dir = fs.mkdtempSync(path.join(base, "nodin-"));
+        const input = path.join(dir, `nota.${ext}`);
+        fs.writeFileSync(input, docxBuf);
+        const profile = `file://${path.join(dir, "profil").split(path.sep).join("/")}`;
+        const r = await exec(soffice, [`-env:UserInstallation=${profile}`, "--headless", "--norestore", ...extra, "--convert-to", "pdf", "--outdir", dir, input], { timeoutMs });
+        const out = path.join(dir, "nota.pdf");
+        if (fs.existsSync(out)) return fs.readFileSync(out);
+        const said = oneLine(`${r?.stdout || ""} ${r?.stderr || ""}`);
+        problems.push(`${base}${extra.length ? " (penyaring Word)" : ""}: PDF tidak terbentuk${said ? ` (${said})` : ""}`);
+      } catch (e) {
+        problems.push(`${base}: ${oneLine(e?.stderr || e?.message || e)}`);
+      } finally {
+        if (dir) fs.rmSync(dir, { recursive: true, force: true });
+      }
     }
   }
   const all = problems.join(" | ");
-  const hint = /no export filter|writer/i.test(all)
-    ? "Komponen Writer belum terpasang: sudo apt install libreoffice-writer"
-    : "Bila LibreOffice dari snap, coba: sudo snap remove libreoffice && sudo apt install libreoffice-writer";
+  const hint = /no export filter|writer|could not be loaded/i.test(all)
+    ? "Komponen Writer LibreOffice kemungkinan belum terpasang/rusak (ketik /nodin cek untuk pemeriksaan)"
+    : "Ketik /nodin cek untuk pemeriksaan LibreOffice";
   throw new Error(`${hint}. Rincian: ${all}`.slice(0, 420));
 }
 
@@ -300,7 +306,7 @@ const sizeKb = (b) => `${Math.max(1, Math.round(b.length / 1024))} KB`;
  * deps: { state: {get,set}, sendFiles(files, caption) -> Promise (kirim ke pemilik), send(text) -> Promise,
  *         timeZone, tzLabel, now(), log, convert(docxBuf)->Promise<Buffer> (opsional; bawaan LibreOffice), soffice }
  */
-export function createNodin({ config, state, sendFiles, send, timeZone = "Asia/Jakarta", tzLabel = "WIB", now = () => Date.now(), log = console, convert = null, soffice = "" } = {}) {
+export function createNodin({ config, state, sendFiles, send, timeZone = "Asia/Jakarta", tzLabel = "WIB", now = () => Date.now(), log = console, convert = null, soffice = "", exec = run } = {}) {
   let sofficeCmd = soffice;
   let detected = Boolean(soffice) || Boolean(convert);
   let running = false;
@@ -308,7 +314,7 @@ export function createNodin({ config, state, sendFiles, send, timeZone = "Asia/J
 
   async function detect() {
     if (!detected) {
-      sofficeCmd = await findSoffice(config.soffice);
+      sofficeCmd = await findSoffice(config.soffice, exec);
       detected = true;
     }
     return sofficeCmd;
@@ -332,7 +338,7 @@ export function createNodin({ config, state, sendFiles, send, timeZone = "Asia/J
       try {
         const cmd = convert ? "" : await detect();
         if (!convert && !cmd) throw new Error("LibreOffice tidak ditemukan di laptop (pasang: sudo apt install libreoffice-writer)");
-        const pdf = convert ? await convert(docx) : await docxToPdf(docx, { soffice: cmd });
+        const pdf = convert ? await convert(docx) : await docxToPdf(docx, { soffice: cmd, exec });
         files.push({ name: `${base}.pdf`, data: pdf, mime: "application/pdf" });
       } catch (e) {
         pdfError = String(e?.stderr || e?.message || e).slice(0, 420);
@@ -356,9 +362,58 @@ export function createNodin({ config, state, sendFiles, send, timeZone = "Asia/J
     const cmd = parseNodinArg(arg, nowParts());
     if (cmd.kind === "error") return { ok: false, text: cmd.error };
     if (cmd.kind === "status") return { ok: true, text: await status() };
+    if (cmd.kind === "check") return { ok: true, text: await diagnose() };
     const r = await generate(cmd.period);
     const caption = [captionFor(cmd.period, cmd.kind === "default"), r.pdfError ? `⚠️ PDF tidak dibuat (${r.pdfError}). Word tetap dikirim; buka dan ekspor ke PDF dari Word/LibreOffice.` : ""].filter(Boolean).join("\n");
     return { ok: true, text: `${caption}\n${r.files.map((f) => `• ${f.name} (${sizeKb(f.data)})`).join("\n")}`, caption, files: r.files };
+  }
+
+  /** /nodin cek: periksa LibreOffice di laptop dan coba ubah dua berkas (Word & teks biasa) jadi PDF; hasilnya dijelaskan. */
+  async function diagnose() {
+    const lines = ["🔎 *Pemeriksaan PDF nota dinas*"];
+    const cmd = await findSoffice(config.soffice, exec);
+    sofficeCmd = cmd;
+    detected = true;
+    if (!cmd) {
+      lines.push("❌ LibreOffice tidak ditemukan (perintah soffice/libreoffice tidak ada).", "Pasang di laptop: sudo apt install libreoffice-writer");
+      return lines.join("\n");
+    }
+    let where = cmd;
+    try {
+      const w = oneLine((await exec("which", [cmd], { timeoutMs: 10_000 })).stdout);
+      if (w) where = fs.realpathSync(w);
+    } catch {
+      /* biarkan nama perintah */
+    }
+    let version = "?";
+    try {
+      version = oneLine((await exec(cmd, ["--version"], { timeoutMs: 30_000 })).stdout, 80) || "?";
+    } catch {
+      /* abaikan */
+    }
+    let writer = "tidak diketahui";
+    try {
+      const d = (await exec("dpkg", ["-s", "libreoffice-writer"], { timeoutMs: 10_000 })).stdout;
+      writer = /Status:\s*install ok installed/.test(d) ? "terpasang" : "TIDAK terpasang";
+    } catch {
+      writer = "TIDAK terpasang lewat apt (atau bukan sistem apt)";
+    }
+    lines.push(`• Perintah: ${where}${/\/snap\//.test(where) ? " (versi snap)" : ""}`, `• Versi: ${version}`, `• Paket libreoffice-writer: ${writer}`);
+    const attempt = async (buf, ext) => {
+      try {
+        const pdf = await docxToPdf(buf, { soffice: cmd, exec, ext, timeoutMs: 90_000 });
+        return { ok: true, note: `${sizeKb(pdf)}` };
+      } catch (e) {
+        return { ok: false, note: oneLine(String(e?.message || e).replace(/^.*?Rincian:\s*/, ""), 260) };
+      }
+    };
+    const a = await attempt(fillDocx(readTemplate(), { bulan: "Oktober", tahun: 2026 }), "docx");
+    const b = await attempt(Buffer.from("Tes PDF nota dinas.\n"), "txt");
+    lines.push(`• Uji ubah Word ke PDF: ${a.ok ? `✅ berhasil (${a.note})` : `❌ gagal (${a.note})`}`, `• Uji ubah teks biasa ke PDF: ${b.ok ? `✅ berhasil (${b.note})` : `❌ gagal (${b.note})`}`);
+    if (a.ok) lines.push("", "✅ PDF bisa dibuat. Bot akan mengirim PDF + Word.");
+    else if (!b.ok) lines.push("", "Dua-duanya gagal, jadi LibreOffice-nya yang bermasalah (Writer belum terpasang/rusak atau LibreOffice tidak bisa jalan tanpa tampilan).", "Di laptop kantor jalankan: sudo apt install --reinstall libreoffice-writer libreoffice-core", "Lalu ketik /nodin cek lagi. Sementara itu bot tetap mengirim Word.");
+    else lines.push("", "Teks biasa berhasil tetapi Word gagal. Kirim pesan ini ke saya untuk dicarikan penyebabnya. Sementara itu bot tetap mengirim Word.");
+    return lines.join("\n");
   }
 
   const timeText = () => `${String(config.hour).padStart(2, "0")}.${String(config.minute).padStart(2, "0")} ${tzLabel}`;
@@ -384,7 +439,7 @@ export function createNodin({ config, state, sendFiles, send, timeZone = "Asia/J
       `Jadwal: ${config.enabled ? `otomatis tiap tanggal ${config.day} pukul ${timeText()}` : "otomatis MATI"}; bila terlewat dikejar sampai tanggal ${config.day + config.lateDays - 1}.`,
       `Laporan bulan ini (bulan sebelumnya): ${periodLabel(due)}. Terakhir terkirim otomatis: ${last ? periodLabel({ y: Number(last.slice(0, 4)), m: Number(last.slice(5, 7)) }) : "belum pernah"}.`,
       `Templat: ${fs.existsSync(config.template) ? "ada" : "TIDAK ADA"} (${path.basename(config.template)}). PDF: ${config.pdf ? (sofficeCmd ? "bisa (LibreOffice)" : "TIDAK bisa (LibreOffice tidak ditemukan), Word saja") : "dimatikan"}.`,
-      "Manual: /nodin (bulan lalu), /nodin november, /nodin oktober 2026"
+      "Manual: /nodin (bulan lalu), /nodin november, /nodin oktober 2026, /nodin cek (periksa PDF)"
     ].join("\n");
   }
 
@@ -426,5 +481,5 @@ export function createNodin({ config, state, sendFiles, send, timeZone = "Asia/J
     }
   }
 
-  return { check, compose, generate, describe, status, detect };
+  return { check, compose, generate, describe, status, detect, diagnose };
 }

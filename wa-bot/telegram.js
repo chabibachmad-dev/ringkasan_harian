@@ -151,7 +151,7 @@ const HELP = [
   "/pasar  — IHSG, harga emas dunia (Rp/gram), dan kurs USD/IDR sekarang (alias /emas, /ihsg); dikirim otomatis tiap pagi hari kerja. /pasar tes = uji tiap sumber data",
   "/ingatkan <waktu> <teks>  — pengingat pribadi (contoh: /ingatkan besok 09:00 kirim SPJ; /ingatkan tiap tanggal 25 jam 08:00 laporan);  /pengingat  — daftar;  /pengingat batal <nomor>",
   "/kesehatan  — periksa Ollama, disk, memori, WhatsApp, basis data, restart, dan cadangan sekarang (otomatis dipantau; kamu dikabari saat bermasalah dan pulih)",
-  "/nodin  — konsep Nota Dinas LPJ Bendahara (PDF + Word); otomatis tiap tanggal 1. Contoh: /nodin,  /nodin november,  /nodin oktober 2026,  /nodin status",
+  "/nodin  — konsep Nota Dinas LPJ Bendahara (PDF + Word); otomatis tiap tanggal 1. Contoh: /nodin,  /nodin november,  /nodin oktober 2026,  /nodin status,  /nodin cek (periksa pembuatan PDF)",
   "/urutan  — lihat/ubah urutan AI untuk balasan WhatsApp & grup (jalur santai & akurat; contoh: /urutan santai groq,gemini,openrouter,ollama;  /urutan reset)",
   "/cadangan  — status cadangan otomatis (memori, pengingat, skill, sesi WhatsApp);  /cadangan sekarang  — buat sekarang",
   "/lokal <pesan>  — ngobrol dengan Ollama LOKAL (alias /tanya): percakapan dan catatan pribadimu tidak keluar dari laptop;  /lokal baru  — lupakan percakapan",

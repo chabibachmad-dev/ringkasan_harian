@@ -852,7 +852,7 @@ Nota Dinas "Penyampaian Laporan Pertanggungjawaban Bendahara Pengeluaran" hanya 
 - `[Bulan_Laporan]` dan `[Tahun_Laporan]` diisi bot dengan **bulan sebelum tanggal surat** (surat 1 November → Oktober; surat 1 Januari → Desember tahun lalu).
 - `[Nomor_ND]` dan `[Tanggal_ND]` **sengaja dibiarkan**: diisi sistem persuratan saat naskah dibuat. QR tanda tangan juga dibuat sistem persuratan, jadi tidak ada di konsep.
 - Tiap tanggal 1 pukul 07.00 (zona `WA_TIMEZONE`) bot mengirim **PDF + Word** ke WhatsApp dan Telegram pemilik. Hanya sekali per bulan laporan (penanda `nodin_last` di tabel `bot_state`). Bila bot mati pada tanggal 1, dikejar sampai tanggal 5. Gagal 3 kali dalam sehari → kamu dikabari.
-- Kapan saja: `/nodin` (bulan lalu), `/nodin november`, `/nodin oktober 2026`, `/nodin status` (WhatsApp maupun Telegram).
+- Kapan saja: `/nodin` (bulan lalu), `/nodin november`, `/nodin oktober 2026`, `/nodin status`, dan `/nodin cek` (memeriksa LibreOffice di laptop dan menjelaskan kalau PDF gagal dibuat) — semuanya dari WhatsApp maupun Telegram.
 
 PDF dibuat LibreOffice tanpa tampilan. Pasang sekali di laptop: `sudo apt install libreoffice-writer`, lalu cek `soffice --version`. Tanpa LibreOffice bot tetap mengirim Word (kamu ekspor PDF sendiri) dan memberi tahu alasannya.
 

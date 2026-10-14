@@ -49,6 +49,7 @@ assert.deepEqual(parseNodinArg("desember", now).period, { y: 2025, m: 12 });
 assert.deepEqual(parseNodinArg("november 2026", now).period, { y: 2026, m: 11 });
 assert.deepEqual(parseNodinArg("10 2026", now).period, { y: 2026, m: 10 });
 assert.deepEqual(parseNodinArg("2026-09", now).period, { y: 2026, m: 9 });
+assert.equal(parseNodinArg("cek", now).kind, "check");
 assert.equal(parseNodinArg("blabla", now).kind, "error");
 assert.equal(parseNodinArg("13 2026", now).kind, "error");
 assert.equal(parseNodinArg("oktober 1999", now).kind, "error");
@@ -232,12 +233,40 @@ ok("Telegram: /nodin kirim PDF+Word, keterangan di berkas pertama, argumen salah
   const pdf = await docxToPdf(Buffer.from("x"), { soffice: "soffice", exec: fakeExec, baseDirs: [bad, good] });
   assert.equal(pdf.toString(), "%PDF-ok", "folder pertama gagal -> folder cadangan dipakai");
   await assert.rejects(docxToPdf(Buffer.from("x"), { soffice: "soffice", exec: fakeExec, baseDirs: [bad] }), /source file could not be loaded/);
-  await assert.rejects(docxToPdf(Buffer.from("x"), { soffice: "soffice", exec: async () => ({ stdout: "Error: no export filter for pdf", stderr: "" }), baseDirs: [bad] }), /libreoffice-writer/);
+  const seen = [];
+  await docxToPdf(Buffer.from("x"), { soffice: "soffice", exec: async (c, a) => { seen.push(a.some((x) => /infilter/.test(x))); const o = a[a.indexOf("--outdir") + 1]; if (seen.length === 2) fs.writeFileSync(path.join(o, "nota.pdf"), "%PDF"); return { stdout: "", stderr: "" }; }, baseDirs: [bad] });
+  assert.deepEqual(seen, [false, true], "gagal -> diulang dengan penyaring Word di folder yang sama");
+  await assert.rejects(docxToPdf(Buffer.from("x"), { soffice: "soffice", exec: async () => ({ stdout: "Error: no export filter for pdf", stderr: "" }), baseDirs: [bad] }), /Writer LibreOffice/);
   await assert.rejects(docxToPdf(Buffer.from("x"), { soffice: "soffice", exec: async () => { throw new Error("boom"); }, baseDirs: [bad] }), /boom/);
   assert.deepEqual(fs.readdirSync(bad), [], "folder sementara dibersihkan");
   fs.rmSync(root, { recursive: true, force: true });
 }
 ok("docxToPdf: folder cadangan, pesan alasan jelas, pembersihan");
+
+
+// --- /nodin cek (diagnosa) dengan LibreOffice palsu
+{
+  const mk = (behaviour) => async (cmd, args) => {
+    if (cmd === "which") return { stdout: "/usr/bin/soffice\n", stderr: "" };
+    if (cmd === "dpkg") { if (behaviour.noWriter) throw new Error("dpkg: tidak ada"); return { stdout: "Package: libreoffice-writer\nStatus: install ok installed\n", stderr: "" }; }
+    if (args.includes("--version")) return { stdout: "LibreOffice 7.6.4.1 60(Build:1)\n", stderr: "" };
+    const outdir = args[args.indexOf("--outdir") + 1];
+    const input = args.at(-1);
+    if (behaviour.fail?.(input)) return { stdout: "Error: source file could not be loaded", stderr: "" };
+    fs.writeFileSync(path.join(outdir, "nota.pdf"), "%PDF-ok");
+    return { stdout: "", stderr: "" };
+  };
+  const mkSvc = (behaviour) => createNodin({ config: { ...cfg, soffice: "soffice" }, state: mem(), log: silent, exec: mk(behaviour), sendFiles: async () => {}, send: async () => {} });
+  let r = await mkSvc({}).compose("cek");
+  assert.ok(r.ok && /berhasil/.test(r.text) && /terpasang/.test(r.text) && /LibreOffice 7\.6/.test(r.text) && /Bot akan mengirim PDF/.test(r.text));
+  r = await mkSvc({ noWriter: true, fail: () => true }).compose("cek");
+  assert.ok(/gagal/.test(r.text) && /reinstall libreoffice-writer/.test(r.text) && /TIDAK terpasang/.test(r.text));
+  r = await mkSvc({ fail: (i) => i.endsWith(".docx") }).compose("cek");
+  assert.ok(/Teks biasa berhasil tetapi Word gagal/.test(r.text));
+  const none = createNodin({ config: { ...cfg, soffice: "" }, state: mem(), log: silent, exec: async () => { throw new Error("tidak ada"); }, sendFiles: async () => {}, send: async () => {} });
+  assert.ok(/tidak ditemukan/.test((await none.compose("cek")).text));
+}
+ok("/nodin cek: berhasil, Writer hilang, hanya Word gagal, LibreOffice tak ada");
 
 // --- LibreOffice sungguhan bila ada (bergantung mesin: gagal hanya DICATAT, bukan menggagalkan tes)
 const so = await findSoffice("");
