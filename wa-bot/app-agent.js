@@ -111,6 +111,7 @@ export function createAppAgentWorker(deps, overrides = {}) {
     notify, // async ({ title, body, url, tag }) -> void (push ke HP); opsional
     kbIndex, // indeks dokumen di laptop (kb-index.js); opsional
     getExtra, // () -> { waConnected, extra }; opsional (untuk halaman Status sistem)
+    getOwnerMemory, // () -> string; blok CATATAN PRIBADI pemilik (owner-memory.js); opsional. Chat aplikasi = pemilik + Ollama lokal.
     log = console
   } = deps;
   const startedAtIso = new Date().toISOString();
@@ -277,7 +278,14 @@ export function createAppAgentWorker(deps, overrides = {}) {
     const attachments = await loadAttachments(job.chat_date);
     if (useKb || attachments.length > 0) history = compactHistory(history, cfg.docHistoryLimit, cfg.docHistoryClipChars);
     const strictDocs = useKb || attachments.length > 0;
-    const system = `${SYSTEM_PROMPT}${strictDocs ? `\n\n${STRICT_DOC_RULES}` : ""}\n\n${currentDateLine()}`;
+    let ownerMemory = "";
+    try {
+      ownerMemory = typeof getOwnerMemory === "function" ? String(getOwnerMemory() || "").trim() : "";
+    } catch {
+      ownerMemory = ""; // catatan tidak boleh menggagalkan jawaban
+    }
+    const memoryNote = ownerMemory ? `\n\n${ownerMemory}${strictDocs ? "\nCatatan di atas hanya untuk gaya jawaban dan konteks pemilik; isi dokumen/peraturan tetap hanya dari dokumen." : ""}` : "";
+    const system = `${SYSTEM_PROMPT}${strictDocs ? `\n\n${STRICT_DOC_RULES}` : ""}\n\n${currentDateLine()}${memoryNote}`;
     const lastIdx = history.length - 1;
     const addContext = (label, body) => {
       history[lastIdx] = { role: "user", content: `${history[lastIdx].content}\n\n---\n${label}\n${body}` };

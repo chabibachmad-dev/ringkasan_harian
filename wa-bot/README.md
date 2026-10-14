@@ -677,4 +677,14 @@ dokumen/peraturan-md/    hasil .md terstruktur. Boleh kamu sunting; suntingan TI
   - Balasan otomatis ke kontak/grup TIDAK memakai dokumen lokal (bawaan). `DOC_LOCAL_WA_CONTACTS=true` mengizinkannya (hanya bila `WA_AI_ENGINE=ollama`). `DOC_LOCAL_BUDGET_CHARS` (bawaan 3500) = banyaknya teks dokumen yang dibaca model untuk `/dokumen`.
 - Pemasangan: `npx supabase db push` (atau tempel 0037 dan 0038 di SQL Editor; 0038 = kolom progres), `npx supabase functions deploy chat`, ekstrak zip, `pm2 restart wa-bot --update-env`.
 
-<!-- uji patch lewat Telegram: 2026-10-14 (komentar ini tidak tampil; aman dihapus) -->
+## Status penyedia AI (`/penyedia`) dan catatan pribadi (`/ingat`)
+
+Dua perintah untuk pemilik, di Telegram dan WhatsApp (WhatsApp: chat pribadi saja, bukan grup). Keduanya jalan lokal, tanpa biaya, tanpa paket baru.
+
+**`/penyedia`** menampilkan status tiap penyedia AI sejak bot dihidupkan: Gemini, Groq, OpenRouter, Ollama, dan pencarian web. Isinya jumlah berhasil/gagal, 20 percobaan terakhir, kapan terakhir berhasil, berapa key yang sedang istirahat (dan jam pulihnya), serta galat terakhir. Ikon: 🟢 lancar, 🟡 kadang gagal, 🔴 tiga percobaan terakhir gagal, ⚪ belum dipakai. `/penyedia reset` menghitung dari nol. Yang dicatat hanya hasil panggilan; isi percakapan dan key tidak disimpan (galat dibersihkan dari pola key). Hitungan di memori, jadi mulai dari nol setiap bot di-restart.
+
+**`/ingat <teks>`** menyimpan catatan pribadi (maks 300 huruf, maks 50 catatan), **`/catatan`** menampilkan daftar, **`/lupa <nomor>`** atau **`/lupa semua`** menghapus. Catatan disimpan di `wa-bot/memori.sqlite` di laptop (sudah masuk `.gitignore`) dan hanya disisipkan ke prompt Ollama lokal untuk pemilik: chat di aplikasi dan `/dokumen`. Catatan **tidak** dikirim ke Gemini/Groq/OpenRouter, **tidak** dipakai untuk balasan otomatis ke kontak WhatsApp, dan obrolan biasa di Telegram (yang dijawab Gemini) juga tidak memakainya. Teks yang tampak seperti rahasia (API key, kata sandi, PIN, nomor kartu) ditolak. Untuk `/dokumen`, catatan hanya menyesuaikan gaya jawaban; isi peraturan tetap hanya dari dokumen.
+
+Contoh: `/ingat jawab singkat, maksimal 5 poin` lalu tanya di chat aplikasi dengan mesin Ollama.
+
+Pengaturan (opsional) ada di bagian 16 `.env.example`: `OWNER_MEMORY_ENABLED`, `OWNER_MEMORY_MAX`, `OWNER_MEMORY_BUDGET_CHARS`, `OWNER_MEMORY_FILE`.

@@ -100,6 +100,7 @@ function setup(over = {}) {
       getExtra: () => ({ waConnected: true, extra: { pausedChats: 2 } }),
       chunkDocumentText: chunker,
       currentDateLine: () => "Waktu sekarang: tes.",
+      getOwnerMemory: over.ownerMemory,
       ollamaBaseUrl: base,
       ollamaModel: "qwen2.5:3b",
       log: silent
@@ -124,6 +125,21 @@ check(JSON.stringify(pickEvenly([1,2,3,4,5,6,7,8,9,10], 3)) === "[1,6,10]" && pi
   check(calls.length === 1 && calls[0].messages[0].role === "system" && calls[0].messages.at(-1).content === "pertanyaan baru", "prompt: system + riwayat, pertanyaan terakhir");
   check(!calls[0].messages.at(-1).content.includes("KONTEKS DOKUMEN"), "tanpa KB tidak ada konteks dokumen");
   check(calls[0].opts.numCtx === 8192 && calls[0].opts.maxTokens === 700, "num_ctx 8192 & max output 700 utk chat aplikasi");
+}
+
+// 2a. Catatan pribadi pemilik (owner-memory.js) masuk ke prompt system Ollama; tanpa catatan prompt tidak berubah
+{
+  const { calls, w } = setup({ ownerMemory: () => "CATATAN PRIBADI PEMILIK (tes):\n- jawab singkat" });
+  await w.tick();
+  const sys = calls[0].messages[0].content;
+  check(sys.includes("CATATAN PRIBADI PEMILIK") && sys.includes("- jawab singkat"), "catatan pemilik: masuk ke prompt system");
+  check(!calls[0].messages.slice(1).some((m) => m.content.includes("jawab singkat")), "catatan pemilik: tidak bercampur ke riwayat/pertanyaan");
+  const plain = setup();
+  await plain.w.tick();
+  check(!plain.calls[0].messages[0].content.includes("CATATAN PRIBADI"), "catatan pemilik: tanpa catatan prompt tidak berubah");
+  const broken = setup({ ownerMemory: () => { throw new Error("rusak"); } });
+  await broken.w.tick();
+  check(broken.tables.agent_jobs[0].status === "done", "catatan pemilik: pembaca catatan rusak tidak menggagalkan job");
 }
 
 

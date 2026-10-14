@@ -77,6 +77,8 @@ import { guardDocAnswer } from "./docguard.js";
 import { createLocalDocs, parseDokumenCommand } from "./local-docs.js";
 import { createOps, readOpsConfig } from "./ops.js";
 import { ollamaChatStream } from "./ollama-http.js";
+import { createProviderStats, parseProviderCommand } from "./provider-stats.js";
+import { handleMemoryCommand, openOwnerMemory, parseMemoryCommand } from "./owner-memory.js";
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -133,6 +135,8 @@ if (GEMINI_API_KEYS.length > 0 && (process.env.WA_AI_ENGINE || "ollama").trim().
 }
 // Penyedia CADANGAN (Groq, OpenRouter): dipakai hanya setelah semua key Gemini gagal/habis kuota.
 // Diatur lewat GROQ_API_KEYS / OPENROUTER_API_KEYS di .env (lihat llm-fallback.js & .env.example).
+// Statistik penyedia AI untuk /penyedia (hanya hitungan berhasil/gagal di memori; tanpa isi percakapan atau key).
+const providerStats = createProviderStats();
 const llmFallback = createFallbackChain({ config: readFallbackConfig(process.env), onEvent: (e) => reportLlmEvent(e) });
 if (llmFallback.available() && (process.env.WA_AI_ENGINE || "ollama").trim().toLowerCase() === "gemini") {
   console.log(`🛟 Penyedia cadangan AI aktif (setelah Gemini): ${llmFallback.describe()}`);
@@ -842,20 +846,27 @@ async function callOllamaChat(messages, { timeoutMs = OLLAMA_TIMEOUT_MS, maxToke
   // Lewat node:http + stream (lihat ollama-http.js): fetch bawaan Node memutus
   // request yang menunggu > 300 detik ("fetch failed"), padahal di laptop ini
   // jawaban berbasis dokumen bisa lebih lama dari itu.
-  const { content } = await ollamaChatStream({
-    baseUrl: OLLAMA_BASE_URL,
-    timeoutMs,
-    onToken,
-    body: {
-      model,
-      messages,
-      // keep_alive: berapa lama model dibiarkan di RAM sejak pemakaian terakhir
-      // (lihat OLLAMA_KEEP_ALIVE di atas).
-      keep_alive: OLLAMA_KEEP_ALIVE,
-      ...(format ? { format } : {}),
-      options: { num_ctx: numCtx, num_predict: maxTokens, temperature }
-    }
-  });
+  let content;
+  try {
+    ({ content } = await ollamaChatStream({
+      baseUrl: OLLAMA_BASE_URL,
+      timeoutMs,
+      onToken,
+      body: {
+        model,
+        messages,
+        // keep_alive: berapa lama model dibiarkan di RAM sejak pemakaian terakhir
+        // (lihat OLLAMA_KEEP_ALIVE di atas).
+        keep_alive: OLLAMA_KEEP_ALIVE,
+        ...(format ? { format } : {}),
+        options: { num_ctx: numCtx, num_predict: maxTokens, temperature }
+      }
+    }));
+  } catch (err) {
+    providerStats.record({ provider: "ollama", kind: "error", error: err instanceof Error ? err.message : String(err) });
+    throw err;
+  }
+  providerStats.record({ provider: "ollama", kind: "success", model });
   return content;
 }
 
@@ -1047,6 +1058,8 @@ function summarizeGeminiError(raw) {
 // auto-reply (mis. migration 0013 belum dijalankan).
 let keyReportWarned = false;
 function reportKeyEvent(key, { requestsInc = 0, exhaustedUntilMs = null, error = null } = {}) {
+  if (requestsInc > 0) providerStats.record({ provider: "gemini", kind: "success", model: GEMINI_MODEL, keyHint: geminiKeyHint(key) });
+  else if (exhaustedUntilMs) providerStats.record({ provider: "gemini", kind: "exhausted", keyHint: geminiKeyHint(key), untilMs: exhaustedUntilMs, error: summarizeGeminiError(error) });
   supabase
     .rpc("report_gemini_key_event", {
       p_usage_date: pacificDateString(),
@@ -1069,6 +1082,7 @@ function reportKeyEvent(key, { requestsInc = 0, exhaustedUntilMs = null, error =
 // (tabel gemini_key_usage, kolom provider -- migration 0020). Hanya 4 karakter terakhir key.
 let llmReportWarned = false;
 function reportLlmEvent(e) {
+  providerStats.record(e);
   supabase
     .rpc("report_llm_key_event", {
       p_provider: e.provider,
@@ -1394,6 +1408,7 @@ async function geminiGenerateWithRotation(
       return data;
     } catch (err) {
       attemptsLeft -= 1;
+      if (err.status !== 429) providerStats.record({ provider: "gemini", kind: "error", error: summarizeGeminiError(err.message) });
       if (err.status === 429 && attemptsLeft > 0) {
         markGeminiKeyExhausted(apiKey, err);
         continue; // coba lagi dari awal pakai key berikutnya
@@ -2911,6 +2926,8 @@ async function handleIncoming(msg, sock) {
 
   // /dokumen <pertanyaan> (hanya pemilik, bukan di grup): jawab dari dokumen lokal lewat Ollama; tidak disimpan & tidak memicu auto-reply.
   if (isOwnerSender(msg, isSelfChat) && !isGroupJid(jid) && (await handleWaDokumenCommand(sock, jid, text))) return;
+  // /ingat /catatan /lupa /penyedia (hanya pemilik, bukan di grup): lihat owner-memory.js dan provider-stats.js.
+  if (isOwnerSender(msg, isSelfChat) && !isGroupJid(jid) && (await handleWaOwnerLocalCommands(sock, jid, text))) return;
 
   // Tutor suara (/speak, /selesai) hanya untuk pemilik; selama sesi, teks/voice note pemilik = ucapan untuk tutor
   // (tidak disimpan ke riwayat chat dan tidak memicu auto-reply).
@@ -3284,9 +3301,40 @@ const waTutor = createWaTutor({
   hasTranscriber: transcriber.available(),
   config: waVoiceCfg
 });
+// Catatan pribadi pemilik (/ingat /catatan /lupa): SQLite lokal, hanya disisipkan ke prompt Ollama milik pemilik
+// (chat aplikasi + /dokumen). Tidak pernah ke Gemini/Groq/OpenRouter dan tidak ke balasan otomatis untuk kontak. Lihat owner-memory.js.
+const OWNER_MEMORY_BUDGET_CHARS = Math.max(300, Math.min(4000, Number(process.env.OWNER_MEMORY_BUDGET_CHARS) || 1200));
+let ownerMemory = null;
+if (!["0", "false", "off", "tidak", "no"].includes(String(process.env.OWNER_MEMORY_ENABLED ?? "true").trim().toLowerCase())) {
+  try {
+    ownerMemory = await openOwnerMemory({
+      file: process.env.OWNER_MEMORY_FILE?.trim() || fileURLToPath(new URL("./memori.sqlite", import.meta.url)),
+      maxNotes: Number(process.env.OWNER_MEMORY_MAX) || 50
+    });
+    if (ownerMemory) console.log(`🧠 Catatan pribadi: AKTIF (${ownerMemory.count()} catatan; hanya dibaca Ollama lokal)`);
+  } catch (err) {
+    console.warn(`🧠 Catatan pribadi tidak aktif: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+const ownerMemoryBlock = () => ownerMemory?.promptBlock(OWNER_MEMORY_BUDGET_CHARS) ?? "";
+
+// Teks /penyedia: status tiap penyedia AI sejak bot dihidupkan.
+function buildProviderReport({ reset = false } = {}) {
+  if (reset) {
+    providerStats.reset();
+    return "🔄 Statistik penyedia dihitung ulang dari nol.";
+  }
+  const configured = [];
+  if (GEMINI_API_KEYS.length > 0) configured.push("gemini");
+  for (const n of ["groq", "openrouter"]) if (llmFallback.has(n)) configured.push(n);
+  configured.push("ollama");
+  return providerStats.format({ configured, formatClock: (ms) => `${formatClockInTimezone(ms)} ${WA_TIMEZONE_LABEL}` });
+}
+
 // /dokumen <pertanyaan>: tanya-jawab dari dokumen lokal, khusus pemilik, dijawab Ollama (prioritas sama dgn chat aplikasi).
 const localDocs = createLocalDocs({
-  getIndex: () => kbIndex, // kbIndex baru terisi setelah start; jangan ditangkap sekarang (sempat null -> "indeks belum aktif")
+  getIndex: () => kbIndex,
+  getMemory: ownerMemoryBlock, // kbIndex baru terisi setelah start; jangan ditangkap sekarang (sempat null -> "indeks belum aktif")
   budgetChars: DOC_LOCAL_BUDGET_CHARS,
   temperature: OLLAMA_DOC_TEMPERATURE,
   callModel: (messages, opts) => enqueueOllamaCall(() => callOllamaChat(messages, opts), { priority: PRIORITY.CHAT, label: "owner-docs" })
@@ -3316,6 +3364,16 @@ const ops = createOps({
     }
   }
 });
+
+/** /ingat /catatan /lupa dan /penyedia dari WhatsApp (hanya pemilik, bukan grup). true = pesan sudah ditangani. */
+async function handleWaOwnerLocalCommands(sock, jid, text) {
+  const mem = parseMemoryCommand(text);
+  const prov = mem ? null : parseProviderCommand(text);
+  if (!mem && !prov) return false;
+  const reply = mem ? handleMemoryCommand(ownerMemory, mem) : buildProviderReport({ reset: prov.reset });
+  await sock.sendMessage(jid, { text: reply }).catch((e) => console.error("💬 [WA/Lokal] gagal kirim:", e instanceof Error ? e.message : String(e)));
+  return true;
+}
 
 /** Jalankan /dokumen dari WhatsApp. true = pesan sudah ditangani. */
 async function handleWaDokumenCommand(sock, jid, text) {
@@ -3354,6 +3412,8 @@ const telegram = createTelegram({
     status: () => buildBotStatusText(),
     localDocs,
     ops,
+    memory: { handle: (cmd) => handleMemoryCommand(ownerMemory, cmd) },
+    providers: { report: (opts) => buildProviderReport(opts) },
     state: {
       get: async (key) => {
         const { data } = await supabase.from("bot_state").select("value").eq("key", key).maybeSingle();
@@ -3502,6 +3562,7 @@ const appAgent = createAppAgentWorker({
   rankKnowledgeChunks,
   chunkDocumentText,
   currentDateLine,
+  getOwnerMemory: ownerMemoryBlock,
   ollamaBaseUrl: OLLAMA_BASE_URL,
   ollamaModel: OLLAMA_MODEL,
   notify: sendPush,

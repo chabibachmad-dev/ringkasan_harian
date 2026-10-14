@@ -148,6 +148,8 @@ const HELP = [
   "/ringkasan  — ringkasan percakapan WhatsApp hari ini",
   "/peraturan  — pantau peraturan terbaru (\"/peraturan semua\" = tampilkan semua hasil)",
   "/dokumen <pertanyaan>  — tanya dari dokumen lokal di laptop (hasil PDF → MD), dijawab Ollama. \"/dokumen\" saja = daftar dokumen",
+  "/penyedia  — status tiap penyedia AI (Gemini, Groq, OpenRouter, Ollama): berhasil/gagal, key yang istirahat",
+  "/ingat <teks>  — simpan catatan pribadi (hanya di laptop, hanya dibaca Ollama lokal);  /catatan  — daftar;  /lupa <nomor|semua>  — hapus",
   "/sistem  — kondisi laptop bot (pm2, disk, RAM, Ollama); /log, /restart, /deploy, /migrasi: ketik /ops (perlu OPS_ENABLED=true)",
   "/baru  — mulai obrolan baru (lupakan konteks sebelumnya)",
   "/speak [topik]  — mulai latihan ngobrol Inggris dengan tutor (suara)   /speak id [topik]  — ngobrol santai bahasa Indonesia   /selesai  — akhiri",
@@ -164,6 +166,8 @@ const HELP = [
  *   status?()                         -> Promise<string>   teks kondisi bot (/status)
  *   ops?: { handle(name, arg, {chatId, viaVoice, send}) -> Promise<string|undefined> }   perintah laptop (ops.js)
  *   localDocs?: { ask(q)->Promise<{reply}>, list()->string }   tanya-jawab dokumen lokal (/dokumen), dijawab Ollama
+ *   memory?: { handle({name:"ingat"|"catatan"|"lupa", arg}) -> string }   catatan pribadi pemilik (owner-memory.js), hanya dibaca Ollama lokal
+ *   providers?: { report({reset}) -> string }   status penyedia AI (/penyedia, provider-stats.js)
  *   regNow?({ all, sendTo })          -> Promise            jalankan pantauan peraturan, kirim lewat sendTo(text)
  *   state?: { get(key), set(key, value) }                   penyimpan offset (supaya restart tidak memproses ulang)
  * }
@@ -644,6 +648,24 @@ Ubah: /suara auto • /suara on • /suara off`));
       return;
     }
 
+    if (name === "ingat" || name === "catatan" || name === "lupa" || name === "memori" || name === "note") {
+      if (!deps.memory) return void (await reply("Fitur catatan belum aktif di bot ini."));
+      try {
+        const memName = name === "memori" || name === "note" ? "catatan" : name;
+        return void (await reply(deps.memory.handle({ name: memName, arg })));
+      } catch (e) {
+        return void (await reply(`⚠️ Catatan gagal diproses: ${String(e?.message || e).slice(0, 200)}`));
+      }
+    }
+    if (name === "penyedia" || name === "provider") {
+      if (!deps.providers) return void (await reply("Status penyedia belum tersedia."));
+      try {
+        return void (await reply(deps.providers.report({ reset: /^(reset|ulang|nol|bersihkan)$/i.test(arg) })));
+      } catch (e) {
+        return void (await reply(`⚠️ Status penyedia gagal dibuat: ${String(e?.message || e).slice(0, 200)}`));
+      }
+    }
+
     // Perintah laptop (/sistem /log /restart /deploy /migrasi /ya): lihat ops.js. Sebelum blok SiMAB supaya "/ya <kode>" tidak tertelan sesi SiMAB.
     if (deps.ops && (deps.ops.commands || ["sistem", "log", "restart", "deploy", "migrasi", "ya", "ops"]).includes(name)) {
       try {
@@ -757,7 +779,7 @@ Ubah: /suara auto • /suara on • /suara off`));
   }
 
   const HANDLER_DEADLINE_MS = 10 * 60_000;
-  const FAST_COMMANDS = new Set(["dokumen", "dok", "doc", "status", "id", "help", "start"]);
+  const FAST_COMMANDS = new Set(["dokumen", "dok", "doc", "status", "id", "help", "start", "ingat", "catatan", "lupa", "memori", "note", "penyedia", "provider"]);
   function isFastUpdate(u) {
     const m = u?.message;
     if (!m) return false;
@@ -873,6 +895,8 @@ Ubah: /suara auto • /suara on • /suara off`));
           { command: "ringkasan", description: "Ringkasan percakapan WhatsApp hari ini" },
           { command: "peraturan", description: "Pantau peraturan terbaru" },
           { command: "dokumen", description: "Tanya dari dokumen lokal di laptop (dijawab Ollama)" },
+          { command: "penyedia", description: "Status penyedia AI: Gemini, Groq, OpenRouter, Ollama" },
+          { command: "ingat", description: "Simpan catatan pribadi (hanya Ollama lokal); /catatan, /lupa" },
           { command: "sistem", description: "Kondisi laptop bot; /ops untuk restart, deploy, log" },
           { command: "baru", description: "Mulai obrolan baru" },
           { command: "speak", description: "Ngobrol dengan tutor suara: Inggris, atau \"/speak id\" Indonesia" },

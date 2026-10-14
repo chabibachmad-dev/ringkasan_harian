@@ -67,9 +67,10 @@ export function buildOwnerDocMessage(question, chunks) {
  *   index      — kb-index (butuh search, listDocs)
  *   callModel(messages, { temperature }) -> Promise<string>   (di index.js: lewat antrean Ollama, prioritas obrolan)
  *   guard      — opsional (bawaan guardDocAnswer)
+ *   getMemory  — opsional: () => string, blok CATATAN PRIBADI pemilik (owner-memory.js); hanya ke Ollama lokal ini
  *   budgetChars, maxChunks, temperature — opsional
  */
-export function createLocalDocs({ index: indexArg = null, getIndex = null, callModel, guard = defaultGuard, budgetChars = 3500, maxChunks = 8, temperature = 0.1, now = () => new Date() } = {}) {
+export function createLocalDocs({ index: indexArg = null, getIndex = null, getMemory = null, callModel, guard = defaultGuard, budgetChars = 3500, maxChunks = 8, temperature = 0.1, now = () => new Date() } = {}) {
   // getIndex: indeks di bot dibuka belakangan (await saat start), jadi diambil saat dipakai, bukan saat modul dibuat.
   const currentIndex = () => (typeof getIndex === "function" ? getIndex() : indexArg);
 
@@ -100,10 +101,17 @@ export function createLocalDocs({ index: indexArg = null, getIndex = null, callM
     if (chunks.length === 0) return { ok: false, reply: NO_MATCH };
 
     const dateLine = `Waktu sekarang: ${now().toISOString().slice(0, 10)}.`;
+    let memory = "";
+    try {
+      memory = typeof getMemory === "function" ? String(getMemory() || "").trim() : "";
+    } catch {
+      memory = ""; // catatan tidak boleh menggagalkan jawaban
+    }
+    const memoryNote = memory ? `\n\n${memory}\nCatatan di atas hanya untuk menyesuaikan gaya jawaban dan konteks pemilik. Isi peraturan/angka tetap HANYA dari KONTEKS DOKUMEN.` : "";
     const raw = String(
       await callModel(
         [
-          { role: "system", content: `${LOCAL_DOC_SYSTEM_PROMPT}\n\n${dateLine}` },
+          { role: "system", content: `${LOCAL_DOC_SYSTEM_PROMPT}\n\n${dateLine}${memoryNote}` },
           { role: "user", content: buildOwnerDocMessage(q, chunks) }
         ],
         { temperature }

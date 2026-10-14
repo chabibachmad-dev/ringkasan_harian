@@ -12,3 +12,6 @@ supabase/.branches/
 # Folder dokumen lokal di laptop (PDF peraturan + hasil .md): pribadi, tidak boleh ke GitHub
 dokumen/
 .DS_Store
+
+# Catatan pribadi pemilik (/ingat) -- hanya di laptop, jangan ke GitHub
+wa-bot/memori.sqlite*
