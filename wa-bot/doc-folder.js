@@ -80,6 +80,19 @@ function atomicWrite(file, content) {
   fs.renameSync(tmp, file);
 }
 
+/** Perkiraan persen kemajuan dari teks tahap konversi (untuk bilah kemajuan di aplikasi). */
+export function percentOf(text) {
+  const t = String(text || "");
+  const ocr = /OCR halaman \d+ \((\d+)\/(\d+)\)/.exec(t);
+  if (ocr) return 20 + Math.round((60 * Number(ocr[1])) / Math.max(1, Number(ocr[2])));
+  if (/Mengunduh/i.test(t)) return 5;
+  if (/Membaca PDF/i.test(t)) return 10;
+  if (/Mengubah PDF menjadi teks/i.test(t)) return 20;
+  if (/Menata/i.test(t)) return 85;
+  if (/Mengindeks/i.test(t)) return 95;
+  return null;
+}
+
 export function createDocFolderWorker(deps, overrides = {}) {
   const { supabase = null, index, notify, log = console, now = () => Date.now(), isBusy, waitForIdle } = deps;
   const cfg = { ...readDocFolderConfig(deps.env || process.env, deps.baseDir || process.cwd()), ...overrides };
@@ -124,9 +137,20 @@ export function createDocFolderWorker(deps, overrides = {}) {
       log.error?.(/relation|does not exist|schema cache|column/i.test(msg) ? "📂 Dokumen lokal: tabel pdf_md_jobs belum ada -- jalankan migrasi supabase/migrations/0037_pdf_md_jobs.sql (folder tetap bekerja tanpa itu)." : `📂 Dokumen lokal: ${msg}`);
     }
   }
+  let noProgressCol = false; // migrasi 0038 belum dijalankan: kolom progress tidak ada, abaikan saja
+  const stripProgress = (f) => {
+    if (!noProgressCol || !("progress" in f)) return f;
+    const { progress: _p, ...rest } = f;
+    return rest;
+  };
   async function patchJob(id, fields) {
     if (!supabase || !id) return false;
-    const { error } = await supabase.from("pdf_md_jobs").update(fields).eq("id", id);
+    let { error } = await supabase.from("pdf_md_jobs").update(stripProgress(fields)).eq("id", id);
+    if (error && /progress/i.test(error.message || "") && !noProgressCol) {
+      noProgressCol = true;
+      log.error?.("📂 Dokumen lokal: kolom progress belum ada -- jalankan migrasi 0038_pdf_md_progress.sql (bilah kemajuan baru tampil setelah itu).");
+      ({ error } = await supabase.from("pdf_md_jobs").update(stripProgress(fields)).eq("id", id));
+    }
     if (error) noteTableError(error);
     return !error;
   }
@@ -138,7 +162,11 @@ export function createDocFolderWorker(deps, overrides = {}) {
       if (error) return noteTableError(error);
       if (data && data[0]) await patchJob(data[0].id, fields);
       else {
-        const { error: e2 } = await supabase.from("pdf_md_jobs").insert({ source: "folder", filename: rel, ...fields });
+        let { error: e2 } = await supabase.from("pdf_md_jobs").insert({ source: "folder", filename: rel, ...stripProgress(fields) });
+        if (e2 && /progress/i.test(e2.message || "") && !noProgressCol) {
+          noProgressCol = true;
+          ({ error: e2 } = await supabase.from("pdf_md_jobs").insert({ source: "folder", filename: rel, ...stripProgress(fields) }));
+        }
         if (e2) noteTableError(e2);
       }
     } catch (e) {
@@ -210,7 +238,7 @@ export function createDocFolderWorker(deps, overrides = {}) {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "docmd-"));
     stats.current = { file: rel, detail: "mulai" };
     try {
-      progress("Membaca PDF…");
+      progress("Membaca PDF…", 10);
       const conv = await convert({
         file: abs,
         tmpDir,
@@ -219,7 +247,7 @@ export function createDocFolderWorker(deps, overrides = {}) {
         },
         onProgress: (t) => {
           stats.current.detail = t;
-          progress(t);
+          progress(t, percentOf(t));
         }
       });
       const textLen = conv.pages.reduce((n, p) => n + String(p.text || "").replace(/\s+/g, "").length, 0);
@@ -230,7 +258,7 @@ export function createDocFolderWorker(deps, overrides = {}) {
             : "Tidak ada teks yang bisa dibaca dari PDF ini."
         );
       }
-      progress("Menata menjadi Markdown…");
+      progress("Menata menjadi Markdown…", 85);
       const built = buildRegulationMarkdown(conv.pages, {
         filename: path.basename(rel),
         now: new Date(now()),
@@ -252,6 +280,7 @@ export function createDocFolderWorker(deps, overrides = {}) {
           note.push(`Sudah ada ${path.posix.basename(relMd.replace(/\.baru\.md$/i, ".md"))} yang kamu sunting (atau bukan buatan bot); hasil baru disimpan sebagai ${path.posix.basename(relMd)}.`);
         }
       }
+      progress("Mengindeks…", 95);
       atomicWrite(path.join(cfg.mdDir, relMd), built.markdown);
       const isBaru = /\.baru\.md$/i.test(relMd);
       state.files[rel] = {
@@ -289,6 +318,7 @@ export function createDocFolderWorker(deps, overrides = {}) {
     table_count: r.stats.tabel,
     notes: r.notes,
     indexed: r.indexed,
+    progress: 100,
     storage_path: null,
     finished_at: new Date(now()).toISOString()
   });
@@ -324,7 +354,14 @@ export function createDocFolderWorker(deps, overrides = {}) {
         continue;
       }
       try {
-        const r = await convertOne(rel);
+        await reportFolder(rel, { status: "processing", status_detail: "Mulai diproses di laptop…", error: null, progress: 2, finished_at: null });
+        let lastAt = 0;
+        const progress = (text, pct = null) => {
+          if (now() - lastAt < 2500) return;
+          lastAt = now();
+          reportFolder(rel, { status_detail: text, ...(pct != null ? { progress: pct } : {}) }).catch(() => {});
+        };
+        const r = await convertOne(rel, { progress });
         await reportFolder(rel, resultFields(r));
       } catch (e) {
         const msg = String(e?.message || e).slice(0, 500);
@@ -357,12 +394,19 @@ export function createDocFolderWorker(deps, overrides = {}) {
     }
     const job = data?.[0];
     if (!job) return null;
-    const { data: claimed, error: e2 } = await supabase
-      .from("pdf_md_jobs")
-      .update({ status: "processing", status_detail: "Mulai diproses di laptop…", error: null })
-      .eq("id", job.id)
-      .eq("status", "queued")
-      .select("id");
+    const claim = () =>
+      supabase
+        .from("pdf_md_jobs")
+        .update(stripProgress({ status: "processing", status_detail: "Mulai diproses di laptop…", error: null, progress: 2 }))
+        .eq("id", job.id)
+        .eq("status", "queued")
+        .select("id");
+    let { data: claimed, error: e2 } = await claim();
+    if (e2 && /progress/i.test(e2.message || "") && !noProgressCol) {
+      noProgressCol = true; // migrasi 0038 belum dijalankan: lanjut tanpa bilah kemajuan
+      log.error?.("📂 Dokumen lokal: kolom progress belum ada -- jalankan migrasi 0038_pdf_md_progress.sql (bilah kemajuan baru tampil setelah itu).");
+      ({ data: claimed, error: e2 } = await claim());
+    }
     if (e2) {
       noteTableError(e2);
       return null;
@@ -389,13 +433,13 @@ export function createDocFolderWorker(deps, overrides = {}) {
 
   async function processJob(job) {
     let lastAt = 0;
-    const progress = (text) => {
+    const progress = (text, pct = null) => {
       if (now() - lastAt < 2500) return;
       lastAt = now();
-      patchJob(job.id, { status_detail: text }).catch(() => {});
+      patchJob(job.id, { status_detail: text, ...(pct != null ? { progress: pct } : {}) }).catch(() => {});
     };
     try {
-      progress("Mengunduh PDF ke laptop…");
+      progress("Mengunduh PDF ke laptop…", 5);
       const { data: blob, error: dlErr } = await supabase.storage.from(cfg.bucket).download(job.storage_path);
       if (dlErr || !blob) throw new Error(`Gagal mengunduh file dari inbox (${dlErr?.message || "kosong"}).`);
       const rel = placePdf(job.filename, Buffer.from(await blob.arrayBuffer()));
@@ -442,6 +486,9 @@ export function createDocFolderWorker(deps, overrides = {}) {
       // Tugas yang terputus (bot mati di tengah jalan) diantrekan lagi.
       const { error } = await supabase.from("pdf_md_jobs").update({ status: "queued", status_detail: "Menunggu diproses di laptop…" }).eq("status", "processing").eq("source", "app").not("storage_path", "is", null);
       if (error) noteTableError(error);
+      // Konversi folder yang terputus saat bot mati: hapus status 'processing' yang menggantung (akan diproses ulang oleh pemantau).
+      const { error: e3 } = await supabase.from("pdf_md_jobs").update(stripProgress({ status: "queued", status_detail: "Menunggu diproses ulang…", progress: 0 })).eq("status", "processing").eq("source", "folder");
+      if (e3) noteTableError(e3);
     }
     log.log?.(`📂 Dokumen lokal aktif: PDF di ${cfg.pdfDir} → .md di ${cfg.mdDir} (hanya dijawab Ollama).`);
     timer = setInterval(() => {

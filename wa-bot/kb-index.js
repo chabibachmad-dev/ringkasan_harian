@@ -431,7 +431,7 @@ export async function openKbIndex({ file, log = console, chunkChars = 1000, over
   //   2. hasil teratas mengisi ±65% anggaran, lalu potongan SESUDAH/SEBELUM 3 hasil teratas
   //      (dan 2 potongan sesudah hasil #1) ikut disertakan (daftar yang berlanjut ke potongan berikutnya tidak terpotong);
   //   3. potongan yang bersebelahan digabung jadi satu blok berurutan (awalan overlap dibuang).
-  function search(question, { budgetChars = 5000, maxChunks = 8, neighbors = true, minCoverage = defaults.minCoverage, titles = null, excludeLocal = false } = {}) {
+  function search(question, { budgetChars = 5000, maxChunks = 8, neighbors = true, minCoverage = defaults.minCoverage, titles = null, excludeLocal = false, onlyLocal = false } = {}) {
     const tokens = tokenizeQuery(question);
     if (tokens.length === 0) return [];
     // Dua pencarian digabung dengan Reciprocal Rank Fusion:
@@ -442,10 +442,12 @@ export async function openKbIndex({ file, log = console, chunkChars = 1000, over
     const titleLike = (Array.isArray(titles) ? titles : []).map((t) => String(t).trim().toLowerCase()).filter(Boolean).map((t) => `%${t}%`);
     const filtered = (ftsTable, prep) => {
       // excludeLocal: dokumen dari folder lokal laptop (id 'local:...') TIDAK PERNAH ikut ke penyedia cloud (Gemini/Groq/OpenRouter).
-      if (titleLike.length === 0 && !excludeLocal) return prep;
+      if (titleLike.length === 0 && !excludeLocal && !onlyLocal) return prep;
       const conds = [];
       if (titleLike.length > 0) conds.push(`(${titleLike.map(() => "lower(d.title) like ?").join(" or ")})`);
       if (excludeLocal) conds.push("d.id not like 'local:%'");
+      // onlyLocal: hanya dokumen folder lokal (untuk perintah /dokumen milik pemilik).
+      if (onlyLocal) conds.push("d.id like 'local:%'");
       const sql = `select c.doc_id as doc_id, d.title as title, c.page as page, c.seq as seq, c.text as text, c.ov as ov, c.toc as toc, c.head as head, c.bad as bad, bm25(${ftsTable}) as score
        from ${ftsTable} join chunks c on c.id = ${ftsTable}.rowid join docs d on d.id = c.doc_id
        where ${ftsTable} match ? and ${conds.join(" and ")} order by bm25(${ftsTable}) limit ?`;

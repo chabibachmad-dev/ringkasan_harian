@@ -239,6 +239,7 @@ const els = {
   mdFileInput: document.getElementById("md-file-input"),
   mdUploadBtn: document.getElementById("md-upload-btn"),
   mdUploadStatus: document.getElementById("md-upload-status"),
+  mdBatch: document.getElementById("md-batch"),
   mdJobList: document.getElementById("md-job-list"),
   mdJobListEmpty: document.getElementById("md-job-list-empty"),
   mdCloseBtn: document.getElementById("md-close-btn"),
@@ -2188,11 +2189,29 @@ async function renderKbDocList() {
 // ---------- PDF → MD (menu "PDF → MD"): konversi peraturan menjadi Markdown di laptop ----------
 
 let mdPollTimer = null;
+let mdUploading = false; // sedang mengirim berkas (status unggah dikelola handler submit)
+let mdStatusIsError = false;
+
+function mdBar(pct, indeterminate = false) {
+  const wrap = document.createElement("div");
+  wrap.className = `md-progress${indeterminate ? " md-progress--wait" : ""}`;
+  wrap.setAttribute("role", "progressbar");
+  wrap.setAttribute("aria-valuemin", "0");
+  wrap.setAttribute("aria-valuemax", "100");
+  if (!indeterminate) wrap.setAttribute("aria-valuenow", String(pct));
+  const bar = document.createElement("div");
+  bar.className = "md-progress-bar";
+  bar.style.width = indeterminate ? "100%" : `${Math.max(2, Math.min(100, pct))}%`;
+  wrap.appendChild(bar);
+  return wrap;
+}
 
 async function openMdDialog() {
   closeSettingsDialog();
   els.mdFileInput.value = "";
   els.mdUploadStatus.hidden = true;
+  els.mdBatch.hidden = true;
+  mdStatusIsError = false;
   openDialogEl(els.mdDialog);
   await renderMdJobs();
 }
@@ -2262,6 +2281,16 @@ async function renderMdJobs() {
     else info.textContent = `${t(state.lang, "md_saved_at")} ${job.md_name || "-"}${job.indexed ? ` • ${t(state.lang, "md_indexed")}` : ""}`;
     if (["uploading", "queued", "processing"].includes(job.status)) needsPoll = true;
     main.appendChild(info);
+    if (job.status === "processing") {
+      const pct = Math.max(2, Math.min(99, Number(job.progress) || 0));
+      main.appendChild(mdBar(pct));
+      const lbl = document.createElement("div");
+      lbl.className = "kb-doc-meta md-progress-label";
+      lbl.textContent = `${pct}%`;
+      main.appendChild(lbl);
+    } else if (job.status === "queued" || job.status === "uploading") {
+      main.appendChild(mdBar(0, true));
+    }
 
     const notes = Array.isArray(job.notes) ? job.notes : [];
     if (job.status === "done" && notes.length > 0) {
@@ -2306,10 +2335,23 @@ async function renderMdJobs() {
     row.appendChild(delBtn);
     els.mdJobList.appendChild(row);
   }
+  // Baris status unggah mengikuti keadaan SEBENARNYA: selama masih ada tugas aktif tampil ringkasannya,
+  // begitu semuanya selesai baris ini hilang (kecuali pesan galat unggah yang perlu dibaca).
+  if (!mdUploading) {
+    const proc = jobs.filter((j) => j.status === "processing").length;
+    const wait = jobs.filter((j) => j.status === "queued" || j.status === "uploading").length;
+    if (proc + wait > 0) {
+      els.mdUploadStatus.hidden = false;
+      mdStatusIsError = false;
+      els.mdUploadStatus.textContent = [proc ? `${proc} ${t(state.lang, "md_n_processing")}` : "", wait ? `${wait} ${t(state.lang, "md_n_waiting")}` : ""].filter(Boolean).join(" • ");
+    } else if (!mdStatusIsError) {
+      els.mdUploadStatus.hidden = true;
+    }
+  }
   if (needsPoll) {
     mdPollTimer = setTimeout(() => {
       if (els.mdDialog.open) renderMdJobs();
-    }, 4000);
+    }, 3000);
   }
 }
 
@@ -3488,11 +3530,16 @@ function wireEvents() {
       return;
     }
     els.mdUploadBtn.disabled = true;
+    mdUploading = true;
+    mdStatusIsError = false;
     let okCount = 0;
     let lastErr = "";
+    els.mdBatch.hidden = files.length < 2;
+    els.mdBatch.replaceChildren(mdBar(0));
     for (let i = 0; i < files.length; i++) {
       const file = files[i];
       els.mdUploadStatus.textContent = `${t(state.lang, "md_sending")} ${i + 1}/${files.length}: ${file.name}`;
+      els.mdBatch.replaceChildren(mdBar(Math.round((i / files.length) * 100)));
       if (file.size > KB_MAX_FILE_BYTES) {
         lastErr = `${file.name}: ${t(state.lang, "kb_file_too_big")}`;
         continue;
@@ -3509,6 +3556,12 @@ function wireEvents() {
       }
     }
     els.mdUploadBtn.disabled = false;
+    mdUploading = false;
+    els.mdBatch.replaceChildren(mdBar(100));
+    setTimeout(() => {
+      if (!mdUploading) els.mdBatch.hidden = true;
+    }, 1500);
+    mdStatusIsError = !!lastErr;
     els.mdUploadStatus.textContent = lastErr ? `${okCount > 0 ? `${okCount} ${t(state.lang, "md_queued_n")}. ` : ""}${lastErr}` : `${okCount} ${t(state.lang, "md_queued_n")}`;
     els.mdFileInput.value = "";
     await renderMdJobs();

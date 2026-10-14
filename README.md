@@ -319,4 +319,5 @@ Tidak ada secret baru. Fungsi `study` memakai kunci AI yang sudah ada (urutan: G
 ## Menu "PDF → MD"
 
 Mengubah PDF peraturan menjadi Markdown terstruktur (BAB/Pasal/ayat/tabel) yang disimpan di laptop dan bisa ditanyakan ke Ollama.
-Lihat bagian "Dokumen lokal" di `wa-bot/README.md`. Butuh migrasi `0037_pdf_md_jobs.sql` dan deploy ulang Edge Function `chat`.
+Lihat bagian "Dokumen lokal" di `wa-bot/README.md`. Butuh migrasi `0037_pdf_md_jobs.sql` + `0038_pdf_md_progress.sql` (bar progres) dan deploy ulang Edge Function `chat`.
+Menanyakannya: chat aplikasi (mesin Ollama + toggle Dokumen), atau `/dokumen <pertanyaan>` di WhatsApp dan Telegram.

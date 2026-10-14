@@ -4126,3 +4126,42 @@ button.study-trow:active {
 .study-speak-row.is-mine {
   border-left: 3px solid var(--accent);
 }
+
+
+/* Menu "PDF → MD": bilah kemajuan per tugas dan per kumpulan unggahan */
+.md-progress {
+  height: 6px;
+  margin-top: 8px;
+  border: 1px solid var(--border, currentColor);
+  border-radius: 999px;
+  overflow: hidden;
+  background: transparent;
+}
+.md-progress-bar {
+  height: 100%;
+  background: currentColor;
+  border-radius: 999px;
+  transition: width 0.4s ease;
+}
+.md-progress--wait .md-progress-bar {
+  opacity: 0.35;
+  background: repeating-linear-gradient(45deg, currentColor 0 6px, transparent 6px 12px);
+  background-size: 17px 17px;
+  animation: md-progress-slide 1s linear infinite;
+}
+.md-progress-label {
+  margin-top: 4px;
+}
+.md-batch {
+  margin: -4px 0 12px;
+}
+@keyframes md-progress-slide {
+  to {
+    background-position: 17px 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .md-progress--wait .md-progress-bar {
+    animation: none;
+  }
+}

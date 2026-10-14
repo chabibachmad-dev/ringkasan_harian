@@ -735,12 +735,17 @@ Deno.serve(async (req) => {
   }
 
   // --- Menu "PDF → MD": antrean konversi di laptop (lihat migrations/0037, wa-bot/doc-folder.js) ---
-  const MD_COLS =
+  const MD_COLS_OLD =
     "id, source, filename, title, status, status_detail, error, md_name, page_count, bab_count, pasal_count, table_count, notes, indexed, created_at, finished_at";
+  const MD_COLS = `${MD_COLS_OLD}, progress`; // kolom progress: migrasi 0038
   const mdMissingTable = (msg: string) => /relation|does not exist|schema cache/i.test(msg || "");
 
   if (body.action === "md_list") {
-    const { data, error } = await supabaseAdmin.from("pdf_md_jobs").select(MD_COLS).order("created_at", { ascending: false }).limit(100);
+    let { data, error } = await supabaseAdmin.from("pdf_md_jobs").select(MD_COLS).order("created_at", { ascending: false }).limit(100);
+    // Migrasi 0038 belum dijalankan -> kolom progress belum ada; pakai daftar lama (tanpa bilah kemajuan).
+    if (error && /progress/i.test(error.message || "")) {
+      ({ data, error } = await supabaseAdmin.from("pdf_md_jobs").select(MD_COLS_OLD).order("created_at", { ascending: false }).limit(100));
+    }
     if (error) {
       return json(
         { ok: false, error: mdMissingTable(error.message) ? "Jalankan dulu migrasi 0037_pdf_md_jobs.sql di Supabase." : error.message },
@@ -766,7 +771,7 @@ Deno.serve(async (req) => {
     const { data, error } = await supabaseAdmin
       .from("pdf_md_jobs")
       .insert({ id, source: "app", filename, status: "uploading", status_detail: "Mengirim file…", storage_path: path })
-      .select(MD_COLS)
+      .select(MD_COLS_OLD)
       .single();
     if (error) {
       return json({ ok: false, error: mdMissingTable(error.message) ? "Jalankan dulu migrasi 0037_pdf_md_jobs.sql di Supabase." : error.message }, 500);

@@ -147,6 +147,7 @@ const HELP = [
   "/status  — kondisi bot: WhatsApp, key Gemini, token hari ini, Ollama, dokumen",
   "/ringkasan  — ringkasan percakapan WhatsApp hari ini",
   "/peraturan  — pantau peraturan terbaru (\"/peraturan semua\" = tampilkan semua hasil)",
+  "/dokumen <pertanyaan>  — tanya dari dokumen lokal di laptop (hasil PDF → MD), dijawab Ollama. \"/dokumen\" saja = daftar dokumen",
   "/baru  — mulai obrolan baru (lupakan konteks sebelumnya)",
   "/speak [topik]  — mulai latihan ngobrol Inggris dengan tutor (suara)   /speak id [topik]  — ngobrol santai bahasa Indonesia   /selesai  — akhiri",
   "/suara [auto|on|off]  — atur balasan suara untuk obrolan biasa",
@@ -160,6 +161,7 @@ const HELP = [
  *   simab?: { enabled, hasSession(key), run(text, {notify, sessionKey}) -> Promise<string> }
  *   summary?()                        -> Promise<string>   teks ringkasan harian
  *   status?()                         -> Promise<string>   teks kondisi bot (/status)
+ *   localDocs?: { ask(q)->Promise<{reply}>, list()->string }   tanya-jawab dokumen lokal (/dokumen), dijawab Ollama
  *   regNow?({ all, sendTo })          -> Promise            jalankan pantauan peraturan, kirim lewat sendTo(text)
  *   state?: { get(key), set(key, value) }                   penyimpan offset (supaya restart tidak memproses ulang)
  * }
@@ -592,6 +594,19 @@ Ubah: /suara auto • /suara on • /suara off`));
       return void (await reply(s.text ? "📝 Balasan tutor sekarang juga ditulis. /teks off untuk suara saja." : "🔊 Balasan tutor sekarang suara saja. /teks on bila mau teks juga."));
     }
     if (name === "suara") return handleVoiceCommand(chatId, arg);
+
+    if (name === "dokumen" || name === "dok" || name === "doc") {
+      const ld = deps.localDocs;
+      if (!ld) return void (await reply("Fitur dokumen lokal belum aktif di bot ini."));
+      if (arg === "" || /^(daftar|list|ls)$/i.test(arg)) return void (await reply(ld.list()));
+      try {
+        const out = await withTyping(chatId, () => ld.ask(arg));
+        await reply(out.reply);
+      } catch (e) {
+        await reply(`⚠️ Gagal menjawab dari dokumen lokal: ${String(e?.message || e).slice(0, 200)}\nPastikan Ollama berjalan di laptop.`);
+      }
+      return;
+    }
 
     // SiMAB: "/simab ..." atau "simab ..." atau lanjutan sesi "simab rekam" yang sedang aktif
     const simab = deps.simab;

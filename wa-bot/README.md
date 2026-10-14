@@ -642,4 +642,10 @@ dokumen/peraturan-md/    hasil .md terstruktur. Boleh kamu sunting; suntingan TI
 - **Privasi:** dokumen ini diindeks dengan id `local:` dan dikecualikan dari pencarian untuk Gemini/Groq/OpenRouter (`excludeLocal`). Hanya jalur Ollama (balasan WA bila `WA_AI_ENGINE=ollama`, agen chat aplikasi) yang melihatnya. Ke Supabase hanya naik metadata tugas (nama file, jumlah halaman/Pasal, status).
 - Menu **PDF → MD** di aplikasi: unggah PDF → antrean (`pdf_md_jobs`, migrasi `0037_pdf_md_jobs.sql`) → laptop menyimpannya ke `peraturan-pdf/` dan memprosesnya. Hasil dari folder juga tampil di daftar itu.
 - Folder `dokumen/` sudah masuk `.gitignore` (tidak ikut ke GitHub).
-- Pemasangan: `npx supabase db push` (atau tempel 0037 di SQL Editor), `npx supabase functions deploy chat`, ekstrak zip, `pm2 restart wa-bot --update-env`.
+- **Cara menanyakannya (semuanya dijawab Ollama di laptop):**
+  - *Chat aplikasi*: pilih mesin **Ollama** pada percakapan, lalu nyalakan toggle **Dokumen**. Pertanyaan otomatis mencari di dokumen lokal (dan Dokumen Pengetahuan biasa). Teks jawabannya tersimpan di riwayat chat Supabase seperti obrolan lain.
+  - *WhatsApp* (chat pribadi/chat ke diri sendiri, hanya pemilik; di grup diabaikan): `/dokumen <pertanyaan>`. `/dokumen` saja = daftar dokumen lokal.
+  - *Telegram* (hanya pemilik): perintah yang sama.
+  - Satu pertanyaan = satu jawaban (tanpa memori obrolan), jadi tulis lengkap, mis. `/dokumen berapa lama hibah diberikan menurut UU 1 2004 pasal 12?`. Jawaban memuat daftar sumber (judul + halaman) dan diperiksa `guardDocAnswer`; bila tak ada bagian yang cocok, model tidak dipanggil dan bot bilang tidak ditemukan.
+  - Balasan otomatis ke kontak/grup TIDAK memakai dokumen lokal (bawaan). `DOC_LOCAL_WA_CONTACTS=true` mengizinkannya (hanya bila `WA_AI_ENGINE=ollama`). `DOC_LOCAL_BUDGET_CHARS` (bawaan 3500) = banyaknya teks dokumen yang dibaca model untuk `/dokumen`.
+- Pemasangan: `npx supabase db push` (atau tempel 0037 dan 0038 di SQL Editor; 0038 = kolom progres), `npx supabase functions deploy chat`, ekstrak zip, `pm2 restart wa-bot --update-env`.

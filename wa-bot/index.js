@@ -53,6 +53,7 @@ import { createKbIngestWorker, readKbConfig } from "./kb-ingest.js";
 import { createKbRetrievalWorker } from "./kb-retrieval.js";
 import { createDocFolderWorker } from "./doc-folder.js";
 import { guardDocAnswer } from "./docguard.js";
+import { createLocalDocs, parseDokumenCommand } from "./local-docs.js";
 import { ollamaChatStream } from "./ollama-http.js";
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
@@ -313,6 +314,10 @@ const RAG_CHUNK_SIZE_CHARS = 700;
 // prompt yang lebih kecil = prompt eval lebih cepat = lebih jarang kebentur
 // timeout, dgn tetap nyisa cukup ruang buat 1-2 potongan dokumen relevan.
 const RAG_CONTEXT_BUDGET_CHARS = 1500;
+// Dokumen LOKAL (folder dokumen/peraturan-md) bawaannya HANYA untuk pemilik (chat aplikasi + /dokumen).
+// DOC_LOCAL_WA_CONTACTS=true = balasan otomatis Ollama ke kontak/grup juga boleh memakainya (hati-hati: isinya bisa terkutip ke orang lain).
+const DOC_LOCAL_WA_CONTACTS = ["1", "true", "ya", "on", "yes"].includes(String(process.env.DOC_LOCAL_WA_CONTACTS ?? "").trim().toLowerCase());
+const DOC_LOCAL_BUDGET_CHARS = Math.max(1500, Math.min(12000, Number(process.env.DOC_LOCAL_BUDGET_CHARS) || 3500));
 // Kalau potongan dokumen dgn skor tertinggi >= angka ini, pertanyaannya
 // dianggap "jelas soal dokumen kita" -> SKIP pencarian web (lebih cepat &
 // lebih privat, tidak perlu kirim apa pun ke Bing -- DAN lebih penting lagi
@@ -504,12 +509,14 @@ function titleMatches(title, titles) {
   return titles.some((x) => t.includes(String(x).toLowerCase()));
 }
 
-async function fetchRelevantKnowledgeChunks(question, budgetChars, titles = null) {
+// includeLocal: dokumen folder lokal (id 'local:') hanya ikut bila pemanggilnya memang boleh membacanya
+// (chat aplikasi milik pemilik, perintah /dokumen). Bawaan false, jadi balasan otomatis ke kontak tidak membocorkannya.
+async function fetchRelevantKnowledgeChunks(question, budgetChars, titles = null, { includeLocal = false } = {}) {
   // Dokumen yang diupload lewat laptop diindeks FULL (tanpa batas ukuran) --
   // cari di indeks itu dulu. Rekonsiliasi berkala menjamin isinya sama dengan
   // tabel knowledge_documents, jadi kalau indeks ada isinya, tak perlu ke Supabase.
   if (kbIndex && kbIndex.hasDocs()) {
-    return kbIndex.search(question, { budgetChars, maxChunks: 8, titles }).map(({ title, text }) => ({ title, text }));
+    return kbIndex.search(question, { budgetChars, maxChunks: 8, titles, excludeLocal: !includeLocal }).map(({ title, text }) => ({ title, text }));
   }
   const qWords = new Set(tokenizeForScoring(question));
   if (qWords.size === 0) return [];
@@ -864,7 +871,7 @@ async function generateAutoReplyWithOllama(jid, { timeoutMs } = {}) {
   const lookupAllowed = !isGroupJid(jid) || GROUP_LOOKUP_RE.test(searchQuestion);
   const docsAllowed = lookupAllowed || (GROUP_DOCS_ALWAYS && searchQuestion.trim().split(/\s+/).length >= 3);
   const pinnedTitles = docTitlesFor(jid);
-  const docChunks = docsAllowed ? await fetchRelevantKnowledgeChunks(searchQuestion, RAG_CONTEXT_BUDGET_CHARS, pinnedTitles) : [];
+  const docChunks = docsAllowed ? await fetchRelevantKnowledgeChunks(searchQuestion, RAG_CONTEXT_BUDGET_CHARS, pinnedTitles, { includeLocal: DOC_LOCAL_WA_CONTACTS }) : [];
   const topScore = docChunks[0]?.score ?? 0;
   const webResults = !lookupAllowed || pinnedTitles || topScore >= RAG_STRONG_MATCH_SCORE ? [] : await webSearch.search(searchQuestion, WEB_SEARCH_MAX_RESULTS, { snippetChars: 220 });
 
@@ -2880,6 +2887,9 @@ async function handleIncoming(msg, sock) {
     }
   }
 
+  // /dokumen <pertanyaan> (hanya pemilik, bukan di grup): jawab dari dokumen lokal lewat Ollama; tidak disimpan & tidak memicu auto-reply.
+  if (isOwnerSender(msg, isSelfChat) && !isGroupJid(jid) && (await handleWaDokumenCommand(sock, jid, text))) return;
+
   // Tutor suara (/speak, /selesai) hanya untuk pemilik; selama sesi, teks/voice note pemilik = ucapan untuk tutor
   // (tidak disimpan ke riwayat chat dan tidak memicu auto-reply).
   if (isOwnerSender(msg, isSelfChat) && (await waTutor.handle(jid, text, waTutorIo(sock, jid)))) return;
@@ -3252,6 +3262,37 @@ const waTutor = createWaTutor({
   hasTranscriber: transcriber.available(),
   config: waVoiceCfg
 });
+// /dokumen <pertanyaan>: tanya-jawab dari dokumen lokal, khusus pemilik, dijawab Ollama (prioritas sama dgn chat aplikasi).
+const localDocs = createLocalDocs({
+  index: kbIndex,
+  budgetChars: DOC_LOCAL_BUDGET_CHARS,
+  temperature: OLLAMA_DOC_TEMPERATURE,
+  callModel: (messages, opts) => enqueueOllamaCall(() => callOllamaChat(messages, opts), { priority: PRIORITY.CHAT, label: "owner-docs" })
+});
+
+/** Jalankan /dokumen dari WhatsApp. true = pesan sudah ditangani. */
+async function handleWaDokumenCommand(sock, jid, text) {
+  const cmd = parseDokumenCommand(text);
+  if (!cmd) return false;
+  const io = waTutorIo(sock, jid);
+  const send = (t) => sock.sendMessage(jid, { text: t }).catch((e) => console.error("💬 [WA/Dokumen] gagal kirim:", e instanceof Error ? e.message : String(e)));
+  if (cmd.list) {
+    await send(localDocs.list());
+    return true;
+  }
+  const stop = io.busy("text");
+  try {
+    const out = await localDocs.ask(cmd.question);
+    await send(out.reply);
+  } catch (e) {
+    console.error("💬 [WA/Dokumen] gagal:", e instanceof Error ? e.message : String(e));
+    await send(`⚠️ Gagal menjawab dari dokumen lokal: ${String(e instanceof Error ? e.message : e).slice(0, 200)}\nPastikan Ollama berjalan di laptop.`);
+  } finally {
+    stop();
+  }
+  return true;
+}
+
 const telegram = createTelegram({
   config: readTelegramConfig(process.env),
   deps: {
@@ -3264,6 +3305,7 @@ const telegram = createTelegram({
     summary: () => buildDailySummaryText(zonedParts(Date.now(), WA_TIMEZONE).dateStr, { allowAi: true }),
     regNow: (opts) => regMonitor.runNow(opts),
     status: () => buildBotStatusText(),
+    localDocs,
     state: {
       get: async (key) => {
         const { data } = await supabase.from("bot_state").select("value").eq("key", key).maybeSingle();
@@ -3403,7 +3445,8 @@ const appAgent = createAppAgentWorker({
   kbIndex,
   callOllamaChat,
   enqueueOllamaCall,
-  fetchRelevantKnowledgeChunks,
+  // Chat aplikasi = pemilik sendiri -> dokumen lokal boleh ikut (hanya jalur Ollama).
+  fetchRelevantKnowledgeChunks: (question, budgetChars, titles) => fetchRelevantKnowledgeChunks(question, budgetChars, titles, { includeLocal: true }),
   rankKnowledgeChunks,
   chunkDocumentText,
   currentDateLine,

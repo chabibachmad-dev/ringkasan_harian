@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { openKbIndex } from "./kb-index.js";
-import { createDocFolderWorker, readDocFolderConfig, listFiles } from "./doc-folder.js";
+import { createDocFolderWorker, readDocFolderConfig, listFiles, percentOf } from "./doc-folder.js";
 import { createKbIngestWorker } from "./kb-ingest.js";
 import { detectTools } from "./kb-ingest.js";
 
@@ -215,6 +215,30 @@ function makeSb(tables, storage) {
   s.pdf("peraturan-x.pdf", "%PDF isi lain lagi");
   await s.w.scanFolder(); s.advance(1500); await s.w.scanFolder();
   check(tables.pdf_md_jobs.filter((r) => r.source === "folder").length === 1, "laporan: satu baris per file (diperbarui, tidak digandakan)");
+}
+
+// ---- kemajuan (bilah di aplikasi)
+{
+  check(percentOf("OCR halaman 3 (5/10)…") === 50 && percentOf("OCR halaman 9 (10/10)…") === 80, "progress: OCR dipetakan 20-80%");
+  check(percentOf("Mengunduh PDF ke laptop…") === 5 && percentOf("Mengubah PDF menjadi teks…") === 20 && percentOf("Menata menjadi Markdown…") === 85 && percentOf("Mengindeks…") === 95 && percentOf("apa saja") === null, "progress: tahap-tahap lain");
+  const tables = { pdf_md_jobs: [{ id: "p1", source: "app", filename: "a.pdf", status: "queued", storage_path: "md/p1/source.pdf", progress: 0, created_at: "2026-10-14T00:00:00Z" }] };
+  const storage = new Map([["md/p1/source.pdf", Buffer.from("%PDF a")]]);
+  const sb = makeSb(tables, storage);
+  const seen = [];
+  const origFrom = sb.from;
+  sb.from = (n) => { const b = origFrom(n); const up = b.update; b.update = (p) => { if (p && "progress" in p) seen.push(p.progress); return up(p); }; return b; };
+  const s = await setup({ deps: { supabase: sb } });
+  await s.w.tick();
+  check(tables.pdf_md_jobs[0].status === "done" && tables.pdf_md_jobs[0].progress === 100 && seen.includes(2) && seen.at(-1) === 100, "progress: dilaporkan dari awal sampai 100%");
+
+  // kolom progress belum ada (migrasi 0038 belum dijalankan) -> tetap selesai
+  const tables2 = { pdf_md_jobs: [{ id: "p2", source: "app", filename: "b.pdf", status: "queued", storage_path: "md/p2/source.pdf", created_at: "2026-10-14T00:00:00Z" }] };
+  const sb2 = makeSb(tables2, new Map([["md/p2/source.pdf", Buffer.from("%PDF b")]]));
+  const f2 = sb2.from;
+  sb2.from = (n) => { const b = f2(n); const up = b.update; b.update = (p) => { const bb = up(p); if (p && "progress" in p) bb.then = (res, rej) => Promise.resolve({ data: null, error: { message: 'column "progress" of relation "pdf_md_jobs" does not exist' } }).then(res, rej); return bb; }; return b; };
+  const s2 = await setup({ deps: { supabase: sb2 } });
+  await s2.w.tick();
+  check(tables2.pdf_md_jobs[0].status === "done", "progress: tanpa kolom progress tugas tetap selesai");
 }
 
 // ---- PDF nyata end-to-end (pdftotext sungguhan)
