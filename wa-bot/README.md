@@ -676,3 +676,5 @@ dokumen/peraturan-md/    hasil .md terstruktur. Boleh kamu sunting; suntingan TI
   - Satu pertanyaan = satu jawaban (tanpa memori obrolan), jadi tulis lengkap, mis. `/dokumen berapa lama hibah diberikan menurut UU 1 2004 pasal 12?`. Jawaban memuat daftar sumber (judul + halaman) dan diperiksa `guardDocAnswer`; bila tak ada bagian yang cocok, model tidak dipanggil dan bot bilang tidak ditemukan.
   - Balasan otomatis ke kontak/grup TIDAK memakai dokumen lokal (bawaan). `DOC_LOCAL_WA_CONTACTS=true` mengizinkannya (hanya bila `WA_AI_ENGINE=ollama`). `DOC_LOCAL_BUDGET_CHARS` (bawaan 3500) = banyaknya teks dokumen yang dibaca model untuk `/dokumen`.
 - Pemasangan: `npx supabase db push` (atau tempel 0037 dan 0038 di SQL Editor; 0038 = kolom progres), `npx supabase functions deploy chat`, ekstrak zip, `pm2 restart wa-bot --update-env`.
+
+<!-- uji patch lewat Telegram: 2026-10-14 (komentar ini tidak tampil; aman dihapus) -->
