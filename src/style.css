@@ -4165,3 +4165,305 @@ button.study-trow:active {
     animation: none;
   }
 }
+
+/* ================================================================
+   Diskusi AI tentang materi (src/study-matchat.js): tombol terbang + panel yang naik dari bawah layar.
+   ================================================================ */
+
+/* ruang di bawah teks materi supaya tombol terbang tidak menutupi baris terakhir */
+.study-material-body + .study-hint {
+  margin-bottom: 84px;
+}
+
+.study-sheet {
+  position: fixed;
+  inset: auto 0 0 0;
+  margin: 0 auto;
+  width: 100%;
+  max-width: 720px;
+  height: var(--sheet-h, min(85dvh, 640px));
+  max-height: 100dvh;
+  padding: 0;
+  display: none;
+  flex-direction: column;
+  border: 1.5px solid var(--border);
+  border-bottom: 0;
+  border-radius: 18px 18px 0 0;
+  background: var(--bg-card);
+  color: var(--text);
+  overflow: hidden;
+}
+
+.study-sheet[open] {
+  display: flex;
+  animation: study-sheet-up 0.22s ease-out;
+}
+
+.study-sheet::backdrop {
+  background: rgba(0, 0, 0, 0.5);
+}
+
+@keyframes study-sheet-up {
+  from {
+    transform: translateY(40px);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .study-sheet[open] {
+    animation: none;
+  }
+}
+
+.study-sheet-grab {
+  flex: 0 0 auto;
+  width: 40px;
+  height: 4px;
+  margin: 8px auto 0;
+  border-radius: 999px;
+  background: var(--border);
+}
+
+.study-sheet-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px 10px 16px;
+  border-bottom: 1.5px solid var(--border);
+}
+
+.study-sheet-titles {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.study-sheet-titles strong {
+  font-size: 1rem;
+}
+
+.study-sheet-sub {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.study-sheet-btn {
+  flex: 0 0 auto;
+  padding: 6px 10px;
+  border: 1.5px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+.study-sheet-close {
+  flex: 0 0 auto;
+  width: 36px;
+  height: 36px;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text);
+  font-size: 1.6rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.study-sheet-log {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px 16px;
+}
+
+.study-chat-msg {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  max-width: 92%;
+}
+
+.study-chat-msg.is-ai {
+  align-self: flex-start;
+}
+
+.study-chat-msg.is-user {
+  align-self: flex-end;
+  align-items: flex-end;
+  max-width: 85%;
+}
+
+.study-chat-bubble {
+  padding: 9px 12px;
+  border: 1.5px solid var(--border);
+  border-radius: 14px;
+  font-size: 0.95rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.study-chat-msg.is-user .study-chat-bubble {
+  background: var(--accent);
+  color: var(--accent-contrast);
+  white-space: pre-wrap;
+}
+
+.study-chat-bubble.chat-md > :first-child {
+  margin-top: 0;
+}
+
+.study-chat-bubble.chat-md > :last-child {
+  margin-bottom: 0;
+}
+
+.study-chat-bubble.chat-md table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.study-chat-msg.is-thinking .study-chat-bubble {
+  border-style: dashed;
+  color: var(--text-muted);
+}
+
+.study-chat-dots {
+  display: inline-flex;
+  gap: 3px;
+  vertical-align: middle;
+}
+
+.study-chat-dots i {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: study-chat-dot 1s infinite ease-in-out;
+}
+
+.study-chat-dots i:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.study-chat-dots i:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+@keyframes study-chat-dot {
+  0%,
+  80%,
+  100% {
+    opacity: 0.25;
+  }
+  40% {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .study-chat-dots i {
+    animation: none;
+  }
+}
+
+.study-chat-empty {
+  margin: auto 0;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 0.9rem;
+}
+
+.study-chat-empty p {
+  margin: 0 0 12px;
+}
+
+.study-chat-chips {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+}
+
+.study-chat-chip {
+  padding: 8px 12px;
+  border: 1.5px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.85rem;
+  cursor: pointer;
+  text-align: left;
+}
+
+.study-chat-chip:active {
+  background: var(--accent);
+  color: var(--accent-contrast);
+}
+
+.study-sheet-error {
+  flex: 0 0 auto;
+  margin: 0 16px 6px;
+  padding: 8px 10px;
+  border: 1.5px solid var(--danger);
+  border-radius: 10px;
+  color: var(--danger);
+  font-size: 0.85rem;
+  font-weight: 700;
+}
+
+.study-sheet-note {
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 0 16px 6px;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+.study-sheet-composer {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 8px;
+  align-items: flex-end;
+  padding: 8px 12px calc(12px + env(safe-area-inset-bottom, 0px));
+  border-top: 1.5px solid var(--border);
+}
+
+.study-sheet-composer textarea {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-height: 120px;
+  padding: 10px 12px;
+  border: 1.5px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg);
+  color: var(--text);
+  font-family: inherit;
+  /* WAJIB >= 16px (zoom otomatis Safari iOS) */
+  font-size: 16px;
+  line-height: 1.35;
+  resize: none;
+}
+
+.study-sheet-composer .primary-btn {
+  flex: 0 0 auto;
+}

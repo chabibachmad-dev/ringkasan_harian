@@ -12,6 +12,7 @@ import { buildStudyPdf, shareOrSaveStudyPdf, buildMaterialPdf, shareOrSaveMateri
 import { pointsFormula, studyCardFileName } from "./study-text.js";
 import { recognitionSupported, synthSupported, startListening, speakText, stopSpeaking, unlockSpeech, recorderSupported, startRecording, releaseMic, micHeld, idleAudio, playWav, speechToken, audioPlayable } from "./study-voice.js";
 import { renderLessonCard, renderRoomCard, shareOrSaveCard } from "./study-card.js";
+import { createMatChatSheet, newChat } from "./study-matchat.js";
 import { allowedClasses, allowedMaterialGrades, classesOf, computePoints, formatClock, gradeText, PRACTICE_QUESTIONS as PRACTICE_COUNT, timeLimitSeconds } from "../supabase/functions/_shared/study-core.ts";
 
 const $ = (id) => document.getElementById(id);
@@ -138,7 +139,8 @@ const S = {
   rooms: { items: [], loading: false, loaded: false, error: "" },
   room: null, // room yang sedang diikuti: { id, creds, state, busy, leftQuiz }
   materials: { items: [], hasMore: false, loading: false, loaded: false, error: "" },
-  material: null // materi yang sedang dibaca: { id, title, ..., content (null = masih dimuat) }
+  material: null, // materi yang sedang dibaca: { id, title, ..., content (null = masih dimuat) }
+  matChat: null // diskusi AI tentang materi yang sedang dibaca (hanya di memori; hilang saat keluar dari materi)
 };
 
 // ---------------------------------------------------------------- util
@@ -243,6 +245,7 @@ export function hideStudyScreen() {
   S.quiz = null;
   S.stack = [];
   S.view = "home";
+  dropMatChat();
   stopSpeakIO();
   S.speak = null;
   stopPoll();
@@ -275,7 +278,11 @@ export function showStudyScreen() {
 
 export function rerenderStudy() {
   if (!$("screen-study") || $("screen-study").hidden) return;
+  // ganti bahasa: teks panel diskusi dibangun ulang (percakapan tetap)
+  const reopen = !!(matSheet && matSheet.isOpen() && S.matChat);
+  if (matSheet) matSheet.destroy();
   render();
+  if (reopen) getMatSheet().open();
 }
 
 function onBack() {
@@ -418,6 +425,8 @@ function render() {
   else if (S.view === "notif") renderNotif(body);
   else if (S.view === "speaklist") renderSpeakList(body);
   else if (S.view === "speak") renderSpeakChat(body);
+  // diskusi AI hanya hidup selama layar materi yang sama masih terbuka
+  if (S.matChat && (S.view !== "material" || !S.material || S.material.id !== S.matChat.materialId)) dropMatChat();
   typesetMath(body).catch(() => {});
   syncQuizTimer();
   syncPoll();
@@ -826,6 +835,7 @@ async function onBodyClick(e) {
   if (act === "mat-practice") return openPracticeForm(S.materials.items.find((i) => i.id === id));
   if (act === "mat-reader-practice") return openPracticeForm(S.material);
   if (act === "mat-reader-pdf") return materialPdf(S.material?.id, btn);
+  if (act === "mat-chat") return openMatChat();
   if (act === "mat-del") return deleteMaterial(id);
   if (act === "mat-more") return loadMaterials(false);
   if (act === "my-timeline") return openPublic(S.player?.id);
@@ -938,6 +948,7 @@ async function logoutDevice() {
 // Lupakan akun yang masuk di memori (tanpa menyentuh server / penyimpanan).
 function forgetViewer() {
   S.viewer = null;
+  dropMatChat();
   if (S.player) {
     S.player = null;
     S.pin = "";
@@ -2291,7 +2302,55 @@ function renderMaterial(body) {
         <button type="button" class="secondary-btn" data-act="mat-reader-pdf" ${m.content ? "" : "disabled"}>${esc(L("study_mat_pdf"))}</button>
       </div>
     </div>
-    ${m.content ? `<article class="study-material-body chat-md">${mdBlock(m.content)}</article><p class="study-hint">${esc(L("study_mat_hint"))}</p>` : `<p class="status-text">${esc(L("study_loading"))}</p>`}`;
+    ${m.content ? `<article class="study-material-body chat-md">${mdBlock(m.content)}</article><p class="study-hint">${esc(L("study_mat_hint"))}</p>` : `<p class="status-text">${esc(L("study_loading"))}</p>`}
+    ${m.content ? `<button type="button" class="fab study-chat-fab" data-act="mat-chat" aria-label="${esc(L("study_mchat_fab"))}" title="${esc(L("study_mchat_fab"))}">${CHAT_FAB_SVG}</button>` : ""}`;
+}
+
+const CHAT_FAB_SVG = `<svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 11.5a8.4 8.4 0 0 1-9 8.4 8.8 8.8 0 0 1-3.4-.7L3 21l1.9-5.3A8.2 8.2 0 0 1 3 11.5 8.4 8.4 0 0 1 12 3a8.4 8.4 0 0 1 9 8.5z"/><path d="M8.5 10.5h7M8.5 13.5h4.5"/></svg>`;
+
+// ---- diskusi AI tentang materi (panel dari bawah; tanpa penyimpanan di database)
+let matSheet = null;
+function getMatSheet() {
+  if (!matSheet) {
+    matSheet = createMatChatSheet({
+      L,
+      esc,
+      renderMd: mdBlock,
+      typeset: (el) => typesetMath(el).catch(() => {}),
+      getChat: () => S.matChat,
+      getTitle: () => S.material?.title || "",
+      errText,
+      ask: async (question, history) => {
+        const chat = S.matChat;
+        if (!chat) return { ok: false, message: "Error" };
+        if (!S.viewer && !(await ensureViewer())) return { ok: false, message: L("study_mchat_login") };
+        const v = S.viewer;
+        const res = await studyCall("material_chat", { materialId: chat.materialId, playerId: v.id, pin: v.pin, question, history }, { timeoutMs: 60000 });
+        if (!res.ok && (res.pinWrong || res.locked)) S.viewer = null;
+        return res;
+      }
+    });
+  }
+  return matSheet;
+}
+
+function dropMatChat() {
+  S.matChat = null;
+  if (matSheet) matSheet.destroy();
+}
+
+async function openMatChat() {
+  const m = S.material;
+  if (!m || !m.content) return;
+  if (!S.viewer) {
+    if (!S.overview) return window.alert(L("study_loading"));
+    if (!(S.overview.players || []).length) return window.alert(L("study_no_players"));
+    if (!(await ensureViewer())) return;
+    if (!S.material || S.material.id !== m.id) return; // pengguna sudah pindah saat popup masuk terbuka
+    render();
+  }
+  if (!S.matChat || S.matChat.materialId !== m.id) S.matChat = newChat(m.id);
+  getMatSheet().open();
 }
 
 async function fetchMaterial(id) {
