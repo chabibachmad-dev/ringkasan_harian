@@ -80,6 +80,7 @@ import { ollamaChatStream } from "./ollama-http.js";
 import { createProviderStats, parseProviderCommand } from "./provider-stats.js";
 import { createSkillAdmin, createSkills, parseSkillCommand } from "./skills.js";
 import { createLocalChat, parseLocalChatCommand } from "./local-chat.js";
+import { createMarketBrief, createMarketData, parseMarketCommand, readMarketBriefConfig } from "./market-brief.js";
 import { handleMemoryCommand, openOwnerMemory, parseMemoryCommand } from "./owner-memory.js";
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
@@ -2932,6 +2933,7 @@ async function handleIncoming(msg, sock) {
   if (isOwnerSender(msg, isSelfChat) && !isGroupJid(jid) && (await handleWaOwnerLocalCommands(sock, jid, text))) return;
   if (isOwnerSender(msg, isSelfChat) && !isGroupJid(jid) && (await handleWaSkillCommand(sock, jid, text))) return;
   if (isOwnerSender(msg, isSelfChat) && !isGroupJid(jid) && (await handleWaLocalChatCommand(sock, jid, text))) return;
+  if (isOwnerSender(msg, isSelfChat) && !isGroupJid(jid) && (await handleWaMarketCommand(sock, jid, text))) return;
 
   // Tutor suara (/speak, /selesai) hanya untuk pemilik; selama sesi, teks/voice note pemilik = ucapan untuk tutor
   // (tidak disimpan ke riwayat chat dan tidak memicu auto-reply).
@@ -3254,6 +3256,7 @@ async function buildBotStatusText() {
   lines.push(`🏛️ SiMAB: ${simab.enabled ? "aktif" : "mati"}`);
   lines.push(`📋 Ringkasan harian: ${WA_DAILY_SUMMARY_ENABLED ? `aktif (setelah ${String(WA_DAILY_SUMMARY_HOUR).padStart(2, "0")}:00 ${WA_TIMEZONE_LABEL}${summarySentDate ? `, terakhir terkirim ${summarySentDate}` : ""})` : "mati"}`);
   lines.push(`📜 Pantauan peraturan: ${regMonitor.describe()}`);
+  lines.push(`📈 Pasar pagi (IHSG, emas): ${marketBrief.describe()}`);
   lines.push(`✈️ Telegram: ${telegram.describe()}`);
   lines.push(`🎤 Pesan suara Telegram: ${transcriber.available() ? `aktif (${sttConfig.groqKeys.length ? `Groq Whisper ${sttConfig.groqModel}` : ""}${sttConfig.groqKeys.length && sttConfig.geminiKeys.length ? " + " : ""}${sttConfig.geminiKeys.length ? "cadangan Gemini" : ""})` : "mati (isi GROQ_API_KEYS atau GEMINI_API_KEYS)"}`);
   {
@@ -3383,6 +3386,33 @@ const ops = createOps({
   }
 });
 
+// Pemeriksaan pasar tiap pagi (IHSG, emas dunia, kurs) + /pasar. Sumber ganda (xaus.com, ExchangeRate-API, Yahoo, Stooq), tanpa API key. Lihat market-brief.js.
+const marketBrief = createMarketBrief({
+  config: readMarketBriefConfig(process.env),
+  data: createMarketData({ config: readMarketBriefConfig(process.env) }),
+  state: botStateStore,
+  send: async (text) => {
+    // sama seperti pantauan peraturan: WhatsApp dulu, Telegram ikut; gagal hanya bila KEDUANYA tidak bisa menerima
+    let delivered = 0;
+    let waError = null;
+    if (OWNER_JID && currentSock) {
+      try {
+        await currentSock.sendMessage(OWNER_JID, { text });
+        delivered += 1;
+      } catch (err) {
+        waError = err;
+      }
+    }
+    if (await mirrorToTelegram(text)) delivered += 1;
+    if (delivered === 0) throw waError || new Error("WhatsApp belum tersambung / WA_OWNER_NUMBER kosong (dan Telegram tidak aktif)");
+  },
+  timeZone: WA_TIMEZONE
+});
+setInterval(() => {
+  marketBrief.check().catch(() => {});
+}, 60_000);
+console.log(`📈 Pasar pagi (IHSG, emas): ${marketBrief.describe()}`);
+
 // /skill baru|lihat|hapus dari Telegram: perubahan minta konfirmasi "/ya <kode>" lewat ops (butuh OPS_ENABLED=true). Lihat skills.js.
 const skillAdmin = createSkillAdmin({ skills, confirm: (chatId, o) => ops.confirmAction(chatId, o) });
 
@@ -3393,6 +3423,23 @@ async function handleWaOwnerLocalCommands(sock, jid, text) {
   if (!mem && !prov) return false;
   const reply = mem ? handleMemoryCommand(ownerMemory, mem) : buildProviderReport({ reset: prov.reset });
   await sock.sendMessage(jid, { text: reply }).catch((e) => console.error("💬 [WA/Lokal] gagal kirim:", e instanceof Error ? e.message : String(e)));
+  return true;
+}
+
+/** /pasar (alias /emas, /ihsg) dari WhatsApp (hanya pemilik, bukan grup). true = pesan sudah ditangani. */
+async function handleWaMarketCommand(sock, jid, text) {
+  const mcmd = parseMarketCommand(text);
+  if (!mcmd) return false;
+  const send = (t) => sock.sendMessage(jid, { text: t }).catch((e) => console.error("💬 [WA/Pasar] gagal kirim:", e instanceof Error ? e.message : String(e)));
+  const stop = waTutorIo(sock, jid).busy("text");
+  try {
+    await send(mcmd.diagnose ? await marketBrief.diagnose() : (await marketBrief.report()).text);
+  } catch (e) {
+    console.error("💬 [WA/Pasar] gagal:", e instanceof Error ? e.message : String(e));
+    await send(`⚠️ Gagal mengambil data pasar: ${String(e instanceof Error ? e.message : e).slice(0, 200)}`);
+  } finally {
+    stop();
+  }
   return true;
 }
 
@@ -3482,6 +3529,7 @@ const telegram = createTelegram({
     memory: { handle: (cmd) => handleMemoryCommand(ownerMemory, cmd) },
     skills,
     skillAdmin,
+    market: { report: async () => (await marketBrief.report()).text, diagnose: () => marketBrief.diagnose() },
     localChat,
     providers: { report: (opts) => buildProviderReport(opts) },
     state: {
