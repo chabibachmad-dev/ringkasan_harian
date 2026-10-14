@@ -3264,7 +3264,7 @@ const waTutor = createWaTutor({
 });
 // /dokumen <pertanyaan>: tanya-jawab dari dokumen lokal, khusus pemilik, dijawab Ollama (prioritas sama dgn chat aplikasi).
 const localDocs = createLocalDocs({
-  index: kbIndex,
+  getIndex: () => kbIndex, // kbIndex baru terisi setelah start; jangan ditangkap sekarang (sempat null -> "indeks belum aktif")
   budgetChars: DOC_LOCAL_BUDGET_CHARS,
   temperature: OLLAMA_DOC_TEMPERATURE,
   callModel: (messages, opts) => enqueueOllamaCall(() => callOllamaChat(messages, opts), { priority: PRIORITY.CHAT, label: "owner-docs" })

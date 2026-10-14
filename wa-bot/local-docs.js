@@ -69,8 +69,12 @@ export function buildOwnerDocMessage(question, chunks) {
  *   guard      — opsional (bawaan guardDocAnswer)
  *   budgetChars, maxChunks, temperature — opsional
  */
-export function createLocalDocs({ index, callModel, guard = defaultGuard, budgetChars = 3500, maxChunks = 8, temperature = 0.1, now = () => new Date() } = {}) {
+export function createLocalDocs({ index: indexArg = null, getIndex = null, callModel, guard = defaultGuard, budgetChars = 3500, maxChunks = 8, temperature = 0.1, now = () => new Date() } = {}) {
+  // getIndex: indeks di bot dibuka belakangan (await saat start), jadi diambil saat dipakai, bukan saat modul dibuat.
+  const currentIndex = () => (typeof getIndex === "function" ? getIndex() : indexArg);
+
   function localList() {
+    const index = currentIndex();
     if (!index) return [];
     return index.listDocs().filter((d) => String(d.id).startsWith("local:"));
   }
@@ -89,7 +93,8 @@ export function createLocalDocs({ index, callModel, guard = defaultGuard, budget
   async function ask(question) {
     const q = String(question ?? "").trim();
     if (!q) return { ok: false, reply: list() };
-    if (!index) return { ok: false, reply: "Indeks dokumen belum aktif di bot ini." };
+    const index = currentIndex();
+    if (!index) return { ok: false, reply: "Indeks dokumen di laptop tidak aktif (KB_INGEST_ENABLED=false, atau gagal dibuka — lihat `pm2 logs wa-bot`, cari \"Indeks dokumen tidak aktif\")." };
     if (localList().length === 0) return { ok: false, reply: NO_DOCS };
     const chunks = index.search(q, { budgetChars, maxChunks, onlyLocal: true });
     if (chunks.length === 0) return { ok: false, reply: NO_MATCH };

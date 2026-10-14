@@ -77,7 +77,14 @@ index.upsertDoc({ id: "uuid-awan", title: "Panduan Awan", pages: [{ page: 1, tex
   check(!r.ok && r.reply.includes("Belum ada dokumen lokal") && called === 0, "ask: tanpa dokumen lokal -> petunjuk, model tidak dipanggil");
   check(ld.list().includes("Belum ada dokumen lokal"), "list: kosong -> petunjuk");
   const none = createLocalDocs({ index: null, callModel: async () => "x" });
-  check((await none.ask("apa")).reply.includes("belum aktif") && none.list().includes("Belum ada"), "tanpa indeks: pesan aman, tidak error");
+  check((await none.ask("apa")).reply.includes("tidak aktif") && none.list().includes("Belum ada"), "tanpa indeks: pesan aman, tidak error");
+  // regresi: indeks dibuka SETELAH createLocalDocs dibuat (urutan start di index.js)
+  let late = null;
+  const lazy = createLocalDocs({ getIndex: () => late, callModel: async () => "Jawaban." });
+  check((await lazy.ask("hibah")).reply.includes("tidak aktif"), "lazy: sebelum indeks terbuka -> pesan tidak aktif");
+  late = index;
+  const r2 = await lazy.ask("berapa lama hibah diberikan?");
+  check(r2.ok && r2.reply.includes("Jawaban.") && lazy.list().includes("1 dokumen lokal"), "lazy: setelah indeks terbuka langsung berfungsi tanpa restart modul");
 }
 {
   const s = formatSources([{ title: "A", text: "[Halaman 2]\nx [Halaman 5]\ny" }, { title: "A", text: "[Halaman 2]" }, { title: "B", text: "tanpa penanda" }], { maxDocs: 1 });
