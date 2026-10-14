@@ -85,6 +85,7 @@ import { createMarketBrief, createMarketData, parseMarketCommand, readMarketBrie
 import { handleMemoryCommand, openOwnerMemory, parseMemoryCommand } from "./owner-memory.js";
 import { createReminders, openReminderStore, parseReminderCommand } from "./reminders.js";
 import { createBackup, parseBackupCommand, readBackupConfig } from "./backup.js";
+import { backupCheck, createHealth, createRestartTracker, databaseCheck, diskCheck, memoryCheck, ollamaCheck, parseHealthCommand, readHealthConfig, whatsappCheck } from "./health.js";
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -3263,6 +3264,7 @@ async function buildBotStatusText() {
   lines.push(`📈 Pasar pagi (IHSG, emas): ${marketBrief.describe()}`);
   lines.push(`⏰ Pengingat: ${reminders.describe()}`);
   lines.push(`💾 Cadangan: ${backup.describe()}`);
+  lines.push(`🩺 Kesehatan: ${health.describe()}`);
   lines.push(`✈️ Telegram: ${telegram.describe()}`);
   lines.push(`🎤 Pesan suara Telegram: ${transcriber.available() ? `aktif (${sttConfig.groqKeys.length ? `Groq Whisper ${sttConfig.groqModel}` : ""}${sttConfig.groqKeys.length && sttConfig.geminiKeys.length ? " + " : ""}${sttConfig.geminiKeys.length ? "cadangan Gemini" : ""})` : "mati (isi GROQ_API_KEYS atau GEMINI_API_KEYS)"}`);
   {
@@ -3460,6 +3462,33 @@ setInterval(() => {
 }, 60_000);
 console.log(`💾 Cadangan otomatis: ${backup.describe()}`);
 
+// Penjaga kesehatan: Ollama, disk, memori, WhatsApp, basis data, restart berulang, cadangan. Mengabari pemilik saat bermasalah
+// dan saat pulih (sekali per masalah). /kesehatan = papan status sekarang. Lihat health.js.
+const healthConfig = readHealthConfig(process.env);
+const restartTracker = createRestartTracker({ file: fileURLToPath(new URL("./.health-starts.json", import.meta.url)), max: healthConfig.restarts });
+restartTracker.recordStart();
+const BOT_STARTED_AT = Date.now();
+const health = createHealth({
+  config: healthConfig,
+  checks: [
+    ...(healthConfig.ollama ? [ollamaCheck({ baseUrl: OLLAMA_BASE_URL })] : []),
+    diskCheck({ paths: [BOT_DIR, backupConfig.dir], minGb: healthConfig.diskMinGb }),
+    memoryCheck({ read: readMemInfo, minMb: healthConfig.memMinMb }),
+    whatsappCheck({ isConnected: () => waOpen, downMin: healthConfig.waDownMin }),
+    databaseCheck({ ping: () => botStateStore.get("health_ping") }),
+    restartTracker.check,
+    backupCheck({ enabled: backupConfig.enabled, latest: () => backup.list()[0]?.createdAt ?? 0, startedAt: BOT_STARTED_AT })
+  ],
+  notify: sendToOwner
+});
+setTimeout(() => {
+  health.tick().catch(() => {});
+  setInterval(() => {
+    health.tick().catch(() => {});
+  }, healthConfig.intervalMin * 60_000);
+}, 90_000); // beri waktu WhatsApp/Telegram tersambung dulu sebelum pemeriksaan pertama
+console.log(`🩺 Penjaga kesehatan: ${health.describe()}`);
+
 // /skill baru|lihat|hapus dari Telegram: perubahan minta konfirmasi "/ya <kode>" lewat ops (butuh OPS_ENABLED=true). Lihat skills.js.
 const skillAdmin = createSkillAdmin({ skills, confirm: (chatId, o) => ops.confirmAction(chatId, o) });
 
@@ -3490,14 +3519,15 @@ async function handleWaMarketCommand(sock, jid, text) {
   return true;
 }
 
-/** /ingatkan /pengingat /cadangan dari WhatsApp (hanya pemilik, bukan grup). true = pesan sudah ditangani. */
+/** /ingatkan /pengingat /cadangan /kesehatan dari WhatsApp (hanya pemilik, bukan grup). true = pesan sudah ditangani. */
 async function handleWaReminderBackupCommand(sock, jid, text) {
   const rem = parseReminderCommand(text);
   const bak = rem ? null : parseBackupCommand(text);
-  if (!rem && !bak) return false;
+  const hel = rem || bak ? null : parseHealthCommand(text);
+  if (!rem && !bak && !hel) return false;
   const send = (t) => sock.sendMessage(jid, { text: t }).catch((e) => console.error("💬 [WA/Pengingat] gagal kirim:", e instanceof Error ? e.message : String(e)));
   try {
-    await send(rem ? reminders.handle(rem) : bak.now ? await backup.runAndFormat() : backup.status());
+    await send(rem ? reminders.handle(rem) : hel ? await health.report() : bak.now ? await backup.runAndFormat() : backup.status());
   } catch (e) {
     console.error("💬 [WA/Pengingat] gagal:", e instanceof Error ? e.message : String(e));
     await send(`⚠️ Perintah gagal diproses: ${String(e instanceof Error ? e.message : e).slice(0, 200)}`);
@@ -3594,6 +3624,7 @@ const telegram = createTelegram({
     market: { report: async () => (await marketBrief.report()).text, diagnose: () => marketBrief.diagnose() },
     reminders,
     backup: { status: () => backup.status(), run: () => backup.runAndFormat() },
+    health,
     localChat,
     providers: { report: (opts) => buildProviderReport(opts) },
     state: {

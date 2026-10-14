@@ -21,3 +21,6 @@ wa-bot/skills/.terhapus/
 
 # Pengingat pribadi (/ingatkan) -- hanya di laptop, jangan ke GitHub
 wa-bot/pengingat.sqlite*
+
+# Riwayat waktu menyala bot (penjaga kesehatan) -- hanya di laptop
+wa-bot/.health-starts.json

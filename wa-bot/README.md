@@ -799,3 +799,24 @@ pm2 start wa-bot
 ```
 
 Pulihkan hanya bagian yang diperlukan. Memulihkan `auth_session` memakai sesi lama: bila WhatsApp sudah mencabut tautan perangkat itu, bot tetap minta pairing ulang.
+
+## Penjaga kesehatan bot (`/kesehatan`)
+
+Bot memeriksa dirinya sendiri tiap 5 menit dan mengabari pemilik (WhatsApp + Telegram) **sekali** saat ada masalah dan **sekali** saat pulih. Tanpa AI dan tanpa layanan luar.
+
+| Yang diperiksa | Dianggap bermasalah bila | Dilaporkan |
+| --- | --- | --- |
+| Ollama | `GET /api/version` tidak menjawab | setelah 2 kali berturut-turut |
+| Disk (folder bot dan folder cadangan) | sisa ruang < `HEALTH_DISK_MIN_GB` (3) | langsung |
+| Memori | RAM tersedia < `HEALTH_MEM_MIN_MB` (300) | setelah 3 kali berturut-turut |
+| WhatsApp | tidak tersambung > `HEALTH_WA_DOWN_MIN` (10) menit, mis. sesi dicabut dari HP | langsung |
+| Basis data (Supabase) | tidak terjangkau (internet putus / layanan bermasalah) | setelah 3 kali berturut-turut |
+| Restart | bot menyala >= `HEALTH_RESTARTS` (5) kali dalam 15 menit (crash loop) | langsung |
+| Cadangan | cadangan terakhir > 36 jam padahal cadangan otomatis aktif | langsung |
+
+- **`/kesehatan`** (alias `/sehat`, `/health`) menjalankan semua pemeriksaan sekarang dan menampilkan papan status ✅/⚠️ beserta saran. Perintah ini tidak memicu peringatan dan tidak mengubah hitungan.
+- **Anti-berisik:** masalah yang sama tidak diulang, kecuali masih ada setelah 6 jam; beberapa masalah dalam satu putaran digabung jadi satu pesan; gagal sesekali (tidak berturut-turut) diabaikan. Bila pesan gagal terkirim (WhatsApp dan Telegram sama-sama putus), peringatan dicoba lagi di putaran berikutnya.
+- **Pemeriksaan pertama** 90 detik setelah bot menyala, supaya WhatsApp/Telegram sempat tersambung.
+- **Restart** dihitung dari berkas kecil `wa-bot/.health-starts.json` (tidak ikut Git). Memasang patch dan `/restart` berkali-kali dalam 15 menit bisa memicu peringatan ini; itu wajar, abaikan.
+- Bila WhatsApp putus lama, peringatan tetap sampai lewat Telegram.
+- Pengaturan: bagian 20 `.env.example`. Matikan satu pemeriksaan Ollama dengan `HEALTH_OLLAMA=false`, atau seluruhnya dengan `HEALTH_ENABLED=false` (`/kesehatan` tetap bisa dipakai).
