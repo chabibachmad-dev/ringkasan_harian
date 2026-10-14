@@ -625,6 +625,33 @@ Selama sesi `/speak` (WhatsApp dan Telegram), bawaannya **suara saja**: ucapanmu
 - Putar otomatis tidak bisa dipaksa oleh bot: itu perilaku aplikasi WhatsApp/Telegram di HP. Untuk putar-otomatis sungguhan pakai halaman Speaking di aplikasi.
 - `TUTOR_AI_ORDER` (bawaan `fallback-first`): tutor memakai Groq/OpenRouter dulu, Gemini sebagai cadangan; `gemini-first` membalik urutannya.
 
+## Perintah laptop dari Telegram (restart, deploy, log)
+
+Mati bawaan. Aktifkan dengan `OPS_ENABLED=true` di `.env` bot lalu `pm2 restart wa-bot --update-env`. Hanya Telegram (bukan WhatsApp), hanya chat pribadi pemilik (`TELEGRAM_OWNER_IDS`, bisa dipersempit dengan `OPS_TELEGRAM_IDS`), dan tidak lewat pesan suara.
+
+| Perintah | Fungsi |
+| --- | --- |
+| `/sistem` | pm2, disk, RAM/swap, beban, Ollama |
+| `/log [jumlah] [error]` | baris terakhir log bot (maks 80), rahasia disamarkan |
+| `/restart` | `pm2 restart wa-bot --update-env` (konfirmasi) |
+| `/deploy chat` / `/deploy study` | `npx supabase functions deploy <fungsi>` (konfirmasi) |
+| `/migrasi` | pratinjau migrasi yang belum diterapkan (`db push --dry-run`) |
+| `/migrasi terapkan` | `npx supabase db push` (konfirmasi) |
+| `/ya <kode>` | konfirmasi |
+
+**Patch zip + Git dari Telegram.** Alur kerja sehari-hari saat aku mengirim file baru:
+
+1. Kirim berkas `patch-….zip` ke bot Telegram. Bot memeriksanya (path harus relatif terhadap akar proyek; `.env`, `auth_session/`, `dokumen/`, `wa-bot/kb/`, `.git`, `node_modules` tidak pernah disentuh; satu path berbahaya = seluruh zip ditolak), lalu menampilkan daftar `+` baru / `~` berubah dan meminta `/ya <kode>`.
+2. Setelah `/ya`, file lama dicadangkan di `.ops-backup/<waktu>/` dan zip diterapkan. Bot menyarankan langkah berikutnya sesuai file yang berubah: `/tes`, `/migrasi`, `/deploy chat`, `/restart`, `/rilis`.
+3. `/tes` menjalankan `npm test`. Bila gagal: `/urungkan` mengembalikan patch terakhir (dari cadangan).
+4. `/rilis <pesan>` = `git add -A` + `git commit` + `git push` dengan satu konfirmasi. Tersedia juga `/git` (status), `/commit <pesan>`, `/push`.
+
+Git: tidak pernah `--force`; commit dibatalkan bila ada file sensitif ikut ter-stage; push yang ditolak karena remote lebih baru hanya dilaporkan (gabungkan manual dengan `git pull`). Git harus sudah bisa push tanpa kata sandi dari proses bot (pm2): pakai kunci SSH tanpa passphrase atau HTTPS dengan `git config credential.helper store`; bot tidak pernah menanyakan kata sandi (`GIT_TERMINAL_PROMPT=0`). Cabang tanpa upstream di-push dengan `-u origin`. Sekali sebelum memakai: pastikan `git config user.name` dan `user.email` sudah terisi di folder proyek.
+
+Pengaman: tidak ada shell bebas (perintah tetap, nama fungsi dicocokkan dengan daftar putih `OPS_FUNCTIONS`, dijalankan tanpa shell); perintah yang mengubah sesuatu memberi kode acak 4 digit yang harus dibalas `/ya <kode>` dalam 60 detik (sekali pakai, hanya dari chat yang sama); satu pekerjaan berat pada satu waktu; setiap perintah dicatat di `wa-bot/ops-audit.log`; nilai `.env` yang berisi KEY/TOKEN/SECRET/PASSWORD disamarkan dari keluaran. Setelah `/restart`, bot mengabari lewat Telegram begitu menyala lagi.
+
+Catatan: ini menyerahkan kendali atas laptop ke akun Telegram-mu — dengan fitur patch, siapa pun yang menguasai akun itu bisa mengganti kode bot (setelah konfirmasi), jadi perlakukan akun Telegram-mu seperti kunci laptop. Aktifkan verifikasi dua langkah di Telegram dan jangan tinggalkan HP tanpa kunci. `/deploy` dan `/migrasi` memakai login Supabase CLI yang sudah ada di laptop; zip patch tetap harus kamu ekstrak sendiri ke folder proyek sebelum `/deploy` atau `/restart`.
+
 ## Dokumen lokal: PDF peraturan → .md → bisa ditanyakan (khusus Ollama)
 
 Folder di laptop (bawaan: `dokumen/` di samping `wa-bot/`, ubah dengan `DOC_DIR`):

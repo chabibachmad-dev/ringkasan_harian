@@ -54,6 +54,7 @@ import { createKbRetrievalWorker } from "./kb-retrieval.js";
 import { createDocFolderWorker } from "./doc-folder.js";
 import { guardDocAnswer } from "./docguard.js";
 import { createLocalDocs, parseDokumenCommand } from "./local-docs.js";
+import { createOps, readOpsConfig } from "./ops.js";
 import { ollamaChatStream } from "./ollama-http.js";
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
@@ -3270,6 +3271,31 @@ const localDocs = createLocalDocs({
   callModel: (messages, opts) => enqueueOllamaCall(() => callOllamaChat(messages, opts), { priority: PRIORITY.CHAT, label: "owner-docs" })
 });
 
+// Perintah laptop dari Telegram (/sistem /log /restart /deploy /migrasi), mati kecuali OPS_ENABLED=true. Lihat ops.js.
+const botStateStore = {
+  get: async (key) => {
+    const { data } = await supabase.from("bot_state").select("value").eq("key", key).maybeSingle();
+    return data?.value ?? null;
+  },
+  set: async (key, value) => {
+    const { error } = await supabase.from("bot_state").upsert({ key, value, updated_at: new Date().toISOString() });
+    if (error) throw new Error(error.message);
+  }
+};
+const ops = createOps({
+  config: readOpsConfig(process.env, fileURLToPath(new URL(".", import.meta.url))),
+  deps: {
+    state: botStateStore,
+    memInfo: readMemInfo,
+    ollama: async () => {
+      const res = await fetch(`${OLLAMA_BASE_URL}/api/ps`, { signal: AbortSignal.timeout(5000) });
+      if (!res.ok) return { ok: false, error: `HTTP ${res.status}` };
+      const j = await res.json().catch(() => ({}));
+      return { ok: true, models: (j.models || []).map((m) => m.name) };
+    }
+  }
+});
+
 /** Jalankan /dokumen dari WhatsApp. true = pesan sudah ditangani. */
 async function handleWaDokumenCommand(sock, jid, text) {
   const cmd = parseDokumenCommand(text);
@@ -3306,6 +3332,7 @@ const telegram = createTelegram({
     regNow: (opts) => regMonitor.runNow(opts),
     status: () => buildBotStatusText(),
     localDocs,
+    ops,
     state: {
       get: async (key) => {
         const { data } = await supabase.from("bot_state").select("value").eq("key", key).maybeSingle();
@@ -3330,7 +3357,11 @@ async function mirrorToTelegram(text) {
     return false;
   }
 }
-telegram.start().catch((err) => console.error("✈️ [Telegram] gagal mulai:", err instanceof Error ? err.message : String(err)));
+telegram
+  .start()
+  .then(() => ops.announceStartup((chatId, text) => telegram.send(chatId, text)))
+  .catch((err) => console.error("✈️ [Telegram] gagal mulai:", err instanceof Error ? err.message : String(err)));
+if (ops.enabled()) console.log("🛠️ Perintah laptop dari Telegram: AKTIF (/sistem /log /restart /deploy /migrasi, dengan konfirmasi)");
 console.log(`✈️ Telegram untuk pemilik: ${telegram.describe()}`);
 
 connect().catch((err) => {

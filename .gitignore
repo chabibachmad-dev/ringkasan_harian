@@ -6,6 +6,9 @@ supabase/.temp/
 supabase/.branches/
 *.log
 
+# Cadangan file lama sebelum patch zip diterapkan lewat Telegram (wa-bot/ops-patch.js)
+.ops-backup/
+
 # Folder dokumen lokal di laptop (PDF peraturan + hasil .md): pribadi, tidak boleh ke GitHub
 dokumen/
 .DS_Store

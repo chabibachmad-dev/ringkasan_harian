@@ -364,7 +364,7 @@ const msg = (chat, text, extra = {}) => ({ update_id: 1, message: { chat: { id: 
   const tgDead = createTelegram({ config: cfg(), deps: { chat: async () => "x", transcribe: async () => ({ text: "x" }) }, fetchImpl: fDead, log: { ...quiet, error: (m) => errLog.push(m) }, sleep: async () => {} });
   await tgDead.handleUpdate(voice());
   check(dl2 === 3, "suara: unduhan selalu gagal -> berhenti setelah 3 percobaan");
-  check(/ECONNRESET/.test(f.texts(111).at(-1)) && /unduh berkas suara/.test(f.texts(111).at(-1)), "suara: pesan ke pemilik memuat sebab asli (ECONNRESET)");
+  check(/ECONNRESET/.test(f.texts(111).at(-1)) && /unduh berkas/.test(f.texts(111).at(-1)), "suara: pesan ke pemilik memuat sebab asli (ECONNRESET)");
   check(errLog.some((m) => m.includes("ECONNRESET")), "suara: log memuat sebab asli");
 
   let dl3 = 0;

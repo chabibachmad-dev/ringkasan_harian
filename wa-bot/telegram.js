@@ -148,6 +148,7 @@ const HELP = [
   "/ringkasan  — ringkasan percakapan WhatsApp hari ini",
   "/peraturan  — pantau peraturan terbaru (\"/peraturan semua\" = tampilkan semua hasil)",
   "/dokumen <pertanyaan>  — tanya dari dokumen lokal di laptop (hasil PDF → MD), dijawab Ollama. \"/dokumen\" saja = daftar dokumen",
+  "/sistem  — kondisi laptop bot (pm2, disk, RAM, Ollama); /log, /restart, /deploy, /migrasi: ketik /ops (perlu OPS_ENABLED=true)",
   "/baru  — mulai obrolan baru (lupakan konteks sebelumnya)",
   "/speak [topik]  — mulai latihan ngobrol Inggris dengan tutor (suara)   /speak id [topik]  — ngobrol santai bahasa Indonesia   /selesai  — akhiri",
   "/suara [auto|on|off]  — atur balasan suara untuk obrolan biasa",
@@ -161,6 +162,7 @@ const HELP = [
  *   simab?: { enabled, hasSession(key), run(text, {notify, sessionKey}) -> Promise<string> }
  *   summary?()                        -> Promise<string>   teks ringkasan harian
  *   status?()                         -> Promise<string>   teks kondisi bot (/status)
+ *   ops?: { handle(name, arg, {chatId, viaVoice, send}) -> Promise<string|undefined> }   perintah laptop (ops.js)
  *   localDocs?: { ask(q)->Promise<{reply}>, list()->string }   tanya-jawab dokumen lokal (/dokumen), dijawab Ollama
  *   regNow?({ all, sendTo })          -> Promise            jalankan pantauan peraturan, kirim lewat sendTo(text)
  *   state?: { get(key), set(key, value) }                   penyimpan offset (supaya restart tidak memproses ulang)
@@ -491,7 +493,7 @@ Ubah: /suara auto • /suara on • /suara off`));
     await runSimab(chatId, data.slice(3));
   }
 
-  /** Unduh berkas Telegram (suara) ke Buffer. Batas Bot API: 20 MB. Gangguan jaringan sesaat dicoba ulang (maks 3 kali). */
+  /** Unduh berkas Telegram (suara/dokumen) ke Buffer. Batas Bot API: 20 MB. Gangguan jaringan sesaat dicoba ulang (maks 3 kali). */
   async function downloadFile(fileId) {
     let info = null;
     let lastErr = null;
@@ -504,7 +506,7 @@ Ubah: /suara auto • /suara on • /suara off`));
         if (attempt < 2) await sleep(700 * (attempt + 1));
       }
     }
-    if (!info) throw new Error(`gagal meminta berkas suara ke Telegram: ${describeError(lastErr)}`);
+    if (!info) throw new Error(`gagal meminta berkas ke Telegram: ${describeError(lastErr)}`);
     if (!info.file_path) throw new Error("berkas tidak ditemukan di Telegram");
     lastErr = null;
     for (let attempt = 0; attempt < 3; attempt++) {
@@ -526,10 +528,23 @@ Ubah: /suara auto • /suara on • /suara off`));
         clearTimeout(timer);
       }
     }
-    throw new Error(`unduh berkas suara dari Telegram gagal: ${describeError(lastErr)}`);
+    throw new Error(`unduh berkas dari Telegram gagal: ${describeError(lastErr)}`);
   }
 
   /** Pesan suara pemilik: ubah jadi teks, tampilkan apa yang terdengar, lalu proses seperti pesan teks (obrolan / SiMAB). */
+  /** Berkas (mis. patch*.zip) dari pemilik: diserahkan ke ops.js; bila bukan urusannya, balasan umum. */
+  async function handleOwnerDocument(chatId, doc) {
+    try {
+      const out = await withTyping(chatId, () =>
+        deps.ops.handleDocument({ chatId, fileName: doc.file_name, size: doc.file_size, download: () => downloadFile(doc.file_id), send: (t) => send(chatId, t) })
+      );
+      if (typeof out === "string" && out) return void (await send(chatId, out));
+    } catch (e) {
+      return void (await send(chatId, `⚠️ Berkas gagal diproses: ${String(e?.message || e).slice(0, 200)}`).catch(() => {}));
+    }
+    await send(chatId, "Bot membaca pesan teks dan pesan suara (tahan tombol mikrofon). Untuk menerapkan patch, kirim zip bernama patch*.zip (perlu OPS_ENABLED=true).").catch(() => {});
+  }
+
   async function handleOwnerVoice(chatId, voice) {
     if (!deps.transcribe) return void (await send(chatId, "Pesan suara belum aktif: isi GROQ_API_KEYS (atau GEMINI_API_KEYS) di .env bot lalu restart."));
     if (Number(voice.duration) > config.voiceMaxSeconds) return void (await send(chatId, `Pesan suaranya terlalu panjang (${voice.duration} dtk). Maksimal ${config.voiceMaxSeconds} detik; pecah jadi beberapa pesan.`));
@@ -604,6 +619,17 @@ Ubah: /suara auto • /suara on • /suara off`));
         await reply(out.reply);
       } catch (e) {
         await reply(`⚠️ Gagal menjawab dari dokumen lokal: ${String(e?.message || e).slice(0, 200)}\nPastikan Ollama berjalan di laptop.`);
+      }
+      return;
+    }
+
+    // Perintah laptop (/sistem /log /restart /deploy /migrasi /ya): lihat ops.js. Sebelum blok SiMAB supaya "/ya <kode>" tidak tertelan sesi SiMAB.
+    if (deps.ops && (deps.ops.commands || ["sistem", "log", "restart", "deploy", "migrasi", "ya", "ops"]).includes(name)) {
+      try {
+        const out = await deps.ops.handle(name, arg, { chatId, viaVoice, send: (t) => send(chatId, t) });
+        if (typeof out === "string" && out) await reply(out);
+      } catch (e) {
+        await reply(`⚠️ Perintah laptop gagal: ${String(e?.message || e).slice(0, 200)}`);
       }
       return;
     }
@@ -691,6 +717,7 @@ Ubah: /suara auto • /suara on • /suara off`));
       return;
     }
     if (m.voice || m.audio) return handleOwnerVoice(chatId, m.voice || m.audio);
+    if (m.document && deps.ops?.handleDocument) return handleOwnerDocument(chatId, m.document);
     if (typeof m.text !== "string") {
       await send(chatId, "Bot membaca pesan teks dan pesan suara (tahan tombol mikrofon).").catch(() => {});
       return;
@@ -768,6 +795,8 @@ Ubah: /suara auto • /suara on • /suara off`));
           { command: "status", description: "Kondisi bot: WhatsApp, key Gemini, token, Ollama" },
           { command: "ringkasan", description: "Ringkasan percakapan WhatsApp hari ini" },
           { command: "peraturan", description: "Pantau peraturan terbaru" },
+          { command: "dokumen", description: "Tanya dari dokumen lokal di laptop (dijawab Ollama)" },
+          { command: "sistem", description: "Kondisi laptop bot; /ops untuk restart, deploy, log" },
           { command: "baru", description: "Mulai obrolan baru" },
           { command: "speak", description: "Ngobrol dengan tutor suara: Inggris, atau \"/speak id\" Indonesia" },
           { command: "selesai", description: "Akhiri sesi Speaking" },
