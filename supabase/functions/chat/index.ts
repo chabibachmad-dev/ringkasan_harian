@@ -101,6 +101,13 @@
 //   { "code": "...", "action": "kb_upload_done", "id": "..." }  -> status 'queued'
 //   { "code": "...", "action": "kb_retry", "id": "..." }        -> ulangi yang 'error'
 //
+// --- Menu "PDF → MD" (migrations/0037 + wa-bot/doc-folder.js): PDF peraturan jadi Markdown di LAPTOP ---
+//   { "code": "...", "action": "md_list" }                  -> { ok, jobs: [...] }  (metadata saja, tanpa isi dokumen)
+//   { "code": "...", "action": "md_upload_url", "filename": "x.pdf", "size": 123 } -> { ok, job, upload: { path, token } }
+//   { "code": "...", "action": "md_upload_done", "id": "..." }   -> status 'queued'
+//   { "code": "...", "action": "md_retry", "id": "..." }         -> ulangi yang 'error'
+//   { "code": "...", "action": "md_delete", "id": "..." }        -> hapus baris (+ file mentah di inbox bila masih ada)
+//
 // --- Al-Qur'an (halaman Pengaturan > Al-Qur'an; tabel di migrations/0014) ---
 //   { "code": "...", "action": "quran_sync" }
 //     -> { ok: true, lastRead: { surah, ayah, page, updated_at } | null,
@@ -723,6 +730,95 @@ Deno.serve(async (req) => {
       }
     }
     const { error } = await supabaseAdmin.from("knowledge_documents").delete().eq("id", id);
+    if (error) return json({ ok: false, error: error.message }, 500);
+    return json({ ok: true });
+  }
+
+  // --- Menu "PDF → MD": antrean konversi di laptop (lihat migrations/0037, wa-bot/doc-folder.js) ---
+  const MD_COLS =
+    "id, source, filename, title, status, status_detail, error, md_name, page_count, bab_count, pasal_count, table_count, notes, indexed, created_at, finished_at";
+  const mdMissingTable = (msg: string) => /relation|does not exist|schema cache/i.test(msg || "");
+
+  if (body.action === "md_list") {
+    const { data, error } = await supabaseAdmin.from("pdf_md_jobs").select(MD_COLS).order("created_at", { ascending: false }).limit(100);
+    if (error) {
+      return json(
+        { ok: false, error: mdMissingTable(error.message) ? "Jalankan dulu migrasi 0037_pdf_md_jobs.sql di Supabase." : error.message },
+        500
+      );
+    }
+    return json({ ok: true, jobs: data ?? [] });
+  }
+
+  if (body.action === "md_upload_url") {
+    const filename = typeof body.filename === "string" ? body.filename.trim().slice(0, 200) : "";
+    const size = Number(body.size) || 0;
+    if (!filename || !/\.pdf$/i.test(filename)) return json({ ok: false, error: "Hanya file PDF yang bisa diubah jadi .md." }, 400);
+    if (size > KB_MAX_FILE_BYTES) {
+      return json({ ok: false, error: `File terlalu besar (maks ${Math.floor(KB_MAX_FILE_BYTES / 1024 / 1024)} MB per file).` }, 400);
+    }
+    const id = crypto.randomUUID();
+    const path = `md/${id}/source.pdf`;
+    const { data: signed, error: signErr } = await supabaseAdmin.storage.from(KB_BUCKET).createSignedUploadUrl(path);
+    if (signErr || !signed) {
+      return json({ ok: false, error: `Gagal menyiapkan tempat upload (${signErr?.message ?? "tanpa detail"}). Pastikan migrasi 0017_kb_inbox.sql sudah dijalankan.` }, 500);
+    }
+    const { data, error } = await supabaseAdmin
+      .from("pdf_md_jobs")
+      .insert({ id, source: "app", filename, status: "uploading", status_detail: "Mengirim file…", storage_path: path })
+      .select(MD_COLS)
+      .single();
+    if (error) {
+      return json({ ok: false, error: mdMissingTable(error.message) ? "Jalankan dulu migrasi 0037_pdf_md_jobs.sql di Supabase." : error.message }, 500);
+    }
+    return json({ ok: true, job: data, upload: { path, token: signed.token } });
+  }
+
+  if (body.action === "md_upload_done") {
+    const id = typeof body.id === "string" ? body.id : "";
+    if (!UUID_RE.test(id)) return json({ ok: false, error: "ID tugas tidak valid." }, 400);
+    const { data: row } = await supabaseAdmin.from("pdf_md_jobs").select("id, status, storage_path").eq("id", id).maybeSingle();
+    if (!row || row.status !== "uploading" || !row.storage_path) return json({ ok: false, error: "Tugas tidak dalam status upload." }, 400);
+    const { data: files } = await supabaseAdmin.storage.from(KB_BUCKET).list(`md/${id}`);
+    if (!files || files.length === 0) return json({ ok: false, error: "File belum sampai di server -- ulangi upload." }, 400);
+    const { error } = await supabaseAdmin
+      .from("pdf_md_jobs")
+      .update({ status: "queued", status_detail: "Menunggu diproses di laptop…", error: null })
+      .eq("id", id)
+      .eq("status", "uploading");
+    if (error) return json({ ok: false, error: error.message }, 500);
+    return json({ ok: true });
+  }
+
+  if (body.action === "md_retry") {
+    const id = typeof body.id === "string" ? body.id : "";
+    if (!UUID_RE.test(id)) return json({ ok: false, error: "ID tugas tidak valid." }, 400);
+    const { data, error } = await supabaseAdmin
+      .from("pdf_md_jobs")
+      .update({ status: "queued", status_detail: "Menunggu diproses di laptop…", error: null })
+      .eq("id", id)
+      .eq("status", "error")
+      .eq("source", "app")
+      .not("storage_path", "is", null)
+      .select("id");
+    if (error) return json({ ok: false, error: error.message }, 500);
+    if (!data || data.length === 0) return json({ ok: false, error: "Tugas ini tidak bisa diulang (file mentahnya sudah tidak ada) -- unggah ulang." }, 400);
+    return json({ ok: true });
+  }
+
+  if (body.action === "md_delete") {
+    const id = typeof body.id === "string" ? body.id : "";
+    if (!UUID_RE.test(id)) return json({ ok: false, error: "ID tugas tidak valid." }, 400);
+    const { data: row } = await supabaseAdmin.from("pdf_md_jobs").select("storage_path").eq("id", id).maybeSingle();
+    const sp = (row as { storage_path?: string | null } | null)?.storage_path;
+    if (sp) {
+      try {
+        await supabaseAdmin.storage.from(KB_BUCKET).remove([sp]);
+      } catch (_e) {
+        // abaikan
+      }
+    }
+    const { error } = await supabaseAdmin.from("pdf_md_jobs").delete().eq("id", id);
     if (error) return json({ ok: false, error: error.message }, 500);
     return json({ ok: true });
   }
@@ -1444,7 +1540,7 @@ Deno.serve(async (req) => {
     {
       ok: false,
       error:
-        "action tidak dikenal (pakai 'history', 'send', 'agent_job', 'agent_status', 'system_status', 'attachment_add', 'attachment_delete', 'quran_khatam_set', 'quran_khatam_clear', 'delete', 'delete_message', 'last_messages', 'list_threads', 'set_thread_meta', 'token_usage', 'key_status', 'kb_list', 'kb_upload', 'kb_upload_url', 'kb_upload_done', 'kb_retry', 'kb_delete', 'quran_sync', 'quran_set_last_read', 'quran_add_bookmark', atau 'quran_delete_bookmark')."
+        "action tidak dikenal (pakai 'history', 'send', 'agent_job', 'agent_status', 'system_status', 'attachment_add', 'attachment_delete', 'quran_khatam_set', 'quran_khatam_clear', 'delete', 'delete_message', 'last_messages', 'list_threads', 'set_thread_meta', 'token_usage', 'key_status', 'kb_list', 'kb_upload', 'kb_upload_url', 'kb_upload_done', 'kb_retry', 'kb_delete', 'md_list', 'md_upload_url', 'md_upload_done', 'md_retry', 'md_delete', 'quran_sync', 'quran_set_last_read', 'quran_add_bookmark', atau 'quran_delete_bookmark')."
     },
     400
   );

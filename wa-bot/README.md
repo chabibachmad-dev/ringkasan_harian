@@ -624,3 +624,22 @@ Selama sesi `/speak` (WhatsApp dan Telegram), bawaannya **suara saja**: ucapanmu
 - Bawaan global lewat `.env`: `WA_SPEAK_TEXT=true` / `TELEGRAM_SPEAK_TEXT=true`.
 - Putar otomatis tidak bisa dipaksa oleh bot: itu perilaku aplikasi WhatsApp/Telegram di HP. Untuk putar-otomatis sungguhan pakai halaman Speaking di aplikasi.
 - `TUTOR_AI_ORDER` (bawaan `fallback-first`): tutor memakai Groq/OpenRouter dulu, Gemini sebagai cadangan; `gemini-first` membalik urutannya.
+
+## Dokumen lokal: PDF peraturan → .md → bisa ditanyakan (khusus Ollama)
+
+Folder di laptop (bawaan: `dokumen/` di samping `wa-bot/`, ubah dengan `DOC_DIR`):
+
+```
+dokumen/peraturan-pdf/   taruh PDF di sini (boleh subfolder). Bot hanya MEMBACA, tidak mengubah/menghapus.
+dokumen/peraturan-md/    hasil .md terstruktur. Boleh kamu sunting; suntingan TIDAK ditimpa.
+```
+
+- Folder dipantau tiap 20 detik (`DOC_POLL_MS`). PDF baru/berubah dikonversi satu per satu, menunggu Ollama bebas.
+- Hasil: kepala YAML (judul, jenis, nomor, tahun, tentang, jumlah halaman/BAB/Pasal, catatan mutu), `## BAB`, `### Bagian`, `Pasal` jadi judul, ayat/huruf/angka jadi daftar bertingkat (nomor aslinya dipertahankan), tabel jadi tabel Markdown, header/footer berulang dibuang, dan penanda `<!-- hlm N -->` supaya jawaban bisa menyebut halaman PDF.
+- PDF scan memakai OCR yang sama dengan Dokumen Pengetahuan (`tesseract-ocr-ind`).
+- Bila PDF diganti padahal kamu sudah menyunting .md-nya, hasil baru disimpan sebagai `<nama>.baru.md` (tidak ikut diindeks) dan suntinganmu aman.
+- .md yang kamu taruh/sunting sendiri di `peraturan-md/` otomatis diindeks ulang; .md yang dihapus keluar dari indeks.
+- **Privasi:** dokumen ini diindeks dengan id `local:` dan dikecualikan dari pencarian untuk Gemini/Groq/OpenRouter (`excludeLocal`). Hanya jalur Ollama (balasan WA bila `WA_AI_ENGINE=ollama`, agen chat aplikasi) yang melihatnya. Ke Supabase hanya naik metadata tugas (nama file, jumlah halaman/Pasal, status).
+- Menu **PDF → MD** di aplikasi: unggah PDF → antrean (`pdf_md_jobs`, migrasi `0037_pdf_md_jobs.sql`) → laptop menyimpannya ke `peraturan-pdf/` dan memprosesnya. Hasil dari folder juga tampil di daftar itu.
+- Folder `dokumen/` sudah masuk `.gitignore` (tidak ikut ke GitHub).
+- Pemasangan: `npx supabase db push` (atau tempel 0037 di SQL Editor), `npx supabase functions deploy chat`, ekstrak zip, `pm2 restart wa-bot --update-env`.

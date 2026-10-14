@@ -263,6 +263,7 @@ export function createKbIngestWorker(deps, overrides = {}) {
     const local = new Map(index.listDocs().map((d) => [d.id, d]));
     let removed = 0;
     for (const id of local.keys()) {
+      if (String(id).startsWith("local:")) continue; // dokumen dari folder laptop (doc-folder.js) memang tidak ada di Supabase
       if (!remote.has(id)) {
         index.removeDoc(id);
         removed += 1;

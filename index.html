@@ -72,6 +72,10 @@
               <span id="menu-kb-icon" class="menu-thumb"></span>
               <span class="menu-caption" data-i18n="menu_s_kb">Dokumen</span>
             </button>
+            <button type="button" id="menu-md" class="menu-item">
+              <span id="menu-md-icon" class="menu-thumb"></span>
+              <span class="menu-caption" data-i18n="menu_s_md">PDF → MD</span>
+            </button>
             <button type="button" id="menu-qr" class="menu-item">
               <span id="menu-qr-icon" class="menu-thumb"></span>
               <span class="menu-caption" data-i18n="menu_s_qr">Template WA</span>
@@ -578,6 +582,33 @@
 
           <div class="chat-code-dialog-actions">
             <button type="button" id="kb-close-btn" class="primary-btn" data-i18n="detail_close">Tutup</button>
+          </div>
+        </div>
+      </dialog>
+
+      <!-- Dialog PDF → MD: PDF peraturan diubah jadi Markdown terstruktur di laptop (lihat wa-bot/doc-folder.js). -->
+      <dialog id="md-dialog" class="kb-dialog">
+        <div class="kb-dialog-card">
+          <h2 data-i18n="md_title">PDF → Markdown</h2>
+          <p class="kb-intro" data-i18n="md_intro">
+            Unggah PDF peraturan. Laptop mengubahnya menjadi file .md terstruktur (BAB, Pasal, ayat, tabel) dan menyimpannya
+            di folder lokal. Isinya tidak disimpan di server dan hanya bisa dijawab Ollama.
+          </p>
+
+          <form id="md-upload-form" class="kb-upload-form">
+            <input id="md-file-input" type="file" accept="application/pdf,.pdf" multiple />
+            <button type="submit" id="md-upload-btn" class="primary-btn" data-i18n="md_upload_btn">Ubah jadi .md</button>
+          </form>
+          <p id="md-upload-status" class="kb-upload-status" hidden></p>
+
+          <div id="md-job-list" class="kb-doc-list"></div>
+          <p id="md-job-list-empty" class="status-text" hidden></p>
+          <p class="kb-doc-meta" data-i18n="md_folder_hint">
+            Cara lain: taruh PDF di folder dokumen/peraturan-pdf/ di laptop; hasilnya muncul di dokumen/peraturan-md/ dan di daftar ini.
+          </p>
+
+          <div class="chat-code-dialog-actions">
+            <button type="button" id="md-close-btn" class="primary-btn" data-i18n="detail_close">Tutup</button>
           </div>
         </div>
       </dialog>

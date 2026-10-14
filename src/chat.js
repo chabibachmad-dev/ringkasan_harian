@@ -192,6 +192,39 @@ export async function uploadKnowledgeFile(code, { title, file, onStatus } = {}) 
   return { ok: true, document: ticket.document };
 }
 
+// ================================================================
+// Menu "PDF → MD" (migrations/0037, wa-bot/doc-folder.js): PDF peraturan diubah jadi Markdown terstruktur di LAPTOP.
+// Yang lewat Supabase hanya file PDF sementara (dihapus setelah diproses) + metadata tugas; isi .md tinggal di laptop.
+// ================================================================
+export function listMdJobs(code) {
+  return callChatFunction({ code, action: "md_list" });
+}
+
+// 1) tiket upload, 2) kirim PDF ke bucket privat `kb-inbox`, 3) antrekan. Mengembalikan { ok, job } atau error.
+export async function uploadMdPdf(code, { file, onStatus } = {}) {
+  const ticket = await callChatFunction({ code, action: "md_upload_url", filename: file.name, size: file.size });
+  if (!ticket.ok) return ticket;
+  if (onStatus) onStatus("sending");
+  const { error } = await supabase.storage.from("kb-inbox").uploadToSignedUrl(ticket.upload.path, ticket.upload.token, file, {
+    contentType: file.type || "application/pdf"
+  });
+  if (error) {
+    await callChatFunction({ code, action: "md_delete", id: ticket.job.id });
+    return { ok: false, message: error.message || "Gagal mengirim file." };
+  }
+  const done = await callChatFunction({ code, action: "md_upload_done", id: ticket.job.id });
+  if (!done.ok) return done;
+  return { ok: true, job: ticket.job };
+}
+
+export function retryMdJob(code, id) {
+  return callChatFunction({ code, action: "md_retry", id });
+}
+
+export function deleteMdJob(code, id) {
+  return callChatFunction({ code, action: "md_delete", id });
+}
+
 // Ulangi pemrosesan dokumen yang gagal (file mentahnya masih di inbox).
 export function retryKnowledgeDoc(code, id) {
   return callChatFunction({ code, action: "kb_retry", id });

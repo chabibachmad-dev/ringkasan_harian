@@ -63,7 +63,7 @@ export function createKbRetrievalWorker(deps, overrides = {}) {
     try {
       const budgetChars = Math.min(cfg.maxBudgetChars, num(row.budget_chars, 12000));
       const maxChunks = Math.min(cfg.maxChunks, num(row.max_chunks, 10));
-      const blocks = index.hasDocs() ? index.search(row.question, { budgetChars, maxChunks }) : [];
+      const blocks = index.hasDocs() ? index.search(row.question, { budgetChars, maxChunks, excludeLocal: true }) : []; // dokumen folder lokal tidak dikirim ke cloud
       const chunks = blocks.map((b) => ({ title: b.title, page: b.page ?? null, text: b.text, score: Number(b.score.toFixed(3)) }));
       const st = index.stats();
       const { error } = await supabase

@@ -27,6 +27,7 @@ import {
   ICON_COPY,
   ICON_DOTS_SMALL,
   ICON_DOC,
+  ICON_PDFMD,
   ICON_BELL_FILLED,
   ICON_BELL_OUTLINE,
   ICON_ZAP,
@@ -63,6 +64,10 @@ import {
   deleteChatMessage,
   fetchTokenUsageToday,
   listKnowledgeDocs,
+  listMdJobs,
+  uploadMdPdf,
+  retryMdJob,
+  deleteMdJob,
   uploadKnowledgeDoc,
   uploadKnowledgeFile,
   retryKnowledgeDoc,
@@ -227,6 +232,16 @@ const els = {
   kbDocList: document.getElementById("kb-doc-list"),
   kbDocListEmpty: document.getElementById("kb-doc-list-empty"),
   kbCloseBtn: document.getElementById("kb-close-btn"),
+  menuMdBtn: document.getElementById("menu-md"),
+  menuMdIcon: document.getElementById("menu-md-icon"),
+  mdDialog: document.getElementById("md-dialog"),
+  mdUploadForm: document.getElementById("md-upload-form"),
+  mdFileInput: document.getElementById("md-file-input"),
+  mdUploadBtn: document.getElementById("md-upload-btn"),
+  mdUploadStatus: document.getElementById("md-upload-status"),
+  mdJobList: document.getElementById("md-job-list"),
+  mdJobListEmpty: document.getElementById("md-job-list-empty"),
+  mdCloseBtn: document.getElementById("md-close-btn"),
   menuQrBtn: document.getElementById("menu-qr"),
   menuQrIcon: document.getElementById("menu-qr-icon"),
   menuKeysBtn: document.getElementById("menu-keys"),
@@ -2170,6 +2185,134 @@ async function renderKbDocList() {
   }
 }
 
+// ---------- PDF → MD (menu "PDF → MD"): konversi peraturan menjadi Markdown di laptop ----------
+
+let mdPollTimer = null;
+
+async function openMdDialog() {
+  closeSettingsDialog();
+  els.mdFileInput.value = "";
+  els.mdUploadStatus.hidden = true;
+  openDialogEl(els.mdDialog);
+  await renderMdJobs();
+}
+
+async function renderMdJobs() {
+  if (mdPollTimer) clearTimeout(mdPollTimer);
+  mdPollTimer = null;
+  els.mdJobList.innerHTML = "";
+  if (!state.chatCode) {
+    els.mdJobListEmpty.hidden = false;
+    els.mdJobListEmpty.textContent = t(state.lang, "kb_need_code");
+    return;
+  }
+  els.mdJobListEmpty.hidden = false;
+  els.mdJobListEmpty.textContent = t(state.lang, "loading");
+
+  const result = await listMdJobs(state.chatCode);
+  if (!result.ok) {
+    if (result.unauthorized) {
+      state.chatCode = "";
+      clearStoredChatCode();
+    }
+    els.mdJobListEmpty.textContent = result.message && /migrasi/i.test(result.message) ? result.message : t(state.lang, "md_load_error");
+    return;
+  }
+  const jobs = result.jobs || [];
+  if (jobs.length === 0) {
+    els.mdJobListEmpty.textContent = t(state.lang, "md_empty");
+    return;
+  }
+  els.mdJobListEmpty.hidden = true;
+
+  const locale = state.lang === "id" ? "id-ID" : "en-US";
+  let needsPoll = false;
+  for (const job of jobs) {
+    const row = document.createElement("div");
+    row.className = "kb-doc-row";
+    const main = document.createElement("div");
+    main.className = "kb-doc-main";
+
+    const titleEl = document.createElement("div");
+    titleEl.className = "kb-doc-title";
+    titleEl.textContent = job.title || job.filename;
+    main.appendChild(titleEl);
+
+    const meta = document.createElement("div");
+    meta.className = "kb-doc-meta";
+    const bits = [];
+    if (job.status === "done") {
+      if (job.page_count) bits.push(`${job.page_count.toLocaleString(locale)} ${t(state.lang, "kb_pages_unit")}`);
+      if (job.bab_count) bits.push(`${job.bab_count} BAB`);
+      bits.push(`${job.pasal_count || 0} ${t(state.lang, "md_pasal_unit")}`);
+      if (job.table_count) bits.push(`${job.table_count} ${t(state.lang, "md_table_unit")}`);
+    }
+    bits.push(formatFullDateTime(job.finished_at || job.created_at));
+    if (job.source === "folder") bits.push(t(state.lang, "md_from_folder"));
+    meta.textContent = bits.join(" • ");
+    main.appendChild(meta);
+
+    const info = document.createElement("div");
+    const st = job.status === "done" ? "ready" : job.status;
+    info.className = `kb-doc-state kb-doc-state--${st}`;
+    if (job.status === "uploading") info.textContent = t(state.lang, "kb_state_uploading");
+    else if (job.status === "queued") info.textContent = t(state.lang, "kb_state_queued");
+    else if (job.status === "processing") info.textContent = `${t(state.lang, "kb_state_processing")}${job.status_detail ? ` — ${job.status_detail}` : ""}`;
+    else if (job.status === "error") info.textContent = `${t(state.lang, "kb_state_error")}${job.error ? `: ${job.error}` : ""}`;
+    else info.textContent = `${t(state.lang, "md_saved_at")} ${job.md_name || "-"}${job.indexed ? ` • ${t(state.lang, "md_indexed")}` : ""}`;
+    if (["uploading", "queued", "processing"].includes(job.status)) needsPoll = true;
+    main.appendChild(info);
+
+    const notes = Array.isArray(job.notes) ? job.notes : [];
+    if (job.status === "done" && notes.length > 0) {
+      const warn = document.createElement("div");
+      warn.className = "kb-doc-note kb-doc-note--warn";
+      warn.textContent = `⚠️ ${notes.join(" • ")}`;
+      main.appendChild(warn);
+    }
+    row.appendChild(main);
+
+    if (job.status === "error" && job.source === "app") {
+      const retryBtn = document.createElement("button");
+      retryBtn.type = "button";
+      retryBtn.className = "secondary-btn kb-retry-btn";
+      retryBtn.textContent = t(state.lang, "kb_retry_btn");
+      retryBtn.addEventListener("click", async () => {
+        const r = await retryMdJob(state.chatCode, job.id);
+        if (!r.ok) alertWithDetail("kb_retry_error", r);
+        await renderMdJobs();
+      });
+      row.appendChild(retryBtn);
+    }
+    const delBtn = document.createElement("button");
+    delBtn.type = "button";
+    delBtn.className = "icon-btn icon-btn--small";
+    delBtn.innerHTML = ICON_TRASH;
+    delBtn.title = t(state.lang, "md_delete_btn");
+    delBtn.setAttribute("aria-label", t(state.lang, "md_delete_btn"));
+    delBtn.addEventListener("click", async () => {
+      if (!window.confirm(t(state.lang, "md_delete_confirm"))) return;
+      const r = await deleteMdJob(state.chatCode, job.id);
+      if (!r.ok) {
+        if (r.unauthorized) {
+          state.chatCode = "";
+          clearStoredChatCode();
+        }
+        alertWithDetail("kb_delete_error", r);
+        return;
+      }
+      await renderMdJobs();
+    });
+    row.appendChild(delBtn);
+    els.mdJobList.appendChild(row);
+  }
+  if (needsPoll) {
+    mdPollTimer = setTimeout(() => {
+      if (els.mdDialog.open) renderMdJobs();
+    }, 4000);
+  }
+}
+
 // ---------- Template Jawaban WA (Pengaturan > Template Jawaban WA) ----------
 // Pesan WA masuk yang cocok dgn kata kunci sebuah template dijawab langsung
 // oleh bot dari template itu, tanpa memanggil AI (lihat wa-bot/index.js,
@@ -3032,6 +3175,7 @@ function wireEvents() {
   els.settingsToggleIcon.innerHTML = ICON_SETTINGS;
   els.menuChatIcon.innerHTML = ICON_SPARK;
   els.menuKbIcon.innerHTML = ICON_UPLOAD;
+  els.menuMdIcon.innerHTML = ICON_PDFMD;
   els.menuWhatsappIcon.innerHTML = ICON_CHAT;
   els.menuQrIcon.innerHTML = ICON_ZAP;
   els.menuKeysIcon.innerHTML = ICON_PULSE;
@@ -3326,6 +3470,49 @@ function wireEvents() {
   });
 
   els.menuKbBtn.addEventListener("click", () => openKbDialog());
+  els.menuMdBtn.addEventListener("click", () => openMdDialog());
+  els.mdCloseBtn.addEventListener("click", () => closeDialogEl(els.mdDialog));
+  els.mdDialog.addEventListener("click", (e) => {
+    if (e.target === els.mdDialog) closeDialogEl(els.mdDialog);
+  });
+  els.mdUploadForm.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const files = Array.from(els.mdFileInput.files || []);
+    els.mdUploadStatus.hidden = false;
+    if (!state.chatCode) {
+      els.mdUploadStatus.textContent = t(state.lang, "kb_need_code");
+      return;
+    }
+    if (files.length === 0) {
+      els.mdUploadStatus.textContent = t(state.lang, "kb_file_required");
+      return;
+    }
+    els.mdUploadBtn.disabled = true;
+    let okCount = 0;
+    let lastErr = "";
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      els.mdUploadStatus.textContent = `${t(state.lang, "md_sending")} ${i + 1}/${files.length}: ${file.name}`;
+      if (file.size > KB_MAX_FILE_BYTES) {
+        lastErr = `${file.name}: ${t(state.lang, "kb_file_too_big")}`;
+        continue;
+      }
+      const result = await uploadMdPdf(state.chatCode, { file });
+      if (result.ok) okCount++;
+      else {
+        if (result.unauthorized) {
+          state.chatCode = "";
+          clearStoredChatCode();
+        }
+        lastErr = `${file.name}: ${result.message || t(state.lang, "kb_upload_error")}`;
+        if (result.unauthorized) break;
+      }
+    }
+    els.mdUploadBtn.disabled = false;
+    els.mdUploadStatus.textContent = lastErr ? `${okCount > 0 ? `${okCount} ${t(state.lang, "md_queued_n")}. ` : ""}${lastErr}` : `${okCount} ${t(state.lang, "md_queued_n")}`;
+    els.mdFileInput.value = "";
+    await renderMdJobs();
+  });
 
   els.menuWhatsappBtn.addEventListener("click", () => {
     closeSettingsDialog();

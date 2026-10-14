@@ -51,6 +51,7 @@ import { createPriorityQueue, PRIORITY } from "./ollama-queue.js";
 import { openKbIndex } from "./kb-index.js";
 import { createKbIngestWorker, readKbConfig } from "./kb-ingest.js";
 import { createKbRetrievalWorker } from "./kb-retrieval.js";
+import { createDocFolderWorker } from "./doc-folder.js";
 import { guardDocAnswer } from "./docguard.js";
 import { ollamaChatStream } from "./ollama-http.js";
 
@@ -576,7 +577,8 @@ async function fetchKnowledgeChunksForGemini(query, titles = null) {
   // terpotong; pencari TF-IDF di bawah hanya cadangan bila indeks laptop tidak aktif/kosong.
   if (kbIndex && kbIndex.hasDocs()) {
     return kbIndex
-      .search(query, { budgetChars: GEMINI_RAG_BUDGET_CHARS, maxChunks: GEMINI_RAG_MAX_CHUNKS, titles })
+      // excludeLocal: dokumen dari folder lokal laptop (id 'local:') tidak boleh dikirim ke Gemini/Groq/OpenRouter.
+      .search(query, { budgetChars: GEMINI_RAG_BUDGET_CHARS, maxChunks: GEMINI_RAG_MAX_CHUNKS, titles, excludeLocal: true })
       .map((b) => ({ score: b.score, distinct: 0, title: b.title, text: b.text }));
   }
   const baseTokens = [...new Set(tokenizeForScoring(query))];
@@ -3192,6 +3194,10 @@ async function buildBotStatusText() {
 
   const kb = kbIndex?.stats?.();
   lines.push(`📚 Dokumen: ${kb ? `${kb.docs} dokumen, ${kb.chunks} potongan (indeks laptop)` : "indeks laptop belum aktif"}`);
+  {
+    const df = typeof docFolder !== "undefined" && docFolder ? docFolder.status() : null;
+    lines.push(`📂 Dokumen lokal (khusus Ollama): ${df ? `${df.docs} dokumen .md di ${df.mdDir}${df.current ? ` • memproses ${df.current.file}` : ""}${df.lastError ? ` • error terakhir: ${df.lastError}` : ""}` : "mati"}`);
+  }
   lines.push(`🏛️ SiMAB: ${simab.enabled ? "aktif" : "mati"}`);
   lines.push(`📋 Ringkasan harian: ${WA_DAILY_SUMMARY_ENABLED ? `aktif (setelah ${String(WA_DAILY_SUMMARY_HOUR).padStart(2, "0")}:00 ${WA_TIMEZONE_LABEL}${summarySentDate ? `, terakhir terkirim ${summarySentDate}` : ""})` : "mati"}`);
   lines.push(`📜 Pantauan peraturan: ${regMonitor.describe()}`);
@@ -3378,6 +3384,20 @@ if (kbCfg.enabled) {
 // kb_retrievals, worker ini menjawab dengan potongan teks (lihat kb-retrieval.js, migrations/0019).
 const kbRetrieval = kbIndex ? createKbRetrievalWorker({ supabase, index: kbIndex, env: process.env }) : null;
 
+// Folder dokumen lokal (dokumen/peraturan-pdf -> dokumen/peraturan-md) + antrean "PDF → MD" dari aplikasi.
+// Isinya diindeks dengan id 'local:' dan HANYA bisa dijawab Ollama (lihat doc-folder.js / excludeLocal di kb-index.js).
+const docFolder = kbIndex
+  ? createDocFolderWorker({
+      supabase,
+      index: kbIndex,
+      notify: sendPush,
+      env: process.env,
+      baseDir: fileURLToPath(new URL(".", import.meta.url)),
+      isBusy: () => !ollamaQueue.isIdle(),
+      waitForIdle: () => ollamaQueue.waitForIdle()
+    })
+  : null;
+
 const appAgent = createAppAgentWorker({
   supabase,
   kbIndex,
@@ -3431,6 +3451,9 @@ appAgent.start().catch((err) => {
   console.error("Agen Ollama aplikasi gagal start:", err instanceof Error ? err.message : String(err));
 });
 kbRetrieval?.start();
+docFolder?.start().catch((err) => {
+  console.error("Dokumen lokal gagal start:", err instanceof Error ? err.message : String(err));
+});
 if (kbIngest) {
   kbIngest.start().catch((err) => {
     console.error("Ingest dokumen gagal start:", err instanceof Error ? err.message : String(err));
@@ -3439,6 +3462,7 @@ if (kbIngest) {
 for (const sig of ["SIGINT", "SIGTERM"]) {
   process.on(sig, () => {
     kbIngest?.stop();
+    docFolder?.stop();
     kbRetrieval?.stop();
     appAgent
       .stop()
