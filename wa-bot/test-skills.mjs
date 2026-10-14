@@ -4,7 +4,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { createSkills, parseSkillCommand, parseSkillFile, MAX_INPUT_CHARS, MAX_SKILL_FILE_CHARS, SKILL_BASE_SYSTEM } from "./skills.js";
+import { createSkills, createSkillAdmin, parseSkillCommand, parseSkillDraft, parseSkillFile, MAX_INPUT_CHARS, MAX_SKILL_FILE_CHARS, SKILL_BASE_SYSTEM, SKILL_ARCHIVE_DIR } from "./skills.js";
+import { createOps, readOpsConfig } from "./ops.js";
 import { createTelegram } from "./telegram.js";
 
 let fails = 0;
@@ -172,6 +173,129 @@ const sk = createSkills({
   const none = createTelegram({ config: cfg, deps: { chat: async () => "x" }, fetchImpl: f, log: silent });
   await none.handleOwnerText("111", "/skill ringkas x");
   check(sent[4].includes("belum aktif"), "telegram: tanpa modul -> pesan ramah");
+}
+
+// ---- draf skill dari Telegram
+{
+  const d = parseSkillDraft("Notulen-Rapat\ndeskripsi: Ubah catatan jadi notulen # rapi\ndokumen: tidak\nsuhu: 0.4\n\nUbah catatan menjadi notulen.\nJangan menambah keputusan.");
+  check(d.ok && d.name === "notulen-rapat" && d.description === "Ubah catatan jadi notulen rapi" && d.body === "Ubah catatan menjadi notulen.\nJangan menambah keputusan.", "draf: nama huruf kecil, opsi dibaca, '#' dibuang dari deskripsi, sisanya instruksi");
+  check(d.content.startsWith("---\ndeskripsi: Ubah catatan jadi notulen rapi\ndokumen: false\nsuhu: 0.4\n---\nUbah catatan") && d.flags.dokumen === false && d.flags.catatan === true, "draf: file berfront-matter lengkap");
+  const parsed = parseSkillFile(d.content);
+  check(parsed.meta.deskripsi === "Ubah catatan jadi notulen rapi" && parsed.meta.suhu === "0.4" && parsed.body.startsWith("Ubah catatan menjadi notulen."), "draf: hasilnya terbaca balik oleh pembaca skill");
+  const one = parseSkillDraft("cepat Ringkas teks jadi tiga poin");
+  check(one.ok && one.body === "Ringkas teks jadi tiga poin" && one.description === "Ringkas teks jadi tiga poin" && one.content.includes("deskripsi: Ringkas teks"), "draf: satu baris saja; deskripsi diambil dari instruksi");
+  const tricky = parseSkillDraft("trik\n---\nbukan front matter lagi");
+  check(tricky.ok && parseSkillFile(tricky.content).body.startsWith("---"), "draf: instruksi yang diawali '---' tidak merusak front matter");
+  check(!parseSkillDraft("").ok && parseSkillDraft("").message.includes("/skill baru"), "draf: kosong -> petunjuk");
+  check(parseSkillDraft("../x isi").message.includes("tidak valid") && parseSkillDraft("A_B isi").message.includes("tidak valid") && parseSkillDraft("x".repeat(41) + " isi").message.includes("tidak valid"), "draf: nama tak valid ditolak (path, karakter, terlalu panjang)");
+  check(parseSkillDraft("hapus isi").message.includes("dipakai untuk perintah") && parseSkillDraft("baru isi").message.includes("dipakai untuk perintah"), "draf: nama yang bentrok dengan perintah ditolak");
+  check(parseSkillDraft("abc").message.includes("belum ditulis") && parseSkillDraft("abc\ndeskripsi: saja").message.includes("belum ditulis"), "draf: tanpa instruksi ditolak");
+  check(parseSkillDraft("abc " + "x".repeat(MAX_SKILL_FILE_CHARS + 1)).message.includes("terlalu panjang"), "draf: instruksi terlalu panjang ditolak");
+  check(parseSkillDraft("abc\nsuhu: 5\nisi").message.includes("suhu") && parseSkillDraft("abc\ndokumen: mungkin\nisi").message.includes("ya atau tidak"), "draf: nilai opsi tak valid ditolak");
+  check(parseSkillDraft("abc\nIsi biasa\ndeskripsi: di tengah").body === "Isi biasa\ndeskripsi: di tengah", "draf: opsi hanya dibaca di baris paling atas");
+}
+
+// ---- tulis / timpa / hapus + arsip
+{
+  const d2 = fs.mkdtempSync(path.join(os.tmpdir(), "skills-adm-"));
+  let t = 0;
+  const adm = createSkills({ dir: d2, callModel: async () => "x", now: () => new Date(Date.UTC(2026, 9, 14, 0, 0, t++)), log: silent });
+  check(adm.write("uji", "---\ndeskripsi: v1\n---\nisi satu\n").existed === false && adm.load()[0].description === "v1", "tulis: skill baru langsung terbaca");
+  check(adm.write("uji", "---\ndeskripsi: v2\n---\nisi dua\n").existed === true && adm.load()[0].description === "v2", "tulis: timpa");
+  const arch = fs.readdirSync(path.join(d2, SKILL_ARCHIVE_DIR));
+  check(arch.length === 1 && arch[0].startsWith("uji-") && fs.readFileSync(path.join(d2, SKILL_ARCHIVE_DIR, arch[0]), "utf8").includes("v1"), "tulis: isi lama disalin ke .terhapus sebelum ditimpa");
+  check(!fs.readdirSync(d2).some((f) => f.includes(".tmp-")), "tulis: tidak ada berkas sementara tertinggal");
+  check(adm.load().length === 1 && adm.list().includes("• uji"), "arsip: folder .terhapus tidak dihitung sebagai skill");
+  check(adm.remove("uji") === true && adm.load().length === 0 && adm.remove("uji") === false, "hapus: berkas hilang dari daftar; hapus lagi = false");
+  check(fs.readdirSync(path.join(d2, SKILL_ARCHIVE_DIR)).length === 2, "hapus: salinan terakhir masuk .terhapus");
+  let err = ""; try { adm.write("../luar", "x"); } catch (e) { err = e.message; }
+  check(err.includes("tidak valid") && !fs.existsSync(path.join(d2, "..", "luar.md")), "tulis: nama berbahaya ditolak, tidak menulis di luar folder");
+  check(adm.read("../index") === null && adm.read("tidakada") === null, "baca: nama berbahaya / tak ada -> null");
+  for (let i = 0; i < 40; i++) { adm.write("sering", `---\ndeskripsi: v${i}\n---\nisi ${i}\n`); }
+  check(fs.readdirSync(path.join(d2, SKILL_ARCHIVE_DIR)).length <= 30, "arsip: dibatasi 30 salinan terbaru");
+  fs.rmSync(d2, { recursive: true, force: true });
+}
+
+// ---- pengelola (admin) dengan konfirmasi ops sungguhan
+{
+  const d3 = fs.mkdtempSync(path.join(os.tmpdir(), "skills-adm2-"));
+  const auditFile = path.join(d3, "audit.log");
+  let mkN = 0;
+  const mk = (cfg = {}) => {
+    const skillsX = createSkills({ dir: path.join(d3, `skills${mkN++}`), callModel: async () => "x", log: silent });
+    const ops = createOps({ config: { ...readOpsConfig({ OPS_ENABLED: "true", ...cfg }, d3), auditFile, projectDir: d3 }, deps: { run: async () => ({ code: 0, stdout: "", stderr: "" }) }, env: {}, rand: () => 0.5, log: silent });
+    const admin = createSkillAdmin({ skills: skillsX, confirm: (chatId, o) => ops.confirmAction(chatId, o), maxSkills: 3 });
+    return { skillsX, ops, admin };
+  };
+  const { skillsX, ops, admin } = mk();
+  const draft = "catat-rapat\ndeskripsi: Catat rapat\nBuat notulen dari catatan.";
+
+  const ask1 = await admin.handle("baru", draft, { chatId: 111 });
+  check(ask1.includes('simpan skill "catat-rapat"') && ask1.includes("/ya 5500") && ask1.includes("Buat notulen"), "admin: /skill baru -> minta konfirmasi dengan pratinjau, belum menulis");
+  check(skillsX.load().length === 0, "admin: sebelum /ya belum ada berkas");
+  const done = await ops.handle("ya", "5500", { chatId: 111 });
+  check(done.includes('✅ Skill "catat-rapat" disimpan') && skillsX.load()[0].name === "catat-rapat", "admin: setelah /ya <kode> skill tertulis");
+  check((await ops.handle("ya", "5500", { chatId: 111 })).includes("Tidak ada perintah"), "admin: kode sekali pakai");
+  check(fs.readFileSync(auditFile, "utf8").includes('simpan skill "catat-rapat"') && fs.readFileSync(auditFile, "utf8").includes("SELESAI"), "admin: tercatat di audit ops");
+
+  const ask2 = await admin.handle("baru", "catat-rapat\nversi baru isi", { chatId: 111 });
+  check(ask2.includes('timpa skill "catat-rapat"') && ask2.includes(".terhapus"), "admin: menimpa skill yang ada diberi peringatan");
+  const wrong = await ops.handle("ya", "0000", { chatId: 111 });
+  check(wrong.includes("Kode tidak cocok") && skillsX.read("catat-rapat").includes("Buat notulen"), "admin: kode salah -> batal, isi lama utuh");
+
+  check((await admin.handle("lihat", "catat", { chatId: 111 })).includes("🧩 catat-rapat") && (await admin.handle("lihat", "catat", {})).includes("Buat notulen"), "admin: /skill lihat (awalan unik), tanpa konfirmasi");
+  check((await admin.handle("lihat", "", {})).includes("Sebut nama") && (await admin.handle("lihat", "gaib", {})).includes("tidak ada"), "admin: lihat tanpa nama / nama tak ada");
+
+  const del = await admin.handle("hapus", "catat-rapat", { chatId: 111 });
+  check(del.includes('hapus skill "catat-rapat"') && skillsX.load().length === 1, "admin: /skill hapus -> minta konfirmasi, belum terhapus");
+  check((await ops.handle("ya", "5500", { chatId: 111 })).includes("dihapus") && skillsX.load().length === 0, "admin: setelah /ya terhapus");
+  check((await admin.handle("hapus", "catat", { chatId: 111 })).includes("harus persis") && (await admin.handle("hapus", "../x", { chatId: 111 })).includes("tidak ada"), "admin: hapus hanya dengan nama persis; nama berbahaya ditolak");
+
+  for (const n of ["a1", "a2", "a3"]) { skillsX.write(n, "---\ndeskripsi: x\n---\nisi\n"); }
+  check((await admin.handle("baru", "a4 isi", { chatId: 111 })).includes("sudah penuh") && (await admin.handle("baru", "a1 isi baru", { chatId: 111 })).includes("timpa skill"), "admin: batas jumlah skill (baru ditolak, menimpa tetap boleh)");
+  check((await admin.handle("", "", {})).includes("/skill baru <nama>"), "admin: tanpa subperintah -> petunjuk");
+
+  check((await mk().admin.handle("baru", draft, { chatId: 111, viaVoice: true })).includes("tidak bisa lewat pesan suara"), "admin: lewat suara ditolak");
+  const restricted = mk({ OPS_TELEGRAM_IDS: "222" });
+  check((await restricted.admin.handle("baru", draft, { chatId: 111 })).includes("tidak diizinkan"), "admin: chat di luar OPS_TELEGRAM_IDS ditolak");
+  const off = mk({ OPS_ENABLED: "false" });
+  check((await off.admin.handle("baru", draft, { chatId: 111 })).includes("OPS_ENABLED=true") && off.skillsX.load().length === 0, "admin: OPS mati -> pesan petunjuk, tidak menulis");
+  fs.rmSync(d3, { recursive: true, force: true });
+}
+
+// ---- Telegram: /skill baru|lihat|hapus
+{
+  const sent = [];
+  const f = async (url, init) => {
+    const method = String(url).split("/").pop();
+    const body = init?.body ? JSON.parse(init.body) : {};
+    if (method === "sendMessage") sent.push(body.text);
+    return { status: 200, json: async () => ({ ok: true, result: method === "getMe" ? { username: "b" } : { message_id: 1 } }) };
+  };
+  const cfg = { token: "T", enabled: true, ownerIds: ["111"], mirror: true, historyLimit: 4, pollTimeoutSec: 1, speakText: true };
+  const seen = [];
+  const skillAdmin = { handle: async (sub, rest, o) => { seen.push([sub, rest, o.chatId, o.viaVoice]); if (rest === "boom") throw new Error("rusak"); return `ADMIN ${sub}|${rest}`; } };
+  const asked = [];
+  const skills = { list: () => "DAFTAR", ask: async (n, i) => { asked.push([n, i]); return { reply: "x" }; } };
+  const cloud = [];
+  const tg = createTelegram({ config: cfg, deps: { chat: async (h) => { cloud.push(h); return "cloud"; }, skills, skillAdmin }, fetchImpl: f, log: silent });
+  await tg.handleOwnerText("111", "/skill baru notulen\ndeskripsi: uji\nisi instruksi");
+  await tg.handleOwnerText("111", "/skill lihat ringkas");
+  await tg.handleOwnerText("111", "/skill hapus ringkas");
+  await tg.handleOwnerText("111", "/skill tambah x y");
+  await tg.handleOwnerText("111", "/skill bantuan");
+  await tg.handleOwnerText("111", "/skill baru boom");
+  check(sent[0] === "ADMIN baru|notulen\ndeskripsi: uji\nisi instruksi" && seen[0][2] === "111", "telegram: /skill baru meneruskan teks multibaris utuh + chatId ke pengelola");
+  check(sent[1] === "ADMIN lihat|ringkas" && sent[2] === "ADMIN hapus|ringkas" && sent[3] === "ADMIN baru|x y" && sent[4] === "ADMIN |", "telegram: lihat, hapus, alias tambah->baru, bantuan->petunjuk");
+  check(sent[5].includes("Gagal mengelola skill") && asked.length === 0 && cloud.length === 0, "telegram: galat pengelola ditangani; tidak dianggap menjalankan skill dan tidak ke AI cloud");
+  await tg.handleOwnerText("111", "/skill ringkas halo");
+  check(asked[0][0] === "ringkas", "telegram: skill biasa tetap berjalan");
+  const noAdmin = createTelegram({ config: cfg, deps: { chat: async () => "x", skills }, fetchImpl: f, log: silent });
+  await noAdmin.handleOwnerText("111", "/skill baru abc isi");
+  check(sent.at(-1).includes("belum aktif") && asked.length === 1, "telegram: tanpa pengelola -> pesan ramah, tidak dijalankan sebagai skill bernama 'baru'");
+  const voice = createTelegram({ config: cfg, deps: { chat: async () => "x", skills, skillAdmin }, fetchImpl: f, log: silent });
+  await voice.handleOwnerText("111", "/skill baru q isi", { viaVoice: true });
+  check(seen.at(-1)[3] === true, "telegram: penanda viaVoice diteruskan ke pengelola");
 }
 
 fs.rmSync(dir, { recursive: true, force: true });

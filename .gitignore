@@ -15,3 +15,6 @@ dokumen/
 
 # Catatan pribadi pemilik (/ingat) -- hanya di laptop, jangan ke GitHub
 wa-bot/memori.sqlite*
+
+# Arsip skill yang ditimpa/dihapus lewat /skill (hanya di laptop)
+wa-bot/skills/.terhapus/

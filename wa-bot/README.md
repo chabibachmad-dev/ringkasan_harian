@@ -717,3 +717,17 @@ Batas: file maks 8.000 huruf, masukan maks 6.000 huruf, maks 60 skill. Skill `do
 **`/lokal <pesan>`** (alias **`/tanya`**) mengobrol dengan Ollama di laptop, di Telegram dan WhatsApp (WhatsApp: chat pribadi saja, bukan grup). Bedanya dengan obrolan biasa di Telegram (dijawab Gemini di cloud): di sini seluruh percakapan dan **catatan pribadi (`/ingat`) hanya diproses Ollama lokal**, tidak keluar dari laptop. Bot mengingat beberapa tanya-jawab terakhir per chat (hanya di memori; hilang saat restart). `/lokal baru` melupakannya, dan `/baru` di Telegram ikut mengosongkannya. Tidak ada pencarian web dan tidak ada dokumen di sini: untuk dokumen pakai `/dokumen`, untuk info terbaru pakai obrolan biasa. Model lokal bisa keliru, jadi untuk angka/peraturan resmi tetap cek ke dokumen.
 
 **`/catatan <kata>`** mencari catatan yang memuat semua kata itu (tak peduli huruf besar-kecil), contoh `/catatan maju sjph`. Nomor di hasil sama dengan nomor di daftar lengkap, jadi bisa langsung `/lupa <nomor>`.
+
+### Membuat dan mengelola skill dari Telegram
+
+Selain membuat file `.md` sendiri, skill bisa dibuat langsung dari Telegram (butuh `OPS_ENABLED=true`, karena perubahan lewat konfirmasi yang sama dengan perintah laptop):
+
+```
+/skill baru notulen-rapat
+deskripsi: Ubah catatan rapat jadi notulen rapi
+dokumen: tidak
+suhu: 0.3
+Ubah catatan rapat menjadi notulen dengan bagian Peserta, Pokok Bahasan, Keputusan, dan Tindak Lanjut. Jangan menambah keputusan yang tidak disebut.
+```
+
+Baris pertama setelah `baru` adalah nama skill. Baris-baris pembuka `deskripsi:`, `dokumen:` (ya/tidak), `catatan:` (ya/tidak), dan `suhu:` bersifat opsional dan harus berada paling atas; sisanya adalah instruksi untuk model. Pindah baris di Telegram dengan Shift+Enter. Bot menampilkan pratinjau lalu meminta `/ya <kode>`. Perintah lain: `/skill lihat <nama>` (menampilkan isi, tanpa konfirmasi) dan `/skill hapus <nama>` (konfirmasi, nama harus persis). Menimpa atau menghapus tidak menghilangkan isi lama: salinannya disimpan di `wa-bot/skills/.terhapus/` (30 terbaru). Nama skill hanya huruf kecil, angka, dan tanda minus (maks 40); `baru`, `lihat`, `hapus` tidak bisa dipakai sebagai nama; maksimal 60 skill. Tidak bisa lewat pesan suara, dan perubahan hanya dari Telegram (WhatsApp hanya `/skill`, `/skill lihat`, dan menjalankan skill). Semua perubahan tercatat di `ops-audit.log`.

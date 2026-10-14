@@ -53,6 +53,29 @@ function makeOps(over = {}) {
   return { ops, calls, sent, send, store, restarts, clock, h: (name, arg = "", o = {}) => ops.handle(name, arg, { chatId: 111, send, ...o }) };
 }
 
+// ---- confirmAction (dipakai fitur lain, mis. kelola skill): izin, suara, penguncian, kode sekali pakai
+{
+  const m = makeOps();
+  let ran = 0;
+  const ask = m.ops.confirmAction(111, { label: "uji aksi", detail: "rincian", action: () => { ran++; return "SELESAI-UJI"; } });
+  check(ask.includes("uji aksi") && ask.includes("rincian") && ask.includes("/ya 5500") && ran === 0, "confirmAction: minta kode, belum menjalankan");
+  check((await m.h("ya", "5500")) === "SELESAI-UJI" && ran === 1, "confirmAction: kode benar -> aksi jalan, hasilnya dibalas");
+  check((await m.h("ya", "5500")).includes("Tidak ada perintah") && ran === 1, "confirmAction: kode sekali pakai");
+  m.ops.confirmAction(111, { label: "uji", action: () => { ran++; return "x"; } });
+  check((await m.h("ya", "0000")).includes("Kode tidak cocok") && ran === 1, "confirmAction: kode salah -> batal");
+  m.ops.confirmAction(111, { label: "uji", action: () => { throw new Error("disk penuh"); } });
+  check((await m.h("ya", "5500")).includes("Gagal: disk penuh"), "confirmAction: galat aksi dilaporkan, tidak melempar");
+  check(/tidak bisa lewat pesan suara/.test(m.ops.confirmAction(111, { label: "uji", action: () => "x", viaVoice: true })), "confirmAction: lewat suara ditolak");
+  const restricted = makeOps({ cfg: { OPS_TELEGRAM_IDS: "222" } });
+  check(/tidak diizinkan/.test(restricted.ops.confirmAction(111, { label: "uji", action: () => "x" })), "confirmAction: id di luar OPS_TELEGRAM_IDS ditolak");
+  const off = makeOps({ cfg: { OPS_ENABLED: "false" } });
+  check(/OPS_ENABLED=true/.test(off.ops.confirmAction(111, { label: "uji", action: () => "x" })), "confirmAction: OPS mati -> petunjuk");
+  const t = makeOps();
+  t.ops.confirmAction(111, { label: "uji", action: () => { ran++; return "x"; } });
+  t.clock.t += 61_000;
+  check((await t.h("ya", "5500")).includes("kedaluwarsa"), "confirmAction: kedaluwarsa seperti perintah lain");
+}
+
 // ---- mati / izin
 {
   const { ops, calls, h } = makeOps({ cfg: { OPS_ENABLED: "false" } });

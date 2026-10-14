@@ -553,6 +553,36 @@ export function createOps({ config, deps = {}, env = process.env, now = () => Da
     };
   }
 
+  /**
+   * Pintu konfirmasi untuk fitur lain yang mengubah sesuatu di laptop (mis. kelola skill dari Telegram):
+   * memakai izin, mode suara, penguncian, audit, dan "/ya <kode>" yang sama dengan perintah laptop.
+   * action() dijalankan HANYA setelah kode benar dan mengembalikan teks balasan.
+   */
+  function confirmAction(chatId, { label, detail = "", action, viaVoice = false, ttlSec } = {}) {
+    if (!enabled()) return "🛠️ Perintah laptop dimatikan. Isi OPS_ENABLED=true di .env bot lalu restart bot untuk mengaktifkannya.";
+    if (!allowed(chatId)) {
+      audit(chatId, `DITOLAK (id tidak diizinkan) ${String(label).slice(0, 60)}`);
+      return "Chat ini tidak diizinkan memakai perintah laptop (OPS_TELEGRAM_IDS).";
+    }
+    if (viaVoice) return "Perubahan ini tidak bisa lewat pesan suara. Ketik perintahnya.";
+    if (busy) return `Masih ada pekerjaan berjalan (${busy}). Tunggu selesai dulu.`;
+    return ask(
+      chatId,
+      async () => {
+        try {
+          const text = await action();
+          audit(chatId, `SELESAI ${String(label).split("\n")[0]}`);
+          return text;
+        } catch (e) {
+          audit(chatId, `GALAT ${String(label).split("\n")[0]} ${e?.message || e}`);
+          return `⚠️ Gagal: ${String(e?.message || e).slice(0, 200)}`;
+        }
+      },
+      label,
+      { detail, ...(ttlSec ? { ttlSec } : {}) }
+    );
+  }
+
   // ------------------------------------------------------------ pintu masuk
   /** @returns {Promise<string|null>} teks balasan langsung (atau null bila balasan dikirim lewat send) */
   async function handle(name, arg, { chatId, viaVoice = false, send } = {}) {
@@ -668,5 +698,5 @@ export function createOps({ config, deps = {}, env = process.env, now = () => Da
     }
   }
 
-  return { enabled, commands: OPS_COMMANDS, handle, handleDocument, announceStartup, whenIdle: () => Promise.all([...jobs]), isBusy: () => busy, _pending: pending };
+  return { enabled, commands: OPS_COMMANDS, handle, handleDocument, confirmAction, announceStartup, whenIdle: () => Promise.all([...jobs]), isBusy: () => busy, _pending: pending };
 }

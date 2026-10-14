@@ -149,7 +149,7 @@ const HELP = [
   "/peraturan  — pantau peraturan terbaru (\"/peraturan semua\" = tampilkan semua hasil)",
   "/dokumen <pertanyaan>  — tanya dari dokumen lokal di laptop (hasil PDF → MD), dijawab Ollama. \"/dokumen\" saja = daftar dokumen",
   "/lokal <pesan>  — ngobrol dengan Ollama LOKAL (alias /tanya): percakapan dan catatan pribadimu tidak keluar dari laptop;  /lokal baru  — lupakan percakapan",
-  "/skill  — daftar skill (resep tugas buatanmu di wa-bot/skills/*.md);  /skill <nama> <teks>  — jalankan, dijawab Ollama lokal",
+  "/skill  — daftar skill (resep tugas buatanmu);  /skill <nama> <teks>  — jalankan, dijawab Ollama lokal;  /skill baru <nama> …  — buat skill dari sini;  /skill lihat|hapus <nama>",
   "/penyedia  — status tiap penyedia AI (Gemini, Groq, OpenRouter, Ollama): berhasil/gagal, key yang istirahat",
   "/ingat <teks>  — simpan catatan pribadi (hanya di laptop, hanya dibaca Ollama lokal);  /catatan  — daftar;  /catatan <kata>  — cari;  /lupa <nomor|semua>  — hapus",
   "/sistem  — kondisi laptop bot (pm2, disk, RAM, Ollama); /log, /restart, /deploy, /migrasi: ketik /ops (perlu OPS_ENABLED=true)",
@@ -169,6 +169,7 @@ const HELP = [
  *   ops?: { handle(name, arg, {chatId, viaVoice, send}) -> Promise<string|undefined> }   perintah laptop (ops.js)
  *   localDocs?: { ask(q)->Promise<{reply}>, list()->string }   tanya-jawab dokumen lokal (/dokumen), dijawab Ollama
  *   memory?: { handle({name:"ingat"|"catatan"|"lupa", arg}) -> string }   catatan pribadi pemilik (owner-memory.js), hanya dibaca Ollama lokal
+ *   skillAdmin?: { handle(sub, rest, {chatId, viaVoice}) -> string }   /skill baru|lihat|hapus (skills.js); perubahan lewat konfirmasi ops
  *   localChat?: { handle(key, arg)->Promise<string>, reset(key) }   obrolan dengan Ollama lokal (/lokal, /tanya; local-chat.js), tidak lewat Gemini
  *   skills?: { list()->string, ask(name, input)->Promise<{reply}> }   skill pemilik (file .md di wa-bot/skills), dijawab Ollama lokal (skills.js)
  *   providers?: { report({reset}) -> string }   status penyedia AI (/penyedia, provider-stats.js)
@@ -667,6 +668,17 @@ Ubah: /suara auto • /suara on • /suara off`));
       if (!sk) return void (await reply("Fitur skill belum aktif di bot ini."));
       const first = /^(\S+)(?:\s+([\s\S]*))?$/.exec(arg);
       if (!first || /^(daftar|list|ls)$/i.test(arg)) return void (await reply(sk.list()));
+      if (/^(baru|tambah|buat|lihat|hapus|bantuan|help)$/i.test(first[1])) {
+        const admin = deps.skillAdmin;
+        if (!admin) return void (await reply("Mengelola skill dari Telegram belum aktif di bot ini. Buat file .md di wa-bot/skills/ atau kirim zip patch."));
+        const verb = first[1].toLowerCase();
+        const sub = verb === "tambah" || verb === "buat" ? "baru" : verb === "help" || verb === "bantuan" ? "" : verb;
+        try {
+          return void (await reply(await admin.handle(sub, (first[2] ?? "").trim(), { chatId, viaVoice })));
+        } catch (e) {
+          return void (await reply(`⚠️ Gagal mengelola skill: ${String(e?.message || e).slice(0, 200)}`));
+        }
+      }
       try {
         const out = await withTyping(chatId, () => sk.ask(first[1].toLowerCase().replace(/^\/+/, ""), (first[2] ?? "").trim()));
         await reply(out.reply);

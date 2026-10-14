@@ -78,7 +78,7 @@ import { createLocalDocs, parseDokumenCommand } from "./local-docs.js";
 import { createOps, readOpsConfig } from "./ops.js";
 import { ollamaChatStream } from "./ollama-http.js";
 import { createProviderStats, parseProviderCommand } from "./provider-stats.js";
-import { createSkills, parseSkillCommand } from "./skills.js";
+import { createSkillAdmin, createSkills, parseSkillCommand } from "./skills.js";
 import { createLocalChat, parseLocalChatCommand } from "./local-chat.js";
 import { handleMemoryCommand, openOwnerMemory, parseMemoryCommand } from "./owner-memory.js";
 
@@ -3383,6 +3383,9 @@ const ops = createOps({
   }
 });
 
+// /skill baru|lihat|hapus dari Telegram: perubahan minta konfirmasi "/ya <kode>" lewat ops (butuh OPS_ENABLED=true). Lihat skills.js.
+const skillAdmin = createSkillAdmin({ skills, confirm: (chatId, o) => ops.confirmAction(chatId, o) });
+
 /** /ingat /catatan /lupa dan /penyedia dari WhatsApp (hanya pemilik, bukan grup). true = pesan sudah ditangani. */
 async function handleWaOwnerLocalCommands(sock, jid, text) {
   const mem = parseMemoryCommand(text);
@@ -3417,6 +3420,14 @@ async function handleWaSkillCommand(sock, jid, text) {
   const send = (t) => sock.sendMessage(jid, { text: t }).catch((e) => console.error("💬 [WA/Skill] gagal kirim:", e instanceof Error ? e.message : String(e)));
   if (cmd.list) {
     await send(skills.list());
+    return true;
+  }
+  if (/^(baru|tambah|buat|hapus)$/.test(cmd.name)) {
+    await send("Membuat atau menghapus skill hanya bisa dari Telegram (butuh konfirmasi /ya <kode>). Di sini: /skill (daftar), /skill lihat <nama>, /skill <nama> <teks>.");
+    return true;
+  }
+  if (cmd.name === "lihat") {
+    await send(skillAdmin.handle("lihat", cmd.input, {}));
     return true;
   }
   const stop = waTutorIo(sock, jid).busy("text");
@@ -3470,6 +3481,7 @@ const telegram = createTelegram({
     ops,
     memory: { handle: (cmd) => handleMemoryCommand(ownerMemory, cmd) },
     skills,
+    skillAdmin,
     localChat,
     providers: { report: (opts) => buildProviderReport(opts) },
     state: {
