@@ -66,6 +66,7 @@ import { createSpeaker, readTtsConfig } from "./voice-output.js";
 import { buildTutorSystemPrompt, buildTutorUserPrompt, parseTutorReply } from "./tutor.js";
 import { createAppAgentWorker } from "./app-agent.js";
 import { createFallbackChain, readFallbackConfig } from "./llm-fallback.js";
+import { classifyRoute, createAiRoute, parseRouteCommand } from "./ai-route.js";
 import { createWebSearch, readSearchConfig } from "./web-search.js";
 import { createRegMonitor, readRegMonitorConfig } from "./reg-monitor.js";
 import { createKhatamReminder } from "./khatam.js";
@@ -1206,7 +1207,11 @@ function markGeminiKeyExhausted(key, err) {
 // Satu kali panggilan mentah ke Gemini API. withTools=true nyalakan akses
 // pencarian Google (lihat WA_BASE_SYSTEM_PROMPT). Melempar Error (dengan
 // properti .status) kalau gagal, ditangani pemanggil (callGeminiWithRetry).
-async function callGeminiOnce(systemText, contents, withTools, apiKey) {
+// Batas waktu 1 panggilan Gemini. Tanpa ini fetch bisa menggantung berpuluh detik sampai menit saat jaringan buruk
+// (balasan WA terasa "lama banget"). Balasan WA/grup memakai batas pendek; ringkasan & tugas lain memakai yang panjang.
+const GEMINI_TIMEOUT_MS_LONG = Number(process.env.GEMINI_TIMEOUT_MS) || 90_000;
+const GEMINI_WA_TIMEOUT_MS = Number(process.env.GEMINI_WA_TIMEOUT_MS) || 25_000;
+async function callGeminiOnce(systemText, contents, withTools, apiKey, timeoutMs = GEMINI_TIMEOUT_MS_LONG) {
   const body = JSON.stringify({
     system_instruction: { parts: [{ text: systemText }] },
     contents,
@@ -1214,7 +1219,16 @@ async function callGeminiOnce(systemText, contents, withTools, apiKey) {
     generationConfig: { temperature: 0.6 }
   });
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${apiKey}`;
-  const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body });
+  let res;
+  try {
+    res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body, signal: AbortSignal.timeout(timeoutMs) });
+  } catch (e) {
+    const timedOut = e?.name === "TimeoutError" || e?.name === "AbortError";
+    const err = new Error(timedOut ? `Gemini tidak menjawab dalam ${Math.round(timeoutMs / 1000)} detik` : `Gemini jaringan gagal: ${e?.cause?.code || e?.message || e}`);
+    err.transient = true; // bukan soal kuota; layak dicoba di penyedia lain / Ollama
+    err.timeout = timedOut;
+    throw err;
+  }
   if (res.ok) return res.json();
   const errText = await res.text();
   const err = new Error(`Gemini API error ${res.status}: ${errText}`);
@@ -1230,14 +1244,15 @@ async function callGeminiOnce(systemText, contents, withTools, apiKey) {
 // sembuh sendiri, bukan jatah harian yg abis total. Keputusan "key ini
 // beneran habis, pindah ke key lain" ada di generateAutoReplyWithGemini,
 // SETELAH semua jatah retry di key ini benar2 habis.
-async function callGeminiWithRetry(systemText, contents, withTools, maxAttempts, apiKey) {
+async function callGeminiWithRetry(systemText, contents, withTools, maxAttempts, apiKey, timeoutMs = GEMINI_TIMEOUT_MS_LONG) {
   let lastErr;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
-      return await callGeminiOnce(systemText, contents, withTools, apiKey);
+      return await callGeminiOnce(systemText, contents, withTools, apiKey, timeoutMs);
     } catch (err) {
       lastErr = err;
-      const retryable = err.status === 429 || err.status === 503;
+      // 429 "PerDay" = jatah harian key ini habis: mengulang 3 detik kemudian percuma, langsung biarkan rotasi key.
+      const retryable = (err.status === 429 && !/PerDay/i.test(err.message)) || err.status === 503;
       if (!retryable || attempt === maxAttempts) throw err;
       await new Promise((resolve) => setTimeout(resolve, 3000));
     }
@@ -1306,7 +1321,7 @@ function buildWebQuery(userTexts) {
 async function geminiGenerateWithRotation(
   systemText,
   contents,
-  { useSearch = true, webQuery = "", docChunks = [], pinnedDocs = false, docMiss = false } = {}
+  { useSearch = true, webQuery = "", docChunks = [], pinnedDocs = false, docMiss = false, route = "", timeoutMs = GEMINI_TIMEOUT_MS_LONG } = {}
 ) {
   let attemptsLeft = Math.max(GEMINI_API_KEYS.length, 1);
   // Dokumen "dikunci" untuk grup ini: tanpa Google Search/Bing, jawab hanya dari dokumen.
@@ -1387,15 +1402,16 @@ async function geminiGenerateWithRotation(
           // Google Search lagi "diistirahatkan" (ditolak barusan) -- langsung
           // jalur tanpa tool + hasil Bing, tanpa buang 1 request percuma.
           const p = await getNoSearchPayload();
-          data = await callGeminiWithRetry(p.system, p.contents, false, 2, apiKey);
+          data = await callGeminiWithRetry(p.system, p.contents, false, 2, apiKey, timeoutMs);
         } else {
           try {
-            data = await callGeminiWithRetry(systemWithDate, withDocsContents, true, 1, apiKey);
+            data = await callGeminiWithRetry(systemWithDate, withDocsContents, true, 1, apiKey, timeoutMs);
           } catch (err) {
             // Jatah HARIAN key ini habis: coba lagi tanpa internet di key yang sama
             // percuma, langsung rotasi. (429 jenis lain, mis. limit khusus jalur
             // Google Search, tetap lanjut ke percobaan tanpa tool di bawah.)
             if (err.status === 429 && /PerDay/i.test(err.message)) throw err;
+            if (err.timeout) throw err; // jaringan/Gemini macet: percobaan kedua di key yang sama hanya menggandakan waktu tunggu
             if (err.status === 429) {
               googleSearchBlockedUntil = Date.now() + GOOGLE_SEARCH_BLOCK_MS;
               console.warn(
@@ -1405,11 +1421,11 @@ async function geminiGenerateWithRotation(
               console.warn(`Auto-reply WA: percobaan dgn Google Search gagal (${summarizeGeminiError(err.message)}), lanjut tanpa tool...`);
             }
             const p = await getNoSearchPayload();
-            data = await callGeminiWithRetry(p.system, p.contents, false, 2, apiKey);
+            data = await callGeminiWithRetry(p.system, p.contents, false, 2, apiKey, timeoutMs);
           }
         }
       } else {
-        data = await callGeminiWithRetry(systemWithDate, withDocsContents, false, 2, apiKey);
+        data = await callGeminiWithRetry(systemWithDate, withDocsContents, false, 2, apiKey, timeoutMs);
       }
       reportKeyEvent(apiKey, { requestsInc: 1 });
       return data;
@@ -1426,26 +1442,61 @@ async function geminiGenerateWithRotation(
   }
   };
 
-  // Gemini gagal total (semua key habis / 503 / jaringan) -> coba penyedia cadangan (Groq, OpenRouter) dengan
-  // prompt TANPA Google Search (+ hasil Bing bila ada). Hasilnya dibungkus agar bentuknya sama dgn respons Gemini.
-  if (!llmFallback.available()) return await runGemini();
-  try {
-    if (GEMINI_API_KEYS.length === 0) throw Object.assign(new Error("Tidak ada API key Gemini."), { allKeysExhausted: true });
-    return await runGemini();
-  } catch (geminiErr) {
+  // Urutan penyedia. Dengan `route` ("santai"/"akurat", balasan WA & grup) mengikuti pengaturan /urutan; tanpa `route`
+  // (ringkasan harian, pantauan peraturan, dll.) tetap cara lama: Gemini dulu, lalu cadangan sesuai LLM_FALLBACK_ORDER.
+  // Ollama tidak dijalankan di sini: ia di ujung rantai & ditangani tryLocalFallbackReply (dengan prompt & riwayat sendiri).
+  const steps = route ? aiRoute.orderFor(route).filter((n) => n !== "ollama") : ["gemini", "cadangan"];
+  const chainLabel = route ? `${route}: ${steps.join(" > ")}` : "bawaan: gemini > cadangan";
+  const secs = (t0) => `${((Date.now() - t0) / 1000).toFixed(1)} dtk`;
+  let geminiErr = null;
+  let lastErr = null;
+  let attempted = 0;
+  for (const step of steps) {
+    const t0 = Date.now();
     try {
-      const p = await getNoSearchPayload();
+      if (step === "gemini") {
+        // Tanpa key Gemini: lewati bila ada penyedia lain; kalau satu-satunya, runGemini melempar error "kuota habis" seperti biasa.
+        if (GEMINI_API_KEYS.length === 0 && steps.length > 1) continue;
+        attempted += 1;
+        const data = await runGemini();
+        console.log(`⏱️ [AI] dijawab Gemini dalam ${secs(t0)} (${chainLabel})`);
+        return Object.assign(data, { _provider: "gemini" });
+      }
+      // groq / openrouter ("cadangan" = semua penyedia cadangan sesuai LLM_FALLBACK_ORDER)
+      if (!llmFallback.available() || (step !== "cadangan" && !llmFallback.has(step))) continue;
+      attempted += 1;
+      // Jalur santai: prompt biasa (tanpa catatan "internet tidak tersedia"). Selain itu: prompt tanpa Google Search + hasil Bing.
+      const p = route === "santai" && !hasDocs ? { system: systemWithDate, contents: withDocsContents } : await getNoSearchPayload();
       const messages = p.contents
         .map((c) => ({ role: c.role === "model" ? "assistant" : "user", content: c.parts?.map((x) => x.text ?? "").join("") ?? "" }))
         .filter((m) => m.content);
-      const r = await llmFallback.generate({ system: p.system, messages, temperature: pinnedDocs ? 0.2 : 0.4 });
-      console.log(`🛟 [Cadangan] dijawab ${r.provider}/${r.model} (Gemini gagal: ${String(geminiErr?.message || geminiErr).slice(0, 120)})`);
+      const r = await llmFallback.generate({
+        system: p.system,
+        messages,
+        temperature: pinnedDocs ? 0.2 : 0.4,
+        only: step === "cadangan" ? "" : step,
+        ...(route ? { timeoutMs: 20_000, maxTries: 3 } : {})
+      });
+      console.log(`⏱️ [AI] dijawab ${r.provider}/${r.model} dalam ${secs(t0)} (${chainLabel}${geminiErr ? `; Gemini gagal: ${String(geminiErr.message || geminiErr).slice(0, 100)}` : ""})`);
       return { candidates: [{ content: { parts: [{ text: r.text }] } }], usageMetadata: { totalTokenCount: 0 }, _provider: `${r.provider}/${r.model}` };
-    } catch (fbErr) {
-      console.error(`🛟 [Cadangan] juga gagal: ${fbErr instanceof Error ? fbErr.message : String(fbErr)}`);
-      throw geminiErr; // pemanggil menangani error Gemini aslinya spt biasa (antrean ulang, dll)
+    } catch (err) {
+      lastErr = err;
+      if (step === "gemini") geminiErr = err;
+      const next = steps[steps.indexOf(step) + 1];
+      console.warn(`⏭️ [AI] ${step} gagal dalam ${secs(t0)}: ${String(err?.message || err).slice(0, 140).replace(/\s+/g, " ")}${next ? ` -> lanjut ${next}` : " -> tidak ada penyedia lain"}`);
     }
   }
+  if (attempted === 0 && !lastErr) {
+    lastErr = Object.assign(new Error("Tidak ada penyedia AI yang aktif (isi GEMINI_API_KEYS atau GROQ_API_KEYS di .env)."), { allKeysExhausted: true });
+  }
+  // Semua penyedia internet gagal: lempar error Gemini asli bila ada (pemanggil memakai status/allKeysExhausted-nya untuk antrean ulang),
+  // dan tandai supaya Ollama (cadangan lokal) boleh dicoba untuk pertanyaan tanpa angka.
+  const out = geminiErr || lastErr;
+  if (out && typeof out === "object") {
+    out.providersFailed = true;
+    out.aiRoute = route || "akurat";
+  }
+  throw out;
 }
 
 // Minta Gemini bikinkan satu balasan buat obrolan WA tertentu, pakai
@@ -1508,11 +1559,16 @@ async function generateAutoReplyWithGemini(jid) {
     const titles = docChunks.map((c) => `"${c.title}"(skor ${c.score.toFixed(1)})`).join(", ") || "-";
     console.log(`📚 [Dokumen] ${docChunks.length} potongan dipakai: ${titles}`);
   }
+  // Jalur: obrolan biasa = "santai" (cepat dulu), pertanyaan angka/aturan/dokumen/internet = "akurat" (Gemini dulu). Lihat ai-route.js & /urutan.
+  const lastIncoming = stripGroupMeta(jid, contents.filter((c) => c.role === "user").at(-1)?.parts?.[0]?.text ?? "");
+  const route = classifyRoute({ text: lastIncoming, pinnedDocs: Boolean(pinnedTitles), docChunks: docChunks.length, webQuery, accurateRe: NEEDS_ACCURATE_FIGURES_RE });
   const data = await geminiGenerateWithRotation(withGroupNote(WA_BASE_SYSTEM_PROMPT, jid), contents, {
     webQuery,
     docChunks,
     pinnedDocs: Boolean(pinnedTitles),
-    docMiss: Boolean(pinnedTitles) && docChunks.length === 0 && Boolean(docQuery)
+    docMiss: Boolean(pinnedTitles) && docChunks.length === 0 && Boolean(docQuery),
+    route,
+    timeoutMs: GEMINI_WA_TIMEOUT_MS
   });
 
   const rawText = extractGeminiText(data);
@@ -1811,8 +1867,10 @@ async function tryLocalFallbackReply(sock, jid, incomingText, err) {
   if (!WA_OLLAMA_FALLBACK_ENABLED || WA_AI_ENGINE === "ollama") return null;
   // Hanya untuk kegagalan KUOTA/kepadatan (semua key habis, 429, 503) -- bukan
   // error lain (mis. respons kosong) yang tidak ada hubungannya dgn kuota.
-  const quotaLike = err?.allKeysExhausted === true || err?.status === 429 || err?.status === 503;
+  const quotaLike = err?.allKeysExhausted === true || err?.status === 429 || err?.status === 503 || err?.providersFailed === true || err?.transient === true;
   if (!quotaLike) return null;
+  // Pengaturan /urutan: jalur ini sengaja tanpa Ollama.
+  if (err?.aiRoute && !aiRoute.orderFor(err.aiRoute).includes("ollama")) return null;
   if (!incomingText || incomingText.startsWith("[") || NEEDS_ACCURATE_FIGURES_RE.test(incomingText)) return null;
   if (ollamaQueue.pending > 0) {
     console.log("🦙 Cadangan lokal dilewati: Ollama lagi sibuk.");
@@ -2939,6 +2997,7 @@ async function handleIncoming(msg, sock) {
   if (isOwnerSender(msg, isSelfChat) && !isGroupJid(jid) && (await handleWaLocalChatCommand(sock, jid, text))) return;
   if (isOwnerSender(msg, isSelfChat) && !isGroupJid(jid) && (await handleWaMarketCommand(sock, jid, text))) return;
   if (isOwnerSender(msg, isSelfChat) && !isGroupJid(jid) && (await handleWaReminderBackupCommand(sock, jid, text))) return;
+  if (isOwnerSender(msg, isSelfChat) && !isGroupJid(jid) && (await handleWaRouteCommand(sock, jid, text))) return;
 
   // Tutor suara (/speak, /selesai) hanya untuk pemilik; selama sesi, teks/voice note pemilik = ucapan untuk tutor
   // (tidak disimpan ke riwayat chat dan tidak memicu auto-reply).
@@ -3381,6 +3440,13 @@ const botStateStore = {
     if (error) throw new Error(error.message);
   }
 };
+// Urutan penyedia AI untuk balasan WA/grup (2 jalur: santai & akurat), bisa diubah lewat /urutan. Lihat ai-route.js.
+const aiRoute = createAiRoute({
+  state: botStateStore,
+  available: (name) => (name === "gemini" ? GEMINI_API_KEYS.length > 0 : name === "ollama" ? WA_OLLAMA_FALLBACK_ENABLED && WA_AI_ENGINE !== "ollama" : llmFallback.has(name))
+});
+aiRoute.load().then(() => console.log(`🔀 Urutan AI balasan WA: ${aiRoute.describe()}`)).catch(() => {});
+
 const ops = createOps({
   config: readOpsConfig(process.env, fileURLToPath(new URL(".", import.meta.url))),
   deps: {
@@ -3535,6 +3601,20 @@ async function handleWaReminderBackupCommand(sock, jid, text) {
   return true;
 }
 
+/** /urutan dari WhatsApp (hanya pemilik, bukan grup). true = pesan sudah ditangani. */
+async function handleWaRouteCommand(sock, jid, text) {
+  const cmd = parseRouteCommand(text);
+  if (!cmd) return false;
+  const send = (t) => sock.sendMessage(jid, { text: t }).catch((e) => console.error("💬 [WA/Urutan] gagal kirim:", e instanceof Error ? e.message : String(e)));
+  try {
+    await send(await aiRoute.handle(cmd.arg));
+  } catch (e) {
+    console.error("💬 [WA/Urutan] gagal:", e instanceof Error ? e.message : String(e));
+    await send(`⚠️ Urutan AI gagal diproses: ${String(e instanceof Error ? e.message : e).slice(0, 200)}`);
+  }
+  return true;
+}
+
 /** /lokal (alias /tanya) dari WhatsApp (hanya pemilik, bukan grup). true = pesan sudah ditangani. */
 async function handleWaLocalChatCommand(sock, jid, text) {
   const cmd = parseLocalChatCommand(text);
@@ -3625,6 +3705,7 @@ const telegram = createTelegram({
     reminders,
     backup: { status: () => backup.status(), run: () => backup.runAndFormat() },
     health,
+    aiRoute: { handle: (arg) => aiRoute.handle(arg) },
     localChat,
     providers: { report: (opts) => buildProviderReport(opts) },
     state: {

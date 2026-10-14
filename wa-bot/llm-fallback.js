@@ -168,20 +168,24 @@ export function createFallbackChain({ config = readFallbackConfig(), fetchImpl =
     return config.providers.map((p) => `${p.name}: ${p.keys.length} key, model ${p.models.join(" > ")}`).join(" | ");
   }
 
-  // system: string; messages: [{role:"user"|"assistant", content}]. Return { text, provider, model, tokens }
+  // system: string; messages: [{role:"user"|"assistant", content}]. timeoutMs/maxTries (opsional) menimpa batas bawaan untuk panggilan ini.
+  // Return { text, provider, model, tokens }
   // atau melempar Error (gabungan alasan semua percobaan).
-  async function generate({ system, messages, temperature = 0.4, only = "" }) {
+  async function generate({ system, messages, temperature = 0.4, only = "", timeoutMs = 0, maxTries = 0 }) {
     if (!available()) throw new Error("Tidak ada penyedia cadangan yang dikonfigurasi.");
     const chosen = only ? config.providers.filter((p) => p.name === only) : config.providers;
     if (chosen.length === 0) throw new Error(`Penyedia "${only}" tidak dikonfigurasi.`);
     const fitted = fitMessages(system, messages, config.maxInputChars);
     const reasons = [];
     let tries = 0;
+    // Batas per panggilan (opsional): jalur balasan WA cepat-gagal supaya tidak menggantung saat jaringan buruk.
+    const perTryTimeout = timeoutMs > 0 ? timeoutMs : config.timeoutMs;
+    const maxTotalTries = maxTries > 0 ? maxTries : config.maxTries;
     for (const p of chosen) {
       for (const model of p.models) {
         const start = cursor.get(p.name) || 0;
         for (let i = 0; i < p.keys.length; i++) {
-          if (tries >= config.maxTries) break;
+          if (tries >= maxTotalTries) break;
           const key = p.keys[(start + i) % p.keys.length];
           if (now() < (restUntil.get(id(p.name, model, key)) || 0)) continue;
           tries += 1;
@@ -193,7 +197,7 @@ export function createFallbackChain({ config = readFallbackConfig(), fetchImpl =
               system: fitted.system,
               messages: fitted.messages,
               temperature,
-              timeoutMs: config.timeoutMs,
+              timeoutMs: perTryTimeout,
               fetchImpl
             });
             cursor.set(p.name, p.keys.indexOf(key)); // key yang berhasil dipakai lagi

@@ -820,3 +820,27 @@ Bot memeriksa dirinya sendiri tiap 5 menit dan mengabari pemilik (WhatsApp + Tel
 - **Restart** dihitung dari berkas kecil `wa-bot/.health-starts.json` (tidak ikut Git). Memasang patch dan `/restart` berkali-kali dalam 15 menit bisa memicu peringatan ini; itu wajar, abaikan.
 - Bila WhatsApp putus lama, peringatan tetap sampai lewat Telegram.
 - Pengaturan: bagian 20 `.env.example`. Matikan satu pemeriksaan Ollama dengan `HEALTH_OLLAMA=false`, atau seluruhnya dengan `HEALTH_ENABLED=false` (`/kesehatan` tetap bisa dipakai).
+
+## Urutan AI untuk balasan WhatsApp & grup (`/urutan`)
+
+Balasan WhatsApp (chat pribadi dan grup) memakai **dua jalur**, tergantung pesannya:
+
+| Jalur | Dipakai untuk | Urutan bawaan |
+| --- | --- | --- |
+| **santai** | obrolan biasa: tanpa angka, aturan, dokumen, atau pencarian web | Groq → Gemini → OpenRouter → Ollama |
+| **akurat** | pertanyaan angka/tarif/aturan, yang menemukan potongan dokumen, grup dengan dokumen terkunci, atau yang butuh internet | Gemini → Groq → OpenRouter → Ollama |
+
+- Tiap penyedia **dihabiskan dulu** sebelum pindah: Gemini merotasi semua key-nya (lalu model cadangan), Groq/OpenRouter merotasi key dan model di dalamnya. Penyedia yang sudah diketahui habis dilewati seketika, tanpa menunggu.
+- **Ollama selalu di ujung** dan tetap hanya menjawab pertanyaan tanpa angka/aturan (model 3B mudah mengarang angka). Ollama juga dicoba bila semua penyedia internet macet atau jaringan putus.
+- Penyedia yang belum punya key di `.env` otomatis dilewati. `/urutan` menandai mana yang belum aktif.
+- **Tidak perlu menyentuh `.env`.** Urutan diubah dari Telegram atau WhatsApp (chat pribadi pemilik) dan disimpan di tabel `bot_state` (kunci `ai_route`), jadi bertahan setelah restart:
+  - `/urutan` — lihat urutan sekarang
+  - `/urutan santai groq,gemini,openrouter,ollama`
+  - `/urutan akurat gemini,groq,openrouter` — tanpa `ollama` = jalur itu tanpa cadangan lokal
+  - `/urutan semua gemini,groq` — dua jalur sekaligus
+  - `/urutan reset` — kembali ke bawaan
+- Ringkasan harian, pantauan peraturan, dan chat Telegram tidak ikut jalur ini: tetap Gemini dulu, lalu cadangan sesuai `LLM_FALLBACK_ORDER`.
+
+**Batas waktu.** Panggilan Gemini untuk balasan WA kini punya batas **25 detik** (sebelumnya tanpa batas, sehingga jaringan buruk bisa membuat balasan menggantung berpuluh detik sampai menit); tugas lain 90 detik. Groq/OpenRouter di jalur ini dibatasi 20 detik per percobaan dan 3 percobaan. Jatah harian (429 "PerDay") tidak lagi diulang 3 detik kemudian di key yang sama; langsung pindah key. Opsional di `.env`: `GEMINI_WA_TIMEOUT_MS` dan `GEMINI_TIMEOUT_MS` (milidetik).
+
+**Membaca log.** Tiap balasan mencatat penyedia dan lamanya, mis. `⏱️ [AI] dijawab groq/llama-3.3-70b-versatile dalam 1.4 dtk (santai: groq > gemini > openrouter)`; kegagalan sebuah penyedia tercatat `⏭️ [AI] gemini gagal dalam 25.0 dtk: … -> lanjut groq`. Dari sini terlihat penyedia mana yang lambat.
