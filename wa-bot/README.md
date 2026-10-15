@@ -981,3 +981,14 @@ Meta AI (kontak bawaan WhatsApp) tidak bisa ditambahkan ke grup dan tidak punya 
 - `/metaai cari` : mendengarkan 90 dtk tanpa mengirim apa pun. Ketik pesan ke Meta AI dari HP-mu sendiri selama itu; bot menangkap alamat aslinya dari pesan keluar HP.
 
 Pesan dari/ke Meta AI tidak pernah diteruskan ke auto-reply (mencegah bot membalas Meta AI terus-menerus). Belum terhubung ke grup.
+
+## Mengubah pengaturan gambar dari Telegram (`/env`)
+
+Supaya token Cloudflare dan jatah gambar bisa diatur tanpa membuka laptop. Hanya pemilik, hanya lewat teks (bukan pesan suara), dan HANYA kunci pembuat gambar (`CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNTS`, `*_IMAGE_MODELS`, `IMAGE_*`). Kunci lain (Supabase, Telegram, WhatsApp) tidak bisa diubah dari sini.
+
+- `/env` : daftar kunci beserta nilainya (token disamarkan jadi ••••4 huruf terakhir).
+- `/env CLOUDFLARE_ACCOUNT_ID=idAkunmu` lalu `/env CLOUDFLARE_API_TOKEN=tokenmu` : mengisi `.env`; berlaku LANGSUNG tanpa restart.
+- `/env hapus KEY` : menghapus kunci. `/env urungkan` : membatalkan perubahan terakhir (cadangan di `.env.bak`).
+
+Pesan yang berisi token otomatis dihapus dari chat Telegram setelah diproses. Token tetap sempat lewat server Telegram, jadi pakai token yang bisa dicabut kapan saja di dashboard Cloudflare. Nilai ditolak bila berisi spasi, kutip, `#`, `\` atau `$`.
+

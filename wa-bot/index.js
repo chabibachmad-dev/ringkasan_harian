@@ -75,6 +75,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { qrToPng } from "./qr-png.js";
 import { createGroupList } from "./group-list.js";
 import { createImageGen, readImageConfig } from "./image-gen.js";
+import { createEnvEditor } from "./env-edit.js";
 import { createMetaAi, readMetaAiConfig, parseMetaAiArg, unsafeTarget } from "./meta-ai.js";
 import { createWebSearch, readSearchConfig } from "./web-search.js";
 import { createRegMonitor, readRegMonitorConfig } from "./reg-monitor.js";
@@ -3822,6 +3823,11 @@ const imageGen = createImageGen({
         ).text
     : null
 });
+// /env di Telegram: ubah kunci pembuat gambar (token Cloudflare, jatah harian, dll.) tanpa membuka laptop. Lihat env-edit.js.
+const envEditor = createEnvEditor({
+  envPath: fileURLToPath(new URL("./.env", import.meta.url)),
+  onChange: () => imageGen.reconfigure(readImageConfig(process.env))
+});
 imageGen
   .load()
   .then(() => console.log(`🖼️ Pembuat gambar: ${imageGen.available() ? imageGen.describe().replace(/\n/g, " | ") : "mati (isi CLOUDFLARE_ACCOUNT_ID+CLOUDFLARE_API_TOKEN atau GEMINI_API_KEYS)"} (ubah: /gambar grup on|off di Telegram)`))
@@ -4211,6 +4217,7 @@ const telegram = createTelegram({
     health,
     aiRoute: { handle: (arg) => aiRoute.handle(arg) },
     groupVoice,
+    env: { handle: (arg) => envEditor.handle(arg) },
     metaAi: {
       handle: async (arg) => {
         const cmd = parseMetaAiArg(arg);

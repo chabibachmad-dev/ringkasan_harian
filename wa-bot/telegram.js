@@ -155,7 +155,7 @@ const HELP = [
   "/voice wag on|off|id|eng|kor|arb|jawa  — balasan grup WA berupa suara/teks + bahasa suara",
   "/wa2  — nomor WhatsApp kedua (status, kode, qr)",
   "/grup  — grup WA yang dijawab bot: lihat, semua, tambah, hapus",
-  "/gambar <deskripsi>  — buat gambar; /gambar grup on|off = izinkan di grup WA;  /metaai  — uji Meta AI (percobaan)",
+  "/gambar <deskripsi>  — buat gambar; /gambar grup on|off = izinkan di grup WA\n/env  — ubah kunci gambar (token Cloudflare, jatah) dari sini",
   "/kas  — laporan kas bulanan: konfirmasi angka, submit, simpan (/kas bantuan)",
   "/nodin  — konsep Nota Dinas LPJ (PDF + Word), otomatis tiap tanggal 1 (/nodin cek)",
   "/urutan  — lihat/ubah urutan AI untuk balasan WhatsApp & grup (jalur santai & akurat; contoh: /urutan santai groq,gemini,openrouter,ollama;  /urutan reset)",
@@ -164,7 +164,7 @@ const HELP = [
   "/skill  — daftar skill (resep tugas buatanmu);  /skill <nama> <teks>  — jalankan, dijawab Ollama lokal;  /skill baru <nama> …  — buat skill dari sini;  /skill lihat|hapus <nama>",
   "/penyedia  — status tiap penyedia AI (Gemini, Groq, OpenRouter, Ollama): berhasil/gagal, key yang istirahat",
   "/ingat <teks>  — simpan catatan pribadi (hanya di laptop, hanya dibaca Ollama lokal);  /catatan  — daftar;  /catatan <kata>  — cari;  /lupa <nomor|semua>  — hapus",
-  "/sistem  — kondisi laptop bot (pm2, disk, RAM, Ollama); /log, /restart, /deploy, /migrasi: ketik /ops (perlu OPS_ENABLED=true)",
+  "/sistem  — kondisi laptop bot (pm2, disk, RAM, Ollama); /log /restart /deploy /migrasi: lihat /ops (OPS_ENABLED=true)",
   "/baru  — mulai obrolan baru (lupakan konteks sebelumnya)",
   "/speak [topik]  — latihan Inggris dengan tutor (suara);  /speak id [topik]  — santai berbahasa Indonesia;  /selesai  — akhiri",
   "/id  — tampilkan id chat ini"
@@ -182,6 +182,7 @@ const HELP = [
  *   memory?: { handle({name:"ingat"|"catatan"|"lupa", arg}) -> string }   catatan pribadi pemilik (owner-memory.js), hanya dibaca Ollama lokal
  *   reminders?: { handle({name:"ingatkan"|"pengingat", arg}) -> string }   pengingat pribadi (reminders.js)
  *   health?: { report() -> Promise<string> }   papan kesehatan bot (health.js)
+ *   env?: { handle(arg) -> Promise<{text, secret}> }   ubah kunci .env tertentu dari Telegram (env-edit.js, /env)
  *   metaAi?: { handle(arg) -> Promise<string> }   uji ngobrol dengan Meta AI (meta-ai.js, /metaai)
  *   image?: { available(), describe(), parseCommand(arg), setGroup(bool) -> Promise<{on,saved}>, make(prompt) -> Promise<{image:{buffer,mime}}|{error}> }   pembuat gambar (image-gen.js, /gambar)
  *   groupVoice?: { enabled(), set(bool) -> Promise<{on,saved,warning}>, describe() }   balasan suara di grup WhatsApp (group-voice.js, /voice wag)
@@ -721,7 +722,7 @@ Ubah: /suara auto • /suara on • /suara off`));
   }
 
   /** Satu pesan dari pemilik -> balasan. Dipisah dari polling supaya mudah dites. */
-  async function handleOwnerText(chatId, rawText, { viaVoice = false } = {}) {
+  async function handleOwnerText(chatId, rawText, { viaVoice = false, messageId = null } = {}) {
     const text = String(rawText ?? "").trim();
     if (!text) return;
     const key = `tg:${chatId}`;
@@ -752,6 +753,14 @@ Ubah: /suara auto • /suara on • /suara off`));
     }
     if (name === "suara") return handleVoiceCommand(chatId, arg);
     if (name === "voice") return handleVoiceHub(chatId, arg);
+    if (name === "env") {
+      if (!deps.env) return void (await reply("Pengaturan .env dari Telegram tidak tersedia di versi bot ini."));
+      if (viaVoice) return void (await reply("⛔ /env tidak bisa lewat pesan suara. Ketik perintahnya."));
+      const out = await deps.env.handle(arg);
+      // pesan yang memuat token dihapus dari chat (bila Telegram mengizinkan) supaya tidak tertinggal di riwayat
+      if (out.secret && messageId) await api("deleteMessage", { chat_id: chatId, message_id: messageId }, { timeoutMs: 8000 }).catch(() => {});
+      return void (await reply(out.text + (out.secret && messageId ? "\n🧹 Pesanmu yang berisi token sudah kuhapus dari chat." : "")));
+    }
     if (name === "metaai") {
       if (!deps.metaAi) return void (await reply("Uji Meta AI tidak tersedia di versi bot ini."));
       return void (await reply(await withAction(chatId, "typing", () => deps.metaAi.handle(arg))));
@@ -1026,7 +1035,7 @@ Ubah: /suara auto • /suara on • /suara off`));
       await send(chatId, "Bot membaca pesan teks dan pesan suara (tahan tombol mikrofon).").catch(() => {});
       return;
     }
-    await handleOwnerText(chatId, m.text);
+    await handleOwnerText(chatId, m.text, { messageId: m.message_id });
   }
 
   async function loadOffset() {
@@ -1040,7 +1049,7 @@ Ubah: /suara auto • /suara on • /suara off`));
   }
 
   const HANDLER_DEADLINE_MS = 10 * 60_000;
-  const FAST_COMMANDS = new Set(["dokumen", "dok", "doc", "status", "id", "help", "start", "ingat", "catatan", "lupa", "memori", "note", "penyedia", "provider", "skill", "skil", "lokal", "tanya", "pasar", "emas", "ihsg", "ingatkan", "remind", "pengingat", "reminder", "cadangan", "backup", "kesehatan", "sehat", "health", "urutan", "route", "rute", "nodin", "notadinas", "kas", "laporankas", "voice", "wa2", "nomor2", "grup", "group", "gambar", "image", "img", "metaai"]);
+  const FAST_COMMANDS = new Set(["dokumen", "dok", "doc", "status", "id", "help", "start", "ingat", "catatan", "lupa", "memori", "note", "penyedia", "provider", "skill", "skil", "lokal", "tanya", "pasar", "emas", "ihsg", "ingatkan", "remind", "pengingat", "reminder", "cadangan", "backup", "kesehatan", "sehat", "health", "urutan", "route", "rute", "nodin", "notadinas", "kas", "laporankas", "voice", "wa2", "nomor2", "grup", "group", "gambar", "image", "img", "metaai", "env"]);
   function isFastUpdate(u) {
     const m = u?.message;
     if (!m) return false;

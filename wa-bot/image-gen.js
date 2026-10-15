@@ -552,5 +552,12 @@ export function createImageGen({ state = null, config = readImageConfig({}), fet
     return { kind: "prompt", prompt: cleanPrompt(a) };
   }
 
-  return { available, load, groupEnabled, setGroup, reserve, generate, make, describe, parseCommand, detect: detectImageRequest, problem: promptProblem };
+  /** Ganti konfigurasi tanpa restart (dipakai /env). Jatah harian & saklar grup tetap; istirahat akun Cloudflare direset. */
+  function reconfigure(next) {
+    config = next;
+    cfRest.clear();
+    apiPref.clear();
+  }
+
+  return { available, load, groupEnabled, setGroup, reserve, generate, make, describe, parseCommand, reconfigure, detect: detectImageRequest, problem: promptProblem };
 }
