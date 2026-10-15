@@ -2644,6 +2644,43 @@ async function renderSystemStatus() {
     );
   }
 
+  const img = w.extra && w.extra.image;
+  if (img && typeof img.enabled === "boolean") {
+    const clock = (ms) => new Date(ms).toLocaleTimeString(state.lang === "en" ? "en-GB" : "id-ID", { hour: "2-digit", minute: "2-digit" });
+    if (!img.enabled) {
+      rows.push(sysRow(false, L("sys_img"), L("sys_img_off")));
+    } else {
+      const prov = (img.providers || []).join(" > ") || "-";
+      const byProv = img.today && img.today.byProvider ? Object.values(img.today.byProvider) : [];
+      const okN = byProv.reduce((n, p) => n + (p.ok || 0), 0);
+      const failN = byProv.reduce((n, p) => n + (p.fail || 0), 0);
+      const accs = img.cloudflare || [];
+      const anyRest = accs.length > 0 && accs.every((a) => a.resting);
+      const lim = (q) => (q && q.limit > 0 ? `${q.used}/${q.limit}` : `${(q && q.used) || 0} (${L("sys_img_nolimit")})`);
+      rows.push(
+        sysRow(
+          !anyRest,
+          L("sys_img"),
+          `${prov} · ${L("sys_img_groups")} ${img.groupsOn ? L("sys_on") : L("sys_off")} · ${L("sys_img_today")}: ${okN} ${L("sys_img_ok")}, ${failN} ${L("sys_img_fail")}` +
+            (img.quota ? ` · ${L("sys_img_owner")} ${lim(img.quota.owner)} · ${L("sys_img_group")} ${lim(img.quota.group)}` : "")
+        )
+      );
+      for (const a of accs) {
+        rows.push(
+          sysRow(
+            !a.resting,
+            `${L("sys_img_cf")} …${a.id}`,
+            `${a.ok} ${L("sys_img_images")} ≈ ${a.usedNeurons.toLocaleString()}/${a.freeNeurons.toLocaleString()} ${L("sys_img_neurons")} (${L("sys_img_left")} ±${a.imagesLeft})` +
+              (a.resting ? ` · ${L("sys_img_exhausted")} ${clock(a.restUntil)}` : ` · ${L("sys_img_reset")} ${clock(img.resetAt)}`)
+          )
+        );
+      }
+      if (img.lastError && img.lastErrorAt && now - img.lastErrorAt < 24 * 3600_000) {
+        rows.push(sysRow(false, L("sys_img_lasterr"), img.lastError));
+      }
+    }
+  }
+
   const frag = document.createDocumentFragment();
   rows.forEach((r) => frag.appendChild(r));
 

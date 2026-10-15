@@ -3659,6 +3659,7 @@ async function buildBotStatusText() {
     const df = typeof docFolder !== "undefined" && docFolder ? docFolder.status() : null;
     lines.push(`📂 Dokumen lokal (khusus Ollama): ${df ? `${df.docs} dokumen .md di ${df.mdDir}${df.current ? ` • memproses ${df.current.file}` : ""}${df.lastError ? ` • error terakhir: ${df.lastError}` : ""}` : "mati"}`);
   }
+  lines.push(`🖼️ Pembuat gambar: ${imageGen.monitorText((ms) => `${formatClockInTimezone(ms)} ${WA_TIMEZONE_LABEL}`)}`);
   lines.push(`🏛️ SiMAB: ${simab.enabled ? "aktif" : "mati"}`);
   lines.push(`📋 Ringkasan harian: ${WA_DAILY_SUMMARY_ENABLED ? `aktif (setelah ${String(WA_DAILY_SUMMARY_HOUR).padStart(2, "0")}:00 ${WA_TIMEZONE_LABEL}${summarySentDate ? `, terakhir terkirim ${summarySentDate}` : ""})` : "mati"}`);
   lines.push(`📜 Pantauan peraturan: ${regMonitor.describe()}`);
@@ -4447,6 +4448,13 @@ const appAgent = createAppAgentWorker({
       queue: ollamaQueue.stats(),
       mem: readMemInfo(),
       keepAlive: OLLAMA_KEEP_ALIVE,
+      image: (() => {
+        try {
+          return imageGen.monitor();
+        } catch {
+          return null;
+        }
+      })(),
       kb: kbIngest
         ? (() => {
             const st = kbIngest.status();

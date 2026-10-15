@@ -99,7 +99,8 @@ ok("ubah/tambah/hapus/urungkan .env: baris lain utuh, token disamarkan, izin 600
     ["CLOUDFLARE_API_TOKEN=abc#komentar123", /ditolak/],
     ["CLOUDFLARE_API_TOKEN=abc$(rm -rf)", /ditolak/],
     ["CLOUDFLARE_ACCOUNTS=rusak", /format/],
-    ["GEMINI_IMAGE_MODELS=satu dua", /ditolak/]
+    ["GEMINI_IMAGE_MODELS=satu dua", /ditolak/],
+    ["IMAGE_PROVIDERS=facebook", /ditolak/]
   ]) {
     const r = await ed.handle(arg);
     assert.match(r.text, re, arg);
@@ -118,6 +119,20 @@ ok("ubah/tambah/hapus/urungkan .env: baris lain utuh, token disamarkan, izin 600
   assert.match((await none.handle("urungkan")).text, /Belum ada cadangan/);
 }
 ok("penolakan: kunci di luar daftar putih, nilai salah/berbahaya; .env utuh; .env hilang ditangani");
+
+// --- IMAGE_PROVIDERS dan jatah 0 (tanpa batas) bisa diatur dan berlaku langsung
+{
+  fresh();
+  const env = {};
+  const ed = createEnvEditor({ envPath, env });
+  assert.match((await ed.handle("IMAGE_PROVIDERS=cloudflare,gemini")).text, /tersimpan/);
+  assert.match((await ed.handle("IMAGE_OWNER_DAILY=0")).text, /tersimpan/);
+  assert.equal(env.IMAGE_PROVIDERS, "cloudflare,gemini");
+  const cfg = readImageConfig(env);
+  assert.deepEqual(cfg.providers, ["cloudflare", "gemini"]);
+  assert.equal(cfg.ownerDaily, 0);
+}
+ok("IMAGE_PROVIDERS dan IMAGE_OWNER_DAILY=0 dapat diatur lewat /env");
 
 // --- kunci yang diizinkan hanya pembuat gambar
 assert.deepEqual(Object.keys(ENV_KEYS).filter((k) => !/^(CLOUDFLARE_|GEMINI_IMAGE|OPENROUTER_IMAGE|IMAGE_)/.test(k)), []);

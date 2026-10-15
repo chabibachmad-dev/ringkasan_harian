@@ -32,6 +32,11 @@ export const ENV_KEYS = {
   CLOUDFLARE_IMAGE_MODELS: { secret: false, hint: "model gambar Cloudflare", validate: modelList },
   GEMINI_IMAGE_MODELS: { secret: false, hint: "model gambar Gemini", validate: modelList },
   OPENROUTER_IMAGE_MODELS: { secret: false, hint: "model gambar OpenRouter", validate: modelList },
+  IMAGE_PROVIDERS: {
+    secret: false,
+    hint: "urutan penyedia gambar: cloudflare,gemini,openrouter (kosong = hanya Cloudflare bila terisi)",
+    validate: (v) => (/^(?:cloudflare|gemini|openrouter)(?:,(?:cloudflare|gemini|openrouter))*$/i.test(v) ? null : "isi: cloudflare, gemini, openrouter (dipisah koma)")
+  },
   IMAGE_OWNER_DAILY: { secret: false, hint: "jatah gambar pemilik per hari (0 = tanpa batas)", validate: intIn(0, 10000) },
   IMAGE_GROUP_DAILY: { secret: false, hint: "jatah gambar semua grup per hari", validate: intIn(0, 10000) },
   IMAGE_PERSON_DAILY: { secret: false, hint: "jatah gambar per orang di grup per hari", validate: intIn(0, 10000) },

@@ -248,7 +248,7 @@ ok("kunci API lewat header (bukan URL) dan tidak dicetak");
 
 // --- Cloudflare Workers AI (gratis, penyedia pertama)
 {
-  const cfCfg = (over = {}) => ({ ...cfg(), cfAccounts: [{ account: "acc123", token: "tok" }], cfModels: ["@cf/black-forest-labs/flux-1-schnell"], ...over });
+  const cfCfg = (over = {}) => ({ ...cfg(), cfAccounts: [{ account: "acc123", token: "tok" }], cfModels: ["@cf/black-forest-labs/flux-1-schnell"], providers: ["cloudflare", "gemini", "openrouter"], ...over });
   const jpg = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(900, 7)]).toString("base64");
   const seen = [];
   const fetchImpl = async (url, init) => {
@@ -300,6 +300,82 @@ ok("kunci API lewat header (bukan URL) dan tidak dicetak");
   assert.ok(!/log\.\w+\?\.\([^)]*(?:cfToken|acc\.token)/.test(src));
 }
 ok("Cloudflare: penyedia pertama, terjemahan prompt, jatah habis -> Gemini, moderasi -> ditolak, cukup tanpa kunci lain");
+
+// --- penyedia: otomatis hanya Cloudflare bila terisi; IMAGE_PROVIDERS mengatur manual
+{
+  assert.deepEqual(readImageConfig({}).providers, []);
+  assert.deepEqual(readImageConfig({ IMAGE_PROVIDERS: "Cloudflare, gemini ,ngawur" }).providers, ["cloudflare", "gemini"]);
+  const jpg = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(900, 7)]).toString("base64");
+  const urls = [];
+  const quotaCf = async (u) => { urls.push(u); return /cloudflare/.test(u) ? res(429, { errors: [{ code: 4006, message: "daily free allocation of neurons used up" }] }) : res(200, { result: { image: jpg } }); };
+  // Cloudflare terisi + kunci Gemini/OpenRouter ada, tanpa IMAGE_PROVIDERS -> HANYA Cloudflare
+  const base = readImageConfig({ CLOUDFLARE_ACCOUNT_ID: "acc12345", CLOUDFLARE_API_TOKEN: "token12345", GEMINI_API_KEYS: "k1", OPENROUTER_API_KEYS: "or1" });
+  const only = createImageGen({ config: base, fetchImpl: quotaCf, log: silent });
+  await assert.rejects(only.generate("x"), (e) => e.kind === "quota" && /jatah gratis pulih/.test(e.message) && !/Gemini/.test(e.message));
+  assert.ok(urls.every((u) => /cloudflare/.test(u)), "Gemini/OpenRouter tidak pernah dipanggil");
+  // tanpa Cloudflare -> Gemini/OpenRouter seperti semula
+  assert.equal(createImageGen({ config: readImageConfig({ GEMINI_API_KEYS: "k1" }), fetchImpl: quotaCf, log: silent }).monitor().providers[0], "gemini");
+  // IMAGE_PROVIDERS memaksa: cloudflare saja walau tak ada kunci lain; hanya gemini walau Cloudflare ada
+  assert.equal(createImageGen({ config: { ...base, providers: ["gemini"] }, fetchImpl: quotaCf, log: silent }).monitor().providers.join(), "gemini");
+  assert.equal(createImageGen({ config: readImageConfig({ IMAGE_PROVIDERS: "cloudflare", GEMINI_API_KEYS: "k1" }), fetchImpl: quotaCf, log: silent }).available(), false, "dipaksa Cloudflare tetapi tak terisi -> belum aktif");
+}
+ok("penyedia: otomatis hanya Cloudflare bila terisi; IMAGE_PROVIDERS memaksa; tanpa Cloudflare tetap Gemini/OpenRouter");
+
+// --- pemantauan
+{
+  const jpg = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(900, 7)]).toString("base64");
+  let t = Date.parse("2026-10-15T10:00:00Z");
+  const st = mem();
+  let mode = "ok";
+  const fetchImpl = async () => (mode === "ok" ? res(200, { result: { image: jpg } }) : mode === "quota" ? res(429, { errors: [{ code: 4006, message: "daily free allocation of neurons used up" }] }) : res(500, "boom"));
+  const mk = () => createImageGen({ state: st, config: { ...cfg({ keys: [] }), cfAccounts: [{ account: "aaaa1111", token: "t1t1t1t1" }], cfModels: ["@cf/m"] }, fetchImpl, log: silent, now: () => t });
+  let g = mk();
+  for (let i = 0; i < 5; i++) await g.generate("x");
+  mode = "err";
+  await assert.rejects(g.generate("x"));
+  let m = g.monitor();
+  assert.deepEqual(m.providers, ["cloudflare"]);
+  assert.equal(m.today.byProvider.cloudflare.ok, 5);
+  assert.equal(m.today.byProvider.cloudflare.fail, 1);
+  assert.equal(m.cloudflare[0].id, "…1111");
+  assert.equal(m.cloudflare[0].ok, 5);
+  assert.equal(m.cloudflare[0].usedNeurons, 288, "5 x 57,6 neuron");
+  assert.equal(m.cloudflare[0].imagesLeft, Math.floor((10000 - 288) / 57.6));
+  assert.equal(m.cloudflare[0].resting, false);
+  assert.match(m.lastError, /cloudflare 1111: HTTP 500 server/);
+  assert.equal(m.resetAt, Date.parse("2026-10-16T00:00:00Z"));
+  const txt = g.monitorText((ms) => new Date(ms).toISOString().slice(11, 16));
+  assert.match(txt, /cloudflare • grup aktif • hari ini 5 berhasil, 1 gagal/);
+  assert.match(txt, /Cloudflare …1111: 5 gambar ≈ 288\/10\.000 neuron \(sisa ±\d+ gambar\), reset 00:00/);
+  assert.match(txt, /Galat terakhir: cloudflare 1111/);
+  assert.ok(!txt.includes("aaaa1111") && !txt.includes("t1t1t1t1"), "ID penuh dan token tidak tampil");
+  // jatah habis -> status 'JATAH HABIS (pulih ...)'
+  mode = "quota";
+  await assert.rejects(g.generate("x"));
+  assert.match(g.monitorText((ms) => new Date(ms).toISOString().slice(11, 16)), /JATAH HABIS \(pulih 00:00\)/);
+  assert.equal(g.monitor().cloudflare[0].resting, true);
+  // tersimpan: instance baru di hari yang sama membaca hitungan
+  await new Promise((r) => setTimeout(r, 5));
+  g = mk();
+  await g.load();
+  assert.equal(g.monitor().cloudflare[0].ok, 5);
+  // ganti hari UTC: hitungan nol lagi, tetapi galat terakhir tetap diingat
+  t = Date.parse("2026-10-16T00:00:05Z");
+  m = g.monitor();
+  assert.equal(m.cloudflare[0].ok, 0);
+  assert.equal(m.cloudflare[0].imagesLeft, Math.floor(10000 / 57.6));
+  assert.equal(m.today.day, "2026-10-16");
+  // describe memuat jatah buatan bot + pemantauan
+  assert.match(g.describe(), /Jatah hari ini \(batas buatan bot\)/);
+  assert.match(g.describe(), /Cloudflare …1111/);
+  // mati: petunjuk
+  assert.match(createImageGen({ config: readImageConfig({}), log: silent }).monitorText(), /mati \(isi CLOUDFLARE/);
+  // DB galat tidak mengganggu pemantauan
+  const bad = createImageGen({ state: { get: async () => { throw new Error("db"); }, set: async () => { throw new Error("db"); } }, config: { ...cfg({ keys: [] }), cfAccounts: [{ account: "aaaa1111", token: "t1t1t1t1" }], cfModels: ["@cf/m"] }, fetchImpl: async () => res(200, { result: { image: jpg } }), log: silent });
+  await bad.generate("x");
+  assert.equal(bad.monitor().today.byProvider.cloudflare.ok, 1);
+}
+ok("pemantauan: hitungan per penyedia & akun, perkiraan neuron, reset 00:00 UTC, tersimpan, tahan DB galat, tanpa rahasia");
 
 // --- Gemini "limit: 0": berhenti mencoba, rincian tanpa baris ganda
 {
@@ -436,7 +512,7 @@ ok("Cloudflare banyak akun: parsing, rotasi, istirahat saat jatah habis (pulih 0
   const blocked = createImageGen({ config: { ...cfg({ keys: ["k1"] }), orKeys: ["or1"], orModels: ["m"] }, fetchImpl: async (u) => { orCalls.push(u); return res(200, { candidates: [{ finishReason: "IMAGE_SAFETY" }] }); }, log: silent });
   await assert.rejects(blocked.generate("x"), (e) => e.kind === "blocked");
   assert.ok(!orCalls.some((u) => /openrouter/.test(u)));
-  assert.match(createImageGen({ config: { ...cfg(), orKeys: ["o"], orModels: ["m"] }, log: silent }).describe(), /OpenRouter: m/);
+  assert.match(createImageGen({ config: { ...cfg(), orKeys: ["o"], orModels: ["m"] }, log: silent }).describe(), /OpenRouter m/);
 }
 ok("cadangan OpenRouter: dipakai saat Gemini habis/tanpa kunci, 402 = billing, ditolak filter tidak dicoba ulang");
 
@@ -457,7 +533,7 @@ ok("cadangan OpenRouter: dipakai saat Gemini habis/tanpa kunci, 402 = billing, d
   const tg = createTelegram({ config: tcfg, deps, fetchImpl: fakeFetch, log: silent });
   const say = async (text, id) => { await tg.handleUpdate({ update_id: id, message: { chat: { id: 111, type: "private" }, text } }); return calls.filter((c) => c.method === "sendMessage").at(-1)?.body.text; };
   let t = await say("/gambar", 1);
-  assert.ok(/Pembuat gambar/.test(t) && /grup: AKTIF/.test(t) && /Sisa jatah/.test(t));
+  assert.ok(/Pembuat gambar/.test(t) && /grup: AKTIF/.test(t) && /Jatah hari ini/.test(t));
   t = await say("/gambar grup off", 2);
   assert.ok(/MATI/.test(t) && !ig.groupEnabled() && st.m.get(STATE_KEY) === "off");
   t = await say("/gambar grup on", 3);
