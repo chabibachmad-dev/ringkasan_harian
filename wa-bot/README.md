@@ -968,4 +968,6 @@ Bot bisa membuat gambar dari deskripsi memakai Gemini ("Nano Banana"), dengan `G
 
 Batas harian (reset 00.00 WITA, tahan restart): pemilik 30, semua grup 10, per orang di grup 3 (`IMAGE_*` di `.env`; 0 = tanpa batas). Jatah dikembalikan bila pembuatan gagal. Deskripsi konten dewasa atau dokumen/bukti palsu (KTP, kuitansi, stempel, dll.) ditolak sebelum dikirim ke Gemini. Bila kuota Gemini habis, bot memberi tahu dengan sopan; bila kunci ditolak atau model butuh akun berbayar, pemilik diberi tahu lewat Telegram (maks. sekali per 6 jam).
 
+Cadangan: bila Gemini habis/ditolak atau tak ada kunci, bot mencoba OpenRouter (`OPENROUTER_API_KEYS` yang sama; model gambar `OPENROUTER_IMAGE_MODELS`, bawaan `google/gemini-2.5-flash-image`; memakai kredit OpenRouter, bukan gratis). Groq tidak punya model pembuat gambar.
+
 Model dicoba berurutan (`GEMINI_IMAGE_MODELS`); tiap model dicoba lewat Interactions API lalu `generateContent`, dan jalur yang berhasil diingat. Kuota gambar Gemini terpisah dari kuota chat/suara, tetapi bergantung pada akun Google AI Studio: bila muncul "butuh akun berbayar", model gambar belum tersedia di tier gratis untuk kunci itu.

@@ -21,6 +21,8 @@
 export const STATE_KEY = "wa_image_gen";
 export const QUOTA_KEY = "wa_image_quota";
 export const DEFAULT_IMAGE_MODELS = ["gemini-nano-banana-2.1", "gemini-3.1-flash-lite-image", "gemini-3.1-flash-image", "gemini-2.5-flash-image"];
+export const DEFAULT_OR_IMAGE_MODELS = ["google/gemini-2.5-flash-image"];
+const OR_URL = "https://openrouter.ai/api/v1/chat/completions";
 const API_BASE = "https://generativelanguage.googleapis.com/v1beta";
 
 const splitList = (s) =>
@@ -35,6 +37,8 @@ export function readImageConfig(env = process.env) {
   return {
     keys: splitList(env.GEMINI_API_KEYS || env.GEMINI_API_KEY),
     models: models.length ? models : DEFAULT_IMAGE_MODELS,
+    orKeys: splitList(env.OPENROUTER_API_KEYS || env.OPENROUTER_API_KEY),
+    orModels: splitList(env.OPENROUTER_IMAGE_MODELS).length ? splitList(env.OPENROUTER_IMAGE_MODELS) : DEFAULT_OR_IMAGE_MODELS,
     timeoutMs: Math.max(10_000, num(env.IMAGE_TIMEOUT_MS, 90_000)),
     ownerDaily: num(env.IMAGE_OWNER_DAILY, 30),
     groupDaily: num(env.IMAGE_GROUP_DAILY, 10),
@@ -109,6 +113,10 @@ function mimeFromBytes(buf) {
 
 function asImage(o) {
   if (!o || typeof o !== "object") return null;
+  // OpenRouter: {type:"image_url", image_url:{url:"data:image/png;base64,...."}}
+  const durl = typeof o.url === "string" ? o.url : "";
+  const m = /^data:(image\/[a-z0-9.+-]+);base64,(.+)$/is.exec(durl);
+  if (m && m[2].length >= 400) return { b64: m[2], mime: m[1] };
   const inline = o.inlineData || o.inline_data;
   const src = inline && typeof inline === "object" ? inline : o;
   const data = src.data;
@@ -161,6 +169,7 @@ const BLOCKED_RE = /blockReason|IMAGE_SAFETY|PROHIBITED|"SAFETY"|IMAGE_OTHER|REC
 
 function errorKind(status, bodyText) {
   const b = String(bodyText || "");
+  if (status === 402) return "billing";
   if (status === 429 || /RESOURCE_EXHAUSTED|quota|rate.?limit/i.test(b)) return "quota";
   if (/billing|paid|free tier|not available in your|only available.*(paid|billing)|limit: 0/i.test(b) && (status === 403 || status === 400)) return "billing";
   if (status === 401 || status === 403 || /API key (not valid|expired)|PERMISSION_DENIED/i.test(b)) return "auth";
@@ -190,7 +199,7 @@ export function createImageGen({ state = null, config = readImageConfig({}), fet
   const apiPref = new Map(); // model -> "interactions" | "generate"
   let rr = 0;
 
-  const available = () => config.keys.length > 0 && typeof fetchImpl === "function";
+  const available = () => (config.keys.length > 0 || (config.orKeys?.length ?? 0) > 0) && typeof fetchImpl === "function";
 
   async function load() {
     if (!state) return groupsOn;
@@ -307,8 +316,8 @@ export function createImageGen({ state = null, config = readImageConfig({}), fet
     const note = (kind) => {
       if (!worst || rank[kind] > rank[worst]) worst = kind;
     };
-    const start = rr++ % config.keys.length;
-    for (const model of config.models) {
+    const start = config.keys.length ? rr++ % config.keys.length : 0;
+    for (const model of config.keys.length ? config.models : []) {
       const apis = apiPref.get(model) === "generate" ? ["generate", "interactions"] : ["interactions", "generate"];
       for (let i = 0; i < config.keys.length; i++) {
         const key = config.keys[(start + i) % config.keys.length];
@@ -356,6 +365,43 @@ export function createImageGen({ state = null, config = readImageConfig({}), fet
         if (modelMissing && !worst) note("unavailable");
       }
     }
+    // Cadangan: OpenRouter (model gambar berbayar/kredit; dicoba bila Gemini habis/ditolak/tidak ada kunci).
+    for (const model of config.orModels || []) {
+      for (const key of config.orKeys || []) {
+        let r;
+        try {
+          const res = await fetchImpl(OR_URL, {
+            method: "POST",
+            headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
+            body: JSON.stringify({ model, messages: [{ role: "user", content: p }], modalities: ["image", "text"] }),
+            signal: AbortSignal.timeout(config.timeoutMs)
+          });
+          const raw = await res.text();
+          let json = null;
+          try {
+            json = JSON.parse(raw);
+          } catch {
+            /* bukan JSON */
+          }
+          r = { status: res.status, ok: res.ok, raw, json };
+        } catch (e) {
+          log.warn?.(`🖼️ [Gambar] OpenRouter ${model}: ${e instanceof Error ? e.message : e}`);
+          note("unavailable");
+          continue;
+        }
+        if (r.ok) {
+          const out = parseImageResponse(r.json ?? {});
+          if (out.buffer) return { buffer: out.buffer, mime: out.mime, model: `openrouter:${model}`, text: out.text };
+          if (/content_filter|safety|moderation/i.test(r.raw) || out.text) throw fail("blocked");
+          note("unavailable");
+          continue;
+        }
+        const kind = errorKind(r.status, r.raw);
+        log.warn?.(`🖼️ [Gambar] OpenRouter ${model} HTTP ${r.status} (${kind}): ${String(r.raw).replace(/\s+/g, " ").slice(0, 160)}`);
+        note(kind === "api" || kind === "server" ? "unavailable" : kind);
+        if (kind === "api") break; // model tidak ada -> model berikutnya
+      }
+    }
     throw fail(worst || "unavailable");
   }
 
@@ -384,7 +430,7 @@ export function createImageGen({ state = null, config = readImageConfig({}), fet
     rollDay();
     const sisa = (limit, used) => (limit > 0 ? `${Math.max(0, limit - used)}/${limit}` : "tanpa batas");
     return (
-      `grup: ${groupsOn ? "AKTIF" : "mati"} • model: ${config.models[0]}${config.models.length > 1 ? ` (+${config.models.length - 1} cadangan)` : ""}\n` +
+      `grup: ${groupsOn ? "AKTIF" : "mati"} • model: ${config.keys.length ? config.models[0] : "(Gemini tanpa kunci)"}${config.keys.length && config.models.length > 1 ? ` (+${config.models.length - 1} cadangan)` : ""}${config.orKeys?.length ? ` • cadangan OpenRouter: ${config.orModels[0]}` : ""}\n` +
       `Sisa jatah hari ini — pemilik: ${sisa(config.ownerDaily, quota.owner)}, semua grup: ${sisa(config.groupDaily, quota.group)} (maks ${config.personDaily || "∞"} per orang)`
     );
   }

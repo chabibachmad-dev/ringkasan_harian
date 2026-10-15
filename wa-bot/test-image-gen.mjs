@@ -246,6 +246,40 @@ ok("saklar grup tersimpan, perintah /gambar, DB galat tidak merusak");
 }
 ok("kunci API lewat header (bukan URL) dan tidak dicetak");
 
+// --- cadangan OpenRouter
+{
+  const dataUrl = `data:image/png;base64,${b64}`;
+  const orOk = { choices: [{ message: { role: "assistant", content: "ok", images: [{ type: "image_url", image_url: { url: dataUrl } }] } }] };
+  assert.ok(parseImageResponse(orOk).buffer, "data URL OpenRouter terbaca");
+  const seen = [];
+  const fetchImpl = async (url, init) => {
+    seen.push(url);
+    if (/googleapis/.test(url)) return res(429, "RESOURCE_EXHAUSTED");
+    assert.equal(init.headers.authorization, "Bearer or1");
+    const body = JSON.parse(init.body);
+    assert.deepEqual(body.modalities, ["image", "text"]);
+    assert.equal(body.model, "google/gemini-2.5-flash-image");
+    return res(200, orOk);
+  };
+  const g = createImageGen({ config: { ...cfg({ keys: ["k1"] }), orKeys: ["or1"], orModels: ["google/gemini-2.5-flash-image"] }, fetchImpl, log: silent });
+  const out = await g.generate("kucing");
+  assert.equal(out.model, "openrouter:google/gemini-2.5-flash-image");
+  assert.ok(seen.some((u) => /openrouter\.ai/.test(u)) && seen.some((u) => /googleapis/.test(u)));
+  // tanpa kunci Gemini, hanya OpenRouter
+  const only = createImageGen({ config: readImageConfig({ OPENROUTER_API_KEYS: "or1" }), fetchImpl, log: silent });
+  assert.equal(only.available(), true);
+  assert.equal((await only.generate("x")).model, "openrouter:google/gemini-2.5-flash-image");
+  // OpenRouter kehabisan kredit -> billing; Gemini ditolak filter -> OpenRouter tidak dicoba
+  const noCredit = createImageGen({ config: { ...cfg({ keys: [] }), orKeys: ["or1"], orModels: ["m"] }, fetchImpl: async () => res(402, "Insufficient credits"), log: silent });
+  await assert.rejects(noCredit.generate("x"), (e) => e.kind === "billing");
+  const orCalls = [];
+  const blocked = createImageGen({ config: { ...cfg({ keys: ["k1"] }), orKeys: ["or1"], orModels: ["m"] }, fetchImpl: async (u) => { orCalls.push(u); return res(200, { candidates: [{ finishReason: "IMAGE_SAFETY" }] }); }, log: silent });
+  await assert.rejects(blocked.generate("x"), (e) => e.kind === "blocked");
+  assert.ok(!orCalls.some((u) => /openrouter/.test(u)));
+  assert.match(createImageGen({ config: { ...cfg(), orKeys: ["o"], orModels: ["m"] }, log: silent }).describe(), /OpenRouter: m/);
+}
+ok("cadangan OpenRouter: dipakai saat Gemini habis/tanpa kunci, 402 = billing, ditolak filter tidak dicoba ulang");
+
 // --- Telegram /gambar
 {
   const calls = [];
