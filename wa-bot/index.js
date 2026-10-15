@@ -70,8 +70,9 @@ import { classifyRoute, createAiRoute, parseRouteCommand } from "./ai-route.js";
 import { createNodin, parseNodinCommand, readNodinConfig } from "./nodin.js";
 import { createKas, parseKasCommand, readKasConfig } from "./kas.js";
 import { createGroupVoice, readGroupVoiceConfig } from "./group-voice.js";
-import { MAIN_ACCOUNT, acctFields, createAccountRouter, pairingInstructions, readSecondAccountConfig } from "./wa-accounts.js";
+import { MAIN_ACCOUNT, acctFields, createAccountRouter, isPairedCreds, isStalePairing, pairingInstructions, personaPrompt, readSecondAccountConfig } from "./wa-accounts.js";
 import { AsyncLocalStorage } from "node:async_hooks";
+import { qrToPng } from "./qr-png.js";
 import { createWebSearch, readSearchConfig } from "./web-search.js";
 import { createRegMonitor, readRegMonitorConfig } from "./reg-monitor.js";
 import { createKhatamReminder } from "./khatam.js";
@@ -311,7 +312,9 @@ function isGroupJid(jid) {
 }
 
 function withGroupNote(basePrompt, jid) {
-  return isGroupJid(jid) ? `${basePrompt}${GROUP_PROMPT_NOTE}` : basePrompt;
+  // Nomor kedua boleh punya nama bot sendiri (WA2_NAME): AI memperkenalkan diri dengan nama itu.
+  const base = currentAccountId() === MAIN_ACCOUNT ? basePrompt : personaPrompt(basePrompt, wa2Config.botName);
+  return isGroupJid(jid) ? `${base}${GROUP_PROMPT_NOTE}` : base;
 }
 
 // Buang awalan "Nama: " & baris "(mengutip: ...)" supaya pencarian dokumen/web
@@ -3194,14 +3197,24 @@ async function requestWa2PairingCode({ force = false, notify = true } = {}) {
   const acct = WA2_ACCOUNT_DEF;
   if (!acct) throw new Error("Nomor kedua belum dinyalakan (isi WA2_NUMBER di .env).");
   if (!wa2Config.number) throw new Error("WA2_NUMBER belum diisi di .env, jadi kode tautan tidak bisa dibuat (pakai scan QR di log: pm2 logs).");
-  if (!acct.sock) throw new Error("Sesi nomor kedua belum siap; coba lagi beberapa detik lagi.");
-  if (acct.sock.authState?.creds?.registered) throw new Error(`${acct.label} sudah tertaut.`);
+  if (!acct.sock) {
+    // Sesi berhenti (kode sebelumnya tidak dipakai / logout). Mulai sesi baru; kodenya dikirim otomatis begitu siap.
+    if (acct.connecting) throw new Error("Sesi nomor kedua sedang disiapkan; tunggu sebentar, kodenya dikirim otomatis.");
+    acct.idle = false;
+    acct.mode = "code";
+    acct.autoCodes = 1; // tepat satu kode untuk permintaan ini
+    connect(acct).catch((err) => console.error(`Gagal memulai ${acct.label}:`, err instanceof Error ? err.message : String(err)));
+    return null;
+  }
+  if (isPairedCreds(acct.sock.authState?.creds)) throw new Error(`${acct.label} sudah tertaut.`);
   if (acct.pairing && !force) throw new Error("Permintaan kode sedang berjalan.");
   acct.pairing = true;
+  acct.mode = "code";
+  acct.sock.pairCodeAsked = true;
   try {
     const code = await acct.sock.requestPairingCode(wa2Config.number);
     console.log(`🔗 [${acct.label}] kode tautan: ${code}`);
-    if (notify) await sendToOwner(pairingInstructions({ label: acct.label, code }));
+    if (notify) await sendToOwner(pairingInstructions({ label: acct.label, code, number: wa2Config.number, clock: formatClockInTimezone(Date.now()) }));
     return code;
   } finally {
     setTimeout(() => {
@@ -3210,9 +3223,51 @@ async function requestWa2PairingCode({ force = false, notify = true } = {}) {
   }
 }
 
+// Gambar QR penautan nomor kedua (untuk dipindai dari HP lain, mis. layar HP/laptop kamu dipindai pemegang HP nomor 2).
+// QR berlaku sekitar 1 menit lalu diganti; sambungan menunggu sekitar 2,5 menit sebelum menyerah.
+async function wa2QrImage() {
+  const acct = WA2_ACCOUNT_DEF;
+  if (!acct) throw new Error("Nomor kedua belum dinyalakan (isi WA2_NUMBER di .env).");
+  if (acct.sock && isPairedCreds(acct.sock.authState?.creds)) throw new Error(`${acct.label} sudah tertaut.`);
+  if (!acct.sock) {
+    if (acct.connecting) throw new Error("Sesi nomor kedua sedang disiapkan; coba lagi beberapa detik lagi.");
+    acct.idle = false;
+    acct.mode = "qr";
+    acct.autoCodes = 2; // tidak ada kode otomatis di mode QR
+    acct.lastQr = null;
+    connect(acct).catch((err) => console.error(`Gagal memulai ${acct.label}:`, err instanceof Error ? err.message : String(err)));
+  } else {
+    acct.mode = "qr";
+  }
+  for (let i = 0; i < 40 && !(acct.lastQr && Date.now() - acct.lastQr.at < 15_000); i += 1) await new Promise((r) => setTimeout(r, 500));
+  if (!acct.lastQr) throw new Error("QR belum muncul dari WhatsApp (koneksi internet laptop mungkin lambat). Coba /wa2 qr lagi.");
+  return qrToPng(acct.lastQr.qr);
+}
+
+function wipeAuthDir(dir) {
+  fs.rmSync(path.resolve(dir), { recursive: true, force: true });
+}
+
 async function connect(acct = MAIN_ACCOUNT_DEF) {
-  const { state, saveCreds } = await useMultiFileAuthState(acct.authDir);
-  const { version } = await fetchLatestBaileysVersion();
+  if (acct.secondary) {
+    if (acct.connecting) return;
+    acct.connecting = true;
+  }
+  let loaded;
+  let version;
+  try {
+    loaded = await useMultiFileAuthState(acct.authDir);
+    // Sisa tautan yang tidak selesai (kode tidak dimasukkan di HP) membuat WhatsApp menjawab 401 terus-menerus: buang, mulai bersih.
+    if (acct.secondary && isStalePairing(loaded.state.creds)) {
+      console.warn(`🔗 [${acct.label}] sisa tautan yang belum selesai ditemukan; sesi dibersihkan dan dimulai dari awal.`);
+      wipeAuthDir(acct.authDir);
+      loaded = await useMultiFileAuthState(acct.authDir);
+    }
+    ({ version } = await fetchLatestBaileysVersion());
+  } finally {
+    acct.connecting = false;
+  }
+  const { state, saveCreds } = loaded;
 
   const sock = makeWASocket({
     version,
@@ -3241,11 +3296,16 @@ async function connect(acct = MAIN_ACCOUNT_DEF) {
   sock.ev.on("connection.update", (update) => {
     const { connection, lastDisconnect, qr } = update;
 
+    if (qr && acct.secondary) acct.lastQr = { qr, at: Date.now() };
     if (qr) {
-      if (acct.secondary && wa2Config.number) {
+      if (acct.secondary && acct.mode === "qr") {
+        // Mode QR (/wa2 qr): gambarnya dikirim ke Telegram saat diminta; tidak membuat kode tautan.
+      } else if (acct.secondary && wa2Config.number) {
         // Nomor kedua dipegang orang lain: kirim KODE TAUTAN ke pemilik (bisa diteruskan), bukan QR di layar laptop.
-        // Otomatis hanya 2 kali per start bot (supaya pemilik tidak dibanjiri kode); selanjutnya lewat /wa2 kode.
-        if (!acct.pairing && (acct.autoCodes || 0) < 2) {
+        // SATU kode per koneksi. WhatsApp mengirim ulang event QR tiap ~20 detik; meminta kode lagi di tiap event membuat kode
+        // sebelumnya langsung tidak berlaku (itulah yang membuat "Gagal menautkan perangkat"). Kode berikutnya hanya lewat /wa2 kode.
+        if (!sock.pairCodeAsked && !acct.pairing && (acct.autoCodes || 0) < 2) {
+          sock.pairCodeAsked = true;
           acct.autoCodes = (acct.autoCodes || 0) + 1;
           requestWa2PairingCode().catch((err) => {
             console.error(`🔗 [${acct.label}] gagal membuat kode tautan:`, err instanceof Error ? err.message : String(err));
@@ -3262,18 +3322,47 @@ async function connect(acct = MAIN_ACCOUNT_DEF) {
       const statusCode = lastDisconnect?.error?.output?.statusCode;
       const loggedOut = statusCode === DisconnectReason.loggedOut;
       if (acct.secondary) {
+        // Catat penyebab putus (kode status + pesan) -- penting untuk melacak kegagalan menautkan.
+        const reason = lastDisconnect?.error instanceof Error ? lastDisconnect.error.message : String(lastDisconnect?.error ?? "");
+        acct.lastClose = { code: statusCode ?? "?", reason: reason.slice(0, 120), at: Date.now() };
+        acct.lastQr = null;
+        console.warn(`🔗 [${acct.label}] koneksi ditutup: kode ${statusCode ?? "?"}${reason ? ` (${reason.slice(0, 120)})` : ""}, tertaut: ${isPairedCreds(sock.authState?.creds) ? "ya" : "belum"}`);
+      }
+      if (acct.secondary) {
         acct.sock = null;
         acct.open = false;
       } else {
         currentSock = null;
         waOpen = false;
       }
-      if (loggedOut) {
+      const paired = isPairedCreds(sock.authState?.creds);
+      if (acct.secondary && !paired) {
+        // Belum pernah tertaut: kode kedaluwarsa / belum dimasukkan -- bukan logout. Selama jatah kode otomatis belum habis, coba lagi
+        // (sesi dibersihkan di connect()); setelah itu berhenti dan menunggu /wa2 kode supaya tidak membanjiri WhatsApp & kamu.
+        if ((acct.autoCodes || 0) >= 1 || loggedOut) {
+          acct.idle = true;
+          wipeAuthDir(acct.authDir);
+          console.warn(`🔗 [${acct.label}] belum tertaut; berhenti menyambung. Kirim /wa2 kode untuk memulai lagi.`);
+          if (!acct.idleNotified) {
+            acct.idleNotified = true;
+            sendToOwner(`ℹ️ ${acct.label} belum tertaut (kode tautan kedaluwarsa atau belum dimasukkan). Kirim /wa2 kode untuk minta kode baru.`).catch(() => {});
+          }
+        } else {
+          console.warn(`🔗 [${acct.label}] koneksi putus sebelum tertaut, coba lagi dalam 5 detik...`);
+          setTimeout(() => connect(acct).catch((err) => console.error(`Gagal menyambung ulang ${acct.label}:`, err instanceof Error ? err.message : String(err))), 5000);
+        }
+      } else if (loggedOut) {
         console.error(
           `\n❌ Sesi WhatsApp${acct.secondary ? ` (${acct.label})` : ""} logout/dicabut dari HP (atau sesi tidak valid lagi).\n` +
             `   Hapus folder wa-bot/${acct.authDir}/ lalu jalankan ulang bot ini untuk menautkan ulang.\n`
         );
-        if (acct.secondary) sendToOwner(`⚠️ ${acct.label} keluar (logout) dari WhatsApp. Hapus folder ${acct.authDir}/ di wa-bot lalu /restart untuk menautkan ulang.`).catch(() => {});
+        if (acct.secondary) {
+          // Sesi sudah tidak berlaku: buang otomatis, berhenti menyambung, dan kabari SEKALI. Tautkan ulang dengan /wa2 kode.
+          acct.idle = true;
+          acct.idleNotified = true;
+          wipeAuthDir(acct.authDir);
+          sendToOwner(`⚠️ ${acct.label} keluar (logout) dari WhatsApp. Sesi lamanya sudah dibersihkan; kirim /wa2 kode untuk menautkan ulang.`).catch(() => {});
+        }
       } else {
         console.warn(`⚠️  Koneksi WhatsApp${acct.secondary ? ` (${acct.label})` : ""} putus, coba sambung ulang dalam 5 detik...`);
         setTimeout(() => connect(acct).catch((err) => console.error(`Gagal menyambung ulang ${acct.label}:`, err instanceof Error ? err.message : String(err))), 5000);
@@ -3282,6 +3371,8 @@ async function connect(acct = MAIN_ACCOUNT_DEF) {
       if (acct.secondary) acct.open = true;
       else waOpen = true;
       acct.pairing = false;
+      acct.idle = false;
+      acct.idleNotified = false;
       console.log(`\n✅ WhatsApp${acct.secondary ? ` ${acct.label}` : ""} tersambung (${sock.user?.id || "?"}). Bot siap jalan.\n`);
       if (acct.secondary) sendToOwner(`✅ ${acct.label} tersambung (${(sock.user?.id || "?").split(":")[0].split("@")[0]}).`).catch(() => {});
     }
@@ -3407,7 +3498,7 @@ function wa2StatusWord() {
   const a = WA2_ACCOUNT_DEF;
   if (!a) return "tidak dipakai";
   if (a.sock && a.open) return `tersambung (${(a.sock.user?.id || "?").split(":")[0].split("@")[0]})`;
-  if (a.sock && !a.sock.authState?.creds?.registered) return "⚠️ belum tertaut (kirim /wa2 kode)";
+  if (a.idle || (a.sock && !isPairedCreds(a.sock.authState?.creds))) return "⚠️ belum tertaut (kirim /wa2 kode)";
   return "⚠️ terputus (menyambung ulang...)";
 }
 function describeWa2() {
@@ -3417,7 +3508,8 @@ function describeWa2() {
   return [
     `📱 *${a.label}*`,
     `• Status: ${wa2StatusWord()}`,
-    `• Nomor: ${wa2Config.number || "(WA2_NUMBER belum diisi)"}`,
+    `• Nomor: ${wa2Config.number ? `+${wa2Config.number}` : "(WA2_NUMBER belum diisi)"} (HP yang memasukkan kode harus nomor ini)`,
+    ...(a.lastClose ? [`• Putus terakhir: kode ${a.lastClose.code}${a.lastClose.reason ? ` (${a.lastClose.reason})` : ""} pukul ${formatClockInTimezone(a.lastClose.at)}`] : []),
     `• Grup: ${groups > 0 ? `${groups} aturan grup diizinkan` : "tidak menjawab di grup (isi WA2_GROUP_ALLOWED_NAMES)"}`,
     `• Ringkasan harian pemilik: ${wa2Config.inSummary ? "ikut" : "tidak ikut"}`,
     `• Perintah pemilik hanya dari nomor ${OWNER_NUMBER || "pemilik"} (chat-ke-diri-sendiri di nomor ini diabaikan)`,
@@ -3984,9 +4076,11 @@ const telegram = createTelegram({
     groupVoice,
     wa2: {
       describe: () => describeWa2(),
+      qr: async () => ({ data: await wa2QrImage(), name: "qr-nomor-2.png", mime: "image/png", photo: true }),
       code: async () => {
         const code = await requestWa2PairingCode({ force: true, notify: false });
-        return pairingInstructions({ label: WA2_ACCOUNT_DEF.label, code });
+        if (!code) return "⏳ Menyiapkan sesi baru untuk nomor kedua. Kode tautan akan dikirim ke sini dalam beberapa detik.";
+        return pairingInstructions({ label: WA2_ACCOUNT_DEF.label, code, number: wa2Config.number, clock: formatClockInTimezone(Date.now()) });
       }
     },
     nodin,

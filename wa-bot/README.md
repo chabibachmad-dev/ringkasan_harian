@@ -917,7 +917,8 @@ Satu bot bisa memegang **dua nomor WhatsApp**. Nomor utama jalan seperti biasa; 
 
 1. Jalankan migrasi database **sekali** (menambah kolom `account` di `whatsapp_messages`): Telegram `/migrasi terapkan`, atau salin isi `supabase/migrations/0039_whatsapp_account.sql` ke Supabase SQL Editor.
 2. Isi `.env` (lihat bagian 25 `.env.example`), minimal `WA2_NUMBER=0812xxxxxxx`, lalu `/restart`.
-3. Bot mengirim **kode tautan** 8 huruf ke WhatsApp + Telegram kamu. Teruskan ke pemegang HP nomor kedua: WhatsApp → Perangkat Tertaut → Tautkan Perangkat → *Tautkan dengan nomor telepon* → masukkan kode. Kode berlaku beberapa menit; minta lagi dengan `/wa2 kode`. Tanpa `WA2_NUMBER`, bot menampilkan QR di log (`pm2 logs`).
+3. Bot mengirim **kode tautan** 8 huruf ke WhatsApp + Telegram kamu. Teruskan ke pemegang HP nomor kedua: WhatsApp → Perangkat Tertaut → Tautkan Perangkat → *Tautkan dengan nomor telepon* → masukkan kode. Kode berlaku beberapa menit; minta lagi dengan `/wa2 kode`. Tanpa `WA2_NUMBER`, bot menampilkan QR di log (`pm2 logs`). Kalau kode tidak dimasukkan tepat waktu, bot membersihkan sesi setengah jadi itu sendiri (tidak perlu menghapus folder), berhenti menyambung, dan menunggu `/wa2 kode`.
+3b. **Cara lain bila kode ditolak HP:** kirim `/wa2 qr`. Bot mengirim gambar QR ke Telegram; pemegang HP nomor 2 memindainya dari HP/laptop lain (WhatsApp → Perangkat Tertaut → Tautkan Perangkat). QR berlaku ±1 menit; kirim `/wa2 qr` lagi untuk gambar baru.
 4. `/wa2` menampilkan status; `/status` ikut menampilkan nomor kedua.
 
 **Aturan nomor kedua** (karena HP-nya dipegang orang lain)

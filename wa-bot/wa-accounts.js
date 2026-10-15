@@ -14,7 +14,8 @@
 // .env (semua opsional):
 //   WA2_ENABLED=true               nyalakan nomor kedua (otomatis true bila WA2_NUMBER diisi)
 //   WA2_NUMBER=0812xxxxxxx         nomor itu, dipakai membuat KODE TAUTAN (tanpa scan QR); "0"/"8" di depan otomatis jadi 62
-//   WA2_LABEL=Nomor 2              nama di pesan status
+//   WA2_NAME=Wongsobot             nama bot di nomor kedua: dipakai AI saat memperkenalkan diri DAN di pesan status
+//   WA2_LABEL=Nomor 2              nama di pesan status saja (bila beda dari WA2_NAME)
 //   WA2_AUTH_DIR=auth_session_2    folder sesi login nomor kedua
 //   WA2_GROUP_ALLOWED_NAMES=...    grup yang dijawab nomor kedua (pisah koma, sama aturannya dengan WA_GROUP_ALLOWED_NAMES)
 //   WA2_GROUP_ALLOWED_JIDS=...
@@ -45,13 +46,15 @@ const truthy = (v, d = false) => {
 export function readSecondAccountConfig(env = process.env) {
   const number = normalizePhone(env.WA2_NUMBER);
   const enabled = env.WA2_ENABLED === undefined || String(env.WA2_ENABLED).trim() === "" ? Boolean(number) : truthy(env.WA2_ENABLED);
-  const label = String(env.WA2_LABEL || "").trim() || "Nomor 2";
+  const name = String(env.WA2_NAME || "").trim();
+  const label = String(env.WA2_LABEL || "").trim() || name || "Nomor 2";
   const authDir = String(env.WA2_AUTH_DIR || "").trim() || "auth_session_2";
   const split = (v) => String(v || "").split(",");
   return {
     enabled,
     id: SECOND_ACCOUNT,
     label,
+    botName: name, // nama yang dipakai AI saat memperkenalkan diri lewat nomor ini ("" = tetap Ayyubi)
     number,
     authDir,
     groupNames: split(env.WA2_GROUP_ALLOWED_NAMES).map(normalizeGroupName).filter(Boolean),
@@ -71,13 +74,15 @@ export function formatPairingCode(code) {
   return c.length === 8 ? `${c.slice(0, 4)}-${c.slice(4)}` : c;
 }
 
-/** Teks petunjuk untuk pemegang HP nomor kedua. */
-export function pairingInstructions({ label, code }) {
+/** Teks petunjuk untuk pemegang HP nomor kedua. number = nomor yang dipakai membuat kode; clock = jam pembuatan "HH:MM". */
+export function pairingInstructions({ label, code, number = null, clock = null }) {
   return (
-    `🔗 Kode tautan ${label}: ${formatPairingCode(code)}\n\n` +
-    "Di HP nomor itu: WhatsApp → ⋮ / Pengaturan → Perangkat Tertaut → Tautkan Perangkat → " +
+    `🔗 Kode tautan ${label}: ${formatPairingCode(code)}\n` +
+    (number ? `Untuk nomor: +${number} — HP yang memasukkan kode HARUS nomor ini.\n` : "") +
+    (clock ? `Dibuat ${clock}; berlaku sekitar 2 menit. Pakai kode TERBARU saja (kode lama tidak berlaku lagi).\n` : "") +
+    "\nDi HP nomor itu: WhatsApp → ⋮ / Pengaturan → Perangkat Tertaut → Tautkan Perangkat → " +
     "\"Tautkan dengan nomor telepon\" (di bagian bawah layar scan) → masukkan kode di atas.\n" +
-    "Kode berlaku beberapa menit saja. Kalau kedaluwarsa, kirim /wa2 kode untuk minta yang baru."
+    "Kalau muncul \"Gagal menautkan perangkat\", kirim /wa2 kode untuk kode baru dan coba lagi segera."
   );
 }
 
@@ -118,4 +123,24 @@ export function createAccountRouter({ supabase = null, log = console } = {}) {
   }
 
   return { remember, accountOf, size: () => known.size };
+}
+
+/** Sesi sudah benar-benar ditautkan ke HP (pair-success menyimpan `account`). */
+export function isPairedCreds(creds) {
+  return Boolean(creds?.account);
+}
+
+/**
+ * Sisa tautan yang TIDAK selesai: requestPairingCode() sudah menyimpan `me` (nomor) tetapi kode tidak pernah dimasukkan di HP.
+ * Baileys lalu mengira sesi itu login dan mencoba "masuk" -> WhatsApp menjawab 401 (tampak seperti logout) berulang-ulang.
+ * Sesi seperti ini harus dibuang dan dimulai dari awal.
+ */
+export function isStalePairing(creds) {
+  return Boolean(creds?.me?.id) && !isPairedCreds(creds);
+}
+
+/** Ganti nama "Ayyubi" di prompt AI dengan nama bot nomor kedua (hanya bila botName diisi). */
+export function personaPrompt(prompt, botName) {
+  const n = String(botName || "").trim();
+  return n ? String(prompt).replaceAll("Ayyubi", n) : String(prompt);
 }

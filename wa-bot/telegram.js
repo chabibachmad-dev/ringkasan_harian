@@ -153,7 +153,7 @@ const HELP = [
   "/ingatkan <waktu> <teks>  — pengingat pribadi (contoh: /ingatkan besok 09:00 kirim SPJ; /ingatkan tiap tanggal 25 jam 08:00 laporan);  /pengingat  — daftar;  /pengingat batal <nomor>",
   "/kesehatan  — periksa Ollama, disk, memori, WhatsApp, basis data, restart, dan cadangan sekarang (otomatis dipantau)",
   "/voice wag on|off  — balasan di grup WhatsApp berupa suara (on) atau teks (off)",
-  "/wa2  — nomor WhatsApp kedua (status; /wa2 kode)",
+  "/wa2  — nomor WhatsApp kedua (status; /wa2 kode; /wa2 qr)",
   "/kas  — laporan kas bulanan: konfirmasi angka tiap awal bulan, submit, simpan (/kas bantuan)",
   "/nodin  — konsep Nota Dinas LPJ (PDF + Word), otomatis tiap tanggal 1 (/nodin november, /nodin cek)",
   "/urutan  — lihat/ubah urutan AI untuk balasan WhatsApp & grup (jalur santai & akurat; contoh: /urutan santai groq,gemini,openrouter,ollama;  /urutan reset)",
@@ -182,7 +182,7 @@ const HELP = [
  *   reminders?: { handle({name:"ingatkan"|"pengingat", arg}) -> string }   pengingat pribadi (reminders.js)
  *   health?: { report() -> Promise<string> }   papan kesehatan bot (health.js)
  *   groupVoice?: { enabled(), set(bool) -> Promise<{on,saved,warning}>, describe() }   balasan suara di grup WhatsApp (group-voice.js, /voice wag)
- *   wa2?: { describe() -> string, code() -> Promise<string> }   nomor WhatsApp kedua (/wa2, /wa2 kode)
+ *   wa2?: { describe() -> string, code() -> Promise<string>, qr() -> Promise<{data,name,mime,photo}> }   nomor WhatsApp kedua (/wa2, /wa2 kode)
  *   kas?: { handle(arg) -> Promise<{ok,text,files?,caption?}> }   laporan kas bulanan (kas.js, /kas)
  *   nodin?: { compose(arg) -> Promise<{ok,text,caption?,files?}> }   konsep nota dinas bulanan (nodin.js, /nodin)
  *   aiRoute?: { handle(arg) -> Promise<string> }   urutan penyedia AI balasan WA/grup (ai-route.js, /urutan)
@@ -367,12 +367,25 @@ export function createTelegram({ config, deps = {}, fetchImpl = globalThis.fetch
     return apiForm("sendDocument", form, { timeoutMs: 120_000 });
   }
 
+  /** Kirim gambar sebagai foto (tampil langsung, bisa dipindai). */
+  async function sendPhoto(chatId, file, caption = "") {
+    const form = new FormData();
+    form.append("chat_id", String(chatId));
+    form.append("photo", new Blob([file.data], { type: file.mime || "image/png" }), file.name);
+    if (caption) {
+      form.append("caption", waToTelegramHtml(caption).slice(0, 1000));
+      form.append("parse_mode", "HTML");
+    }
+    return apiForm("sendPhoto", form, { timeoutMs: 120_000 });
+  }
+
   /** Kirim beberapa berkas ke satu chat; keterangan menempel di berkas pertama. */
   async function sendFiles(chatId, files, caption = "") {
     let i = 0;
     for (const f of files) {
       try {
-        await sendDocument(chatId, f, i === 0 ? caption : "");
+        if (f.photo) await sendPhoto(chatId, f, i === 0 ? caption : "");
+        else await sendDocument(chatId, f, i === 0 ? caption : "");
       } catch (e) {
         // keterangan berformat ditolak (HTML)? kirim ulang tanpa keterangan berformat
         if (i === 0 && caption && e.status === 400 && /parse entities|can't parse/i.test(e.message)) await sendDocument(chatId, f, "");
@@ -699,7 +712,7 @@ Ubah: /suara auto • /suara on • /suara off`));
     if (!text) return;
     const key = `tg:${chatId}`;
     const reply = (t) => send(chatId, t);
-    const cmd = /^\/([a-z_]+)(?:@\w+)?(?:\s+([\s\S]*))?$/i.exec(text);
+    const cmd = /^\/([a-z_][a-z0-9_]*)(?:@\w+)?(?:\s+([\s\S]*))?$/i.exec(text);
     const name = cmd ? cmd[1].toLowerCase() : "";
     const arg = cmd ? (cmd[2] || "").trim() : "";
 
@@ -731,6 +744,14 @@ Ubah: /suara auto • /suara on • /suara off`));
       if (/^(kode|code|tautkan|pair)$/i.test(arg.trim())) {
         try {
           return void (await reply(await withAction(chatId, "typing", () => w.code())));
+        } catch (e) {
+          return void (await reply(`⚠️ ${e instanceof Error ? e.message : e}`));
+        }
+      }
+      if (/^(qr|barcode)$/i.test(arg.trim())) {
+        try {
+          const img = await withAction(chatId, "upload_photo", () => w.qr());
+          return void (await sendFiles(chatId, [img], "QR penautan Nomor 2. Di HP nomor 2: WhatsApp → Perangkat Tertaut → Tautkan Perangkat → pindai QR ini dari HP/laptop lain (bukan dari HP yang sama). QR berlaku ±1 menit; kalau gagal kirim /wa2 qr lagi."));
         } catch (e) {
           return void (await reply(`⚠️ ${e instanceof Error ? e.message : e}`));
         }
@@ -984,7 +1005,7 @@ Ubah: /suara auto • /suara on • /suara off`));
     const m = u?.message;
     if (!m) return false;
     if (m.document && deps.ops?.handleDocument) return true;
-    const c = typeof m.text === "string" ? /^\/([a-z_]+)/i.exec(m.text) : null;
+    const c = typeof m.text === "string" ? /^\/([a-z_][a-z0-9_]*)/i.exec(m.text) : null;
     if (!c) return false;
     const name = c[1].toLowerCase();
     return FAST_COMMANDS.has(name) || (deps.ops?.commands || []).includes(name);
