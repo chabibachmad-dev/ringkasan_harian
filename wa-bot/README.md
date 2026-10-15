@@ -891,3 +891,20 @@ Dua laporan yang dibuat tiap awal bulan, satu berkas dua halaman (halaman 1 Lapo
 | `/kas mulai`, `/kas status`, `/kas bantuan` | buat rancangan manual, jadwal, bantuan |
 
 Pengaturan opsional ada di bagian 23 `.env.example` (`KAS_DAY`, `KAS_TIME`, `KAS_PDF`, `KAS_ENABLED`). Daftar rekening mengikuti data bulan lalu; rekening baru/ditutup belum punya perintah sendiri (bilang saja, akan ditambahkan).
+
+## Balasan suara di grup WhatsApp (`/voice wag on|off`)
+
+Diatur dari Telegram (hanya pemilik):
+
+| Perintah | Fungsi |
+|---|---|
+| `/voice` | lihat pengaturan suara (grup WhatsApp + Telegram) |
+| `/voice wag on` | balasan bot di grup berupa **voice note saja** (tanpa teks / transkrip) |
+| `/voice wag off` | balasan grup kembali **teks** (bawaan) |
+| `/voice tg auto\|on\|off` | sama dengan `/suara` (balasan suara di Telegram) |
+
+- Pengaturan disimpan di tabel `bot_state` (kunci `wa_group_voice`), jadi bertahan setelah restart dan berlaku untuk semua grup yang diizinkan.
+- Syarat: `GEMINI_API_KEYS` terisi dan `ffmpeg` terpasang (`sudo apt install ffmpeg`), sama dengan balasan suara Telegram.
+- Tetap dikirim sebagai **teks** bila jawabannya memuat tautan, blok kode, atau tabel; lebih panjang dari `WA_GROUP_VOICE_MAX_CHARS`; atau suara gagal dibuat (ffmpeg belum ada, kuota habis, terlalu lama). Jawaban tidak pernah hilang, dan kamu dikabari sekali di Telegram/WhatsApp bila penyebabnya ffmpeg atau kuota.
+- Riwayat percakapan tetap menyimpan teks jawaban (bukan suara), sehingga balasan terhadap voice note bot tetap dikenali.
+- Pengaturan opsional ada di bagian 24 `.env.example`.

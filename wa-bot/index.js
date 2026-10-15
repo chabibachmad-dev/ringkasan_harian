@@ -69,6 +69,7 @@ import { createFallbackChain, readFallbackConfig } from "./llm-fallback.js";
 import { classifyRoute, createAiRoute, parseRouteCommand } from "./ai-route.js";
 import { createNodin, parseNodinCommand, readNodinConfig } from "./nodin.js";
 import { createKas, parseKasCommand, readKasConfig } from "./kas.js";
+import { createGroupVoice, readGroupVoiceConfig } from "./group-voice.js";
 import { createWebSearch, readSearchConfig } from "./web-search.js";
 import { createRegMonitor, readRegMonitorConfig } from "./reg-monitor.js";
 import { createKhatamReminder } from "./khatam.js";
@@ -2835,7 +2836,37 @@ async function handleGroupMessage(msg, sock) {
   }
   sock.sendPresenceUpdate("paused", groupJid).catch(() => {});
   if (!result || !result.reply) return;
+  // /voice wag on: balasan grup berupa voice note saja (tanpa teks). Gagal/tidak layak dibacakan -> tetap dikirim teks.
+  if (groupVoice.enabled()) {
+    sock.sendPresenceUpdate("recording", groupJid).catch(() => {});
+    const voice = await groupVoice.tryVoice(result.reply);
+    sock.sendPresenceUpdate("paused", groupJid).catch(() => {});
+    if (voice && (await deliverAutoReplyVoice(sock, groupJid, result, voice, { quoted: msg, waName: subject || null }))) return;
+  }
   await deliverAutoReplyText(sock, groupJid, result, "👥 Balasan grup", { quoted: msg, waName: subject || null });
+}
+
+/** Kirim balasan grup sebagai voice note. true = terkirim (dan tercatat); false = gagal kirim, pemanggil mengirim teks. */
+async function deliverAutoReplyVoice(sock, jid, result, voice, { quoted = null, waName = null } = {}) {
+  try {
+    const sent = await sock.sendMessage(jid, { audio: voice.ogg, mimetype: "audio/ogg; codecs=opus", ptt: true }, quoted ? { quoted } : undefined);
+    // Yang dicatat tetap TEKS jawabannya: konteks percakapan grup untuk AI tidak boleh kosong, dan id pesan suara dipakai
+    // untuk mengenali balasan-ke-bot (voice note itu bisa di-reply).
+    await supabase.from("whatsapp_messages").insert({
+      wa_jid: jid,
+      wa_name: waName,
+      direction: "out",
+      content: result.reply,
+      status: "sent",
+      wa_message_id: sent?.key?.id ?? null
+    });
+    console.log(`🔊 Balasan grup (suara) ke ${jid}: ${result.reply.slice(0, 60)}`);
+    await recordTokenUsage(result.tokensUsed, result.costUsd);
+    return true;
+  } catch (err) {
+    console.error(`Gagal kirim voice note ke ${jid}, kirim teks:`, err instanceof Error ? err.message : String(err));
+    return false;
+  }
 }
 
 // ---------------- Suara di WhatsApp ----------------
@@ -3451,6 +3482,19 @@ const aiRoute = createAiRoute({
 });
 aiRoute.load().then(() => console.log(`🔀 Urutan AI balasan WA: ${aiRoute.describe()}`)).catch(() => {});
 
+// Balasan SUARA di grup WhatsApp (/voice wag on|off dari Telegram; tersimpan di bot_state). Lihat group-voice.js.
+const groupVoice = createGroupVoice({
+  state: botStateStore,
+  speak: speaker.available() ? (text) => speaker.speak(text) : null,
+  check: checkVoiceOutput,
+  notify: (text) => sendToOwner(text),
+  config: readGroupVoiceConfig(process.env, ttsConfig.maxChars)
+});
+groupVoice
+  .load()
+  .then(() => console.log(`🔊 Balasan grup WhatsApp: ${groupVoice.describe()} (ubah: /voice wag on|off di Telegram)`))
+  .catch(() => {});
+
 const ops = createOps({
   config: readOpsConfig(process.env, fileURLToPath(new URL(".", import.meta.url))),
   deps: {
@@ -3815,6 +3859,7 @@ const telegram = createTelegram({
     backup: { status: () => backup.status(), run: () => backup.runAndFormat() },
     health,
     aiRoute: { handle: (arg) => aiRoute.handle(arg) },
+    groupVoice,
     nodin,
     kas,
     localChat,

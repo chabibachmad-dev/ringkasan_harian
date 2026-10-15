@@ -22,6 +22,7 @@
 // ================================================================
 
 import { voiceToCommand, describeError } from "./voice-input.js";
+import { parseVoiceArg } from "./group-voice.js";
 import { isFarewellFor, formatTutorMessage, TUTOR_STT_HINT, TUTOR_STT_HINT_ID, TUTOR_TEXT_MAX, TUTOR_TEXT_MAX_ID } from "./tutor.js";
 
 const API = "https://api.telegram.org";
@@ -151,6 +152,7 @@ const HELP = [
   "/pasar  — IHSG, harga emas dunia (Rp/gram), dan kurs USD/IDR sekarang (alias /emas, /ihsg); dikirim otomatis tiap pagi hari kerja. /pasar tes = uji tiap sumber data",
   "/ingatkan <waktu> <teks>  — pengingat pribadi (contoh: /ingatkan besok 09:00 kirim SPJ; /ingatkan tiap tanggal 25 jam 08:00 laporan);  /pengingat  — daftar;  /pengingat batal <nomor>",
   "/kesehatan  — periksa Ollama, disk, memori, WhatsApp, basis data, restart, dan cadangan sekarang (otomatis dipantau; kamu dikabari saat bermasalah dan pulih)",
+  "/voice wag on|off  — balasan di grup WhatsApp berupa suara (on) atau teks (off)",
   "/kas  — laporan kas bulanan: konfirmasi angka tiap awal bulan, submit, simpan (/kas bantuan)",
   "/nodin  — konsep Nota Dinas LPJ (PDF + Word), otomatis tiap tanggal 1 (/nodin november, /nodin cek)",
   "/urutan  — lihat/ubah urutan AI untuk balasan WhatsApp & grup (jalur santai & akurat; contoh: /urutan santai groq,gemini,openrouter,ollama;  /urutan reset)",
@@ -178,6 +180,7 @@ const HELP = [
  *   memory?: { handle({name:"ingat"|"catatan"|"lupa", arg}) -> string }   catatan pribadi pemilik (owner-memory.js), hanya dibaca Ollama lokal
  *   reminders?: { handle({name:"ingatkan"|"pengingat", arg}) -> string }   pengingat pribadi (reminders.js)
  *   health?: { report() -> Promise<string> }   papan kesehatan bot (health.js)
+ *   groupVoice?: { enabled(), set(bool) -> Promise<{on,saved,warning}>, describe() }   balasan suara di grup WhatsApp (group-voice.js, /voice wag)
  *   kas?: { handle(arg) -> Promise<{ok,text,files?,caption?}> }   laporan kas bulanan (kas.js, /kas)
  *   nodin?: { compose(arg) -> Promise<{ok,text,caption?,files?}> }   konsep nota dinas bulanan (nodin.js, /nodin)
  *   aiRoute?: { handle(arg) -> Promise<string> }   urutan penyedia AI balasan WA/grup (ai-route.js, /urutan)
@@ -455,6 +458,29 @@ Ubah: /suara auto • /suara on • /suara off`));
     await send(chatId, `🔊 Balasan suara: ${label[mode]}.${extra}`);
   }
 
+  /** /voice: pusat pengaturan suara. /voice wag on|off = balasan grup WhatsApp suara/teks; /voice tg ... = sama dengan /suara. */
+  async function handleVoiceHub(chatId, arg) {
+    const cmd = parseVoiceArg(arg);
+    const gv = deps.groupVoice;
+    if (cmd.kind === "error") return void (await send(chatId, cmd.error));
+    if (cmd.kind === "tg") return handleVoiceCommand(chatId, cmd.arg);
+    if (!gv) return void (await send(chatId, "Fitur balasan suara grup belum aktif di bot ini."));
+    if (cmd.kind === "status" || cmd.value === null) {
+      const tg = await getVoiceMode(chatId);
+      const tgLabel = { auto: "otomatis", on: "selalu suara", off: "teks saja" }[tg] || tg;
+      return void (await send(chatId, `🔊 *Pengaturan suara*\n• Grup WhatsApp: ${gv.describe()}\n• Telegram: ${tgLabel}\n\nUbah: /voice wag on • /voice wag off • /voice tg auto|on|off`));
+    }
+    const r = await gv.set(cmd.value === "on");
+    if (r.on) {
+      await send(
+        chatId,
+        `🔊 Grup WhatsApp: balasan sekarang *voice note saja* (tanpa teks).\nJawaban yang panjang, berisi tautan, kode, atau tabel tetap dikirim sebagai teks supaya tidak terpotong. Kalau suara gagal dibuat, jawaban dikirim teks.${r.warning ? `\n\n⚠️ Tapi suara belum bisa dibuat sekarang: ${r.warning}. Sampai beres, balasan grup tetap teks.` : ""}${r.saved ? "" : "\n\n⚠️ Pengaturan gagal disimpan; berlaku sampai bot restart."}`
+      );
+    } else {
+      await send(chatId, `💬 Grup WhatsApp: balasan kembali berupa *teks*.${r.saved ? "" : "\n\n⚠️ Pengaturan gagal disimpan; berlaku sampai bot restart."}`);
+    }
+  }
+
   // ---------------------------------------------------------------- tutor Inggris (/speak)
   function tutorActive(chatId) {
     const s = tutorSessions.get(chatId);
@@ -696,6 +722,7 @@ Ubah: /suara auto • /suara on • /suara off`));
       return void (await reply(s.text ? "📝 Balasan tutor sekarang juga ditulis. /teks off untuk suara saja." : "🔊 Balasan tutor sekarang suara saja. /teks on bila mau teks juga."));
     }
     if (name === "suara") return handleVoiceCommand(chatId, arg);
+    if (name === "voice") return handleVoiceHub(chatId, arg);
 
     if (name === "dokumen" || name === "dok" || name === "doc") {
       const ld = deps.localDocs;
@@ -938,7 +965,7 @@ Ubah: /suara auto • /suara on • /suara off`));
   }
 
   const HANDLER_DEADLINE_MS = 10 * 60_000;
-  const FAST_COMMANDS = new Set(["dokumen", "dok", "doc", "status", "id", "help", "start", "ingat", "catatan", "lupa", "memori", "note", "penyedia", "provider", "skill", "skil", "lokal", "tanya", "pasar", "emas", "ihsg", "ingatkan", "remind", "pengingat", "reminder", "cadangan", "backup", "kesehatan", "sehat", "health", "urutan", "route", "rute", "nodin", "notadinas", "kas", "laporankas"]);
+  const FAST_COMMANDS = new Set(["dokumen", "dok", "doc", "status", "id", "help", "start", "ingat", "catatan", "lupa", "memori", "note", "penyedia", "provider", "skill", "skil", "lokal", "tanya", "pasar", "emas", "ihsg", "ingatkan", "remind", "pengingat", "reminder", "cadangan", "backup", "kesehatan", "sehat", "health", "urutan", "route", "rute", "nodin", "notadinas", "kas", "laporankas", "voice"]);
   function isFastUpdate(u) {
     const m = u?.message;
     if (!m) return false;
@@ -1056,6 +1083,7 @@ Ubah: /suara auto • /suara on • /suara off`));
           { command: "dokumen", description: "Tanya dari dokumen lokal di laptop (dijawab Ollama)" },
           { command: "ingatkan", description: "Pengingat pribadi: /ingatkan besok 09:00 kirim SPJ; /pengingat" },
           { command: "kesehatan", description: "Periksa kesehatan bot: Ollama, disk, memori, WhatsApp, cadangan" },
+          { command: "voice", description: "Balasan grup WhatsApp: suara (on) atau teks (off)" },
           { command: "kas", description: "Laporan kas bulanan (Saldo Rekening & Register Kas)" },
           { command: "nodin", description: "Konsep Nota Dinas LPJ Bendahara (PDF + Word)" },
           { command: "urutan", description: "Urutan AI untuk balasan WhatsApp & grup (santai/akurat)" },
