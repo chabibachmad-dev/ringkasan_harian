@@ -155,6 +155,7 @@ const HELP = [
   "/voice wag on|off|id|eng|kor|arb|jawa  — balasan grup WA berupa suara/teks + bahasa suara",
   "/wa2  — nomor WhatsApp kedua (status, kode, qr)",
   "/grup  — grup WA yang dijawab bot: lihat, semua, tambah, hapus",
+  "/gambar <deskripsi>  — buat gambar (Gemini); /gambar grup on|off = izinkan di grup WA",
   "/kas  — laporan kas bulanan: konfirmasi angka, submit, simpan (/kas bantuan)",
   "/nodin  — konsep Nota Dinas LPJ (PDF + Word), otomatis tiap tanggal 1 (/nodin cek)",
   "/urutan  — lihat/ubah urutan AI untuk balasan WhatsApp & grup (jalur santai & akurat; contoh: /urutan santai groq,gemini,openrouter,ollama;  /urutan reset)",
@@ -165,8 +166,7 @@ const HELP = [
   "/ingat <teks>  — simpan catatan pribadi (hanya di laptop, hanya dibaca Ollama lokal);  /catatan  — daftar;  /catatan <kata>  — cari;  /lupa <nomor|semua>  — hapus",
   "/sistem  — kondisi laptop bot (pm2, disk, RAM, Ollama); /log, /restart, /deploy, /migrasi: ketik /ops (perlu OPS_ENABLED=true)",
   "/baru  — mulai obrolan baru (lupakan konteks sebelumnya)",
-  "/speak [topik]  — mulai latihan ngobrol Inggris dengan tutor (suara)   /speak id [topik]  — ngobrol santai bahasa Indonesia   /selesai  — akhiri",
-  "/suara [auto|on|off]  — atur balasan suara untuk obrolan biasa",
+  "/speak [topik]  — latihan Inggris dengan tutor (suara);  /speak id [topik]  — santai berbahasa Indonesia;  /selesai  — akhiri",
   "/id  — tampilkan id chat ini"
 ].join("\n");
 
@@ -182,6 +182,7 @@ const HELP = [
  *   memory?: { handle({name:"ingat"|"catatan"|"lupa", arg}) -> string }   catatan pribadi pemilik (owner-memory.js), hanya dibaca Ollama lokal
  *   reminders?: { handle({name:"ingatkan"|"pengingat", arg}) -> string }   pengingat pribadi (reminders.js)
  *   health?: { report() -> Promise<string> }   papan kesehatan bot (health.js)
+ *   image?: { available(), describe(), parseCommand(arg), setGroup(bool) -> Promise<{on,saved}>, make(prompt) -> Promise<{image:{buffer,mime}}|{error}> }   pembuat gambar (image-gen.js, /gambar)
  *   groupVoice?: { enabled(), set(bool) -> Promise<{on,saved,warning}>, describe() }   balasan suara di grup WhatsApp (group-voice.js, /voice wag)
  *   groups?: { handle(arg) -> Promise<string> }   daftar grup yang dijawab (/grup)
  *   wa2?: { describe() -> string, code() -> Promise<string>, qr() -> Promise<{data,name,mime,photo}> }   nomor WhatsApp kedua (/wa2, /wa2 kode)
@@ -750,6 +751,24 @@ Ubah: /suara auto • /suara on • /suara off`));
     }
     if (name === "suara") return handleVoiceCommand(chatId, arg);
     if (name === "voice") return handleVoiceHub(chatId, arg);
+    if (name === "gambar" || name === "image" || name === "img") {
+      const im = deps.image;
+      if (!im) return void (await reply("Pembuat gambar tidak tersedia di versi bot ini."));
+      if (!im.available()) return void (await reply("Pembuat gambar belum aktif: GEMINI_API_KEYS belum diisi di .env bot."));
+      const c = im.parseCommand(arg);
+      if (c.kind === "status") {
+        return void (await reply(`🖼️ Pembuat gambar\n${im.describe()}\n\nPakai: /gambar <deskripsi>\nDi grup WA: ketik "bot, buatkan gambar ...".\nSaklar grup: /gambar grup on atau /gambar grup off`));
+      }
+      if (c.kind === "group") {
+        const r = await im.setGroup(c.value);
+        return void (await reply(r.on ? "🖼️ Gambar di grup WA: AKTIF. Anggota grup yang diizinkan bisa minta \"bot, buatkan gambar ...\" (dibatasi jatah harian)." : "🖼️ Gambar di grup WA: MATI. Permintaan gambar di grup dijawab seperti pertanyaan biasa." + (r.saved ? "" : "\n⚠️ Gagal disimpan di database; berlaku sampai bot restart.")));
+      }
+      if (!c.prompt) return void (await reply("Mau digambar apa? Contoh: /gambar kucing memakai topi astronot"));
+      const out = await withAction(chatId, "upload_photo", () => im.make(c.prompt));
+      if (out.error) return void (await reply(`⚠️ ${out.error}`));
+      const ext = /jpe?g/i.test(out.image.mime) ? "jpg" : /webp/i.test(out.image.mime) ? "webp" : "png";
+      return void (await sendFiles(chatId, [{ data: out.image.buffer, name: `gambar.${ext}`, mime: out.image.mime || "image/png", photo: true }], ""));
+    }
     if (name === "grup" || name === "group") {
       if (!deps.groups) return void (await reply("Pengaturan grup tidak tersedia di versi bot ini."));
       return void (await reply(await withAction(chatId, "typing", () => deps.groups.handle(arg))));
@@ -1016,7 +1035,7 @@ Ubah: /suara auto • /suara on • /suara off`));
   }
 
   const HANDLER_DEADLINE_MS = 10 * 60_000;
-  const FAST_COMMANDS = new Set(["dokumen", "dok", "doc", "status", "id", "help", "start", "ingat", "catatan", "lupa", "memori", "note", "penyedia", "provider", "skill", "skil", "lokal", "tanya", "pasar", "emas", "ihsg", "ingatkan", "remind", "pengingat", "reminder", "cadangan", "backup", "kesehatan", "sehat", "health", "urutan", "route", "rute", "nodin", "notadinas", "kas", "laporankas", "voice", "wa2", "nomor2", "grup", "group"]);
+  const FAST_COMMANDS = new Set(["dokumen", "dok", "doc", "status", "id", "help", "start", "ingat", "catatan", "lupa", "memori", "note", "penyedia", "provider", "skill", "skil", "lokal", "tanya", "pasar", "emas", "ihsg", "ingatkan", "remind", "pengingat", "reminder", "cadangan", "backup", "kesehatan", "sehat", "health", "urutan", "route", "rute", "nodin", "notadinas", "kas", "laporankas", "voice", "wa2", "nomor2", "grup", "group", "gambar", "image", "img"]);
   function isFastUpdate(u) {
     const m = u?.message;
     if (!m) return false;
@@ -1136,6 +1155,7 @@ Ubah: /suara auto • /suara on • /suara off`));
           { command: "kesehatan", description: "Periksa kesehatan bot: Ollama, disk, memori, WhatsApp, cadangan" },
           { command: "voice", description: "Balasan grup WhatsApp: suara (on) atau teks (off)" },
           { command: "grup", description: "Grup WhatsApp yang dijawab bot: lihat, tambah, hapus" },
+          { command: "gambar", description: "Buat gambar dari deskripsi (Gemini); /gambar grup on|off" },
           { command: "wa2", description: "Nomor WhatsApp kedua: status dan kode tautan" },
           { command: "kas", description: "Laporan kas bulanan (Saldo Rekening & Register Kas)" },
           { command: "nodin", description: "Konsep Nota Dinas LPJ Bendahara (PDF + Word)" },

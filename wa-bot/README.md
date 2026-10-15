@@ -957,3 +957,15 @@ Suara dibuat Gemini TTS yang mengenali bahasa dari teks yang dibacakan, jadi yan
 Hanya voice note, tanpa teks terjemahan. Jawaban yang memuat tautan, kode, tabel, atau terlalu panjang tetap berupa teks (aturan sama dengan `/voice wag on`). Bahasa suara hanya berlaku saat suara grup menyala; saat `/voice wag off`, bot tetap menjawab teks seperti biasa.
 
 Catatan: voice note MASUK di grup (balasan ke pesan bot) dikenali sebagai bahasa Indonesia (`VOICE_LANGUAGE=id`), jadi anggota grup yang membalas dengan voice note berbahasa Korea/Arab belum terbaca dengan baik; mereka bisa mengetik.
+
+## Pembuat gambar (`/gambar`, "buatkan gambar ...")
+
+Bot bisa membuat gambar dari deskripsi memakai Gemini ("Nano Banana"), dengan `GEMINI_API_KEYS` yang sama. Tidak ada kunci baru.
+
+- **Grup WhatsApp** (nomor 1 dan nomor 2, hanya grup yang sudah diizinkan): `bot, buatkan gambar kucing memakai topi astronot`. Hasilnya dikirim sebagai gambar (membalas pesan peminta). Saklar dari Telegram: `/gambar grup on|off` (bawaan aktif).
+- **Chat WhatsApp pemilik** (chat ke diri sendiri atau chat dengan nomor bot): `buatkan gambar ...` atau `/gambar ...`. Kontak pribadi lain TIDAK bisa meminta gambar.
+- **Telegram**: `/gambar <deskripsi>`; `/gambar` saja = status dan sisa jatah.
+
+Batas harian (reset 00.00 WITA, tahan restart): pemilik 30, semua grup 10, per orang di grup 3 (`IMAGE_*` di `.env`; 0 = tanpa batas). Jatah dikembalikan bila pembuatan gagal. Deskripsi konten dewasa atau dokumen/bukti palsu (KTP, kuitansi, stempel, dll.) ditolak sebelum dikirim ke Gemini. Bila kuota Gemini habis, bot memberi tahu dengan sopan; bila kunci ditolak atau model butuh akun berbayar, pemilik diberi tahu lewat Telegram (maks. sekali per 6 jam).
+
+Model dicoba berurutan (`GEMINI_IMAGE_MODELS`); tiap model dicoba lewat Interactions API lalu `generateContent`, dan jalur yang berhasil diingat. Kuota gambar Gemini terpisah dari kuota chat/suara, tetapi bergantung pada akun Google AI Studio: bila muncul "butuh akun berbayar", model gambar belum tersedia di tier gratis untuk kunci itu.

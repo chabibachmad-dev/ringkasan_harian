@@ -74,6 +74,7 @@ import { MAIN_ACCOUNT, SECOND_ACCOUNT, acctFields, createAccountRouter, isPaired
 import { AsyncLocalStorage } from "node:async_hooks";
 import { qrToPng } from "./qr-png.js";
 import { createGroupList } from "./group-list.js";
+import { createImageGen, readImageConfig } from "./image-gen.js";
 import { createWebSearch, readSearchConfig } from "./web-search.js";
 import { createRegMonitor, readRegMonitorConfig } from "./reg-monitor.js";
 import { createKhatamReminder } from "./khatam.js";
@@ -2849,6 +2850,15 @@ async function handleGroupMessage(msg, sock) {
     return;
   }
 
+  // Permintaan membuat gambar ("bot, buatkan gambar ..."): ditangani pembuat gambar, bukan AI percakapan.
+  if (imageGen.groupEnabled()) {
+    const imageReq = imageGen.detect(text);
+    if (imageReq) {
+      await handleImageRequestWa(sock, groupJid, imageReq, { kind: "group", who: msg.key.participant || sender, quoted: msg, waName: subject || null, record: true });
+      return;
+    }
+  }
+
   sock.sendPresenceUpdate("composing", groupJid).catch(() => {});
   // Bahasa jawaban (hanya relevan bila balasan grup berupa suara): permintaan di pesan ini > pengaturan /voice wag > otomatis.
   if (groupVoice.enabled()) {
@@ -2904,6 +2914,72 @@ async function handleGroupMessage(msg, sock) {
     if (voice && (await deliverAutoReplyVoice(sock, groupJid, result, voice, { quoted: msg, waName: subject || null }))) return;
   }
   await deliverAutoReplyText(sock, groupJid, result, "👥 Balasan grup", { quoted: msg, waName: subject || null });
+}
+
+// ---------------- Pembuat gambar di WhatsApp ----------------
+const imageNoticeAt = new Map(); // jenis galat -> waktu pemberitahuan terakhir ke pemilik
+async function tellOwnerImageProblem(kind, text) {
+  if (!["billing", "auth", "nokey"].includes(kind)) return;
+  if (Date.now() - (imageNoticeAt.get(kind) || 0) < 6 * 3600_000) return;
+  imageNoticeAt.set(kind, Date.now());
+  await sendToOwner(`🖼️ Pembuat gambar bermasalah: ${text}`).catch(() => {});
+}
+
+/**
+ * Buat gambar lalu kirim ke chat WA (tanpa keterangan, supaya tidak terbaca sebagai pesan teks saat bot membaca chatnya sendiri).
+ * kind: "owner" | "group". Dimintakan jatah dulu; gagal -> pesan alasan. group: hasil dicatat ke whatsapp_messages.
+ */
+async function handleImageRequestWa(sock, jid, req, { kind = "owner", who = "", quoted = null, waName = null, record = false } = {}) {
+  const send = async (content) => {
+    const sent = await sock.sendMessage(jid, content, quoted ? { quoted } : undefined).catch((e) => {
+      console.error(`🖼️ Gagal kirim ke ${jid}:`, e instanceof Error ? e.message : String(e));
+      return null;
+    });
+    return sent;
+  };
+  const note = async (contentText, sent) => {
+    if (!record) return;
+    const { error } = await supabase.from("whatsapp_messages").insert({
+      wa_jid: jid,
+      wa_name: waName,
+      direction: "out",
+      content: contentText,
+      status: "sent",
+      wa_message_id: sent?.key?.id ?? null,
+      ...acctFields(currentAccountId())
+    });
+    if (error) console.error("Gagal catat balasan gambar:", error.message);
+  };
+  const tick = () => sock.sendPresenceUpdate("composing", jid).catch(() => {});
+  tick();
+  const timer = setInterval(tick, 4500);
+  let out;
+  try {
+    out = await imageGen.make(req.prompt, kind, who);
+  } finally {
+    clearInterval(timer);
+    sock.sendPresenceUpdate("paused", jid).catch(() => {});
+  }
+  if (out.error) {
+    console.log(`🖼️ [${kind}] ${jid}: ${out.kind} — ${out.error.slice(0, 80)}`);
+    await tellOwnerImageProblem(out.kind, out.error);
+    const sent = await send({ text: out.error });
+    await note(out.error, sent);
+    return;
+  }
+  const { buffer, mime, model } = out.image;
+  const sent = await send({ image: buffer, mimetype: mime || "image/png" });
+  console.log(`🖼️ Gambar dibuat (${model}, ${Math.round(buffer.length / 1024)} KB) untuk ${jid}: ${String(req.prompt).slice(0, 60)}`);
+  await note(`🖼️ (gambar dibuat: ${String(req.prompt).slice(0, 200)})`, sent);
+}
+
+/** Pemilik meminta gambar di chat pribadi ("buatkan gambar ..." / "/gambar ..."). true = ditangani. */
+async function handleWaImageCommand(sock, jid, msg, text) {
+  if (!imageGen.available()) return false;
+  const req = imageGen.detect(text);
+  if (!req) return false;
+  await handleImageRequestWa(sock, jid, req, { kind: "owner", quoted: msg });
+  return true;
 }
 
 /** Kirim balasan grup sebagai voice note. true = terkirim (dan tercatat); false = gagal kirim, pemanggil mengirim teks. */
@@ -3096,6 +3172,7 @@ async function handleIncoming(msg, sock) {
   if (isOwnerSender(msg, isSelfChat) && !isGroupJid(jid) && (await handleWaRouteCommand(sock, jid, text))) return;
   if (isOwnerSender(msg, isSelfChat) && !isGroupJid(jid) && (await handleWaNodinCommand(sock, jid, text))) return;
   if (isOwnerSender(msg, isSelfChat) && !isGroupJid(jid) && (await handleWaKasCommand(sock, jid, text))) return;
+  if (isOwnerSender(msg, isSelfChat) && !isGroupJid(jid) && (await handleWaImageCommand(sock, jid, msg, text))) return;
 
   // Tutor suara (/speak, /selesai) hanya untuk pemilik; selama sesi, teks/voice note pemilik = ucapan untuk tutor
   // (tidak disimpan ke riwayat chat dan tidak memicu auto-reply).
@@ -3721,6 +3798,13 @@ groupVoice
   .then(() => console.log(`🔊 Balasan grup WhatsApp: ${groupVoice.describe()} (ubah: /voice wag on|off di Telegram)`))
   .catch(() => {});
 
+// Pembuat GAMBAR (Gemini): grup WA, chat pemilik di WA, dan /gambar di Telegram. Lihat image-gen.js.
+const imageGen = createImageGen({ state: botStateStore, config: readImageConfig(process.env) });
+imageGen
+  .load()
+  .then(() => console.log(`🖼️ Pembuat gambar: ${imageGen.available() ? imageGen.describe().replace(/\n/g, " | ") : "mati (GEMINI_API_KEYS kosong)"} (ubah: /gambar grup on|off di Telegram)`))
+  .catch(() => {});
+
 const ops = createOps({
   config: readOpsConfig(process.env, fileURLToPath(new URL(".", import.meta.url))),
   deps: {
@@ -4105,6 +4189,17 @@ const telegram = createTelegram({
     health,
     aiRoute: { handle: (arg) => aiRoute.handle(arg) },
     groupVoice,
+    image: {
+      available: () => imageGen.available(),
+      describe: () => imageGen.describe(),
+      parseCommand: (arg) => imageGen.parseCommand(arg),
+      setGroup: (v) => imageGen.setGroup(v),
+      make: async (prompt) => {
+        const out = await imageGen.make(prompt, "owner");
+        if (out.error) await tellOwnerImageProblem(out.kind, out.error);
+        return out;
+      }
+    },
     groups: { handle: (arg) => groupList.handle(arg, { secondAliases: [String(wa2Config.botName || "").trim().split(/\s+/)[0]] }) },
     wa2: {
       describe: () => describeWa2(),
