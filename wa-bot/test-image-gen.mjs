@@ -301,6 +301,36 @@ ok("kunci API lewat header (bukan URL) dan tidak dicetak");
 }
 ok("Cloudflare: penyedia pertama, terjemahan prompt, jatah habis -> Gemini, moderasi -> ditolak, cukup tanpa kunci lain");
 
+// --- Gemini "limit: 0": berhenti mencoba, rincian tanpa baris ganda
+{
+  let calls = 0; let t = Date.parse("2026-10-15T10:00:00Z");
+  const fetchImpl = async () => { calls++; return res(429, { error: { status: "RESOURCE_EXHAUSTED", message: "Rate limit exceeded for model x (limit: 0 requests per day on Free Tier)." } }); };
+  const g = createImageGen({ config: cfg({ models: ["m1", "m2"] }), fetchImpl, log: silent, now: () => t });
+  await assert.rejects(g.generate("x"), (e) => {
+    const lines = e.detail.split("\n");
+    assert.equal(new Set(lines).size, lines.length, "tidak ada baris rincian ganda");
+    return e.kind === "quota";
+  });
+  assert.equal(calls, 1, "setelah 'limit: 0' pertama, sisa key/model/jalur tidak dicoba lagi");
+  calls = 0;
+  await assert.rejects(g.generate("y"), (e) => /dilewati/.test(e.detail));
+  assert.equal(calls, 0, "6 jam berikutnya Gemini tidak dipanggil sama sekali");
+  t += 6 * 3600_000 + 1000;
+  await assert.rejects(g.generate("z"));
+  assert.equal(calls, 1, "setelah 6 jam dicoba lagi");
+  // reconfigure (mis. dari /env) membersihkan istirahat
+  calls = 0;
+  g.reconfigure(cfg({ models: ["m1"] }));
+  await assert.rejects(g.generate("z"));
+  assert.equal(calls, 1);
+  // 429 biasa (bukan limit 0) tetap merotasi key
+  let n429 = 0;
+  const g2 = createImageGen({ config: cfg(), fetchImpl: async () => { n429++; return res(429, "RESOURCE_EXHAUSTED rate limit"); }, log: silent });
+  await assert.rejects(g2.generate("x"));
+  assert.ok(n429 >= 2, "kuota sementara: semua key dicoba");
+}
+ok("Gemini 'limit: 0': dilewati 6 jam, rincian tanpa baris ganda, /env membersihkan, 429 biasa tetap rotasi");
+
 // --- Cloudflare: banyak akun (rotasi)
 {
   assert.deepEqual(parseCfAccounts({}), []);

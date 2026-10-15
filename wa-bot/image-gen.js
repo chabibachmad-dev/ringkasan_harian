@@ -233,6 +233,7 @@ export function createImageGen({ state = null, config = readImageConfig({}), fet
   const hasCf = () => cfList().length > 0;
   const cfRest = new Map(); // idAkun -> ms: akun diistirahatkan (jatah harian habis / token ditolak)
   let cfRr = 0;
+  let geminiRest = 0; // ms: Gemini dilewati sampai waktu ini (jatah gratis 0 untuk model gambar -> percuma dicoba terus)
   const tail = (a) => `…${String(a).slice(-4)}`;
   const available = () => (config.keys.length > 0 || (config.orKeys?.length ?? 0) > 0 || hasCf()) && typeof fetchImpl === "function";
 
@@ -342,6 +343,9 @@ export function createImageGen({ state = null, config = readImageConfig({}), fet
    */
   async function generate(prompt) {
     const details = []; // rincian per penyedia, untuk pemilik (bukan untuk grup)
+    const addDetail = (line) => {
+      if (!details.includes(line)) details.push(line);
+    };
     const fail = (kind, extra = "") => Object.assign(new Error(KIND_TEXT[kind] + (extra ? ` (${extra})` : "")), { kind, detail: details.join("\n") });
     if (!available()) throw fail("nokey");
     const p = String(prompt ?? "").trim().slice(0, config.promptMax);
@@ -394,7 +398,7 @@ export function createImageGen({ state = null, config = readImageConfig({}), fet
             r = { status: res.status, ok: res.ok, raw, json };
           } catch (e) {
             log.warn?.(`🖼️ [Gambar] Cloudflare ${tail(acc.account)} ${model}: ${e instanceof Error ? e.message : e}`);
-            details.push(`Cloudflare ${tail(acc.account)} ${model}: ${e instanceof Error ? e.message : e}`);
+            addDetail(`Cloudflare ${tail(acc.account)} ${model}: ${e instanceof Error ? e.message : e}`);
             note("unavailable");
             continue;
           }
@@ -405,7 +409,7 @@ export function createImageGen({ state = null, config = readImageConfig({}), fet
           }
           const kind = r.ok ? "server" : errorKind(r.status, r.raw);
           log.warn?.(`🖼️ [Gambar] Cloudflare ${tail(acc.account)} ${model} HTTP ${r.status} (${kind}): ${String(r.raw).replace(/\s+/g, " ").slice(0, 160)}`);
-          details.push(`Cloudflare ${tail(acc.account)} ${model}: HTTP ${r.status} ${kind} — ${apiMessage(r)}`);
+          addDetail(`Cloudflare ${tail(acc.account)} ${model}: HTTP ${r.status} ${kind} — ${apiMessage(r)}`);
           if (/nsfw|moderat|flagged|inappropriate/i.test(r.raw)) throw fail("blocked");
           if (kind === "quota") cfRest.set(acc.account, nextUtcMidnight()); // jatah harian: pulih 00:00 UTC
           else if (kind === "auth") cfRest.set(acc.account, now() + 3600_000);
@@ -413,15 +417,19 @@ export function createImageGen({ state = null, config = readImageConfig({}), fet
           if (kind === "api") break; // model tidak ada -> model berikutnya
         }
         if (!triedAny) {
-          details.push("Cloudflare: semua akun sedang istirahat (jatah harian habis / token ditolak)");
+          addDetail("Cloudflare: semua akun sedang istirahat (jatah harian habis / token ditolak)");
           note("quota");
         }
       }
     }
+    const geminiOn = config.keys.length > 0 && geminiRest <= now();
+    if (config.keys.length > 0 && !geminiOn) addDetail("Gemini: dilewati (jatah gratis 0 untuk model gambar; dicoba lagi nanti)");
     const start = config.keys.length ? rr++ % config.keys.length : 0;
-    for (const model of config.keys.length ? config.models : []) {
+    for (const model of geminiOn ? config.models : []) {
+      if (geminiRest > now()) break;
       const apis = apiPref.get(model) === "generate" ? ["generate", "interactions"] : ["interactions", "generate"];
       for (let i = 0; i < config.keys.length; i++) {
+        if (geminiRest > now()) break;
         const key = config.keys[(start + i) % config.keys.length];
         let modelMissing = false;
         for (const api of apis) {
@@ -452,7 +460,8 @@ export function createImageGen({ state = null, config = readImageConfig({}), fet
           }
           const kind = errorKind(r.status, r.raw);
           log.warn?.(`🖼️ [Gambar] ${model}/${api} HTTP ${r.status} (${kind}): ${String(r.raw).replace(/\s+/g, " ").slice(0, 160)}`);
-          if (kind !== "api") details.push(`Gemini ${model}: HTTP ${r.status} ${kind} — ${apiMessage(r)}`);
+          if (kind !== "api") addDetail(`Gemini ${model}: HTTP ${r.status} ${kind} — ${apiMessage(r)}`);
+          if (kind === "quota" && /limit:\s*0\b/i.test(r.raw)) geminiRest = now() + 6 * 3600_000; // jatah gratis memang 0: berhenti mencoba 6 jam
           if (kind === "api") {
             modelMissing = true;
             continue; // coba jalur panggilan lain untuk model ini
@@ -501,7 +510,7 @@ export function createImageGen({ state = null, config = readImageConfig({}), fet
         }
         const kind = errorKind(r.status, r.raw);
         log.warn?.(`🖼️ [Gambar] OpenRouter ${model} HTTP ${r.status} (${kind}): ${String(r.raw).replace(/\s+/g, " ").slice(0, 160)}`);
-        details.push(`OpenRouter ${model}: HTTP ${r.status} ${kind} — ${apiMessage(r)}`);
+        addDetail(`OpenRouter ${model}: HTTP ${r.status} ${kind} — ${apiMessage(r)}`);
         note(kind === "api" || kind === "server" ? "unavailable" : kind);
         if (kind === "api") break; // model tidak ada -> model berikutnya
       }
@@ -557,6 +566,7 @@ export function createImageGen({ state = null, config = readImageConfig({}), fet
     config = next;
     cfRest.clear();
     apiPref.clear();
+    geminiRest = 0;
   }
 
   return { available, load, groupEnabled, setGroup, reserve, generate, make, describe, parseCommand, reconfigure, detect: detectImageRequest, problem: promptProblem };

@@ -2924,7 +2924,7 @@ async function tellOwnerImageProblem(kind, text, detail = "") {
   if (!["billing", "auth", "nokey", "quota"].includes(kind)) return;
   if (Date.now() - (imageNoticeAt.get(kind) || 0) < 6 * 3600_000) return;
   imageNoticeAt.set(kind, Date.now());
-  await sendToOwner(`🖼️ Pembuat gambar bermasalah: ${text}${detail ? `\n\nRincian:\n${detail}` : ""}\n\nIsi saldo OpenRouter (minimal $1) atau tunggu kuota Gemini pulih; cek /gambar untuk sisa jatah.`).catch(() => {});
+  await sendToOwner(`🖼️ Pembuat gambar bermasalah: ${text}${detail ? `\n\nRincian:\n${detail}` : ""}\n\nSolusi gratis: isi token Cloudflare lewat /env (CLOUDFLARE_ACCOUNT_ID dan CLOUDFLARE_API_TOKEN), lalu tes /gambar kucing lucu. Alternatif berbayar: saldo OpenRouter minimal $1. Kunci Gemini gratis memang tidak punya jatah untuk model gambar.`).catch(() => {});
 }
 
 /**
