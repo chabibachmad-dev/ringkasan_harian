@@ -32,14 +32,33 @@ const splitList = (s) =>
     .map((x) => x.trim())
     .filter(Boolean);
 
+/**
+ * Akun Cloudflare: pasangan tunggal (CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN) dan/atau daftar
+ * CLOUDFLARE_ACCOUNTS=idAkun1:token1,idAkun2:token2 (jatah gratis dihitung PER AKUN, jadi akun berbeda = jatah berbeda).
+ * -> [{ account, token }] tanpa duplikat.
+ */
+export function parseCfAccounts(env = {}) {
+  const out = [];
+  const add = (account, token) => {
+    const a = String(account || "").trim();
+    const t = String(token || "").trim();
+    if (/^[A-Za-z0-9]{8,64}$/.test(a) && t.length >= 8 && !out.some((x) => x.account === a)) out.push({ account: a, token: t });
+  };
+  add(env.CLOUDFLARE_ACCOUNT_ID || env.CF_ACCOUNT_ID, env.CLOUDFLARE_API_TOKEN || env.CF_API_TOKEN);
+  for (const item of String(env.CLOUDFLARE_ACCOUNTS || "").split(",")) {
+    const i = item.indexOf(":");
+    if (i > 0) add(item.slice(0, i), item.slice(i + 1));
+  }
+  return out;
+}
+
 export function readImageConfig(env = process.env) {
   const num = (v, d, min = 0) => (Number.isFinite(Number(v)) && String(v ?? "").trim() !== "" && Number(v) >= min ? Math.floor(Number(v)) : d);
   const models = splitList(env.GEMINI_IMAGE_MODELS);
   return {
     keys: splitList(env.GEMINI_API_KEYS || env.GEMINI_API_KEY),
     models: models.length ? models : DEFAULT_IMAGE_MODELS,
-    cfAccount: String(env.CLOUDFLARE_ACCOUNT_ID || env.CF_ACCOUNT_ID || "").trim(),
-    cfToken: String(env.CLOUDFLARE_API_TOKEN || env.CF_API_TOKEN || "").trim(),
+    cfAccounts: parseCfAccounts(env),
     cfModels: splitList(env.CLOUDFLARE_IMAGE_MODELS).length ? splitList(env.CLOUDFLARE_IMAGE_MODELS) : DEFAULT_CF_IMAGE_MODELS,
     orKeys: splitList(env.OPENROUTER_API_KEYS || env.OPENROUTER_API_KEY),
     orModels: splitList(env.OPENROUTER_IMAGE_MODELS).length ? splitList(env.OPENROUTER_IMAGE_MODELS) : DEFAULT_OR_IMAGE_MODELS,
@@ -210,7 +229,11 @@ export function createImageGen({ state = null, config = readImageConfig({}), fet
   const apiPref = new Map(); // model -> "interactions" | "generate"
   let rr = 0;
 
-  const hasCf = () => Boolean(config.cfAccount && config.cfToken);
+  const cfList = () => config.cfAccounts || [];
+  const hasCf = () => cfList().length > 0;
+  const cfRest = new Map(); // idAkun -> ms: akun diistirahatkan (jatah harian habis / token ditolak)
+  let cfRr = 0;
+  const tail = (a) => `…${String(a).slice(-4)}`;
   const available = () => (config.keys.length > 0 || (config.orKeys?.length ?? 0) > 0 || hasCf()) && typeof fetchImpl === "function";
 
   async function load() {
@@ -341,39 +364,58 @@ export function createImageGen({ state = null, config = readImageConfig({}), fet
           log.warn?.(`🖼️ [Gambar] terjemahan deskripsi gagal, pakai aslinya: ${e instanceof Error ? e.message : e}`);
         }
       }
+      const nextUtcMidnight = () => {
+        const d = new Date(now());
+        return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1);
+      };
       for (const model of config.cfModels || []) {
-        let r;
-        try {
-          const res = await fetchImpl(`https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(config.cfAccount)}/ai/run/${model}`, {
-            method: "POST",
-            headers: { "content-type": "application/json", authorization: `Bearer ${config.cfToken}` },
-            body: JSON.stringify({ prompt: cfPrompt, steps: 4 }),
-            signal: AbortSignal.timeout(config.timeoutMs)
-          });
-          const raw = await res.text();
-          let json = null;
+        const accts = cfList();
+        const startAt = cfRr++ % accts.length;
+        let triedAny = false;
+        for (let i = 0; i < accts.length; i++) {
+          const acc = accts[(startAt + i) % accts.length];
+          if ((cfRest.get(acc.account) || 0) > now()) continue; // akun sedang istirahat
+          triedAny = true;
+          let r;
           try {
-            json = JSON.parse(raw);
-          } catch {
-            /* bukan JSON */
+            const res = await fetchImpl(`https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(acc.account)}/ai/run/${model}`, {
+              method: "POST",
+              headers: { "content-type": "application/json", authorization: `Bearer ${acc.token}` },
+              body: JSON.stringify({ prompt: cfPrompt, steps: 4 }),
+              signal: AbortSignal.timeout(config.timeoutMs)
+            });
+            const raw = await res.text();
+            let json = null;
+            try {
+              json = JSON.parse(raw);
+            } catch {
+              /* bukan JSON */
+            }
+            r = { status: res.status, ok: res.ok, raw, json };
+          } catch (e) {
+            log.warn?.(`🖼️ [Gambar] Cloudflare ${tail(acc.account)} ${model}: ${e instanceof Error ? e.message : e}`);
+            details.push(`Cloudflare ${tail(acc.account)} ${model}: ${e instanceof Error ? e.message : e}`);
+            note("unavailable");
+            continue;
           }
-          r = { status: res.status, ok: res.ok, raw, json };
-        } catch (e) {
-          log.warn?.(`🖼️ [Gambar] Cloudflare ${model}: ${e instanceof Error ? e.message : e}`);
-          details.push(`Cloudflare ${model}: ${e instanceof Error ? e.message : e}`);
-          note("unavailable");
-          continue;
+          const b64 = r.json?.result?.image;
+          if (r.ok && typeof b64 === "string" && b64.length > 400) {
+            const buffer = Buffer.from(b64, "base64");
+            return { buffer, mime: mimeFromBytes(buffer) || "image/jpeg", model: `cloudflare:${model}`, text: "" };
+          }
+          const kind = r.ok ? "server" : errorKind(r.status, r.raw);
+          log.warn?.(`🖼️ [Gambar] Cloudflare ${tail(acc.account)} ${model} HTTP ${r.status} (${kind}): ${String(r.raw).replace(/\s+/g, " ").slice(0, 160)}`);
+          details.push(`Cloudflare ${tail(acc.account)} ${model}: HTTP ${r.status} ${kind} — ${apiMessage(r)}`);
+          if (/nsfw|moderat|flagged|inappropriate/i.test(r.raw)) throw fail("blocked");
+          if (kind === "quota") cfRest.set(acc.account, nextUtcMidnight()); // jatah harian: pulih 00:00 UTC
+          else if (kind === "auth") cfRest.set(acc.account, now() + 3600_000);
+          note(kind === "api" || kind === "server" ? "unavailable" : kind);
+          if (kind === "api") break; // model tidak ada -> model berikutnya
         }
-        const b64 = r.json?.result?.image;
-        if (r.ok && typeof b64 === "string" && b64.length > 400) {
-          const buffer = Buffer.from(b64, "base64");
-          return { buffer, mime: mimeFromBytes(buffer) || "image/jpeg", model: `cloudflare:${model}`, text: "" };
+        if (!triedAny) {
+          details.push("Cloudflare: semua akun sedang istirahat (jatah harian habis / token ditolak)");
+          note("quota");
         }
-        const kind = r.ok ? "server" : errorKind(r.status, r.raw);
-        log.warn?.(`🖼️ [Gambar] Cloudflare ${model} HTTP ${r.status} (${kind}): ${String(r.raw).replace(/\s+/g, " ").slice(0, 160)}`);
-        details.push(`Cloudflare ${model}: HTTP ${r.status} ${kind} — ${apiMessage(r)}`);
-        if (/nsfw|moderat|flagged|inappropriate/i.test(r.raw)) throw fail("blocked");
-        note(kind === "api" || kind === "server" ? "unavailable" : kind);
       }
     }
     const start = config.keys.length ? rr++ % config.keys.length : 0;
@@ -496,7 +538,7 @@ export function createImageGen({ state = null, config = readImageConfig({}), fet
     rollDay();
     const sisa = (limit, used) => (limit > 0 ? `${Math.max(0, limit - used)}/${limit}` : "tanpa batas");
     return (
-      `grup: ${groupsOn ? "AKTIF" : "mati"} • model: ${config.keys.length ? config.models[0] : "(Gemini tanpa kunci)"}${config.keys.length && config.models.length > 1 ? ` (+${config.models.length - 1} cadangan)` : ""}${hasCf() ? ` • GRATIS: Cloudflare ${config.cfModels[0].split("/").pop()}` : ""}${config.orKeys?.length ? ` • cadangan OpenRouter: ${config.orModels[0]}` : ""}\n` +
+      `grup: ${groupsOn ? "AKTIF" : "mati"} • model: ${config.keys.length ? config.models[0] : "(Gemini tanpa kunci)"}${config.keys.length && config.models.length > 1 ? ` (+${config.models.length - 1} cadangan)` : ""}${hasCf() ? ` • GRATIS: Cloudflare ${config.cfModels[0].split("/").pop()}${cfList().length > 1 ? ` (${cfList().length} akun)` : ""}` : ""}${config.orKeys?.length ? ` • cadangan OpenRouter: ${config.orModels[0]}` : ""}\n` +
       `Sisa jatah hari ini — pemilik: ${sisa(config.ownerDaily, quota.owner)}, semua grup: ${sisa(config.groupDaily, quota.group)} (maks ${config.personDaily || "∞"} per orang)`
     );
   }

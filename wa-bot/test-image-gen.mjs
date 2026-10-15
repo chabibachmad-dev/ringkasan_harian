@@ -1,7 +1,7 @@
 // Tes pembuat gambar (image-gen.js). Jalankan: node test-image-gen.mjs
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import { detectImageRequest, promptProblem, parseImageResponse, createImageGen, readImageConfig, DEFAULT_IMAGE_MODELS, STATE_KEY, QUOTA_KEY } from "./image-gen.js";
+import { parseCfAccounts, detectImageRequest, promptProblem, parseImageResponse, createImageGen, readImageConfig, DEFAULT_IMAGE_MODELS, STATE_KEY, QUOTA_KEY } from "./image-gen.js";
 import { qrToPng } from "./qr-png.js";
 import { createTelegram } from "./telegram.js";
 
@@ -248,7 +248,7 @@ ok("kunci API lewat header (bukan URL) dan tidak dicetak");
 
 // --- Cloudflare Workers AI (gratis, penyedia pertama)
 {
-  const cfCfg = (over = {}) => ({ ...cfg(), cfAccount: "acc123", cfToken: "tok", cfModels: ["@cf/black-forest-labs/flux-1-schnell"], ...over });
+  const cfCfg = (over = {}) => ({ ...cfg(), cfAccounts: [{ account: "acc123", token: "tok" }], cfModels: ["@cf/black-forest-labs/flux-1-schnell"], ...over });
   const jpg = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(900, 7)]).toString("base64");
   const seen = [];
   const fetchImpl = async (url, init) => {
@@ -271,7 +271,7 @@ ok("kunci API lewat header (bukan URL) dan tidak dicetak");
   await g2.generate("rumah adat");
   assert.equal(JSON.parse(seen[0].init.body).prompt, "rumah adat");
   // hanya Cloudflare (tanpa kunci lain) sudah cukup
-  const only = createImageGen({ config: readImageConfig({ CLOUDFLARE_ACCOUNT_ID: "a", CLOUDFLARE_API_TOKEN: "t" }), fetchImpl, log: silent });
+  const only = createImageGen({ config: readImageConfig({ CLOUDFLARE_ACCOUNT_ID: "acc12345", CLOUDFLARE_API_TOKEN: "token12345" }), fetchImpl, log: silent });
   assert.equal(only.available(), true);
   assert.match(only.describe(), /GRATIS: Cloudflare flux-1-schnell/);
   // jatah harian Cloudflare habis -> Gemini; keduanya habis -> kind quota
@@ -297,9 +297,73 @@ ok("kunci API lewat header (bukan URL) dan tidak dicetak");
   assert.equal(nsfwUrls.length, 1);
   // token tidak bocor ke log/URL
   const src = fs.readFileSync(new URL("./image-gen.js", import.meta.url), "utf8");
-  assert.ok(!/log\.\w+\?\.\([^)]*cfToken/.test(src));
+  assert.ok(!/log\.\w+\?\.\([^)]*(?:cfToken|acc\.token)/.test(src));
 }
 ok("Cloudflare: penyedia pertama, terjemahan prompt, jatah habis -> Gemini, moderasi -> ditolak, cukup tanpa kunci lain");
+
+// --- Cloudflare: banyak akun (rotasi)
+{
+  assert.deepEqual(parseCfAccounts({}), []);
+  assert.deepEqual(parseCfAccounts({ CLOUDFLARE_ACCOUNT_ID: "abc12345", CLOUDFLARE_API_TOKEN: "tokenpanjang1" }), [{ account: "abc12345", token: "tokenpanjang1" }]);
+  assert.deepEqual(
+    parseCfAccounts({ CLOUDFLARE_ACCOUNT_ID: "abc12345", CLOUDFLARE_API_TOKEN: "tokenpanjang1", CLOUDFLARE_ACCOUNTS: "abc12345:tokenpanjang1, def67890:tok-dua_xyz:aneh ,rusak,:x,ghi:pendek" }),
+    [{ account: "abc12345", token: "tokenpanjang1" }, { account: "def67890", token: "tok-dua_xyz:aneh" }],
+    "duplikat dibuang, entri rusak/terlalu pendek diabaikan, titik dua di token dipertahankan"
+  );
+  assert.equal(readImageConfig({ CLOUDFLARE_ACCOUNTS: "abc12345:tokenpanjang1" }).cfAccounts.length, 1);
+
+  const jpg = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(900, 7)]).toString("base64");
+  let t = Date.parse("2026-10-15T10:00:00Z");
+  const used = [];
+  const exhausted = new Set();
+  const fetchImpl = async (url, init) => {
+    const acc = /accounts\/(\w+)\//.exec(url)[1];
+    used.push(acc);
+    if (exhausted.has(acc)) return res(429, { success: false, errors: [{ code: 4006, message: "you have used up your daily free allocation of 10,000 neurons" }] });
+    return res(200, { result: { image: jpg }, success: true });
+  };
+  const config = { ...cfg({ keys: [] }), cfAccounts: [{ account: "aaaa1111", token: "t1t1t1t1" }, { account: "bbbb2222", token: "t2t2t2t2" }, { account: "cccc3333", token: "t3t3t3t3" }], cfModels: ["@cf/m"] };
+  const g = createImageGen({ config, fetchImpl, log: silent, now: () => t });
+  // rotasi bergilir antar akun
+  for (let i = 0; i < 3; i++) await g.generate("x");
+  assert.deepEqual([...new Set(used)].sort(), ["aaaa1111", "bbbb2222", "cccc3333"], "ketiga akun dipakai bergantian");
+  assert.match(g.describe(), /\(3 akun\)/);
+  // akun pertama habis -> pindah ke berikutnya dan diistirahatkan sampai 00:00 UTC
+  used.length = 0; exhausted.add("aaaa1111"); exhausted.add("bbbb2222");
+  const out = await g.generate("x");
+  assert.equal(out.model, "cloudflare:@cf/m");
+  assert.equal(used.at(-1), "cccc3333");
+  used.length = 0;
+  for (let i = 0; i < 4; i++) await g.generate("x");
+  assert.ok(!used.includes("aaaa1111") && !used.includes("bbbb2222"), "akun yang habis tidak dipanggil lagi hari ini");
+  // semua habis -> kind quota, tanpa memanggil siapa pun lagi
+  exhausted.add("cccc3333");
+  await assert.rejects(g.generate("x"), (e) => e.kind === "quota");
+  used.length = 0;
+  await assert.rejects(g.generate("x"), (e) => e.kind === "quota" && /semua akun sedang istirahat/.test(e.detail));
+  assert.equal(used.length, 0);
+  // lewat 00:00 UTC: semua akun dicoba lagi
+  exhausted.clear();
+  t = Date.parse("2026-10-16T00:00:05Z");
+  used.length = 0;
+  await g.generate("x");
+  assert.equal(used.length, 1);
+  // token ditolak (401) -> akun diistirahatkan 1 jam, akun lain tetap jalan
+  const bad = new Set(["aaaa1111"]);
+  const g2 = createImageGen({
+    config,
+    fetchImpl: async (url) => { const acc = /accounts\/(\w+)\//.exec(url)[1]; used.push(acc); return bad.has(acc) ? res(403, { errors: [{ message: "Authentication error" }] }) : res(200, { result: { image: jpg } }); },
+    log: silent,
+    now: () => t
+  });
+  used.length = 0;
+  for (let i = 0; i < 5; i++) await g2.generate("x");
+  assert.equal(used.filter((a) => a === "aaaa1111").length, 1, "akun bertoken salah dicoba sekali lalu diistirahatkan");
+  // ID akun hanya 4 digit terakhir di rincian
+  const g3 = createImageGen({ config: { ...config, cfAccounts: [{ account: "aaaa1111", token: "t1t1t1t1" }] }, fetchImpl: async () => res(500, "boom"), log: silent, now: () => t });
+  await assert.rejects(g3.generate("x"), (e) => /…1111/.test(e.detail) && !/aaaa1111/.test(e.detail) && !/t1t1t1t1/.test(e.detail));
+}
+ok("Cloudflare banyak akun: parsing, rotasi, istirahat saat jatah habis (pulih 00:00 UTC), token ditolak, ID disamarkan");
 
 // --- cadangan OpenRouter
 {
