@@ -2644,43 +2644,6 @@ async function renderSystemStatus() {
     );
   }
 
-  const img = w.extra && w.extra.image;
-  if (img && typeof img.enabled === "boolean") {
-    const clock = (ms) => new Date(ms).toLocaleTimeString(state.lang === "en" ? "en-GB" : "id-ID", { hour: "2-digit", minute: "2-digit" });
-    if (!img.enabled) {
-      rows.push(sysRow(false, L("sys_img"), L("sys_img_off")));
-    } else {
-      const prov = (img.providers || []).join(" > ") || "-";
-      const byProv = img.today && img.today.byProvider ? Object.values(img.today.byProvider) : [];
-      const okN = byProv.reduce((n, p) => n + (p.ok || 0), 0);
-      const failN = byProv.reduce((n, p) => n + (p.fail || 0), 0);
-      const accs = img.cloudflare || [];
-      const anyRest = accs.length > 0 && accs.every((a) => a.resting);
-      const lim = (q) => (q && q.limit > 0 ? `${q.used}/${q.limit}` : `${(q && q.used) || 0} (${L("sys_img_nolimit")})`);
-      rows.push(
-        sysRow(
-          !anyRest,
-          L("sys_img"),
-          `${prov} · ${L("sys_img_groups")} ${img.groupsOn ? L("sys_on") : L("sys_off")} · ${L("sys_img_today")}: ${okN} ${L("sys_img_ok")}, ${failN} ${L("sys_img_fail")}` +
-            (img.quota ? ` · ${L("sys_img_owner")} ${lim(img.quota.owner)} · ${L("sys_img_group")} ${lim(img.quota.group)}` : "")
-        )
-      );
-      for (const a of accs) {
-        rows.push(
-          sysRow(
-            !a.resting,
-            `${L("sys_img_cf")} …${a.id}`,
-            `${a.ok} ${L("sys_img_images")} ≈ ${a.usedNeurons.toLocaleString()}/${a.freeNeurons.toLocaleString()} ${L("sys_img_neurons")} (${L("sys_img_left")} ±${a.imagesLeft})` +
-              (a.resting ? ` · ${L("sys_img_exhausted")} ${clock(a.restUntil)}` : ` · ${L("sys_img_reset")} ${clock(img.resetAt)}`)
-          )
-        );
-      }
-      if (img.lastError && img.lastErrorAt && now - img.lastErrorAt < 24 * 3600_000) {
-        rows.push(sysRow(false, L("sys_img_lasterr"), img.lastError));
-      }
-    }
-  }
-
   const frag = document.createDocumentFragment();
   rows.forEach((r) => frag.appendChild(r));
 
@@ -2713,7 +2676,7 @@ async function renderSystemStatus() {
   box.replaceChildren(frag);
 }
 
-const KEYS_PROVIDERS = ["gemini", "openrouter", "groq", "tavily", "serper", "brave"];
+const KEYS_PROVIDERS = ["gemini", "openrouter", "groq", "tavily", "serper", "brave", "cloudflare"];
 
 // Tombol penyedia (aktif = disorot) + judul & penjelasan sesuai penyedia yang dipilih.
 function renderKeysHeader() {
@@ -2725,6 +2688,81 @@ function renderKeysHeader() {
   els.keysIntro.textContent = t(state.lang, `keys_intro_${provider}`);
 }
 
+// Tab Cloudflare: pemantauan pembuat gambar (data dari bot lewat status sistem, bukan dari tabel key).
+async function renderCloudflareImages() {
+  const L = (k) => t(state.lang, k);
+  els.keysStatus.hidden = false;
+  els.keysStatus.textContent = L("loading");
+  const res = await fetchSystemStatus(state.chatCode);
+  if (state.keysProvider !== "cloudflare") return;
+  if (!res.ok) {
+    dropChatCodeIfUnauthorized(res);
+    els.keysStatus.textContent = L("keys_load_error");
+    return;
+  }
+  const img = res.worker && res.worker.extra && res.worker.extra.image;
+  const accs = (img && img.cloudflare) || [];
+  if (!img || !accs.length) {
+    els.keysStatus.textContent = img ? L("keys_empty_cloudflare") : L("keys_nodata_cloudflare");
+    return;
+  }
+  els.keysStatus.hidden = true;
+  const clock = (ms) => formatFullDateTime(ms);
+
+  for (const a of accs) {
+    const row = document.createElement("div");
+    row.className = "kb-doc-row keys-row";
+    const main = document.createElement("div");
+    main.className = "kb-doc-main";
+
+    const head = document.createElement("div");
+    head.className = "keys-head";
+    const nameEl = document.createElement("span");
+    nameEl.className = "kb-doc-title";
+    nameEl.textContent = `${L("keys_account_label")} …${a.id}`;
+    const chip = document.createElement("span");
+    chip.className = `keys-chip ${a.resting ? "keys-chip--exhausted" : "keys-chip--active"}`;
+    chip.textContent = L(a.resting ? "keys_exhausted" : "keys_active");
+    head.append(nameEl, chip);
+
+    const bar = document.createElement("div");
+    bar.className = "keys-bar";
+    const fill = document.createElement("div");
+    const pct = a.resting ? 100 : Math.min(100, Math.round((a.usedNeurons / a.freeNeurons) * 100));
+    fill.className = "keys-bar-fill";
+    if (a.resting) fill.classList.add("keys-bar-fill--exhausted");
+    else if (pct >= 80) fill.classList.add("keys-bar-fill--warn");
+    fill.style.width = `${pct}%`;
+    bar.appendChild(fill);
+
+    const meta = document.createElement("div");
+    meta.className = "kb-doc-meta";
+    meta.textContent = `${a.ok} ${L("sys_img_images")} ≈ ${a.usedNeurons.toLocaleString()}/${a.freeNeurons.toLocaleString()} ${L("sys_img_neurons")} · ${L("sys_img_left")} ±${a.imagesLeft}${a.fail ? ` · ${a.fail} ${L("sys_img_fail")}` : ""}`;
+
+    main.append(head, bar, meta);
+    if (a.resting && a.restUntil) {
+      const until = document.createElement("div");
+      until.className = "kb-doc-meta";
+      until.textContent = `${L("keys_exhausted_until")} ${clock(a.restUntil)}`;
+      main.appendChild(until);
+    }
+    row.appendChild(main);
+    els.keysList.appendChild(row);
+  }
+
+  const byProv = img.today && img.today.byProvider ? Object.values(img.today.byProvider) : [];
+  const okN = byProv.reduce((n, p) => n + (p.ok || 0), 0);
+  const failN = byProv.reduce((n, p) => n + (p.fail || 0), 0);
+  const lim = (q) => (q && q.limit > 0 ? `${q.used}/${q.limit}` : `${(q && q.used) || 0} (${L("sys_img_nolimit")})`);
+  const lines = [
+    `${L("sys_img_today")}: ${okN} ${L("sys_img_ok")}, ${failN} ${L("sys_img_fail")} · ${(img.providers || []).join(" > ") || "-"} · ${L("sys_img_groups")} ${img.groupsOn ? L("sys_on") : L("sys_off")}`
+  ];
+  if (img.quota) lines.push(`${L("sys_img_owner")} ${lim(img.quota.owner)} · ${L("sys_img_group")} ${lim(img.quota.group)}`);
+  if (img.resetAt) lines.push(`${L("keys_reset_note")} ${clock(img.resetAt)}`);
+  if (img.lastError && img.lastErrorAt && Date.now() - img.lastErrorAt < 24 * 3600_000) lines.push(`${L("sys_img_lasterr")}: ${truncate(String(img.lastError), 300)}`);
+  els.keysResetNote.textContent = lines.join("\n");
+}
+
 async function renderKeysList() {
   const provider = KEYS_PROVIDERS.includes(state.keysProvider) ? state.keysProvider : "gemini";
   renderKeysHeader();
@@ -2734,6 +2772,11 @@ async function renderKeysList() {
   if (!state.chatCode) {
     els.keysStatus.hidden = false;
     els.keysStatus.textContent = t(state.lang, "keys_need_code");
+    return;
+  }
+
+  if (provider === "cloudflare") {
+    await renderCloudflareImages();
     return;
   }
 
