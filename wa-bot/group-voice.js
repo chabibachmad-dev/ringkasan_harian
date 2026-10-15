@@ -18,6 +18,49 @@
 import { speakableText } from "./voice-output.js";
 
 export const STATE_KEY = "wa_group_voice";
+export const LANG_STATE_KEY = "wa_group_voice_lang";
+
+// Bahasa suara grup. Gemini TTS mengenali bahasa dari teks yang dibacakan, jadi yang perlu diatur hanyalah BAHASA TULISAN jawabannya.
+// instruction = tambahan prompt AI (jawaban ini akan DIBACAKAN: tanpa romanisasi/terjemahan ganda).
+export const VOICE_LANGS = {
+  id: { name: "Indonesia", words: ["id", "indo", "indonesia", "indonesian"], instruction: "Jawab SELURUHNYA dalam bahasa Indonesia yang natural dan singkat." },
+  en: { name: "Inggris", words: ["en", "eng", "inggris", "english"], instruction: "Reply ENTIRELY in natural, concise English (not Indonesian)." },
+  ko: { name: "Korea", words: ["ko", "kor", "korea", "korean"], instruction: "Jawab SELURUHNYA dalam bahasa Korea (Hangul) yang natural dan singkat, tanpa romanisasi dan tanpa terjemahan Indonesia." },
+  ar: { name: "Arab", words: ["ar", "arb", "arab", "arabic"], instruction: "Jawab SELURUHNYA dalam bahasa Arab Fusha (aksara Arab) yang natural dan singkat, tanpa transliterasi Latin dan tanpa terjemahan Indonesia." },
+  jv: { name: "Jawa", words: ["jv", "jawa", "jowo", "java", "javanese", "boso", "basa"], instruction: "Jawab SELURUHNYA dalam bahasa Jawa (aksara Latin) yang sopan dan natural (ngoko alus), singkat, tanpa terjemahan Indonesia." }
+};
+
+/** Kata -> kode bahasa ("id","en","ko","ar","jv"), "auto" untuk otomatis, atau null bila bukan nama bahasa. */
+export function parseLangWord(word) {
+  const w = String(word ?? "").trim().toLowerCase();
+  if (!w) return null;
+  if (/^(auto|otomatis|oto|default)$/.test(w)) return "auto";
+  for (const [code, l] of Object.entries(VOICE_LANGS)) if (l.words.includes(w)) return code;
+  return null;
+}
+
+export function langInstruction(code) {
+  const l = VOICE_LANGS[code];
+  return l ? `\n\nBAHASA JAWABAN (WAJIB): ${l.instruction} Jawaban ini akan DIBACAKAN sebagai suara, jadi tulis kalimat yang enak diucapkan.` : "";
+}
+
+/**
+ * Anggota grup meminta bahasa tertentu di pesannya ("bot, jawab pakai bahasa Korea", "reply in Arabic") -> kode bahasa atau null.
+ * Pertanyaan terjemahan ("apa bahasa Korea dari terima kasih?") bukan permintaan ganti bahasa jawaban.
+ */
+export function detectRequestedLang(text) {
+  const t = String(text ?? "");
+  if (/\b(artinya|arti kata|terjemah\w*|translate|translation|apa bahasa|bahasa \w+ dari|bahasa \w+ nya)\b/i.test(t)) return null;
+  const m = /\b(?:jawab|balas|bales|bicara|berbicara|ngomong|ucapkan|bilang|pakai|pake|gunakan|dengan|dalam|speak|reply|answer|respond|say|use|using|in)\b[^.!?\n]{0,25}?\b(?:bahasa|basa|boso|language)?\s*(korea\w*|arab\w*|jawa|jowo|javanese|inggris|english|indonesia\w*)\b/i.exec(t);
+  if (!m) return null;
+  const w = m[1].toLowerCase();
+  if (w.startsWith("korea")) return "ko";
+  if (w.startsWith("arab")) return "ar";
+  if (w === "jawa" || w === "jowo" || w === "javanese") return "jv";
+  if (w === "inggris" || w === "english") return "en";
+  if (w.startsWith("indonesia")) return "id";
+  return null;
+}
 
 export function readGroupVoiceConfig(env = process.env, ttsMax = 700) {
   const num = (v, d) => (Number(v) > 0 ? Number(v) : d);
@@ -30,7 +73,7 @@ export function readGroupVoiceConfig(env = process.env, ttsMax = 700) {
 /**
  * "/voice ..." -> { kind, ... } :
  *   { kind: "status" }                       /voice
- *   { kind: "wag", value: "on"|"off"|null }  /voice wag [on|off]   (null = hanya lihat)
+ *   { kind: "wag", value: "on"|"off"|null, lang? }  /voice wag [on|off|auto|id|eng|kor|arb|jawa]   (null = hanya lihat; lang = pilih bahasa suara)
  *   { kind: "tg", arg }                      /voice tg auto|on|off  (sama dengan /suara)
  *   { kind: "error", error }
  */
@@ -45,7 +88,9 @@ export function parseVoiceArg(arg) {
     if (!value) return { kind: "wag", value: null };
     if (ON.test(value)) return { kind: "wag", value: "on" };
     if (OFF.test(value)) return { kind: "wag", value: "off" };
-    return { kind: "error", error: `"${value}" tidak dikenali. Pakai: /voice wag on  atau  /voice wag off` };
+    const lang = parseLangWord(value);
+    if (lang) return { kind: "wag", value: null, lang };
+    return { kind: "error", error: `"${value}" tidak dikenali. Pakai: /voice wag on | off | auto | id | eng | kor | arb | jawa` };
   }
   if (/^(tg|telegram)$/.test(target)) return { kind: "tg", arg: value };
   return { kind: "error", error: `"${target}" tidak dikenali. Pakai: /voice wag on | /voice wag off | /voice (lihat status)` };
@@ -70,12 +115,15 @@ export function decideGroupVoice(reply, { maxChars = 600 } = {}) {
  */
 export function createGroupVoice({ state = null, speak = null, check = null, notify = null, config = readGroupVoiceConfig({}), log = console, now = () => Date.now() } = {}) {
   let on = false;
+  let lang = "auto"; // "auto" = ikuti bahasa penanya; selain itu kode bahasa paksaan (id, en, ko, ar, jv)
   const noticeAt = new Map(); // jenis masalah -> waktu pemberitahuan terakhir ke pemilik
 
   async function load() {
     if (!state) return on;
     try {
       on = (await state.get(STATE_KEY)) === "on";
+      const l = await state.get(LANG_STATE_KEY);
+      lang = l && VOICE_LANGS[l] ? l : "auto";
     } catch (e) {
       log.warn?.(`🔊 [Suara grup] gagal membaca pengaturan tersimpan (anggap mati): ${e instanceof Error ? e.message : e}`);
     }
@@ -83,6 +131,22 @@ export function createGroupVoice({ state = null, speak = null, check = null, not
   }
 
   const enabled = () => on;
+  /** Bahasa paksaan (kode) atau null bila otomatis. */
+  const forcedLang = () => (lang === "auto" ? null : lang);
+
+  /** Pilih bahasa suara: kode bahasa atau "auto". -> { lang, saved } */
+  async function setLang(value) {
+    lang = value && VOICE_LANGS[value] ? value : "auto";
+    let saved = true;
+    try {
+      await state?.set(LANG_STATE_KEY, lang);
+    } catch {
+      saved = false;
+    }
+    return { lang, saved };
+  }
+
+  const describeLang = () => (lang === "auto" ? "otomatis (mengikuti bahasa penanya)" : VOICE_LANGS[lang].name);
 
   /** Ubah pengaturan. -> { on, saved, warning } ; warning bila suara belum bisa dibuat sekarang. */
   async function set(value) {
@@ -102,7 +166,7 @@ export function createGroupVoice({ state = null, speak = null, check = null, not
   }
 
   function describe() {
-    return on ? "SUARA (voice note saja, tanpa teks)" : "teks";
+    return on ? `SUARA (voice note saja, tanpa teks) • bahasa: ${describeLang()}` : `teks (bahasa suara bila dinyalakan: ${describeLang()})`;
   }
 
   async function tell(kind, everyMs, text) {
@@ -140,5 +204,5 @@ export function createGroupVoice({ state = null, speak = null, check = null, not
     }
   }
 
-  return { load, enabled, set, describe, tryVoice };
+  return { load, enabled, set, describe, tryVoice, lang: forcedLang, setLang, describeLang };
 }

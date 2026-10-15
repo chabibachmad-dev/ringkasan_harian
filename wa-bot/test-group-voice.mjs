@@ -1,6 +1,7 @@
 // Tes balasan suara grup WhatsApp (/voice wag on|off). Jalankan: node test-group-voice.mjs
 import assert from "node:assert/strict";
-import { parseVoiceArg, decideGroupVoice, createGroupVoice, readGroupVoiceConfig, STATE_KEY } from "./group-voice.js";
+import { parseVoiceArg, decideGroupVoice, createGroupVoice, readGroupVoiceConfig, STATE_KEY, LANG_STATE_KEY, parseLangWord, detectRequestedLang, langInstruction, VOICE_LANGS } from "./group-voice.js";
+import fs from "node:fs";
 import { createTelegram } from "./telegram.js";
 
 let n = 0;
@@ -141,5 +142,100 @@ ok("pengaturan tersimpan, suara dibuat, ffmpeg/kuota diberi tahu sekali, lambat/
   assert.ok(/belum aktif/.test(calls.filter((c) => c.method === "sendMessage").at(-1).body.text));
 }
 ok("Telegram: /voice, /voice wag on|off, status, nilai salah, /voice tg, peringatan, tanpa fitur");
+
+// --- bahasa suara grup
+{
+  assert.deepEqual(parseVoiceArg("wag kor"), { kind: "wag", value: null, lang: "ko" });
+  assert.deepEqual(parseVoiceArg("wag ARB"), { kind: "wag", value: null, lang: "ar" });
+  assert.deepEqual(parseVoiceArg("wag jawa"), { kind: "wag", value: null, lang: "jv" });
+  assert.deepEqual(parseVoiceArg("wag eng"), { kind: "wag", value: null, lang: "en" });
+  assert.deepEqual(parseVoiceArg("wag id"), { kind: "wag", value: null, lang: "id" });
+  assert.deepEqual(parseVoiceArg("wag auto"), { kind: "wag", value: null, lang: "auto" });
+  assert.deepEqual(parseVoiceArg("wag on"), { kind: "wag", value: "on" }, "on tetap on");
+  assert.equal(parseVoiceArg("wag klingon").kind, "error");
+  assert.match(parseVoiceArg("wag klingon").error, /kor/);
+  assert.equal(parseLangWord("korean"), "ko");
+  assert.equal(parseLangWord("Jowo"), "jv");
+  assert.equal(parseLangWord("ya"), null);
+  assert.equal(Object.keys(VOICE_LANGS).length, 5);
+  for (const c of Object.keys(VOICE_LANGS)) assert.match(langInstruction(c), /WAJIB/);
+  assert.equal(langInstruction("xx"), "");
+  assert.match(langInstruction("ko"), /Hangul/);
+  assert.match(langInstruction("ar"), /aksara Arab/);
+  assert.match(langInstruction("jv"), /Jawa/);
+}
+ok("bahasa suara: kata perintah (id/eng/kor/arb/jawa/auto), instruksi prompt per bahasa");
+
+{
+  const yes = { "bot, jawab pakai bahasa Korea ya": "ko", "tolong balas dalam bahasa Arab": "ar", "reply in Arabic please": "ar", "ngomong pakai bahasa jawa dong": "jv", "bicara boso jowo": "jv", "jawab dengan bahasa Inggris": "en", "answer in Korean": "ko", "pakai bahasa indonesia aja": "id" };
+  for (const [t, c] of Object.entries(yes)) assert.equal(detectRequestedLang(t), c, t);
+  for (const t of ["apa bahasa Korea dari terima kasih?", "terjemahkan ke bahasa arab", "artinya apa dalam bahasa Korea", "bot jam berapa buka?", "", null]) assert.equal(detectRequestedLang(t), null, String(t));
+}
+ok("permintaan bahasa di pesan grup dikenali; pertanyaan terjemahan dan chat biasa bukan permintaan");
+
+{
+  const st = mem();
+  const gv = createGroupVoice({ state: st, log: silent, speak: async () => ({ ogg: Buffer.from("x") }), check: async () => ({ ok: true }) });
+  assert.equal(gv.lang(), null, "bawaan otomatis");
+  assert.match(gv.describe(), /otomatis/);
+  assert.deepEqual(await gv.setLang("ko"), { lang: "ko", saved: true });
+  assert.equal(gv.lang(), "ko");
+  assert.equal(st.m.get(LANG_STATE_KEY), "ko");
+  await gv.set(true);
+  assert.match(gv.describe(), /SUARA.*Korea/);
+  const gv2 = createGroupVoice({ state: st, log: silent });
+  await gv2.load();
+  assert.equal(gv2.lang(), "ko", "bahasa bertahan setelah restart");
+  assert.equal((await gv2.setLang("auto")).lang, "auto");
+  assert.equal(gv2.lang(), null);
+  assert.equal((await gv2.setLang("klingon")).lang, "auto", "kode tak dikenal -> otomatis");
+  const bad = mem(); bad.set = async () => { throw new Error("db mati"); };
+  const gv3 = createGroupVoice({ state: bad, log: silent });
+  assert.equal((await gv3.setLang("ar")).saved, false);
+  assert.equal(gv3.lang(), "ar", "tetap berlaku sementara");
+  const junk = mem(); junk.m.set(LANG_STATE_KEY, "zz");
+  const gv4 = createGroupVoice({ state: junk, log: silent }); await gv4.load();
+  assert.equal(gv4.lang(), null, "nilai rusak diabaikan");
+}
+ok("pengaturan bahasa tersimpan, dimuat ulang, gagal simpan tetap berlaku, nilai rusak diabaikan");
+
+{
+  const calls = [];
+  const fakeFetch = async (url, init) => { calls.push({ method: String(url).split("/").pop(), body: init?.body && !(init.body instanceof FormData) ? JSON.parse(init.body) : {} }); return { status: 200, json: async () => ({ ok: true, result: { message_id: 1 } }) }; };
+  const st = mem();
+  const gv = createGroupVoice({ state: st, log: silent, speak: async () => ({ ogg: Buffer.from("x") }), check: async () => ({ ok: true }) });
+  const tcfg = { token: "T", enabled: true, ownerIds: ["111"], mirror: true, historyLimit: 4, pollTimeoutSec: 1, speakText: true };
+  const tg = createTelegram({ config: tcfg, deps: { chat: async () => "x", groupVoice: gv, voiceCheck: async () => ({ ok: true }), speak: async () => null }, fetchImpl: fakeFetch, log: silent });
+  const say = async (text, id) => { await tg.handleUpdate({ update_id: id, message: { chat: { id: 111, type: "private" }, text } }); return calls.filter((c) => c.method === "sendMessage").at(-1).body.text; };
+  let t = await say("/voice wag kor", 1);
+  assert.ok(/Korea/.test(t) && /dinyalakan/.test(t), "memilih bahasa menyalakan suara");
+  assert.equal(gv.enabled(), true);
+  assert.equal(gv.lang(), "ko");
+  t = await say("/voice", 2);
+  assert.ok(/Korea/.test(t) && /kor/.test(t), "status memuat bahasa dan petunjuk");
+  t = await say("/voice wag jawa", 3);
+  assert.ok(/Jawa/.test(t) && !/dinyalakan/.test(t), "sudah menyala: tidak diumumkan lagi");
+  t = await say("/voice wag auto", 4);
+  assert.ok(/otomatis/.test(t));
+  assert.equal(gv.lang(), null);
+  assert.equal(gv.enabled(), true, "auto tidak mematikan suara");
+  await say("/voice wag off", 5);
+  t = await say("/voice wag arb", 6);
+  assert.ok(gv.enabled() && /Arab/.test(t));
+  assert.ok(await say("/voice wag klingon", 7) && /tidak dikenali/.test(calls.filter((c) => c.method === "sendMessage").at(-1).body.text));
+}
+ok("Telegram: /voice wag kor|arb|jawa|eng|id|auto memilih bahasa (menyalakan suara bila mati), status, nilai salah");
+
+{
+  const src = fs.readFileSync(new URL("./index.js", import.meta.url), "utf8");
+  assert.match(src, /detectRequestedLang\(text\) \|\| groupVoice\.lang\(\)/);
+  assert.match(src, /acctCtx\.replyLang = wantedLang/);
+  assert.match(src, /waAccountContext\.getStore\(\)\?\.replyLang/);
+  assert.match(src, /langInstruction\(replyLang\)/);
+  const i = src.indexOf("acctCtx.replyLang = wantedLang");
+  assert.ok(i > 0 && i < src.indexOf("result = await generateAutoReply(groupJid);"), "bahasa diatur SEBELUM jawaban dibuat");
+  assert.ok(src.slice(i - 400, i).includes("groupVoice.enabled()"), "hanya bila balasan grup berupa suara");
+}
+ok("index.js: bahasa diatur sebelum AI menjawab, hanya saat suara grup menyala");
 
 console.log(`\nSemua ${n} kelompok tes suara grup lulus.`);

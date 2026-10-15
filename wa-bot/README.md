@@ -946,3 +946,14 @@ Tidak perlu membuka `.env` di laptop untuk menambah grup. Perubahan tersimpan di
 Untuk nomor kedua tambahkan kata `wa2` (atau nama botnya, mis. `wongsobot`) setelah perintah: `/grup semua wa2`, `/grup tambah wa2 Pengajian`, `/grup wa2`.
 
 Grup yang sudah ada di `.env` (`WA_GROUP_ALLOWED_*`, `WA2_GROUP_ALLOWED_*`) tetap dipakai sebagai daftar dasar dan bertanda `(.env)`; itu hanya bisa dihapus dengan mengubah `.env`. Bila database sedang bermasalah, perubahan ditunda (daftar lama tidak pernah tertimpa).
+
+### Bahasa suara di grup (Indonesia, Inggris, Korea, Arab, Jawa)
+
+Suara dibuat Gemini TTS yang mengenali bahasa dari teks yang dibacakan, jadi yang diatur adalah **bahasa jawabannya**. Dua cara:
+
+- **Pengaturan (Telegram):** `/voice wag kor` (Korea), `/voice wag arb` (Arab), `/voice wag jawa` (Jawa), `/voice wag eng` (Inggris), `/voice wag id` (Indonesia). Memilih bahasa sekaligus menyalakan suara grup bila masih mati. `/voice wag auto` mengembalikan ke otomatis (mengikuti bahasa penanya, bawaan). `/voice` menampilkan pengaturan sekarang. Pengaturan tersimpan dan bertahan setelah restart.
+- **Permintaan di chat grup:** anggota grup menulis mis. "bot, jawab pakai bahasa Korea", "balas dalam bahasa Arab", "reply in Arabic", "ngomong pakai bahasa Jawa". Berlaku untuk pesan itu saja dan mengalahkan pengaturan di atas. Pertanyaan terjemahan ("apa bahasa Korea dari terima kasih?") bukan permintaan ganti bahasa.
+
+Hanya voice note, tanpa teks terjemahan. Jawaban yang memuat tautan, kode, tabel, atau terlalu panjang tetap berupa teks (aturan sama dengan `/voice wag on`). Bahasa suara hanya berlaku saat suara grup menyala; saat `/voice wag off`, bot tetap menjawab teks seperti biasa.
+
+Catatan: voice note MASUK di grup (balasan ke pesan bot) dikenali sebagai bahasa Indonesia (`VOICE_LANGUAGE=id`), jadi anggota grup yang membalas dengan voice note berbahasa Korea/Arab belum terbaca dengan baik; mereka bisa mengetik.

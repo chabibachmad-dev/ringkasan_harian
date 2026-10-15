@@ -69,7 +69,7 @@ import { createFallbackChain, readFallbackConfig } from "./llm-fallback.js";
 import { classifyRoute, createAiRoute, parseRouteCommand } from "./ai-route.js";
 import { createNodin, parseNodinCommand, readNodinConfig } from "./nodin.js";
 import { createKas, parseKasCommand, readKasConfig } from "./kas.js";
-import { createGroupVoice, readGroupVoiceConfig } from "./group-voice.js";
+import { createGroupVoice, detectRequestedLang, langInstruction, readGroupVoiceConfig } from "./group-voice.js";
 import { MAIN_ACCOUNT, SECOND_ACCOUNT, acctFields, createAccountRouter, isPairedCreds, isStalePairing, pairingInstructions, personaPrompt, readSecondAccountConfig } from "./wa-accounts.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { qrToPng } from "./qr-png.js";
@@ -315,7 +315,10 @@ function isGroupJid(jid) {
 function withGroupNote(basePrompt, jid) {
   // Nomor kedua boleh punya nama bot sendiri (WA2_NAME): AI memperkenalkan diri dengan nama itu.
   const base = currentAccountId() === MAIN_ACCOUNT ? basePrompt : personaPrompt(basePrompt, wa2Config.botName);
-  return isGroupJid(jid) ? `${base}${GROUP_PROMPT_NOTE}` : base;
+  if (!isGroupJid(jid)) return base;
+  // Balasan grup berupa suara: bahasa jawaban dipaksa (/voice wag kor ...) atau diminta anggota grup ("jawab pakai bahasa Korea").
+  const replyLang = waAccountContext.getStore()?.replyLang;
+  return `${base}${GROUP_PROMPT_NOTE}${replyLang ? langInstruction(replyLang) : ""}`;
 }
 
 // Buang awalan "Nama: " & baris "(mengutip: ...)" supaya pencarian dokumen/web
@@ -2847,6 +2850,15 @@ async function handleGroupMessage(msg, sock) {
   }
 
   sock.sendPresenceUpdate("composing", groupJid).catch(() => {});
+  // Bahasa jawaban (hanya relevan bila balasan grup berupa suara): permintaan di pesan ini > pengaturan /voice wag > otomatis.
+  if (groupVoice.enabled()) {
+    const wantedLang = detectRequestedLang(text) || groupVoice.lang();
+    const acctCtx = waAccountContext.getStore();
+    if (acctCtx && wantedLang) {
+      acctCtx.replyLang = wantedLang;
+      console.log(`🔊 Bahasa balasan suara grup: ${wantedLang}`);
+    }
+  }
   let result = null;
   try {
     try {

@@ -152,7 +152,7 @@ const HELP = [
   "/pasar  — IHSG, emas dunia (Rp/gram), dan kurs USD/IDR (alias /emas, /ihsg); otomatis tiap pagi hari kerja; /pasar tes = uji sumber data",
   "/ingatkan <waktu> <teks>  — pengingat pribadi (contoh: /ingatkan besok 09:00 kirim SPJ; /ingatkan tiap tanggal 25 jam 08:00 laporan);  /pengingat  — daftar / batal <nomor>",
   "/kesehatan  — periksa Ollama, disk, memori, WhatsApp, basis data, restart, dan cadangan sekarang (otomatis dipantau)",
-  "/voice wag on|off  — balasan di grup WhatsApp berupa suara (on) atau teks (off)",
+  "/voice wag on|off|id|eng|kor|arb|jawa  — balasan grup WA berupa suara/teks + bahasa suara",
   "/wa2  — nomor WhatsApp kedua (status, kode, qr)",
   "/grup  — grup WA yang dijawab bot: lihat, semua, tambah, hapus",
   "/kas  — laporan kas bulanan: konfirmasi angka, submit, simpan (/kas bantuan)",
@@ -482,10 +482,20 @@ Ubah: /suara auto • /suara on • /suara off`));
     if (cmd.kind === "error") return void (await send(chatId, cmd.error));
     if (cmd.kind === "tg") return handleVoiceCommand(chatId, cmd.arg);
     if (!gv) return void (await send(chatId, "Fitur balasan suara grup belum aktif di bot ini."));
-    if (cmd.kind === "status" || cmd.value === null) {
+    if ((cmd.kind === "status" || cmd.value === null) && !cmd.lang) {
       const tg = await getVoiceMode(chatId);
       const tgLabel = { auto: "otomatis", on: "selalu suara", off: "teks saja" }[tg] || tg;
-      return void (await send(chatId, `🔊 *Pengaturan suara*\n• Grup WhatsApp: ${gv.describe()}\n• Telegram: ${tgLabel}\n\nUbah: /voice wag on • /voice wag off • /voice tg auto|on|off`));
+      return void (await send(chatId, `🔊 *Pengaturan suara*\n• Grup WhatsApp: ${gv.describe()}\n• Telegram: ${tgLabel}\n\nUbah: /voice wag on • /voice wag off\nBahasa suara grup: /voice wag auto • id • eng • kor • arb • jawa\n/voice tg auto|on|off`));
+    }
+    if (cmd.lang) {
+      const l = await gv.setLang(cmd.lang);
+      let extra = "";
+      if (l.lang !== "auto" && !gv.enabled()) {
+        const r2 = await gv.set(true);
+        extra = `\nSuara grup sekarang *dinyalakan*.${r2.warning ? `\n⚠️ Tapi suara belum bisa dibuat sekarang: ${r2.warning}.` : ""}`;
+      }
+      const note = l.lang === "auto" ? "Bahasa suara grup: *otomatis* — mengikuti bahasa penanya." : `Bahasa suara grup: *${gv.describeLang()}* — semua balasan suara di grup dijawab dalam bahasa ini.`;
+      return void (await send(chatId, `🔊 ${note}${extra}\nAnggota grup juga bisa meminta langsung di chat, mis. "bot, jawab pakai bahasa Korea" (berlaku untuk pesan itu saja).${l.saved ? "" : "\n\n⚠️ Pengaturan gagal disimpan; berlaku sampai bot restart."}`));
     }
     const r = await gv.set(cmd.value === "on");
     if (r.on) {
