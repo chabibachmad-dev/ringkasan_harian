@@ -754,7 +754,7 @@ Ubah: /suara auto • /suara on • /suara off`));
     if (name === "gambar" || name === "image" || name === "img") {
       const im = deps.image;
       if (!im) return void (await reply("Pembuat gambar tidak tersedia di versi bot ini."));
-      if (!im.available()) return void (await reply("Pembuat gambar belum aktif: GEMINI_API_KEYS belum diisi di .env bot."));
+      if (!im.available()) return void (await reply("Pembuat gambar belum aktif: isi CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN (gratis) atau GEMINI_API_KEYS di .env bot."));
       const c = im.parseCommand(arg);
       if (c.kind === "status") {
         return void (await reply(`🖼️ Pembuat gambar\n${im.describe()}\n\nPakai: /gambar <deskripsi>\nDi grup WA: ketik "bot, buatkan gambar ...".\nSaklar grup: /gambar grup on atau /gambar grup off`));

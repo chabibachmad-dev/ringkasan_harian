@@ -21,6 +21,7 @@
 export const STATE_KEY = "wa_image_gen";
 export const QUOTA_KEY = "wa_image_quota";
 export const DEFAULT_IMAGE_MODELS = ["gemini-nano-banana-2.1", "gemini-3.1-flash-lite-image", "gemini-3.1-flash-image", "gemini-2.5-flash-image"];
+export const DEFAULT_CF_IMAGE_MODELS = ["@cf/black-forest-labs/flux-1-schnell"];
 export const DEFAULT_OR_IMAGE_MODELS = ["google/gemini-2.5-flash-image"];
 const OR_URL = "https://openrouter.ai/api/v1/chat/completions";
 const API_BASE = "https://generativelanguage.googleapis.com/v1beta";
@@ -37,6 +38,9 @@ export function readImageConfig(env = process.env) {
   return {
     keys: splitList(env.GEMINI_API_KEYS || env.GEMINI_API_KEY),
     models: models.length ? models : DEFAULT_IMAGE_MODELS,
+    cfAccount: String(env.CLOUDFLARE_ACCOUNT_ID || env.CF_ACCOUNT_ID || "").trim(),
+    cfToken: String(env.CLOUDFLARE_API_TOKEN || env.CF_API_TOKEN || "").trim(),
+    cfModels: splitList(env.CLOUDFLARE_IMAGE_MODELS).length ? splitList(env.CLOUDFLARE_IMAGE_MODELS) : DEFAULT_CF_IMAGE_MODELS,
     orKeys: splitList(env.OPENROUTER_API_KEYS || env.OPENROUTER_API_KEY),
     orModels: splitList(env.OPENROUTER_IMAGE_MODELS).length ? splitList(env.OPENROUTER_IMAGE_MODELS) : DEFAULT_OR_IMAGE_MODELS,
     timeoutMs: Math.max(10_000, num(env.IMAGE_TIMEOUT_MS, 90_000)),
@@ -170,6 +174,7 @@ const BLOCKED_RE = /blockReason|IMAGE_SAFETY|PROHIBITED|"SAFETY"|IMAGE_OTHER|REC
 function errorKind(status, bodyText) {
   const b = String(bodyText || "");
   if (status === 402) return "billing";
+  if (/daily free allocation|neurons|4006/i.test(b)) return "quota";
   if (status === 429 || /RESOURCE_EXHAUSTED|quota|rate.?limit/i.test(b)) return "quota";
   if (/billing|paid|free tier|not available in your|only available.*(paid|billing)|limit: 0/i.test(b) && (status === 403 || status === 400)) return "billing";
   if (status === 401 || status === 403 || /API key (not valid|expired)|PERMISSION_DENIED/i.test(b)) return "auth";
@@ -179,11 +184,11 @@ function errorKind(status, bodyText) {
 
 export const KIND_TEXT = {
   quota: "Kuota pembuat gambar Gemini sedang habis. Coba lagi nanti.",
-  billing: "Pembuat gambar belum bisa dipakai sekarang: kuota gratis Gemini habis dan saldo cadangan belum ada. Pemilik sudah diberi tahu.",
+  billing: "Pembuat gambar belum bisa dipakai sekarang: kuota gratis habis dan saldo cadangan belum ada. Pemilik sudah diberi tahu.",
   auth: "Kunci Gemini ditolak untuk pembuatan gambar.",
   unavailable: "Pembuat gambar sedang tidak tersedia. Coba lagi sebentar lagi.",
   blocked: "Maaf, gambar itu tidak bisa dibuat (ditolak oleh filter keamanan). Coba deskripsi lain.",
-  nokey: "Pembuat gambar belum aktif: GEMINI_API_KEYS belum diisi di .env bot."
+  nokey: "Pembuat gambar belum aktif: isi CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN (gratis) atau GEMINI_API_KEYS di .env bot."
 };
 
 /** Pesan galat singkat dari respons API (error.message), maks 140 huruf. */
@@ -199,13 +204,14 @@ function hariWita(ms) {
 /**
  * deps: { state?: {get,set}, config, fetchImpl?, log?, now? }
  */
-export function createImageGen({ state = null, config = readImageConfig({}), fetchImpl = globalThis.fetch, log = console, now = () => Date.now() } = {}) {
+export function createImageGen({ state = null, config = readImageConfig({}), fetchImpl = globalThis.fetch, log = console, now = () => Date.now(), translate = null } = {}) {
   let groupsOn = true;
   let quota = { day: hariWita(now()), owner: 0, group: 0, people: {} };
   const apiPref = new Map(); // model -> "interactions" | "generate"
   let rr = 0;
 
-  const available = () => (config.keys.length > 0 || (config.orKeys?.length ?? 0) > 0) && typeof fetchImpl === "function";
+  const hasCf = () => Boolean(config.cfAccount && config.cfToken);
+  const available = () => (config.keys.length > 0 || (config.orKeys?.length ?? 0) > 0 || hasCf()) && typeof fetchImpl === "function";
 
   async function load() {
     if (!state) return groupsOn;
@@ -323,6 +329,53 @@ export function createImageGen({ state = null, config = readImageConfig({}), fet
     const note = (kind) => {
       if (!worst || rank[kind] > rank[worst]) worst = kind;
     };
+    // Penyedia GRATIS dulu: Cloudflare Workers AI (FLUX.1 schnell, jatah harian gratis tanpa kartu).
+    if (hasCf()) {
+      let cfPrompt = p;
+      if (translate) {
+        // FLUX jauh lebih paham bahasa Inggris: deskripsi diterjemahkan dulu (gagal -> pakai aslinya).
+        try {
+          const t = String((await translate(p)) ?? "").replace(/\s+/g, " ").trim();
+          if (t && t.length <= 800) cfPrompt = t;
+        } catch (e) {
+          log.warn?.(`🖼️ [Gambar] terjemahan deskripsi gagal, pakai aslinya: ${e instanceof Error ? e.message : e}`);
+        }
+      }
+      for (const model of config.cfModels || []) {
+        let r;
+        try {
+          const res = await fetchImpl(`https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(config.cfAccount)}/ai/run/${model}`, {
+            method: "POST",
+            headers: { "content-type": "application/json", authorization: `Bearer ${config.cfToken}` },
+            body: JSON.stringify({ prompt: cfPrompt, steps: 4 }),
+            signal: AbortSignal.timeout(config.timeoutMs)
+          });
+          const raw = await res.text();
+          let json = null;
+          try {
+            json = JSON.parse(raw);
+          } catch {
+            /* bukan JSON */
+          }
+          r = { status: res.status, ok: res.ok, raw, json };
+        } catch (e) {
+          log.warn?.(`🖼️ [Gambar] Cloudflare ${model}: ${e instanceof Error ? e.message : e}`);
+          details.push(`Cloudflare ${model}: ${e instanceof Error ? e.message : e}`);
+          note("unavailable");
+          continue;
+        }
+        const b64 = r.json?.result?.image;
+        if (r.ok && typeof b64 === "string" && b64.length > 400) {
+          const buffer = Buffer.from(b64, "base64");
+          return { buffer, mime: mimeFromBytes(buffer) || "image/jpeg", model: `cloudflare:${model}`, text: "" };
+        }
+        const kind = r.ok ? "server" : errorKind(r.status, r.raw);
+        log.warn?.(`🖼️ [Gambar] Cloudflare ${model} HTTP ${r.status} (${kind}): ${String(r.raw).replace(/\s+/g, " ").slice(0, 160)}`);
+        details.push(`Cloudflare ${model}: HTTP ${r.status} ${kind} — ${apiMessage(r)}`);
+        if (/nsfw|moderat|flagged|inappropriate/i.test(r.raw)) throw fail("blocked");
+        note(kind === "api" || kind === "server" ? "unavailable" : kind);
+      }
+    }
     const start = config.keys.length ? rr++ % config.keys.length : 0;
     for (const model of config.keys.length ? config.models : []) {
       const apis = apiPref.get(model) === "generate" ? ["generate", "interactions"] : ["interactions", "generate"];
@@ -443,7 +496,7 @@ export function createImageGen({ state = null, config = readImageConfig({}), fet
     rollDay();
     const sisa = (limit, used) => (limit > 0 ? `${Math.max(0, limit - used)}/${limit}` : "tanpa batas");
     return (
-      `grup: ${groupsOn ? "AKTIF" : "mati"} • model: ${config.keys.length ? config.models[0] : "(Gemini tanpa kunci)"}${config.keys.length && config.models.length > 1 ? ` (+${config.models.length - 1} cadangan)` : ""}${config.orKeys?.length ? ` • cadangan OpenRouter: ${config.orModels[0]}` : ""}\n` +
+      `grup: ${groupsOn ? "AKTIF" : "mati"} • model: ${config.keys.length ? config.models[0] : "(Gemini tanpa kunci)"}${config.keys.length && config.models.length > 1 ? ` (+${config.models.length - 1} cadangan)` : ""}${hasCf() ? ` • GRATIS: Cloudflare ${config.cfModels[0].split("/").pop()}` : ""}${config.orKeys?.length ? ` • cadangan OpenRouter: ${config.orModels[0]}` : ""}\n` +
       `Sisa jatah hari ini — pemilik: ${sisa(config.ownerDaily, quota.owner)}, semua grup: ${sisa(config.groupDaily, quota.group)} (maks ${config.personDaily || "∞"} per orang)`
     );
   }

@@ -246,6 +246,61 @@ ok("saklar grup tersimpan, perintah /gambar, DB galat tidak merusak");
 }
 ok("kunci API lewat header (bukan URL) dan tidak dicetak");
 
+// --- Cloudflare Workers AI (gratis, penyedia pertama)
+{
+  const cfCfg = (over = {}) => ({ ...cfg(), cfAccount: "acc123", cfToken: "tok", cfModels: ["@cf/black-forest-labs/flux-1-schnell"], ...over });
+  const jpg = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(900, 7)]).toString("base64");
+  const seen = [];
+  const fetchImpl = async (url, init) => {
+    seen.push({ url, init });
+    return res(200, { result: { image: jpg }, success: true, errors: [], messages: [] });
+  };
+  const translated = [];
+  const g = createImageGen({ config: cfCfg(), fetchImpl, log: silent, translate: async (t) => { translated.push(t); return "a cat wearing an astronaut hat"; } });
+  const out = await g.generate("kucing memakai topi astronot");
+  assert.equal(out.model, "cloudflare:@cf/black-forest-labs/flux-1-schnell");
+  assert.equal(out.mime, "image/jpeg");
+  assert.equal(seen.length, 1, "Gemini tidak dipanggil bila Cloudflare berhasil");
+  assert.equal(seen[0].url, "https://api.cloudflare.com/client/v4/accounts/acc123/ai/run/@cf/black-forest-labs/flux-1-schnell");
+  assert.equal(seen[0].init.headers.authorization, "Bearer tok");
+  assert.deepEqual(JSON.parse(seen[0].init.body), { prompt: "a cat wearing an astronaut hat", steps: 4 });
+  assert.deepEqual(translated, ["kucing memakai topi astronot"]);
+  // terjemahan gagal -> deskripsi asli
+  const g2 = createImageGen({ config: cfCfg(), fetchImpl, log: silent, translate: async () => { throw new Error("groq mati"); } });
+  seen.length = 0;
+  await g2.generate("rumah adat");
+  assert.equal(JSON.parse(seen[0].init.body).prompt, "rumah adat");
+  // hanya Cloudflare (tanpa kunci lain) sudah cukup
+  const only = createImageGen({ config: readImageConfig({ CLOUDFLARE_ACCOUNT_ID: "a", CLOUDFLARE_API_TOKEN: "t" }), fetchImpl, log: silent });
+  assert.equal(only.available(), true);
+  assert.match(only.describe(), /GRATIS: Cloudflare flux-1-schnell/);
+  // jatah harian Cloudflare habis -> Gemini; keduanya habis -> kind quota
+  const urls = [];
+  const fb = createImageGen({
+    config: cfCfg({ keys: ["k1"] }),
+    fetchImpl: async (u) => {
+      urls.push(u);
+      if (/cloudflare/.test(u)) return res(429, { success: false, errors: [{ code: 4006, message: "you have used up your daily free allocation of 10,000 neurons" }] });
+      return res(200, { steps: [{ type: "model_output", content: [{ type: "image", data: b64, mime_type: "image/png" }] }] });
+    },
+    log: silent
+  });
+  const o2 = await fb.generate("x");
+  assert.match(o2.model, /^gemini/);
+  assert.ok(/cloudflare/.test(urls[0]) && /googleapis/.test(urls[1]));
+  const bothOut = createImageGen({ config: cfCfg(), fetchImpl: async () => res(400, { errors: [{ code: 4006, message: "daily free allocation of neurons used up" }] }), log: silent });
+  await assert.rejects(bothOut.generate("x"), (e) => e.kind === "quota" && /Cloudflare/.test(e.detail));
+  // ditolak moderasi -> blocked, penyedia lain tidak dicoba
+  const nsfwUrls = [];
+  const nsfw = createImageGen({ config: cfCfg({ keys: ["k1"] }), fetchImpl: async (u) => { nsfwUrls.push(u); return res(400, { errors: [{ message: "NSFW content flagged" }] }); }, log: silent });
+  await assert.rejects(nsfw.generate("x"), (e) => e.kind === "blocked");
+  assert.equal(nsfwUrls.length, 1);
+  // token tidak bocor ke log/URL
+  const src = fs.readFileSync(new URL("./image-gen.js", import.meta.url), "utf8");
+  assert.ok(!/log\.\w+\?\.\([^)]*cfToken/.test(src));
+}
+ok("Cloudflare: penyedia pertama, terjemahan prompt, jatah habis -> Gemini, moderasi -> ditolak, cukup tanpa kunci lain");
+
 // --- cadangan OpenRouter
 {
   const dataUrl = `data:image/png;base64,${b64}`;
@@ -327,7 +382,7 @@ ok("cadangan OpenRouter: dipakai saat Gemini habis/tanpa kunci, 402 = billing, d
   const noKey = createImageGen({ config: readImageConfig({}), log: silent });
   const tg3 = createTelegram({ config: tcfg, deps: { chat: async () => "x", image: { available: () => noKey.available() } }, fetchImpl: fakeFetch, log: silent });
   await tg3.handleUpdate({ update_id: 10, message: { chat: { id: 111, type: "private" }, text: "/gambar kucing" } });
-  assert.match(calls.filter((c) => c.method === "sendMessage").at(-1).body.text, /GEMINI_API_KEYS/);
+  assert.match(calls.filter((c) => c.method === "sendMessage").at(-1).body.text, /CLOUDFLARE_API_TOKEN/);
 }
 ok("Telegram: /gambar status, saklar grup, kirim foto, deskripsi ditolak, tanpa fitur/kunci");
 

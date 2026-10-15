@@ -3799,10 +3799,26 @@ groupVoice
   .catch(() => {});
 
 // Pembuat GAMBAR (Gemini): grup WA, chat pemilik di WA, dan /gambar di Telegram. Lihat image-gen.js.
-const imageGen = createImageGen({ state: botStateStore, config: readImageConfig(process.env) });
+const imageGen = createImageGen({
+  state: botStateStore,
+  config: readImageConfig(process.env),
+  // FLUX (Cloudflare) jauh lebih paham bahasa Inggris: deskripsi diterjemahkan dulu lewat penyedia cadangan teks (Groq/OpenRouter).
+  translate: llmFallback.available()
+    ? async (text) =>
+        (
+          await llmFallback.generate({
+            system: "Translate the user's image description into concise, vivid English for an image generator. Output ONLY the English description, no quotes, no commentary. Keep names and any text meant to appear in the image unchanged.",
+            messages: [{ role: "user", content: text }],
+            temperature: 0.2,
+            timeoutMs: 8000,
+            maxTries: 2
+          })
+        ).text
+    : null
+});
 imageGen
   .load()
-  .then(() => console.log(`🖼️ Pembuat gambar: ${imageGen.available() ? imageGen.describe().replace(/\n/g, " | ") : "mati (GEMINI_API_KEYS kosong)"} (ubah: /gambar grup on|off di Telegram)`))
+  .then(() => console.log(`🖼️ Pembuat gambar: ${imageGen.available() ? imageGen.describe().replace(/\n/g, " | ") : "mati (isi CLOUDFLARE_ACCOUNT_ID+CLOUDFLARE_API_TOKEN atau GEMINI_API_KEYS)"} (ubah: /gambar grup on|off di Telegram)`))
   .catch(() => {});
 
 const ops = createOps({
