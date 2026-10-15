@@ -70,9 +70,10 @@ import { classifyRoute, createAiRoute, parseRouteCommand } from "./ai-route.js";
 import { createNodin, parseNodinCommand, readNodinConfig } from "./nodin.js";
 import { createKas, parseKasCommand, readKasConfig } from "./kas.js";
 import { createGroupVoice, readGroupVoiceConfig } from "./group-voice.js";
-import { MAIN_ACCOUNT, acctFields, createAccountRouter, isPairedCreds, isStalePairing, pairingInstructions, personaPrompt, readSecondAccountConfig } from "./wa-accounts.js";
+import { MAIN_ACCOUNT, SECOND_ACCOUNT, acctFields, createAccountRouter, isPairedCreds, isStalePairing, pairingInstructions, personaPrompt, readSecondAccountConfig } from "./wa-accounts.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { qrToPng } from "./qr-png.js";
+import { createGroupList } from "./group-list.js";
 import { createWebSearch, readSearchConfig } from "./web-search.js";
 import { createRegMonitor, readRegMonitorConfig } from "./reg-monitor.js";
 import { createKhatamReminder } from "./khatam.js";
@@ -2700,10 +2701,9 @@ async function getGroupSubject(sock, jid) {
 }
 
 // Daftar grup yang boleh dijawab: nomor utama pakai WA_GROUP_ALLOWED_*, nomor kedua pakai WA2_GROUP_ALLOWED_* (kosong = tidak menjawab di grup).
+// Gabungan daftar dari .env dan tambahan lewat Telegram (/grup) -- lihat group-list.js.
 function groupRulesFor(sock) {
-  return sock?.waAccount?.secondary
-    ? { enabled: wa2Config.groupNames.length > 0 || wa2Config.groupJids.length > 0, names: wa2Config.groupNames, jids: wa2Config.groupJids }
-    : { enabled: GROUP_ENABLED, names: GROUP_ALLOWED_NAMES, jids: GROUP_ALLOWED_JIDS };
+  return groupList.rules(sock?.waAccount?.secondary ? SECOND_ACCOUNT : MAIN_ACCOUNT);
 }
 function isGroupAllowed(jid, subject, sock = null) {
   const rules = groupRulesFor(sock);
@@ -3504,13 +3504,14 @@ function wa2StatusWord() {
 function describeWa2() {
   const a = WA2_ACCOUNT_DEF;
   if (!a) return "Nomor kedua belum dinyalakan. Isi WA2_NUMBER di .env lalu /restart (lihat bagian 25 .env.example).";
-  const groups = wa2Config.groupNames.length + wa2Config.groupJids.length;
+  const r2 = groupList.rules(SECOND_ACCOUNT);
+  const groups = r2.names.length + r2.jids.length;
   return [
     `📱 *${a.label}*`,
     `• Status: ${wa2StatusWord()}`,
     `• Nomor: ${wa2Config.number ? `+${wa2Config.number}` : "(WA2_NUMBER belum diisi)"} (HP yang memasukkan kode harus nomor ini)`,
     ...(a.lastClose ? [`• Putus terakhir: kode ${a.lastClose.code}${a.lastClose.reason ? ` (${a.lastClose.reason})` : ""} pukul ${formatClockInTimezone(a.lastClose.at)}`] : []),
-    `• Grup: ${groups > 0 ? `${groups} aturan grup diizinkan` : "tidak menjawab di grup (isi WA2_GROUP_ALLOWED_NAMES)"}`,
+    `• Grup: ${groups > 0 ? `${groups} aturan grup diizinkan (/grup wa2)` : "tidak menjawab di grup (tambah lewat /grup tambah wa2 <nama>)"}`,
     `• Ringkasan harian pemilik: ${wa2Config.inSummary ? "ikut" : "tidak ikut"}`,
     `• Perintah pemilik hanya dari nomor ${OWNER_NUMBER || "pemilik"} (chat-ke-diri-sendiri di nomor ini diabaikan)`,
     "",
@@ -3832,6 +3833,24 @@ const strictStateStore = {
   },
   set: botStateStore.set
 };
+
+// Daftar grup yang dijawab: .env + tambahan lewat /grup di Telegram (tersimpan di bot_state, langsung berlaku). Lihat group-list.js.
+const groupList = createGroupList({
+  state: strictStateStore,
+  env: {
+    [MAIN_ACCOUNT]: { names: GROUP_ALLOWED_NAMES, jids: GROUP_ALLOWED_JIDS },
+    [SECOND_ACCOUNT]: { names: wa2Config.groupNames, jids: wa2Config.groupJids }
+  },
+  labels: { [MAIN_ACCOUNT]: "Nomor utama", [SECOND_ACCOUNT]: WA2_ACCOUNT_DEF?.label || "Nomor 2" },
+  secondEnabled: Boolean(WA2_ACCOUNT_DEF),
+  listGroups: async (accountId) => {
+    const sk = accountId === SECOND_ACCOUNT ? WA2_ACCOUNT_DEF?.sock : currentSock;
+    if (!sk) return null;
+    const all = await sk.groupFetchAllParticipating();
+    return Object.values(all || {}).map((g) => ({ id: g.id, subject: g.subject || "" }));
+  }
+});
+groupList.load().catch(() => {});
 const nodin = createNodin({
   config: readNodinConfig(process.env, BOT_DIR),
   state: strictStateStore,
@@ -4074,6 +4093,7 @@ const telegram = createTelegram({
     health,
     aiRoute: { handle: (arg) => aiRoute.handle(arg) },
     groupVoice,
+    groups: { handle: (arg) => groupList.handle(arg, { secondAliases: [String(wa2Config.botName || "").trim().split(/\s+/)[0]] }) },
     wa2: {
       describe: () => describeWa2(),
       qr: async () => ({ data: await wa2QrImage(), name: "qr-nomor-2.png", mime: "image/png", photo: true }),
@@ -4166,7 +4186,7 @@ console.log(
   `🏛️ SiMAB lewat WhatsApp (hanya baca): ${simab.enabled && OWNER_NUMBER ? `AKTIF (satker ${(process.env.SIMAB_KANTOR_ID || "538065").trim()}, awali pesan dengan "simab")` : "mati (isi SIMAB_* di .env buat menyalakan)"}`
 );
 console.log(
-  `👥 Grup WhatsApp: ${GROUP_ENABLED && AUTO_REPLY_ACTIVE ? `AKTIF (grup diizinkan: ${[...(process.env.WA_GROUP_ALLOWED_NAMES || "").split(",").map((x) => x.trim()).filter(Boolean), ...GROUP_ALLOWED_JIDS].join(" | ")}; pemicu: ${[GROUP_MENTION_TRIGGER ? "mention" : null, "balas pesan bot", GROUP_KEYWORDS.length ? `kata "${GROUP_KEYWORDS.join(",")}"` : null].filter(Boolean).join(", ")})` : "mati (isi WA_GROUP_ALLOWED_NAMES di .env buat menyalakan)"}`
+  `👥 Grup WhatsApp: ${(GROUP_ENABLED || groupList.rules(MAIN_ACCOUNT).enabled) && AUTO_REPLY_ACTIVE ? `AKTIF (grup diizinkan dari .env: ${[...(process.env.WA_GROUP_ALLOWED_NAMES || "").split(",").map((x) => x.trim()).filter(Boolean), ...GROUP_ALLOWED_JIDS].join(" | ") || "-"}; tambahan lewat /grup dibaca setelah bot menyala; pemicu: ${[GROUP_MENTION_TRIGGER ? "mention" : null, "balas pesan bot", GROUP_KEYWORDS.length ? `kata "${GROUP_KEYWORDS.join(",")}"` : null].filter(Boolean).join(", ")})` : "mati (tambah grup lewat /grup tambah <nama> di Telegram, atau isi WA_GROUP_ALLOWED_NAMES di .env)"}`
 );
 console.log(
   `🦙 Cadangan lokal auto-reply (Ollama, saat kuota Gemini habis): ${AUTO_REPLY_ACTIVE && WA_AI_ENGINE === "gemini" && WA_OLLAMA_FALLBACK_ENABLED ? `AKTIF (model ${OLLAMA_MODEL}, hanya pertanyaan non-angka)` : "mati"}`

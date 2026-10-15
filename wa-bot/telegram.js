@@ -148,14 +148,15 @@ const HELP = [
   "/status  — kondisi bot: WhatsApp, key Gemini, token hari ini, Ollama, dokumen",
   "/ringkasan  — ringkasan percakapan WhatsApp hari ini",
   "/peraturan  — pantau peraturan terbaru (\"/peraturan semua\" = tampilkan semua hasil)",
-  "/dokumen <pertanyaan>  — tanya dari dokumen lokal di laptop (hasil PDF → MD), dijawab Ollama. \"/dokumen\" saja = daftar dokumen",
+  "/dokumen <pertanyaan>  — tanya dari dokumen lokal di laptop, dijawab Ollama. \"/dokumen\" saja = daftar dokumen",
   "/pasar  — IHSG, emas dunia (Rp/gram), dan kurs USD/IDR (alias /emas, /ihsg); otomatis tiap pagi hari kerja; /pasar tes = uji sumber data",
-  "/ingatkan <waktu> <teks>  — pengingat pribadi (contoh: /ingatkan besok 09:00 kirim SPJ; /ingatkan tiap tanggal 25 jam 08:00 laporan);  /pengingat  — daftar;  /pengingat batal <nomor>",
+  "/ingatkan <waktu> <teks>  — pengingat pribadi (contoh: /ingatkan besok 09:00 kirim SPJ; /ingatkan tiap tanggal 25 jam 08:00 laporan);  /pengingat  — daftar / batal <nomor>",
   "/kesehatan  — periksa Ollama, disk, memori, WhatsApp, basis data, restart, dan cadangan sekarang (otomatis dipantau)",
   "/voice wag on|off  — balasan di grup WhatsApp berupa suara (on) atau teks (off)",
-  "/wa2  — nomor WhatsApp kedua (status; /wa2 kode; /wa2 qr)",
-  "/kas  — laporan kas bulanan: konfirmasi angka tiap awal bulan, submit, simpan (/kas bantuan)",
-  "/nodin  — konsep Nota Dinas LPJ (PDF + Word), otomatis tiap tanggal 1 (/nodin november, /nodin cek)",
+  "/wa2  — nomor WhatsApp kedua (status, kode, qr)",
+  "/grup  — grup WA yang dijawab bot: lihat, semua, tambah, hapus",
+  "/kas  — laporan kas bulanan: konfirmasi angka, submit, simpan (/kas bantuan)",
+  "/nodin  — konsep Nota Dinas LPJ (PDF + Word), otomatis tiap tanggal 1 (/nodin cek)",
   "/urutan  — lihat/ubah urutan AI untuk balasan WhatsApp & grup (jalur santai & akurat; contoh: /urutan santai groq,gemini,openrouter,ollama;  /urutan reset)",
   "/cadangan  — status cadangan otomatis (memori, pengingat, skill, sesi WhatsApp);  /cadangan sekarang  — buat sekarang",
   "/lokal <pesan>  — ngobrol dengan Ollama LOKAL (alias /tanya): percakapan dan catatan pribadimu tidak keluar dari laptop;  /lokal baru  — lupakan percakapan",
@@ -182,6 +183,7 @@ const HELP = [
  *   reminders?: { handle({name:"ingatkan"|"pengingat", arg}) -> string }   pengingat pribadi (reminders.js)
  *   health?: { report() -> Promise<string> }   papan kesehatan bot (health.js)
  *   groupVoice?: { enabled(), set(bool) -> Promise<{on,saved,warning}>, describe() }   balasan suara di grup WhatsApp (group-voice.js, /voice wag)
+ *   groups?: { handle(arg) -> Promise<string> }   daftar grup yang dijawab (/grup)
  *   wa2?: { describe() -> string, code() -> Promise<string>, qr() -> Promise<{data,name,mime,photo}> }   nomor WhatsApp kedua (/wa2, /wa2 kode)
  *   kas?: { handle(arg) -> Promise<{ok,text,files?,caption?}> }   laporan kas bulanan (kas.js, /kas)
  *   nodin?: { compose(arg) -> Promise<{ok,text,caption?,files?}> }   konsep nota dinas bulanan (nodin.js, /nodin)
@@ -738,6 +740,10 @@ Ubah: /suara auto • /suara on • /suara off`));
     }
     if (name === "suara") return handleVoiceCommand(chatId, arg);
     if (name === "voice") return handleVoiceHub(chatId, arg);
+    if (name === "grup" || name === "group") {
+      if (!deps.groups) return void (await reply("Pengaturan grup tidak tersedia di versi bot ini."));
+      return void (await reply(await withAction(chatId, "typing", () => deps.groups.handle(arg))));
+    }
     if (name === "wa2" || name === "nomor2") {
       const w = deps.wa2;
       if (!w) return void (await reply("Nomor kedua tidak tersedia di versi bot ini."));
@@ -1000,7 +1006,7 @@ Ubah: /suara auto • /suara on • /suara off`));
   }
 
   const HANDLER_DEADLINE_MS = 10 * 60_000;
-  const FAST_COMMANDS = new Set(["dokumen", "dok", "doc", "status", "id", "help", "start", "ingat", "catatan", "lupa", "memori", "note", "penyedia", "provider", "skill", "skil", "lokal", "tanya", "pasar", "emas", "ihsg", "ingatkan", "remind", "pengingat", "reminder", "cadangan", "backup", "kesehatan", "sehat", "health", "urutan", "route", "rute", "nodin", "notadinas", "kas", "laporankas", "voice", "wa2", "nomor2"]);
+  const FAST_COMMANDS = new Set(["dokumen", "dok", "doc", "status", "id", "help", "start", "ingat", "catatan", "lupa", "memori", "note", "penyedia", "provider", "skill", "skil", "lokal", "tanya", "pasar", "emas", "ihsg", "ingatkan", "remind", "pengingat", "reminder", "cadangan", "backup", "kesehatan", "sehat", "health", "urutan", "route", "rute", "nodin", "notadinas", "kas", "laporankas", "voice", "wa2", "nomor2", "grup", "group"]);
   function isFastUpdate(u) {
     const m = u?.message;
     if (!m) return false;
@@ -1119,6 +1125,7 @@ Ubah: /suara auto • /suara on • /suara off`));
           { command: "ingatkan", description: "Pengingat pribadi: /ingatkan besok 09:00 kirim SPJ; /pengingat" },
           { command: "kesehatan", description: "Periksa kesehatan bot: Ollama, disk, memori, WhatsApp, cadangan" },
           { command: "voice", description: "Balasan grup WhatsApp: suara (on) atau teks (off)" },
+          { command: "grup", description: "Grup WhatsApp yang dijawab bot: lihat, tambah, hapus" },
           { command: "wa2", description: "Nomor WhatsApp kedua: status dan kode tautan" },
           { command: "kas", description: "Laporan kas bulanan (Saldo Rekening & Register Kas)" },
           { command: "nodin", description: "Konsep Nota Dinas LPJ Bendahara (PDF + Word)" },

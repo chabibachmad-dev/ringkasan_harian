@@ -930,3 +930,19 @@ Satu bot bisa memegang **dua nomor WhatsApp**. Nomor utama jalan seperti biasa; 
 - Balasan manual dari pemegang HP menjeda AI untuk kontak itu (sama seperti nomor utama). Balasan dari aplikasi Ayyubi ke kontak nomor kedua dikirim lewat nomor kedua.
 - Riwayat kedua nomor tampil di aplikasi Ayyubi milikmu; pemegang HP nomor kedua sebaiknya tahu bahwa bot membaca dan membalas chat di nomornya.
 - `/voice wag on|off`, daftar dokumen pengetahuan, dan pengaturan AI berlaku sama untuk kedua nomor.
+
+## Mengatur grup yang dijawab dari Telegram (`/grup`)
+
+Tidak perlu membuka `.env` di laptop untuk menambah grup. Perubahan tersimpan di database dan **langsung berlaku tanpa restart**.
+
+| Perintah | Fungsi |
+|---|---|
+| `/grup` | daftar grup yang dijawab tiap nomor (bernomor) |
+| `/grup semua` | grup yang diikuti nomor utama (bernomor, ✅ = sudah dijawab) |
+| `/grup tambah <nomor>` | izinkan grup dengan nomor dari `/grup semua` (paling teliti: disimpan sebagai id grup) |
+| `/grup tambah <nama>` | izinkan grup yang namanya memuat potongan nama itu (minimal 3 huruf/angka; huruf besar-kecil, emoji, tanda baca diabaikan) |
+| `/grup hapus <nomor atau nama>` | cabut izin yang ditambahkan lewat `/grup` (nomor dari `/grup`) |
+
+Untuk nomor kedua tambahkan kata `wa2` (atau nama botnya, mis. `wongsobot`) setelah perintah: `/grup semua wa2`, `/grup tambah wa2 Pengajian`, `/grup wa2`.
+
+Grup yang sudah ada di `.env` (`WA_GROUP_ALLOWED_*`, `WA2_GROUP_ALLOWED_*`) tetap dipakai sebagai daftar dasar dan bertanda `(.env)`; itu hanya bisa dihapus dengan mengubah `.env`. Bila database sedang bermasalah, perubahan ditunda (daftar lama tidak pernah tertimpa).
