@@ -70,6 +70,8 @@ import { classifyRoute, createAiRoute, parseRouteCommand } from "./ai-route.js";
 import { createNodin, parseNodinCommand, readNodinConfig } from "./nodin.js";
 import { createKas, parseKasCommand, readKasConfig } from "./kas.js";
 import { createGroupVoice, readGroupVoiceConfig } from "./group-voice.js";
+import { MAIN_ACCOUNT, acctFields, createAccountRouter, pairingInstructions, readSecondAccountConfig } from "./wa-accounts.js";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createWebSearch, readSearchConfig } from "./web-search.js";
 import { createRegMonitor, readRegMonitorConfig } from "./reg-monitor.js";
 import { createKhatamReminder } from "./khatam.js";
@@ -221,6 +223,15 @@ function normalizeOwnerNumber(raw) {
 }
 const OWNER_NUMBER = normalizeOwnerNumber(process.env.WA_OWNER_NUMBER);
 const OWNER_JID = OWNER_NUMBER ? `${OWNER_NUMBER}@s.whatsapp.net` : null;
+
+// ---- Nomor WhatsApp kedua (opsional; lihat wa-accounts.js) ----
+// Nomor utama memakai currentSock + folder auth_session seperti biasa. Nomor kedua = sesi Baileys terpisah (WA2_*).
+const wa2Config = readSecondAccountConfig(process.env);
+const waAccountContext = new AsyncLocalStorage(); // akun yang sedang memproses suatu pesan (supaya riwayat ditandai benar)
+const currentAccountId = () => waAccountContext.getStore()?.account || MAIN_ACCOUNT;
+const accountRouter = createAccountRouter({ supabase });
+const MAIN_ACCOUNT_DEF = { id: MAIN_ACCOUNT, label: "Nomor utama", authDir: "auth_session", secondary: false, sock: null, open: false, pairing: false };
+const WA2_ACCOUNT_DEF = wa2Config.enabled ? { id: wa2Config.id, label: wa2Config.label, authDir: wa2Config.authDir, secondary: true, sock: null, open: false, pairing: false } : null;
 // Zona waktu buat "tengah malam"/jam ringkasan harian & label jam di pesan.
 // Default WITA (sama dgn jam ringkasan berita di aplikasi) -- ganti ke
 // Asia/Jakarta + label WIB kalau mau waktu Jawa.
@@ -1708,7 +1719,8 @@ async function sendQuickReply(sock, jid, template) {
     direction: "out",
     content: template.reply,
     status: "sent",
-    wa_message_id: sent?.key?.id ?? null
+    wa_message_id: sent?.key?.id ?? null,
+    ...acctFields(currentAccountId())
   });
   template.use_count = (template.use_count || 0) + 1;
   supabase
@@ -1743,8 +1755,8 @@ async function finishRetry(id, status, extra = {}) {
 }
 
 let retryProcessing = false;
-async function processRetryQueue(sock) {
-  if (!sock || retryProcessing || !AUTO_REPLY_ACTIVE) return;
+async function processRetryQueue(socks) {
+  if (!socks?.length || retryProcessing || !AUTO_REPLY_ACTIVE) return;
   retryProcessing = true;
   try {
     const { data, error } = await supabase
@@ -1757,6 +1769,12 @@ async function processRetryQueue(sock) {
     if (error || !data || data.length === 0) return;
 
     for (const row of data) {
+      // Balasan ulang harus lewat nomor yang sama dengan percakapannya (nomor utama atau nomor kedua).
+      const rowAcct = await accountRouter.accountOf(row.wa_jid);
+      const sock = socks.find((s) => (s.waAccount?.id || MAIN_ACCOUNT) === rowAcct);
+      if (!sock) continue; // nomor itu sedang terputus; coba lagi menit depan
+      const acctCtx = waAccountContext.getStore();
+      if (acctCtx) acctCtx.account = rowAcct;
       const ageHours = (Date.now() - new Date(row.created_at).getTime()) / 3_600_000;
       if (ageHours > RETRY_EXPIRE_HOURS) {
         await finishRetry(row.id, "expired");
@@ -1842,7 +1860,8 @@ async function deliverAutoReplyText(sock, jid, result, logLabel = "🤖 Auto-rep
       direction: "out",
       content: result.reply,
       status: "sent",
-      wa_message_id: sent?.key?.id ?? null
+      wa_message_id: sent?.key?.id ?? null,
+      ...acctFields(currentAccountId())
     });
     console.log(`${logLabel} ke ${jid}: ${result.reply.slice(0, 60)}`);
   } catch (err) {
@@ -1853,7 +1872,8 @@ async function deliverAutoReplyText(sock, jid, result, logLabel = "🤖 Auto-rep
       direction: "out",
       content: result.reply,
       status: "failed",
-      error: msg
+      error: msg,
+      ...acctFields(currentAccountId())
     });
   }
   await recordTokenUsage(result.tokensUsed, result.costUsd);
@@ -1944,7 +1964,8 @@ async function sendAutoReply(sock, jid, incomingText) {
         direction: "out",
         content: fallbackText,
         status: "sent",
-        wa_message_id: sent?.key?.id ?? null
+        wa_message_id: sent?.key?.id ?? null,
+        ...acctFields(currentAccountId())
       });
     } catch (sendErr) {
       console.error(`Gagal kirim balasan cadangan ke ${jid}:`, sendErr instanceof Error ? sendErr.message : String(sendErr));
@@ -2040,13 +2061,19 @@ async function summarizeWithOllama(transcript) {
 
 async function buildDailySummaryText(dateStr, { allowAi = true } = {}) {
   const startMs = zonedStartOfDayUtcMs(dateStr, WA_TIMEZONE);
-  const { data: rows, error } = await supabase
-    .from("whatsapp_messages")
-    .select("wa_jid, wa_name, direction, content, status, created_at")
-    .gte("created_at", new Date(startMs).toISOString())
-    .order("created_at", { ascending: true })
-    .limit(1500);
+  const fetchRows = (cols) =>
+    supabase
+      .from("whatsapp_messages")
+      .select(cols)
+      .gte("created_at", new Date(startMs).toISOString())
+      .order("created_at", { ascending: true })
+      .limit(1500);
+  let { data: rows, error } = await fetchRows("wa_jid, wa_name, direction, content, status, created_at, account");
+  // Kolom account belum ada (migrasi 0039 belum dijalankan) -> ambil tanpa kolom itu; semua baris dianggap nomor utama.
+  if (error && /account/i.test(error.message || "")) ({ data: rows, error } = await fetchRows("wa_jid, wa_name, direction, content, status, created_at"));
   if (error) throw new Error(`Gagal ambil pesan hari ini: ${error.message}`);
+  // Percakapan nomor kedua (HP orang lain) tidak ikut ringkasan pemilik kecuali WA2_IN_SUMMARY=true.
+  if (!wa2Config.inSummary) rows = (rows ?? []).filter((r) => !r.account || r.account === MAIN_ACCOUNT);
 
   const skipJids = new Set([OWNER_JID, ...(currentSock ? getOwnJids(currentSock) : [])].filter(Boolean));
   const byJid = new Map();
@@ -2260,6 +2287,10 @@ async function checkSummaryFlagFile() {
 // bikin socket baru (lihat connection.update di bawah).
 let currentSock = null;
 let waOpen = false; // koneksi WhatsApp benar-benar terbuka (untuk halaman Status sistem)
+// Semua socket yang sedang tersambung: nomor utama (currentSock) + nomor kedua bila ada.
+function activeSocks() {
+  return [currentSock, WA2_ACCOUNT_DEF?.sock].filter(Boolean);
+}
 
 // Ambil teks dari berbagai tipe pesan WhatsApp yang umum. Tipe yang tidak
 // dikenali (voice note, lokasi, kontak dibagikan, dll) sengaja DILEWATI
@@ -2430,6 +2461,11 @@ function describeContact(keys) {
 
 async function notifyOwner(sock, text) {
   if (!OWNER_JID) return;
+  // Nomor kedua tidak pernah mengirim pesan ke pemilik dari nomornya sendiri: notifikasi lewat nomor utama / Telegram.
+  if (sock?.waAccount?.secondary) {
+    await sendToOwner(`[${sock.waAccount.label}] ${text}`).catch(() => {});
+    return;
+  }
   await sock.sendMessage(OWNER_JID, { text }).catch(() => {});
 }
 
@@ -2660,10 +2696,17 @@ async function getGroupSubject(sock, jid) {
   }
 }
 
-function isGroupAllowed(jid, subject) {
-  if (GROUP_ALLOWED_JIDS.includes(jid)) return true;
+// Daftar grup yang boleh dijawab: nomor utama pakai WA_GROUP_ALLOWED_*, nomor kedua pakai WA2_GROUP_ALLOWED_* (kosong = tidak menjawab di grup).
+function groupRulesFor(sock) {
+  return sock?.waAccount?.secondary
+    ? { enabled: wa2Config.groupNames.length > 0 || wa2Config.groupJids.length > 0, names: wa2Config.groupNames, jids: wa2Config.groupJids }
+    : { enabled: GROUP_ENABLED, names: GROUP_ALLOWED_NAMES, jids: GROUP_ALLOWED_JIDS };
+}
+function isGroupAllowed(jid, subject, sock = null) {
+  const rules = groupRulesFor(sock);
+  if (rules.jids.includes(jid)) return true;
   const norm = normalizeGroupName(subject);
-  return norm !== "" && GROUP_ALLOWED_NAMES.some((n) => norm.includes(n));
+  return norm !== "" && rules.names.some((n) => norm.includes(n));
 }
 
 // Pesan di grup yang pakai "pesan sementara"/view-once dibungkus lagi -- buka dulu.
@@ -2697,7 +2740,7 @@ function getMessageContextInfo(m) {
 const groupLastAskAt = new Map(); // "grup|pengirim" -> ms
 
 async function handleGroupMessage(msg, sock) {
-  if (!GROUP_ENABLED || !AUTO_REPLY_ACTIVE) return;
+  if (!groupRulesFor(sock).enabled || !AUTO_REPLY_ACTIVE) return;
   const groupJid = msg.key.remoteJid;
   const content = unwrapMessageContent(msg.message);
   if (!content) return;
@@ -2749,7 +2792,7 @@ async function handleGroupMessage(msg, sock) {
 
   // --- Grup ini diizinkan?
   const subject = await getGroupSubject(sock, groupJid);
-  if (!isGroupAllowed(groupJid, subject)) {
+  if (!isGroupAllowed(groupJid, subject, sock)) {
     console.log(`👥 Bot dipanggil di grup "${subject || "?"}" (${groupJid}) tapi grup ini tidak ada di WA_GROUP_ALLOWED_NAMES/JIDS, diabaikan.`);
     return;
   }
@@ -2786,7 +2829,8 @@ async function handleGroupMessage(msg, sock) {
     direction: "in",
     content: stored,
     status: "received",
-    wa_message_id: msg.key.id
+    wa_message_id: msg.key.id,
+    ...acctFields(currentAccountId())
   });
   if (error) {
     if (error.code !== "23505") console.error("Gagal simpan pesan grup:", error.message);
@@ -2826,7 +2870,8 @@ async function handleGroupMessage(msg, sock) {
           direction: "out",
           content: GROUP_BUSY_TEXT,
           status: "sent",
-          wa_message_id: sent?.key?.id ?? null
+          wa_message_id: sent?.key?.id ?? null,
+          ...acctFields(currentAccountId())
         });
       } catch (sendErr) {
         console.error(`Gagal kirim pesan sibuk ke grup ${groupJid}:`, sendErr instanceof Error ? sendErr.message : String(sendErr));
@@ -2858,7 +2903,8 @@ async function deliverAutoReplyVoice(sock, jid, result, voice, { quoted = null, 
       direction: "out",
       content: result.reply,
       status: "sent",
-      wa_message_id: sent?.key?.id ?? null
+      wa_message_id: sent?.key?.id ?? null,
+      ...acctFields(currentAccountId())
     });
     console.log(`🔊 Balasan grup (suara) ke ${jid}: ${result.reply.slice(0, 60)}`);
     await recordTokenUsage(result.tokensUsed, result.costUsd);
@@ -2932,6 +2978,8 @@ async function handleIncoming(msg, sock) {
   // tersimpan & tampil di aplikasi juga (TANPA memicu auto-reply -- lihat
   // bagian bawah fungsi ini).
   const isSelfChat = getOwnJids(sock).includes(jid);
+  // Nomor kedua: HP-nya dipegang orang lain, jadi chat-ke-diri-sendiri di sana TIDAK dianggap perintah pemilik -- diabaikan sama sekali.
+  if (isSelfChat && sock.waAccount?.secondary) return;
 
   // Pesan yang KITA kirim sendiri (fromMe) KE KONTAK LAIN juga muncul lewat
   // event ini -- sudah dicatat duluan waktu diproses dari antrian "pending"
@@ -3044,7 +3092,8 @@ async function handleIncoming(msg, sock) {
     direction: "in",
     content: viaVoice ? `🎤 ${text}` : text,
     status: "received",
-    wa_message_id: msg.key.id
+    wa_message_id: msg.key.id,
+    ...acctFields(currentAccountId())
   });
   if (error) {
     // Kode 23505 = unique violation (wa_message_id sudah ada) -- ini AMAN
@@ -3104,6 +3153,8 @@ async function processPendingOutgoing(sock) {
   }
 
   for (const row of data ?? []) {
+    // Pesan dari aplikasi tidak tahu nomor mana: kirim lewat nomor yang menangani percakapan itu (pesan terakhir di jid tsb).
+    if ((await accountRouter.accountOf(row.wa_jid)) !== (sock.waAccount?.id || MAIN_ACCOUNT)) continue;
     try {
       // "AI On" yang diketik dari layar WA di aplikasi = PERINTAH, bukan pesan untuk kontak:
       // aktifkan lagi auto-reply di chat ini, JANGAN dikirim ke kontak, dan JANGAN memicu jeda.
@@ -3136,8 +3187,31 @@ async function processPendingOutgoing(sock) {
   }
 }
 
-async function connect() {
-  const { state, saveCreds } = await useMultiFileAuthState("auth_session");
+// Minta KODE TAUTAN (8 huruf) untuk nomor kedua dan kirim ke pemilik (WhatsApp utama + Telegram). Dipakai otomatis saat sesi
+// nomor kedua belum pernah ditautkan, dan lewat perintah /wa2 kode. Pemegang HP nomor itu memasukkan kode di
+// WhatsApp > Perangkat Tertaut > Tautkan dengan nomor telepon (tanpa scan QR).
+async function requestWa2PairingCode({ force = false, notify = true } = {}) {
+  const acct = WA2_ACCOUNT_DEF;
+  if (!acct) throw new Error("Nomor kedua belum dinyalakan (isi WA2_NUMBER di .env).");
+  if (!wa2Config.number) throw new Error("WA2_NUMBER belum diisi di .env, jadi kode tautan tidak bisa dibuat (pakai scan QR di log: pm2 logs).");
+  if (!acct.sock) throw new Error("Sesi nomor kedua belum siap; coba lagi beberapa detik lagi.");
+  if (acct.sock.authState?.creds?.registered) throw new Error(`${acct.label} sudah tertaut.`);
+  if (acct.pairing && !force) throw new Error("Permintaan kode sedang berjalan.");
+  acct.pairing = true;
+  try {
+    const code = await acct.sock.requestPairingCode(wa2Config.number);
+    console.log(`🔗 [${acct.label}] kode tautan: ${code}`);
+    if (notify) await sendToOwner(pairingInstructions({ label: acct.label, code }));
+    return code;
+  } finally {
+    setTimeout(() => {
+      acct.pairing = false;
+    }, 30_000); // jangan minta kode berulang-ulang (WhatsApp bisa membatasi)
+  }
+}
+
+async function connect(acct = MAIN_ACCOUNT_DEF) {
+  const { state, saveCreds } = await useMultiFileAuthState(acct.authDir);
   const { version } = await fetchLatestBaileysVersion();
 
   const sock = makeWASocket({
@@ -3150,7 +3224,9 @@ async function connect() {
     browser: ["Ayyubi", "Chrome", "1.0.0"]
   });
 
-  currentSock = sock;
+  sock.waAccount = acct;
+  if (acct.secondary) acct.sock = sock;
+  else currentSock = sock;
 
   // Catat id tiap pesan yang dikirim BOT supaya tidak pernah dikira balasan manual.
   const origSendMessage = sock.sendMessage.bind(sock);
@@ -3166,28 +3242,48 @@ async function connect() {
     const { connection, lastDisconnect, qr } = update;
 
     if (qr) {
-      console.log("\n=== Scan QR code ini pakai HP ===");
-      console.log("WhatsApp di HP > Perangkat Tertaut > Tautkan Perangkat\n");
-      qrcode.generate(qr, { small: true });
+      if (acct.secondary && wa2Config.number) {
+        // Nomor kedua dipegang orang lain: kirim KODE TAUTAN ke pemilik (bisa diteruskan), bukan QR di layar laptop.
+        // Otomatis hanya 2 kali per start bot (supaya pemilik tidak dibanjiri kode); selanjutnya lewat /wa2 kode.
+        if (!acct.pairing && (acct.autoCodes || 0) < 2) {
+          acct.autoCodes = (acct.autoCodes || 0) + 1;
+          requestWa2PairingCode().catch((err) => {
+            console.error(`🔗 [${acct.label}] gagal membuat kode tautan:`, err instanceof Error ? err.message : String(err));
+          });
+        }
+      } else {
+        console.log(`\n=== Scan QR code ini pakai HP${acct.secondary ? ` (${acct.label})` : ""} ===`);
+        console.log("WhatsApp di HP > Perangkat Tertaut > Tautkan Perangkat\n");
+        qrcode.generate(qr, { small: true });
+      }
     }
 
     if (connection === "close") {
       const statusCode = lastDisconnect?.error?.output?.statusCode;
       const loggedOut = statusCode === DisconnectReason.loggedOut;
-      currentSock = null;
-      waOpen = false;
+      if (acct.secondary) {
+        acct.sock = null;
+        acct.open = false;
+      } else {
+        currentSock = null;
+        waOpen = false;
+      }
       if (loggedOut) {
         console.error(
-          "\n❌ Sesi WhatsApp logout/dicabut dari HP (atau sesi tidak valid lagi).\n" +
-            "   Hapus folder wa-bot/auth_session/ lalu jalankan ulang bot ini untuk scan QR baru.\n"
+          `\n❌ Sesi WhatsApp${acct.secondary ? ` (${acct.label})` : ""} logout/dicabut dari HP (atau sesi tidak valid lagi).\n` +
+            `   Hapus folder wa-bot/${acct.authDir}/ lalu jalankan ulang bot ini untuk menautkan ulang.\n`
         );
+        if (acct.secondary) sendToOwner(`⚠️ ${acct.label} keluar (logout) dari WhatsApp. Hapus folder ${acct.authDir}/ di wa-bot lalu /restart untuk menautkan ulang.`).catch(() => {});
       } else {
-        console.warn("⚠️  Koneksi WhatsApp putus, coba sambung ulang dalam 5 detik...");
-        setTimeout(connect, 5000);
+        console.warn(`⚠️  Koneksi WhatsApp${acct.secondary ? ` (${acct.label})` : ""} putus, coba sambung ulang dalam 5 detik...`);
+        setTimeout(() => connect(acct).catch((err) => console.error(`Gagal menyambung ulang ${acct.label}:`, err instanceof Error ? err.message : String(err))), 5000);
       }
     } else if (connection === "open") {
-      waOpen = true;
-      console.log(`\n✅ WhatsApp tersambung (${sock.user?.id || "?"}). Bot siap jalan.\n`);
+      if (acct.secondary) acct.open = true;
+      else waOpen = true;
+      acct.pairing = false;
+      console.log(`\n✅ WhatsApp${acct.secondary ? ` ${acct.label}` : ""} tersambung (${sock.user?.id || "?"}). Bot siap jalan.\n`);
+      if (acct.secondary) sendToOwner(`✅ ${acct.label} tersambung (${(sock.user?.id || "?").split(":")[0].split("@")[0]}).`).catch(() => {});
     }
   });
 
@@ -3197,7 +3293,9 @@ async function connect() {
     if (type !== "notify") return;
     for (const msg of messages) {
       try {
-        await handleIncoming(msg, sock);
+        accountRouter.remember(msg.key.remoteJid, acct.id);
+        if (msg.key.remoteJidAlt) accountRouter.remember(msg.key.remoteJidAlt, acct.id);
+        await waAccountContext.run({ account: acct.id }, () => handleIncoming(msg, sock));
       } catch (err) {
         console.error("Gagal proses satu pesan masuk:", err instanceof Error ? err.message : String(err));
       }
@@ -3305,11 +3403,34 @@ function fmtDuration(ms) {
   const h = Math.floor((m % 1440) / 60);
   return d > 0 ? `${d} hari ${h} jam` : h > 0 ? `${h} jam ${m % 60} mnt` : `${m} mnt`;
 }
+function wa2StatusWord() {
+  const a = WA2_ACCOUNT_DEF;
+  if (!a) return "tidak dipakai";
+  if (a.sock && a.open) return `tersambung (${(a.sock.user?.id || "?").split(":")[0].split("@")[0]})`;
+  if (a.sock && !a.sock.authState?.creds?.registered) return "⚠️ belum tertaut (kirim /wa2 kode)";
+  return "⚠️ terputus (menyambung ulang...)";
+}
+function describeWa2() {
+  const a = WA2_ACCOUNT_DEF;
+  if (!a) return "Nomor kedua belum dinyalakan. Isi WA2_NUMBER di .env lalu /restart (lihat bagian 25 .env.example).";
+  const groups = wa2Config.groupNames.length + wa2Config.groupJids.length;
+  return [
+    `📱 *${a.label}*`,
+    `• Status: ${wa2StatusWord()}`,
+    `• Nomor: ${wa2Config.number || "(WA2_NUMBER belum diisi)"}`,
+    `• Grup: ${groups > 0 ? `${groups} aturan grup diizinkan` : "tidak menjawab di grup (isi WA2_GROUP_ALLOWED_NAMES)"}`,
+    `• Ringkasan harian pemilik: ${wa2Config.inSummary ? "ikut" : "tidak ikut"}`,
+    `• Perintah pemilik hanya dari nomor ${OWNER_NUMBER || "pemilik"} (chat-ke-diri-sendiri di nomor ini diabaikan)`,
+    "",
+    "/wa2 kode — minta kode tautan baru"
+  ].join("\n");
+}
 async function buildBotStatusText() {
   const now = Date.now();
   const lines = [`📊 *Status Ayyubi*`, `Bot hidup: ${fmtDuration(process.uptime() * 1000)}`, ""];
 
   lines.push(`💬 WhatsApp: ${currentSock ? "tersambung" : "⚠️ terputus (menyambung ulang...)"}`);
+  if (WA2_ACCOUNT_DEF) lines.push(`📱 ${WA2_ACCOUNT_DEF.label}: ${wa2StatusWord()}`);
   lines.push(
     `🤖 Auto-reply: ${AUTO_REPLY_ACTIVE ? `aktif (mesin ${WA_AI_ENGINE})` : "mati"}`
   );
@@ -3564,6 +3685,7 @@ const backup = createBackup({
     { name: "pengingat", kind: "sqlite", path: REMINDERS_FILE },
     { name: "skill", kind: "dir", path: fileURLToPath(new URL("./skills", import.meta.url)) },
     { name: "sesi WhatsApp", kind: "auth", path: path.resolve("auth_session") }, // sama dengan useMultiFileAuthState("auth_session")
+    ...(WA2_ACCOUNT_DEF ? [{ name: "sesi WhatsApp nomor 2", kind: "auth", path: path.resolve(WA2_ACCOUNT_DEF.authDir) }] : []),
     ...(backupConfig.includeEnv ? [{ name: ".env", kind: "file", path: path.resolve(".env") }] : [])
   ],
   timeZone: WA_TIMEZONE,
@@ -3860,6 +3982,13 @@ const telegram = createTelegram({
     health,
     aiRoute: { handle: (arg) => aiRoute.handle(arg) },
     groupVoice,
+    wa2: {
+      describe: () => describeWa2(),
+      code: async () => {
+        const code = await requestWa2PairingCode({ force: true, notify: false });
+        return pairingInstructions({ label: WA2_ACCOUNT_DEF.label, code });
+      }
+    },
     nodin,
     kas,
     localChat,
@@ -3899,12 +4028,21 @@ connect().catch((err) => {
   console.error("Gagal mulai koneksi WhatsApp:", err);
   process.exit(1);
 });
+if (WA2_ACCOUNT_DEF) {
+  console.log(`📱 Nomor kedua: AKTIF (${WA2_ACCOUNT_DEF.label}, sesi ${WA2_ACCOUNT_DEF.authDir}/, grup: ${wa2Config.groupNames.length + wa2Config.groupJids.length > 0 ? "diizinkan sebagian" : "tidak menjawab di grup"}, ringkasan harian: ${wa2Config.inSummary ? "ikut" : "tidak ikut"})`);
+  connect(WA2_ACCOUNT_DEF).catch((err) => {
+    // Kegagalan nomor kedua tidak boleh mematikan nomor utama.
+    console.error(`Gagal mulai koneksi ${WA2_ACCOUNT_DEF.label}:`, err instanceof Error ? err.message : String(err));
+  });
+}
 
 setInterval(() => {
-  if (currentSock) {
-    processPendingOutgoing(currentSock).catch((err) => {
-      console.error("Loop kirim pesan error:", err instanceof Error ? err.message : String(err));
-    });
+  for (const sk of activeSocks()) {
+    waAccountContext
+      .run({ account: sk.waAccount?.id || MAIN_ACCOUNT }, () => processPendingOutgoing(sk))
+      .catch((err) => {
+        console.error("Loop kirim pesan error:", err instanceof Error ? err.message : String(err));
+      });
   }
 }, POLL_INTERVAL_MS);
 
@@ -3912,7 +4050,7 @@ setInterval(() => {
 // habis hari ini (lihat processRetryQueue, checkDailySummary,
 // primeExhaustedKeysFromDb).
 setInterval(() => {
-  processRetryQueue(currentSock).catch(() => {});
+  waAccountContext.run({ account: MAIN_ACCOUNT }, () => processRetryQueue(activeSocks())).catch(() => {});
 }, RETRY_CHECK_INTERVAL_MS);
 setInterval(() => {
   checkDailySummary().catch(() => {});

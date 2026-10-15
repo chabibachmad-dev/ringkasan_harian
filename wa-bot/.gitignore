@@ -5,6 +5,7 @@ node_modules/
 # "menyerahkan HP yang sudah login WA" kalau sampai bocor/ke-commit ke git.
 # Jangan pernah dihapus manual kecuali memang mau logout & scan ulang.
 auth_session/
+auth_session_*/
 
 *.log
 

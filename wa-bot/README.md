@@ -908,3 +908,24 @@ Diatur dari Telegram (hanya pemilik):
 - Tetap dikirim sebagai **teks** bila jawabannya memuat tautan, blok kode, atau tabel; lebih panjang dari `WA_GROUP_VOICE_MAX_CHARS`; atau suara gagal dibuat (ffmpeg belum ada, kuota habis, terlalu lama). Jawaban tidak pernah hilang, dan kamu dikabari sekali di Telegram/WhatsApp bila penyebabnya ffmpeg atau kuota.
 - Riwayat percakapan tetap menyimpan teks jawaban (bukan suara), sehingga balasan terhadap voice note bot tetap dikenali.
 - Pengaturan opsional ada di bagian 24 `.env.example`.
+
+## Nomor WhatsApp kedua (`WA2_*`, `/wa2`)
+
+Satu bot bisa memegang **dua nomor WhatsApp**. Nomor utama jalan seperti biasa; nomor kedua adalah sesi terpisah (folder `auth_session_2/`) yang membalas chat dan grup dengan AI yang sama. Mati bawaan: baru aktif bila `WA2_NUMBER` (atau `WA2_ENABLED=true`) diisi di `.env`.
+
+**Memasang**
+
+1. Jalankan migrasi database **sekali** (menambah kolom `account` di `whatsapp_messages`): Telegram `/migrasi terapkan`, atau salin isi `supabase/migrations/0039_whatsapp_account.sql` ke Supabase SQL Editor.
+2. Isi `.env` (lihat bagian 25 `.env.example`), minimal `WA2_NUMBER=0812xxxxxxx`, lalu `/restart`.
+3. Bot mengirim **kode tautan** 8 huruf ke WhatsApp + Telegram kamu. Teruskan ke pemegang HP nomor kedua: WhatsApp → Perangkat Tertaut → Tautkan Perangkat → *Tautkan dengan nomor telepon* → masukkan kode. Kode berlaku beberapa menit; minta lagi dengan `/wa2 kode`. Tanpa `WA2_NUMBER`, bot menampilkan QR di log (`pm2 logs`).
+4. `/wa2` menampilkan status; `/status` ikut menampilkan nomor kedua.
+
+**Aturan nomor kedua** (karena HP-nya dipegang orang lain)
+
+- Perintah pemilik (`/kas`, `/nodin`, `/dokumen`, `simab …`, dll.) hanya dari nomor pemilik (`WA_OWNER_NUMBER`) atau Telegram. Chat-ke-diri-sendiri di nomor kedua **diabaikan**, jadi pemegang HP-nya tidak bisa membuka data kamu lewat bot.
+- Notifikasi bot untuk kamu tetap lewat nomor utama dan Telegram, tidak pernah dari nomor kedua.
+- Di grup, nomor kedua hanya menjawab grup di `WA2_GROUP_ALLOWED_NAMES` / `WA2_GROUP_ALLOWED_JIDS` (kosong = tidak menjawab di grup).
+- Chat nomor kedua **tidak** ikut ringkasan harian ke kamu kecuali `WA2_IN_SUMMARY=true`.
+- Balasan manual dari pemegang HP menjeda AI untuk kontak itu (sama seperti nomor utama). Balasan dari aplikasi Ayyubi ke kontak nomor kedua dikirim lewat nomor kedua.
+- Riwayat kedua nomor tampil di aplikasi Ayyubi milikmu; pemegang HP nomor kedua sebaiknya tahu bahwa bot membaca dan membalas chat di nomornya.
+- `/voice wag on|off`, daftar dokumen pengetahuan, dan pengaturan AI berlaku sama untuk kedua nomor.
