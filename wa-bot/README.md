@@ -971,3 +971,13 @@ Batas harian (reset 00.00 WITA, tahan restart): pemilik 30, semua grup 10, per o
 **Penyedia gratis (disarankan):** Cloudflare Workers AI (FLUX.1 schnell). Buat akun Cloudflare gratis (tanpa kartu), buka Dashboard > AI > Workers AI > *Use REST API*, salin *Account ID* dan buat *API token* (templat Workers AI), lalu isi `CLOUDFLARE_ACCOUNT_ID` dan `CLOUDFLARE_API_TOKEN` di `.env` dan `/restart`. Jatah gratisnya 10.000 neuron/hari (±100-170 gambar, reset 07.00 WIB / 08.00 WITA). Dipakai PERTAMA; deskripsi diterjemahkan ke Inggris dulu (lewat Groq/OpenRouter bila ada) karena FLUX lebih paham Inggris. Gemini gratis tidak punya jatah untuk model gambar.\n\nCadangan: bila penyedia sebelumnya habis/ditolak atau tak ada kunci, bot mencoba OpenRouter (`OPENROUTER_API_KEYS` yang sama; model gambar `OPENROUTER_IMAGE_MODELS`, bawaan `google/gemini-2.5-flash-image`; memakai kredit OpenRouter, bukan gratis). Groq tidak punya model pembuat gambar.
 
 Model dicoba berurutan (`GEMINI_IMAGE_MODELS`); tiap model dicoba lewat Interactions API lalu `generateContent`, dan jalur yang berhasil diingat. Kuota gambar Gemini terpisah dari kuota chat/suara, tetapi bergantung pada akun Google AI Studio: bila muncul "butuh akun berbayar", model gambar belum tersedia di tier gratis untuk kunci itu.
+
+## Uji Meta AI (`/metaai`) -- percobaan
+
+Meta AI (kontak bawaan WhatsApp) tidak bisa ditambahkan ke grup dan tidak punya API. Perintah ini hanya MENGUJI apakah bot (nomor utama) bisa menerima balasan dari Meta AI, supaya ide "grup minta gambar -> bot minta Meta AI -> hasilnya diteruskan ke grup" bisa dinilai dengan fakta.
+
+- `/metaai tes` : mengirim SATU pesan "buatkan gambar kucing lucu" ke Meta AI, menunggu balasan (maks. 45 dtk), lalu melaporkan jenis balasannya. Bila ada gambar, gambarnya dikirim ke chat pemilik.
+- `/metaai tes <alamat> [pesan]` : memakai alamat/pesan lain.
+- `/metaai cari` : mendengarkan 90 dtk tanpa mengirim apa pun. Ketik pesan ke Meta AI dari HP-mu sendiri selama itu; bot menangkap alamat aslinya dari pesan keluar HP.
+
+Pesan dari/ke Meta AI tidak pernah diteruskan ke auto-reply (mencegah bot membalas Meta AI terus-menerus). Belum terhubung ke grup.

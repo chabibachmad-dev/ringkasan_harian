@@ -144,7 +144,7 @@ const HELP = [
   "",
   "Perintah:",
   "/simab <perintah>  — SiMAB (pagu, cek, perjadin, sbm, rpd, rekam). Boleh juga tulis \"simab ...\" tanpa garis miring.",
-  "Selama perekaman/ubah/hapus SiMAB, pilihan muncul sebagai tombol di bawah pesan (mengetik angka/kata tetap bisa).",
+  "Pilihan SiMAB muncul sebagai tombol (mengetik angka/kata tetap bisa).",
   "/status  — kondisi bot: WhatsApp, key Gemini, token hari ini, Ollama, dokumen",
   "/ringkasan  — ringkasan percakapan WhatsApp hari ini",
   "/peraturan  — pantau peraturan terbaru (\"/peraturan semua\" = tampilkan semua hasil)",
@@ -155,7 +155,7 @@ const HELP = [
   "/voice wag on|off|id|eng|kor|arb|jawa  — balasan grup WA berupa suara/teks + bahasa suara",
   "/wa2  — nomor WhatsApp kedua (status, kode, qr)",
   "/grup  — grup WA yang dijawab bot: lihat, semua, tambah, hapus",
-  "/gambar <deskripsi>  — buat gambar (Gemini); /gambar grup on|off = izinkan di grup WA",
+  "/gambar <deskripsi>  — buat gambar; /gambar grup on|off = izinkan di grup WA;  /metaai  — uji Meta AI (percobaan)",
   "/kas  — laporan kas bulanan: konfirmasi angka, submit, simpan (/kas bantuan)",
   "/nodin  — konsep Nota Dinas LPJ (PDF + Word), otomatis tiap tanggal 1 (/nodin cek)",
   "/urutan  — lihat/ubah urutan AI untuk balasan WhatsApp & grup (jalur santai & akurat; contoh: /urutan santai groq,gemini,openrouter,ollama;  /urutan reset)",
@@ -182,6 +182,7 @@ const HELP = [
  *   memory?: { handle({name:"ingat"|"catatan"|"lupa", arg}) -> string }   catatan pribadi pemilik (owner-memory.js), hanya dibaca Ollama lokal
  *   reminders?: { handle({name:"ingatkan"|"pengingat", arg}) -> string }   pengingat pribadi (reminders.js)
  *   health?: { report() -> Promise<string> }   papan kesehatan bot (health.js)
+ *   metaAi?: { handle(arg) -> Promise<string> }   uji ngobrol dengan Meta AI (meta-ai.js, /metaai)
  *   image?: { available(), describe(), parseCommand(arg), setGroup(bool) -> Promise<{on,saved}>, make(prompt) -> Promise<{image:{buffer,mime}}|{error}> }   pembuat gambar (image-gen.js, /gambar)
  *   groupVoice?: { enabled(), set(bool) -> Promise<{on,saved,warning}>, describe() }   balasan suara di grup WhatsApp (group-voice.js, /voice wag)
  *   groups?: { handle(arg) -> Promise<string> }   daftar grup yang dijawab (/grup)
@@ -751,6 +752,10 @@ Ubah: /suara auto • /suara on • /suara off`));
     }
     if (name === "suara") return handleVoiceCommand(chatId, arg);
     if (name === "voice") return handleVoiceHub(chatId, arg);
+    if (name === "metaai") {
+      if (!deps.metaAi) return void (await reply("Uji Meta AI tidak tersedia di versi bot ini."));
+      return void (await reply(await withAction(chatId, "typing", () => deps.metaAi.handle(arg))));
+    }
     if (name === "gambar" || name === "image" || name === "img") {
       const im = deps.image;
       if (!im) return void (await reply("Pembuat gambar tidak tersedia di versi bot ini."));
@@ -1035,7 +1040,7 @@ Ubah: /suara auto • /suara on • /suara off`));
   }
 
   const HANDLER_DEADLINE_MS = 10 * 60_000;
-  const FAST_COMMANDS = new Set(["dokumen", "dok", "doc", "status", "id", "help", "start", "ingat", "catatan", "lupa", "memori", "note", "penyedia", "provider", "skill", "skil", "lokal", "tanya", "pasar", "emas", "ihsg", "ingatkan", "remind", "pengingat", "reminder", "cadangan", "backup", "kesehatan", "sehat", "health", "urutan", "route", "rute", "nodin", "notadinas", "kas", "laporankas", "voice", "wa2", "nomor2", "grup", "group", "gambar", "image", "img"]);
+  const FAST_COMMANDS = new Set(["dokumen", "dok", "doc", "status", "id", "help", "start", "ingat", "catatan", "lupa", "memori", "note", "penyedia", "provider", "skill", "skil", "lokal", "tanya", "pasar", "emas", "ihsg", "ingatkan", "remind", "pengingat", "reminder", "cadangan", "backup", "kesehatan", "sehat", "health", "urutan", "route", "rute", "nodin", "notadinas", "kas", "laporankas", "voice", "wa2", "nomor2", "grup", "group", "gambar", "image", "img", "metaai"]);
   function isFastUpdate(u) {
     const m = u?.message;
     if (!m) return false;

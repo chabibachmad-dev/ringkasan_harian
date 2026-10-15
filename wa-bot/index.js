@@ -75,6 +75,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { qrToPng } from "./qr-png.js";
 import { createGroupList } from "./group-list.js";
 import { createImageGen, readImageConfig } from "./image-gen.js";
+import { createMetaAi, readMetaAiConfig, parseMetaAiArg, unsafeTarget } from "./meta-ai.js";
 import { createWebSearch, readSearchConfig } from "./web-search.js";
 import { createRegMonitor, readRegMonitorConfig } from "./reg-monitor.js";
 import { createKhatamReminder } from "./khatam.js";
@@ -3057,6 +3058,8 @@ function waTutorIo(sock, jid) {
 
 async function handleIncoming(msg, sock) {
   const jid = msg.key.remoteJid;
+  // Pesan dari/ke Meta AI (bot bawaan WhatsApp): hanya dicatat untuk uji /metaai, TIDAK PERNAH diteruskan ke auto-reply.
+  if (metaAi.observe(msg)) return;
   // "Chat ke diri sendiri" (catatan pribadi) di WhatsApp -- remoteJid-nya
   // salah satu dari JID KITA SENDIRI (lihat getOwnJids -- BISA jid format
   // nomor HP ATAU format @lid, sudah ketauan dari debugging kalau WhatsApp
@@ -3798,6 +3801,9 @@ groupVoice
   .then(() => console.log(`🔊 Balasan grup WhatsApp: ${groupVoice.describe()} (ubah: /voice wag on|off di Telegram)`))
   .catch(() => {});
 
+// PERCOBAAN: ngobrol dengan Meta AI lewat nomor utama (hanya uji dari Telegram: /metaai). Lihat meta-ai.js.
+const metaAi = createMetaAi({ config: readMetaAiConfig(process.env) });
+
 // Pembuat GAMBAR (Gemini): grup WA, chat pemilik di WA, dan /gambar di Telegram. Lihat image-gen.js.
 const imageGen = createImageGen({
   state: botStateStore,
@@ -4205,6 +4211,40 @@ const telegram = createTelegram({
     health,
     aiRoute: { handle: (arg) => aiRoute.handle(arg) },
     groupVoice,
+    metaAi: {
+      handle: async (arg) => {
+        const cmd = parseMetaAiArg(arg);
+        if (cmd.kind === "help") {
+          return (
+            "🤖 Uji Meta AI (percobaan, nomor utama saja)\n" +
+            "/metaai tes — kirim SATU pesan \"buatkan gambar kucing lucu\" ke Meta AI dan laporkan balasannya (gambar ikut dikirim ke sini)\n" +
+            "/metaai tes <alamat> [pesan] — pakai alamat/pesan lain\n" +
+            "/metaai cari — dengarkan 90 detik; ketik pesan ke Meta AI dari HP-mu supaya bot menangkap alamat aslinya\n\n" +
+            "Belum terhubung ke grup: ini hanya untuk memastikan jalurnya bisa."
+          );
+        }
+        if (!currentSock) return "WhatsApp nomor utama belum tersambung, coba lagi sebentar lagi.";
+        if (cmd.kind === "tes") {
+          const warn = unsafeTarget(cmd.jid, { force: cmd.force, known: metaAi.known() });
+          if (warn) return warn;
+        }
+        const sock = currentSock;
+        const r =
+          cmd.kind === "cari"
+            ? await metaAi.run({})
+            : await metaAi.run({ send: (jid, text) => sock.sendMessage(jid, { text }), jids: cmd.jid ? [cmd.jid] : null, prompt: cmd.prompt });
+        let extra = "";
+        for (const raw of r.images.slice(0, 3)) {
+          try {
+            const buf = await downloadMediaMessage(raw, "buffer", {}, { logger: pino({ level: "silent" }), reuploadRequest: sock.updateMediaMessage });
+            await sendFilesToOwner([{ data: buf, name: "meta-ai.jpg", mime: "image/jpeg", photo: true }], "Gambar dari Meta AI");
+          } catch (e) {
+            extra += `\n⚠️ Gagal mengunduh gambar: ${e instanceof Error ? e.message : e}`;
+          }
+        }
+        return r.text + extra;
+      }
+    },
     image: {
       available: () => imageGen.available(),
       describe: () => imageGen.describe(),
