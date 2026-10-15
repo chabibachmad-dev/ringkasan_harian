@@ -857,3 +857,37 @@ Nota Dinas "Penyampaian Laporan Pertanggungjawaban Bendahara Pengeluaran" hanya 
 PDF dibuat LibreOffice tanpa tampilan. Pasang sekali di laptop: `sudo apt install libreoffice-writer`, lalu cek `soffice --version`. Tanpa LibreOffice bot tetap mengirim Word (kamu ekspor PDF sendiri) dan memberi tahu alasannya.
 
 **Mengganti isi surat:** buka `templates/nota-dinas-lpj.docx` di Word/LibreOffice, ubah kalimatnya, simpan dengan tetap memuat `[Bulan_Laporan]` dan `[Tahun_Laporan]` (ketik utuh, jangan disisipi format di tengahnya). Atau taruh templat lain dan isi `NODIN_TEMPLATE` di `.env`. Pengaturan lain ada di bagian 22 `.env.example`. Perubahan templat sebaiknya lewat patch/`/deploy` agar tidak tertimpa.
+
+## Laporan kas bulanan (`/kas`): Laporan Saldo Rekening + Register Penutupan Kas
+
+Dua laporan yang dibuat tiap awal bulan, satu berkas dua halaman (halaman 1 Laporan Saldo Rekening mendatar, halaman 2 Register Penutupan Kas tegak), meniru PDF dari sistem persuratan. QR tanda tangan tidak dibuat (ditambahkan sistem persuratan di atas tulisan "Ditandatangani secara elektronik").
+
+**Alur tiap awal bulan**
+
+1. Tanggal 1 pukul 07.10 bot mengirim **rancangan** bulan lalu ke WhatsApp + Telegram. Saldo awal = saldo buku bulan sebelumnya; daftar rekening, pejabat, dan tanggal ikut terbawa.
+2. Kamu mengisi yang berubah: `/kas terima 157509115 keluar 165717883`, saldo rekening lain `/kas rek2 1771352342`. Boleh sekaligus dalam satu pesan; angka boleh bertitik (`157.509.115`). Bot langsung menghitung saldo buku (A), saldo kas (B), dan selisih.
+3. `/kas submit`: data **disimpan permanen** (tabel `bot_state`, kunci `kas_rec_YYYY-MM`) lalu PDF + Word dikirim.
+4. Belum disubmit? Bot mengingatkan sekali sehari. Bulan berikutnya baru dibuat setelah bulan ini disubmit, supaya rantai saldo awal tidak bolong (bulan yang terlewat diisi berurutan).
+
+**Aturan hitung**
+
+- Saldo buku (A) = saldo awal + penerimaan − pengeluaran. Saldo kas (B) = uang tunai + saldo rekening 1 (BPG, "kertas berharga dan bagian kas lainnya"). Selisih = A − B.
+- Saldo rekening 1 otomatis = saldo buku bila tidak diisi (selisih 0). Kalau saldo bank sebenarnya berbeda, isi `/kas rek1 <saldo>`; selisih ≠ 0 diberi tanda ⚠️.
+- Rekening lain: saldo dan tanggal transaksi terakhir sama dengan bulan lalu kecuali diisi. Tanggal transaksi terakhir rekening yang saldonya berubah otomatis = tanggal penutupan.
+- Data awal (September 2026) diambil dari PDF contoh sebagai titik mulai rantai.
+
+**Perintah**
+
+| Perintah | Fungsi |
+|---|---|
+| `/kas` | rancangan aktif (atau data terakhir) + cara mengisi |
+| `/kas terima … keluar … rek2 … tgl2 31-10-2026 tunai 100000=2 penjelasan … awal …` | isi rancangan |
+| `/kas pratinjau` | PDF + Word dari rancangan (belum disimpan) |
+| `/kas submit` | simpan + buat dokumen |
+| `/kas ulang` | kosongkan isian rancangan |
+| `/kas daftar`, `/kas lihat september`, `/kas dokumen september` | panggil data tersimpan (angka / PDF + Word) |
+| `/kas ubah september keluar 165717883` | perbaiki bulan lama; bot memberi tahu bila saldo awal bulan sesudahnya jadi tidak sinkron (`/kas ubah oktober awal auto` memperbaikinya) |
+| `/kas kpa …`, `/kas nipkpa …`, `/kas bendahara …`, `/kas nipbend …` | ganti pejabat (berlaku dari rancangan itu dan bulan-bulan sesudahnya) |
+| `/kas mulai`, `/kas status`, `/kas bantuan` | buat rancangan manual, jadwal, bantuan |
+
+Pengaturan opsional ada di bagian 23 `.env.example` (`KAS_DAY`, `KAS_TIME`, `KAS_PDF`, `KAS_ENABLED`). Daftar rekening mengikuti data bulan lalu; rekening baru/ditutup belum punya perintah sendiri (bilang saja, akan ditambahkan).

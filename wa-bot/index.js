@@ -68,6 +68,7 @@ import { createAppAgentWorker } from "./app-agent.js";
 import { createFallbackChain, readFallbackConfig } from "./llm-fallback.js";
 import { classifyRoute, createAiRoute, parseRouteCommand } from "./ai-route.js";
 import { createNodin, parseNodinCommand, readNodinConfig } from "./nodin.js";
+import { createKas, parseKasCommand, readKasConfig } from "./kas.js";
 import { createWebSearch, readSearchConfig } from "./web-search.js";
 import { createRegMonitor, readRegMonitorConfig } from "./reg-monitor.js";
 import { createKhatamReminder } from "./khatam.js";
@@ -3000,6 +3001,7 @@ async function handleIncoming(msg, sock) {
   if (isOwnerSender(msg, isSelfChat) && !isGroupJid(jid) && (await handleWaReminderBackupCommand(sock, jid, text))) return;
   if (isOwnerSender(msg, isSelfChat) && !isGroupJid(jid) && (await handleWaRouteCommand(sock, jid, text))) return;
   if (isOwnerSender(msg, isSelfChat) && !isGroupJid(jid) && (await handleWaNodinCommand(sock, jid, text))) return;
+  if (isOwnerSender(msg, isSelfChat) && !isGroupJid(jid) && (await handleWaKasCommand(sock, jid, text))) return;
 
   // Tutor suara (/speak, /selesai) hanya untuk pemilik; selama sesi, teks/voice note pemilik = ucapan untuk tutor
   // (tidak disimpan ke riwayat chat dan tidak memicu auto-reply).
@@ -3562,9 +3564,19 @@ async function sendWaDocuments(sock, jid, files, caption = "") {
 }
 
 // Konsep Nota Dinas LPJ Bendahara Pengeluaran: dibuat dari templat Word, dikirim otomatis tiap tanggal 1 (PDF + Word) dan lewat /nodin. Lihat nodin.js.
+// Versi "ketat" botStateStore: galat basis data DILEMPAR (bukan dianggap kosong), supaya nota dinas/laporan kas tidak mengirim ganda
+// atau menimpa data hanya karena basis data sedang terganggu sebentar.
+const strictStateStore = {
+  get: async (key) => {
+    const { data, error } = await supabase.from("bot_state").select("value").eq("key", key).maybeSingle();
+    if (error) throw new Error(error.message);
+    return data?.value ?? null;
+  },
+  set: botStateStore.set
+};
 const nodin = createNodin({
   config: readNodinConfig(process.env, BOT_DIR),
-  state: botStateStore,
+  state: strictStateStore,
   sendFiles: sendFilesToOwner,
   send: sendToOwner,
   timeZone: WA_TIMEZONE,
@@ -3590,6 +3602,37 @@ async function handleWaNodinCommand(sock, jid, text) {
   } catch (e) {
     console.error("💬 [WA/Nodin] gagal:", e instanceof Error ? e.message : String(e));
     await send(`⚠️ Konsep nota dinas gagal dibuat: ${String(e instanceof Error ? e.message : e).slice(0, 200)}`);
+  }
+  return true;
+}
+
+// Laporan kas bulanan (Laporan Saldo Rekening + Register Penutupan Kas): tiap awal bulan bot menyiapkan rancangan dari data bulan lalu,
+// kamu konfirmasi angkanya lewat /kas, lalu /kas submit menyimpan data (bot_state) dan membuat PDF + Word. Lihat kas.js.
+const kas = createKas({
+  config: readKasConfig(process.env),
+  state: strictStateStore,
+  send: sendToOwner,
+  convert: (docx) => nodin.toPdf(docx),
+  timeZone: WA_TIMEZONE,
+  tzLabel: WA_TIMEZONE_LABEL
+});
+setInterval(() => {
+  kas.check().catch(() => {});
+}, 60_000);
+console.log(`🧾 Laporan kas bulanan: ${kas.describe()}`);
+
+/** /kas dari WhatsApp (hanya pemilik, bukan grup). true = pesan sudah ditangani. */
+async function handleWaKasCommand(sock, jid, text) {
+  const cmd = parseKasCommand(text);
+  if (!cmd) return false;
+  const send = (t) => sock.sendMessage(jid, { text: t }).catch((e) => console.error("💬 [WA/Kas] gagal kirim:", e instanceof Error ? e.message : String(e)));
+  try {
+    const r = await kas.handle(cmd.arg);
+    if (r.text) await send(r.text);
+    if (r.files?.length) await sendWaDocuments(sock, jid, r.files, r.caption);
+  } catch (e) {
+    console.error("💬 [WA/Kas] gagal:", e instanceof Error ? e.message : String(e));
+    await send(`⚠️ Perintah kas gagal diproses: ${String(e instanceof Error ? e.message : e).slice(0, 200)}`);
   }
   return true;
 }
@@ -3773,6 +3816,7 @@ const telegram = createTelegram({
     health,
     aiRoute: { handle: (arg) => aiRoute.handle(arg) },
     nodin,
+    kas,
     localChat,
     providers: { report: (opts) => buildProviderReport(opts) },
     state: {

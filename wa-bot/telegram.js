@@ -151,7 +151,8 @@ const HELP = [
   "/pasar  — IHSG, harga emas dunia (Rp/gram), dan kurs USD/IDR sekarang (alias /emas, /ihsg); dikirim otomatis tiap pagi hari kerja. /pasar tes = uji tiap sumber data",
   "/ingatkan <waktu> <teks>  — pengingat pribadi (contoh: /ingatkan besok 09:00 kirim SPJ; /ingatkan tiap tanggal 25 jam 08:00 laporan);  /pengingat  — daftar;  /pengingat batal <nomor>",
   "/kesehatan  — periksa Ollama, disk, memori, WhatsApp, basis data, restart, dan cadangan sekarang (otomatis dipantau; kamu dikabari saat bermasalah dan pulih)",
-  "/nodin  — konsep Nota Dinas LPJ Bendahara (PDF + Word); otomatis tiap tanggal 1. Contoh: /nodin,  /nodin november,  /nodin oktober 2026,  /nodin status,  /nodin cek (periksa pembuatan PDF)",
+  "/kas  — laporan kas bulanan: konfirmasi angka tiap awal bulan, submit, simpan (/kas bantuan)",
+  "/nodin  — konsep Nota Dinas LPJ (PDF + Word), otomatis tiap tanggal 1 (/nodin november, /nodin cek)",
   "/urutan  — lihat/ubah urutan AI untuk balasan WhatsApp & grup (jalur santai & akurat; contoh: /urutan santai groq,gemini,openrouter,ollama;  /urutan reset)",
   "/cadangan  — status cadangan otomatis (memori, pengingat, skill, sesi WhatsApp);  /cadangan sekarang  — buat sekarang",
   "/lokal <pesan>  — ngobrol dengan Ollama LOKAL (alias /tanya): percakapan dan catatan pribadimu tidak keluar dari laptop;  /lokal baru  — lupakan percakapan",
@@ -177,6 +178,7 @@ const HELP = [
  *   memory?: { handle({name:"ingat"|"catatan"|"lupa", arg}) -> string }   catatan pribadi pemilik (owner-memory.js), hanya dibaca Ollama lokal
  *   reminders?: { handle({name:"ingatkan"|"pengingat", arg}) -> string }   pengingat pribadi (reminders.js)
  *   health?: { report() -> Promise<string> }   papan kesehatan bot (health.js)
+ *   kas?: { handle(arg) -> Promise<{ok,text,files?,caption?}> }   laporan kas bulanan (kas.js, /kas)
  *   nodin?: { compose(arg) -> Promise<{ok,text,caption?,files?}> }   konsep nota dinas bulanan (nodin.js, /nodin)
  *   aiRoute?: { handle(arg) -> Promise<string> }   urutan penyedia AI balasan WA/grup (ai-route.js, /urutan)
  *   backup?: { status() -> string, run() -> Promise<string> }   cadangan lokal (backup.js)
@@ -786,6 +788,17 @@ Ubah: /suara auto • /suara on • /suara off`));
         return void (await reply(`⚠️ Konsep nota dinas gagal dibuat: ${String(e?.message || e).slice(0, 200)}`));
       }
     }
+    if (name === "kas" || name === "laporankas") {
+      if (!deps.kas) return void (await reply("Fitur laporan kas belum aktif di bot ini."));
+      try {
+        const r = await withAction(chatId, "typing", () => deps.kas.handle(arg));
+        if (r.text) await reply(r.text);
+        if (r.files?.length) await sendFiles(chatId, r.files, r.caption);
+        return;
+      } catch (e) {
+        return void (await reply(`⚠️ Perintah kas gagal diproses: ${String(e?.message || e).slice(0, 200)}`));
+      }
+    }
     if (name === "kesehatan" || name === "sehat" || name === "health") {
       if (!deps.health) return void (await reply("Fitur penjaga kesehatan belum aktif di bot ini."));
       try {
@@ -925,7 +938,7 @@ Ubah: /suara auto • /suara on • /suara off`));
   }
 
   const HANDLER_DEADLINE_MS = 10 * 60_000;
-  const FAST_COMMANDS = new Set(["dokumen", "dok", "doc", "status", "id", "help", "start", "ingat", "catatan", "lupa", "memori", "note", "penyedia", "provider", "skill", "skil", "lokal", "tanya", "pasar", "emas", "ihsg", "ingatkan", "remind", "pengingat", "reminder", "cadangan", "backup", "kesehatan", "sehat", "health", "urutan", "route", "rute", "nodin", "notadinas"]);
+  const FAST_COMMANDS = new Set(["dokumen", "dok", "doc", "status", "id", "help", "start", "ingat", "catatan", "lupa", "memori", "note", "penyedia", "provider", "skill", "skil", "lokal", "tanya", "pasar", "emas", "ihsg", "ingatkan", "remind", "pengingat", "reminder", "cadangan", "backup", "kesehatan", "sehat", "health", "urutan", "route", "rute", "nodin", "notadinas", "kas", "laporankas"]);
   function isFastUpdate(u) {
     const m = u?.message;
     if (!m) return false;
@@ -1043,6 +1056,7 @@ Ubah: /suara auto • /suara on • /suara off`));
           { command: "dokumen", description: "Tanya dari dokumen lokal di laptop (dijawab Ollama)" },
           { command: "ingatkan", description: "Pengingat pribadi: /ingatkan besok 09:00 kirim SPJ; /pengingat" },
           { command: "kesehatan", description: "Periksa kesehatan bot: Ollama, disk, memori, WhatsApp, cadangan" },
+          { command: "kas", description: "Laporan kas bulanan (Saldo Rekening & Register Kas)" },
           { command: "nodin", description: "Konsep Nota Dinas LPJ Bendahara (PDF + Word)" },
           { command: "urutan", description: "Urutan AI untuk balasan WhatsApp & grup (santai/akurat)" },
           { command: "cadangan", description: "Status cadangan otomatis; /cadangan sekarang" },

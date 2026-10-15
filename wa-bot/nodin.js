@@ -28,7 +28,7 @@ export const PH_BULAN = "[Bulan_Laporan]";
 export const PH_TAHUN = "[Tahun_Laporan]";
 export const STATE_KEY = "nodin_last";
 
-const MONTH_WORDS = {
+export const MONTH_WORDS = {
   januari: 1, jan: 1, februari: 2, feb: 2, pebruari: 2, maret: 3, mar: 3, april: 4, apr: 4, mei: 5, juni: 6, jun: 6, juli: 7, jul: 7,
   agustus: 8, agu: 8, agt: 8, ags: 8, september: 9, sep: 9, sept: 9, oktober: 10, okt: 10, november: 11, nov: 11, nop: 11, desember: 12, des: 12
 };
@@ -481,5 +481,13 @@ export function createNodin({ config, state, sendFiles, send, timeZone = "Asia/J
     }
   }
 
-  return { check, compose, generate, describe, status, detect, diagnose };
+  /** .docx (Buffer) -> .pdf (Buffer) lewat LibreOffice yang sudah terdeteksi; melempar galat berisi alasan bila gagal. Dipakai modul lain (kas.js). */
+  async function toPdf(docxBuf) {
+    if (convert) return convert(docxBuf);
+    const cmd = await detect();
+    if (!cmd) throw new Error("LibreOffice tidak ditemukan di laptop (pasang: sudo apt install libreoffice-writer)");
+    return docxToPdf(docxBuf, { soffice: cmd, exec });
+  }
+
+  return { check, compose, generate, describe, status, detect, diagnose, toPdf };
 }
