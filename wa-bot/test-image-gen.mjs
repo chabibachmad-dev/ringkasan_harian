@@ -272,6 +272,17 @@ ok("kunci API lewat header (bukan URL) dan tidak dicetak");
   // OpenRouter kehabisan kredit -> billing; Gemini ditolak filter -> OpenRouter tidak dicoba
   const noCredit = createImageGen({ config: { ...cfg({ keys: [] }), orKeys: ["or1"], orModels: ["m"] }, fetchImpl: async () => res(402, "Insufficient credits"), log: silent });
   await assert.rejects(noCredit.generate("x"), (e) => e.kind === "billing");
+  // Gemini kuota habis + OpenRouter butuh saldo $1 (kasus nyata): kind billing, rincian untuk pemilik, pesan grup tanpa jargon
+  const both = createImageGen({
+    config: { ...cfg({ keys: ["k1"] }), orKeys: ["or1"], orModels: ["google/gemini-2.5-flash-image"] },
+    fetchImpl: async (u) => (/googleapis/.test(u) ? res(429, { error: { status: "RESOURCE_EXHAUSTED", message: "quota exceeded, limit: 0" } }) : res(402, { error: { message: "This request requires at least $1.00 in balance for image or video output", code: 402 } })),
+    log: silent
+  });
+  const r2 = await both.make("kucing", "group", "u");
+  assert.equal(r2.kind, "billing");
+  assert.match(r2.detail, /Gemini .*429 quota/);
+  assert.match(r2.detail, /OpenRouter .*402 billing.*\$1\.00/);
+  assert.ok(!/OpenRouter|\$1/.test(r2.error), "pesan untuk grup tidak berisi jargon penyedia");
   const orCalls = [];
   const blocked = createImageGen({ config: { ...cfg({ keys: ["k1"] }), orKeys: ["or1"], orModels: ["m"] }, fetchImpl: async (u) => { orCalls.push(u); return res(200, { candidates: [{ finishReason: "IMAGE_SAFETY" }] }); }, log: silent });
   await assert.rejects(blocked.generate("x"), (e) => e.kind === "blocked");

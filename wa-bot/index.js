@@ -2918,11 +2918,11 @@ async function handleGroupMessage(msg, sock) {
 
 // ---------------- Pembuat gambar di WhatsApp ----------------
 const imageNoticeAt = new Map(); // jenis galat -> waktu pemberitahuan terakhir ke pemilik
-async function tellOwnerImageProblem(kind, text) {
-  if (!["billing", "auth", "nokey"].includes(kind)) return;
+async function tellOwnerImageProblem(kind, text, detail = "") {
+  if (!["billing", "auth", "nokey", "quota"].includes(kind)) return;
   if (Date.now() - (imageNoticeAt.get(kind) || 0) < 6 * 3600_000) return;
   imageNoticeAt.set(kind, Date.now());
-  await sendToOwner(`🖼️ Pembuat gambar bermasalah: ${text}`).catch(() => {});
+  await sendToOwner(`🖼️ Pembuat gambar bermasalah: ${text}${detail ? `\n\nRincian:\n${detail}` : ""}\n\nIsi saldo OpenRouter (minimal $1) atau tunggu kuota Gemini pulih; cek /gambar untuk sisa jatah.`).catch(() => {});
 }
 
 /**
@@ -2962,7 +2962,7 @@ async function handleImageRequestWa(sock, jid, req, { kind = "owner", who = "", 
   }
   if (out.error) {
     console.log(`🖼️ [${kind}] ${jid}: ${out.kind} — ${out.error.slice(0, 80)}`);
-    await tellOwnerImageProblem(out.kind, out.error);
+    await tellOwnerImageProblem(out.kind, out.error, out.detail);
     const sent = await send({ text: out.error });
     await note(out.error, sent);
     return;
@@ -4196,7 +4196,7 @@ const telegram = createTelegram({
       setGroup: (v) => imageGen.setGroup(v),
       make: async (prompt) => {
         const out = await imageGen.make(prompt, "owner");
-        if (out.error) await tellOwnerImageProblem(out.kind, out.error);
+        if (out.error) await tellOwnerImageProblem(out.kind, out.error, out.detail);
         return out;
       }
     },

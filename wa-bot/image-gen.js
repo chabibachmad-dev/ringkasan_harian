@@ -179,12 +179,18 @@ function errorKind(status, bodyText) {
 
 export const KIND_TEXT = {
   quota: "Kuota pembuat gambar Gemini sedang habis. Coba lagi nanti.",
-  billing: "Model gambar Gemini belum bisa dipakai dengan kunci ini (mungkin butuh akun berbayar).",
+  billing: "Pembuat gambar belum bisa dipakai sekarang: kuota gratis Gemini habis dan saldo cadangan belum ada. Pemilik sudah diberi tahu.",
   auth: "Kunci Gemini ditolak untuk pembuatan gambar.",
   unavailable: "Pembuat gambar sedang tidak tersedia. Coba lagi sebentar lagi.",
   blocked: "Maaf, gambar itu tidak bisa dibuat (ditolak oleh filter keamanan). Coba deskripsi lain.",
   nokey: "Pembuat gambar belum aktif: GEMINI_API_KEYS belum diisi di .env bot."
 };
+
+/** Pesan galat singkat dari respons API (error.message), maks 140 huruf. */
+function apiMessage(r) {
+  const m = r?.json?.error?.message || r?.json?.error?.status || (typeof r?.raw === "string" ? r.raw : "");
+  return String(m).replace(/\s+/g, " ").slice(0, 140);
+}
 
 function hariWita(ms) {
   return new Date(ms + 8 * 3600_000).toISOString().slice(0, 10);
@@ -306,7 +312,8 @@ export function createImageGen({ state = null, config = readImageConfig({}), fet
    * Buat gambar. -> { buffer, mime, model, text }. Galat: Error dengan .kind (quota|billing|auth|blocked|unavailable|nokey) dan pesan siap tampil.
    */
   async function generate(prompt) {
-    const fail = (kind, extra = "") => Object.assign(new Error(KIND_TEXT[kind] + (extra ? ` (${extra})` : "")), { kind });
+    const details = []; // rincian per penyedia, untuk pemilik (bukan untuk grup)
+    const fail = (kind, extra = "") => Object.assign(new Error(KIND_TEXT[kind] + (extra ? ` (${extra})` : "")), { kind, detail: details.join("\n") });
     if (!available()) throw fail("nokey");
     const p = String(prompt ?? "").trim().slice(0, config.promptMax);
     if (!p) throw fail("blocked");
@@ -350,6 +357,7 @@ export function createImageGen({ state = null, config = readImageConfig({}), fet
           }
           const kind = errorKind(r.status, r.raw);
           log.warn?.(`🖼️ [Gambar] ${model}/${api} HTTP ${r.status} (${kind}): ${String(r.raw).replace(/\s+/g, " ").slice(0, 160)}`);
+          if (kind !== "api") details.push(`Gemini ${model}: HTTP ${r.status} ${kind} — ${apiMessage(r)}`);
           if (kind === "api") {
             modelMissing = true;
             continue; // coba jalur panggilan lain untuk model ini
@@ -398,9 +406,14 @@ export function createImageGen({ state = null, config = readImageConfig({}), fet
         }
         const kind = errorKind(r.status, r.raw);
         log.warn?.(`🖼️ [Gambar] OpenRouter ${model} HTTP ${r.status} (${kind}): ${String(r.raw).replace(/\s+/g, " ").slice(0, 160)}`);
+        details.push(`OpenRouter ${model}: HTTP ${r.status} ${kind} — ${apiMessage(r)}`);
         note(kind === "api" || kind === "server" ? "unavailable" : kind);
         if (kind === "api") break; // model tidak ada -> model berikutnya
       }
+    }
+    // Gemini habis/ditolak DAN OpenRouter kehabisan saldo: tampilkan sebagai "billing" supaya pemilik tahu harus mengisi saldo.
+    if ((config.orKeys?.length ?? 0) > 0 && details.some((d) => /^OpenRouter .*HTTP 402/.test(d)) && (worst === "quota" || worst === "billing" || worst === "auth")) {
+      throw fail("billing");
     }
     throw fail(worst || "unavailable");
   }
@@ -422,7 +435,7 @@ export function createImageGen({ state = null, config = readImageConfig({}), fet
       return { image: await generate(p) };
     } catch (e) {
       await slot.release().catch(() => {});
-      return { error: e instanceof Error ? e.message : String(e), kind: e?.kind || "unavailable" };
+      return { error: e instanceof Error ? e.message : String(e), kind: e?.kind || "unavailable", detail: e?.detail || "" };
     }
   }
 
