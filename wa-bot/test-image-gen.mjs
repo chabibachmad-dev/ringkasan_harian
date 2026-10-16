@@ -722,9 +722,9 @@ ok("edit foto: perintah dikenali ketat, foto diperkecil (ffmpeg), multipart ke F
   assert.match(grp, /const photo = groupAudio \? null : content\.imageMessage/, "foto + keterangan dibaca");
   assert.match(grp, /if \(photo && !editReq\) return;/, "foto dengan keterangan biasa tetap diabaikan");
   assert.match(grp, /imageGen\.groupEnabled\(\) \? imageGen\.detectEdit\(text, \{ hasImage: Boolean\(photo \|\| quotedImage\) \}\)/, "edit hanya bila fitur gambar grup aktif");
-  assert.ok(grp.indexOf("isAutoReplyEnabledForContact") < grp.indexOf("if (editReq) {"), "edit setelah cek izin kontak");
-  assert.ok(grp.indexOf("if (editReq) {") < grp.indexOf("imageGen.detect(text)"), "edit dicek sebelum pembuatan gambar & AI");
-  assert.ok(grp.indexOf("if (editReq) {") < grp.indexOf("generateAutoReply(groupJid)"));
+  assert.ok(grp.indexOf("isAutoReplyEnabledForContact") < grp.indexOf("if (editReq && !docEdit) {"), "edit setelah cek izin kontak");
+  assert.ok(grp.indexOf("if (editReq && !docEdit) {") < grp.indexOf("imageGen.detect(text)"), "edit dicek sebelum pembuatan gambar & AI");
+  assert.ok(grp.indexOf("if (editReq && !docEdit) {") < grp.indexOf("generateAutoReply(groupJid)"));
   assert.match(grp, /edit: \{ source \}/);
   assert.match(grp, /ctx\.stanzaId/, "membalas foto: unduh foto yang dikutip");
   assert.match(idx, /prepareEditInput\(buffer\)/);

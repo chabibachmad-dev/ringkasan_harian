@@ -73,6 +73,7 @@ import { createGroupVoice, detectRequestedLang, detectTextOnlyRequest, langInstr
 import { formatForWhatsApp, detectPdfRequest, detectOfficeRequest, cleanAnswerForFile, titleForFile } from "./wa-format.js";
 import { buildDocx, buildXlsx, officeFileName, MIME_DOCX, MIME_XLSX } from "./office-doc.js";
 import { pdfBufferToMarkdown, PDF_MAX_BYTES } from "./pdf-extract.js";
+import { detectEditRequest, replaceInText, replaceInDocx, docxToMarkdown, numberDiff, buildEditPrompt, buildEditUserMessage, unwrapFence, AI_EDIT_MAX_CHARS } from "./doc-edit.js";
 import { createPersonaVoice } from "./persona-voice.js";
 import { buildPdf, titleFromText, pdfFileName } from "./pdf-doc.js";
 import { MAIN_ACCOUNT, SECOND_ACCOUNT, acctFields, createAccountRouter, isPairedCreds, isStalePairing, pairingInstructions, personaPrompt, readSecondAccountConfig } from "./wa-accounts.js";
@@ -2889,7 +2890,9 @@ async function handleGroupMessage(msg, sock) {
   const pdfReq = groupAudio || officeReq ? null : detectPdfRequest(text);
   const fileReq = officeReq ? { format: officeReq.format, only: officeReq.only, rest: officeReq.rest } : pdfReq ? { format: "pdf", only: pdfReq.only, rest: pdfReq.rest } : null;
   const quotedDoc = ctx?.quotedMessage ? unwrapMessageContent(ctx.quotedMessage)?.documentMessage || null : null;
-  if (docAttached && !(fileReq && fileReq.format !== "pdf")) return; // dokumen tanpa perintah Excel/Word: tetap diabaikan
+  // Ubah ISI dokumen yang dibagikan/dibalas ("ganti X jadi Y", "perbaiki kalimatnya", "ringkas"): hanya untuk PDF/Word, hasilnya berkas BARU.
+  const docEdit = groupAudio || photo || !(docAttached || quotedDoc) || fileReq?.format === "xlsx" ? null : detectEditRequest(fileReq ? fileReq.rest : text);
+  if (docAttached && !docEdit && !(fileReq && fileReq.format !== "pdf")) return; // dokumen tanpa perintah Excel/Word/ubah isi: tetap diabaikan
   const fileHint = fileReq && !fileReq.only ? fileReq.rest : "";
   if (fileReq && !fileReq.only && fileReq.rest) text = fileReq.rest;
 
@@ -2935,7 +2938,7 @@ async function handleGroupMessage(msg, sock) {
   }
 
   // Permintaan EDIT foto ("bot, ubah jadi hitam putih" + foto/balas foto): ditangani pembuat gambar, bukan AI percakapan.
-  if (editReq) {
+  if (editReq && !docEdit) {
     if (editReq.needsImage) {
       await replyGroupText(sock, groupJid, msg, subject, "Fotonya belum ada. Kirim foto dengan keterangan perintah edit (mis. \"bot, ubah jadi hitam putih\"), atau balas (reply) foto yang mau diedit dengan: bot, edit foto ini jadi ...");
       return;
@@ -2948,8 +2951,19 @@ async function handleGroupMessage(msg, sock) {
   }
 
   // Permintaan berkas (PDF/Excel/Word): jatah per orang per hari, supaya jatah AI & laptop tidak habis oleh satu orang.
-  if (fileReq && !fileQuotaOk(msg.key.participant || sender)) {
+  if ((fileReq || docEdit) && !fileQuotaOk(msg.key.participant || sender)) {
     await replyGroupText(sock, groupJid, msg, subject, `Jatah berkas (PDF/Excel/Word) untukmu hari ini sudah habis (${FILE_DAILY_MAX} berkas per hari). Besok bisa lagi ya.`);
+    return;
+  }
+  // Ubah isi PDF/Word yang dibagikan (atau dibalas): ganti kata langsung di Word, atau disunting AI -> berkas BARU (asli tidak disentuh).
+  if (docEdit) {
+    const doc = docAttached || quotedDoc;
+    const source = docAttached
+      ? { key: msg.key, message: content }
+      : { key: { remoteJid: groupJid, id: ctx.stanzaId, participant: ctx.participant }, message: unwrapMessageContent(ctx.quotedMessage) };
+    sock.sendPresenceUpdate("composing", groupJid).catch(() => {});
+    await editGroupDocument(sock, groupJid, { source, doc, req: docEdit, instruction: fileReq ? fileReq.rest : text, outFormat: fileReq ? fileReq.format : null, msg, subject });
+    sock.sendPresenceUpdate("paused", groupJid).catch(() => {});
     return;
   }
   // PDF yang dibagikan (atau dibalas) + "convert ke excel/word": ubah isi PDF-nya, tanpa memanggil AI.
@@ -3098,7 +3112,7 @@ function runFileJob(fn) {
  * Ubah teks (markdown) menjadi berkas PDF / Word / Excel lalu kirim sebagai dokumen ke grup. true = terkirim. Tidak pernah melempar galat.
  * result (opsional) = hasil AI: token pemakaiannya dicatat. raw = isi apa adanya (hasil konversi PDF), tanpa pembersihan jawaban AI.
  */
-async function deliverGroupFile(sock, jid, kind, markdown, { quoted = null, waName = null, result = null, hint = "", fileTitle = "", caption = "", raw = false } = {}) {
+async function deliverGroupFile(sock, jid, kind, markdown, { quoted = null, waName = null, result = null, hint = "", fileTitle = "", fileBase = "", caption = "", raw = false, prebuilt = null } = {}) {
   try {
     const clean = raw ? String(markdown ?? "") : cleanAnswerForFile(markdown);
     const title = fileTitle || titleForFile(clean, hint);
@@ -3106,22 +3120,24 @@ async function deliverGroupFile(sock, jid, kind, markdown, { quoted = null, waNa
     let buf;
     let mimetype;
     let fileName;
-    if (kind === "xlsx") {
+    if (prebuilt) {
+      ({ buf, mimetype, fileName } = prebuilt); // berkas Word hasil ganti-kata langsung (format asli utuh)
+    } else if (kind === "xlsx") {
       buf = buildXlsx(clean);
       mimetype = MIME_XLSX;
-      fileName = officeFileName(title, "xlsx");
+      fileName = officeFileName(fileBase || title, "xlsx");
     } else if (kind === "docx") {
       buf = buildDocx(clean, { title });
       mimetype = MIME_DOCX;
-      fileName = officeFileName(title, "docx");
+      fileName = officeFileName(fileBase || title, "docx");
     } else {
       const when = `${formatClockInTimezone(Date.now())} ${WA_TIMEZONE_LABEL}`;
       buf = buildPdf(clean, { title, subtitle: `Dibuat oleh Ayyubi • ${new Date().toLocaleDateString("id-ID", { day: "numeric", month: "long", year: "numeric", timeZone: WA_TIMEZONE })} ${when}` });
       mimetype = "application/pdf";
-      fileName = pdfFileName(title);
+      fileName = pdfFileName(fileBase || title);
     }
     const sent = await sock.sendMessage(jid, { document: buf, mimetype, fileName, caption: caption || title }, quoted ? { quoted } : undefined);
-    rememberReplySource(sent?.key?.id, clean);
+    if (!prebuilt) rememberReplySource(sent?.key?.id, clean);
     const { error } = await supabase.from("whatsapp_messages").insert({
       wa_jid: jid,
       wa_name: waName,
@@ -3197,6 +3213,161 @@ async function convertGroupDocument(sock, groupJid, { source, doc, format, msg, 
     const caption = `${parts.join(" • ")}. Mohon dicek ulang, terutama kolom tabel.`;
     const ok = await deliverGroupFile(sock, groupJid, format, r.markdown, { quoted: msg, waName: subject || null, fileTitle: base.slice(0, 70), caption, raw: true });
     if (!ok) await say(`Maaf, berkas ${label}-nya gagal dibuat. Coba lagi sebentar lagi ya.`);
+  });
+}
+
+const DOC_EDIT_MAX_BYTES = 15 * 1024 * 1024;
+const PDF_READ_ERR = {
+  notool: "Bot belum bisa membaca PDF karena alat pdftotext belum terpasang di laptop kantor (pemilik bot perlu memasang poppler-utils).",
+  toobig: "PDF-nya terlalu besar.",
+  timeout: "PDF-nya terlalu rumit/lama diproses. Coba kirim sebagian halamannya saja.",
+  badpdf: "File ini tidak bisa dibaca sebagai PDF (rusak atau terkunci kata sandi)."
+};
+
+/** Suntingan AI atas isi dokumen (markdown). Melempar galat bila AI gagal/kosong. */
+async function aiEditMarkdown(instruction, markdown) {
+  const data = await geminiGenerateWithRotation(buildEditPrompt(), [{ role: "user", parts: [{ text: buildEditUserMessage(instruction, markdown) }] }], { useSearch: false });
+  const out = unwrapFence(extractGeminiText(data));
+  if (!out) throw new Error("AI mengembalikan hasil kosong");
+  const tokensUsed = data?.usageMetadata?.totalTokenCount ?? 0;
+  if (tokensUsed > 0) await recordTokenUsage(tokensUsed, estimateCostUsd(GEMINI_MODEL, tokensUsed * 0.5, tokensUsed * 0.5));
+  return out;
+}
+
+const shortQ = (s, n = 40) => `"${String(s).length > n ? String(s).slice(0, n - 1) + "…" : s}"`;
+
+/**
+ * Ubah isi PDF / Word yang dibagikan di grup. Selalu menjawab: berkas BARU "<nama>-revisi", atau alasan kenapa tidak bisa. Berkas asli tidak disentuh.
+ *  - Word + ganti kata: dilakukan langsung di dalam berkas (format asli utuh).
+ *  - PDF, atau permintaan AI ("perbaiki", "ringkas"): isi dibaca -> disunting -> dibuat ulang (tata letak asli tidak ikut).
+ */
+async function editGroupDocument(sock, groupJid, { source, doc, req, instruction, outFormat, msg, subject }) {
+  const say = (t) => replyGroupText(sock, groupJid, msg, subject, t);
+  const name = String(doc?.fileName || "dokumen");
+  const mime = String(doc?.mimetype || "");
+  const isPdf = /pdf/i.test(mime) || /\.pdf$/i.test(name);
+  const isDocx = /wordprocessingml/i.test(mime) || /\.docx$/i.test(name);
+  if (!isPdf && !isDocx) {
+    await say(`Baru file PDF dan Word (.docx) yang bisa diubah isinya. "${name}" bukan keduanya${/\.doc$/i.test(name) ? " (simpan ulang sebagai .docx dulu)" : ""}.`);
+    return;
+  }
+  const maxBytes = isPdf ? PDF_MAX_BYTES : DOC_EDIT_MAX_BYTES;
+  if (Number(doc?.fileLength) > maxBytes) {
+    await say(`Filenya terlalu besar (maks ${Math.round(maxBytes / 1024 / 1024)} MB). Kirim versi yang lebih kecil atau pisahkan per bagian.`);
+    return;
+  }
+  const base = name.replace(/\.(pdf|docx)$/i, "").replace(/[_-]+/g, " ").replace(/\s+/g, " ").trim() || "Dokumen";
+  const fileBase = `${base.slice(0, 60)} revisi`;
+  const kind = outFormat === "pdf" || outFormat === "docx" ? outFormat : isPdf ? "pdf" : "docx";
+  const aiReady = GEMINI_API_KEYS.length > 0 || llmFallback.available();
+
+  await runFileJob(async () => {
+    let buffer = null;
+    let lastErr = null;
+    for (let attempt = 0; attempt < 2 && !buffer; attempt++) {
+      try {
+        buffer = await downloadMediaMessage(source, "buffer", {}, { logger: pino({ level: "silent" }), reuploadRequest: sock.updateMediaMessage });
+      } catch (e) {
+        lastErr = e;
+        await new Promise((r) => setTimeout(r, 700));
+      }
+    }
+    if (!buffer) {
+      console.error(`📝 [Ubah isi] gagal mengunduh ${name}: ${describeError(lastErr)}`);
+      await say("Filenya gagal diunduh (mungkin sudah kedaluwarsa). Kirim ulang filenya, lalu minta lagi.");
+      return;
+    }
+    const countsText = (pairs, counts) => pairs.map((p, i) => (counts[i] > 0 ? `${shortQ(p.from)} → ${shortQ(p.to)} (${counts[i]}x)` : `${shortQ(p.from)} tidak ditemukan`)).join("; ");
+    let useAi = req.kind === "ai";
+
+    // 1) Ganti kata. Word tanpa ganti format: langsung di dalam berkas.
+    if (req.kind === "replace") {
+      try {
+        if (isDocx && kind === "docx") {
+          const r = replaceInDocx(buffer, req.pairs);
+          if (r.counts.some((c) => c > 0)) {
+            const caption = `Sudah diganti: ${countsText(req.pairs, r.counts)}. Format Word aslinya tetap utuh; file asli tidak diubah.`;
+            const ok = await deliverGroupFile(sock, groupJid, "docx", `(${name} diedit langsung)`, { quoted: msg, waName: subject || null, fileTitle: base.slice(0, 70), caption, raw: true, prebuilt: { buf: r.buf, mimetype: MIME_DOCX, fileName: officeFileName(fileBase, "docx") } });
+            if (!ok) await say("Maaf, berkas Word-nya gagal dibuat. Coba lagi sebentar lagi ya.");
+            return;
+          }
+        }
+      } catch (e) {
+        console.error(`📝 [Ubah isi] ${name}: ${e instanceof Error ? e.message : String(e)}`);
+        await say(e?.kind === "baddocx" ? "File ini tidak bisa dibaca sebagai Word (.docx) yang sah." : "Filenya gagal diproses. Coba lagi sebentar lagi ya.");
+        return;
+      }
+    }
+
+    // 2) Baca isi dokumen -> markdown
+    let md;
+    let scanned = false;
+    try {
+      if (isPdf) {
+        const r = await pdfBufferToMarkdown(buffer);
+        md = r.markdown;
+        scanned = r.scanned;
+      } else {
+        md = docxToMarkdown(buffer);
+      }
+    } catch (e) {
+      console.error(`📝 [Ubah isi] ${name}: ${e instanceof Error ? e.message : String(e)}`);
+      await say(isPdf ? PDF_READ_ERR[e?.kind] || "PDF-nya gagal dibaca. Coba lagi sebentar lagi ya." : "File ini tidak bisa dibaca sebagai Word (.docx) yang sah.");
+      return;
+    }
+    if (scanned || !md) {
+      await say(isPdf ? "PDF ini tampaknya hasil scan (berupa gambar), jadi tidak ada teks yang bisa diubah. Kirim PDF aslinya (yang teksnya bisa diseleksi), ya." : "Dokumen Word ini tidak punya teks yang bisa diubah.");
+      return;
+    }
+
+    let outMd = md;
+    const notes = [];
+    if (req.kind === "replace") {
+      const r = replaceInText(md, req.pairs);
+      if (r.counts.some((c) => c > 0)) {
+        outMd = r.text;
+        notes.push(`Sudah diganti: ${countsText(req.pairs, r.counts)}.`);
+      } else if (req.quoted) {
+        await say(`Kata ${req.pairs.map((p) => shortQ(p.from)).join(", ")} tidak ditemukan di "${name}". Cek tulisannya (huruf besar/kecil tidak masalah, tapi ejaan harus sama).`);
+        return;
+      } else {
+        useAi = true; // "ganti judul jadi lebih menarik": bukan kata persis -> serahkan ke AI
+      }
+    }
+
+    // 3) Suntingan AI
+    if (useAi) {
+      if (!aiReady) {
+        await say("Penyuntingan dengan AI sedang tidak tersedia (kunci AI belum terpasang). Ganti kata persis masih bisa: bot, ganti \"kata lama\" jadi \"kata baru\".");
+        return;
+      }
+      if (md.length > AI_EDIT_MAX_CHARS) {
+        await say(`Isi dokumennya terlalu panjang untuk disunting AI sekaligus (${md.length.toLocaleString("id-ID")} karakter, maks ${AI_EDIT_MAX_CHARS.toLocaleString("id-ID")}). Kirim bagian yang mau diubah saja, atau pakai ganti kata persis: bot, ganti "kata lama" jadi "kata baru".`);
+        return;
+      }
+      let edited;
+      try {
+        edited = await aiEditMarkdown(instruction || req.instruction || "", md);
+      } catch (e) {
+        console.error(`📝 [Ubah isi] AI gagal untuk ${name}: ${describeError(e)}`);
+        await say("Maaf, AI-nya lagi tidak bisa menyunting dokumen ini. Coba lagi sebentar lagi ya.");
+        return;
+      }
+      outMd = edited;
+      const summarize = req.kind === "ai" ? req.summarize : false;
+      const diff = numberDiff(md, edited);
+      const list = (a) => [...new Set(a)].slice(0, 6).join(", ") + (new Set(a).size > 6 ? ", …" : "");
+      if (diff.added.length) notes.push(`⚠️ Ada angka baru yang tidak ada di aslinya: ${list(diff.added)}.`);
+      if (diff.removed.length && !summarize) notes.push(`⚠️ Angka di aslinya yang hilang: ${list(diff.removed)}.`);
+      if (!summarize && edited.length < md.length * 0.5) notes.push("⚠️ Hasilnya jauh lebih pendek dari aslinya.");
+      notes.unshift("Disunting oleh AI sesuai permintaanmu.");
+    }
+    if (isPdf) notes.push("Tata letak PDF asli tidak ikut; ini berkas baru dari isinya.");
+    notes.push("Mohon dicek ulang sebelum dipakai; file asli tidak diubah.");
+
+    const heading = /^#\s+(.+)$/m.exec(outMd)?.[1]?.replace(/[*_`]/g, "").trim().slice(0, 70);
+    const ok = await deliverGroupFile(sock, groupJid, kind, outMd, { quoted: msg, waName: subject || null, fileTitle: heading || base.slice(0, 70), fileBase, caption: notes.join(" "), raw: true });
+    if (!ok) await say(`Maaf, berkas ${FILE_LABEL[kind]}-nya gagal dibuat. Coba lagi sebentar lagi ya.`);
   });
 }
 

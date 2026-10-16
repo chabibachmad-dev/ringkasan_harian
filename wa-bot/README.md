@@ -985,6 +985,13 @@ Judul `## ...` menjadi *tebal*, `**x**` menjadi `*x*`, garis `---` dibuang, `[te
 - Batas: PDF **berisi teks** (bukan hasil scan/foto), maksimal 15 MB, 60 halaman pertama. PDF hasil scan dijawab dengan penjelasan (belum ada OCR). Tabel tanpa garis dengan kolom sangat rapat atau sel yang bergabung bisa meleset: bot selalu menulis di keterangan "Mohon dicek ulang". Satu konversi diproses satu per satu agar laptop tidak berat.
 - Hanya file PDF yang bisa dikonversi; file lain dijawab "baru PDF yang bisa".
 
+**Ubah ISI PDF/Word yang dibagikan di grup.** Balas (reply) file Word atau PDF-nya (atau kirim file dengan keterangan) dengan perintah:
+- **Ganti kata:** `bot, ganti "PT Maju" jadi "PT Makmur"` (boleh beberapa: `ganti "A" jadi "B" dan ganti "C" jadi "D"`). Untuk **Word (.docx)** kata diganti **langsung di dalam berkas**, jadi huruf, tabel, header/footer, dan format aslinya utuh; kata yang terbelah beda gaya tetap ketemu. Huruf besar/kecil tidak dipedulikan. Kalau kata tidak ditemukan, bot memberi tahu dan tidak mengirim apa-apa.
+- **Perintah AI:** `bot, perbaiki kalimatnya`, `bot, ringkas jadi satu halaman`, `bot, tulis ulang dengan bahasa formal`, `bot, terjemahkan ke bahasa Inggris`. AI membaca isi dokumen lalu menulis ulang, dan hasilnya dikirim sebagai berkas baru. Maksimal ± 14.000 karakter (kira-kira 5-6 halaman); lebih panjang dijawab dengan penjelasan.
+- **PDF tidak bisa diedit di tempat.** Isinya dibaca (seperti konversi di atas), diubah, lalu dikirim sebagai **PDF/Word baru** (tata letak asli tidak ikut). Tambahkan `... dalam bentuk Word` bila mau hasil Word.
+- **Pengaman:** berkas asli tidak pernah ditimpa (hasil bernama `<nama> revisi`). Setiap hasil AI diberi peringatan di keterangan bila ada **angka baru atau angka yang hilang** (AI bisa keliru mengubah angka/nama), plus "Mohon dicek ulang". Ganti kata persis (berkutip) tidak memakai AI sama sekali. Dihitung ke jatah berkas harian.
+- Format lain (.doc lama, Excel) dijawab dengan penjelasan; PDF hasil scan belum didukung.
+
 Setelah patch: cukup `/restart` (tidak perlu `/rilis`, tidak perlu `npm install`).
 
 ## Suara tiap bot (`/suara daftar`, `/suara coba`, `/suara pakai`)
