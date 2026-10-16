@@ -582,7 +582,7 @@ ok("index.js: grup (diizinkan, setelah cek kontak, sebelum AI), chat pribadi han
   assert.ok(imageSentNote("x".repeat(500)).length < 300, "dipotong");
   const idx = fs.readFileSync(new URL("./index.js", import.meta.url), "utf8");
   assert.match(idx, /IMAGE_PROMPT_NOTE/);
-  assert.match(idx, /imageGen\.available\(\) && imageGen\.groupEnabled\(\)\) imageNote = IMAGE_PROMPT_NOTE/, "catatan hanya bila fitur aktif untuk grup");
+  assert.match(idx, /imageGen\.available\(\) && imageGen\.groupEnabled\(\)( && !ctxFlags\?\.wantFile)?\) imageNote = IMAGE_PROMPT_NOTE/, "catatan hanya bila fitur aktif untuk grup");
   assert.match(idx, /JANGAN pernah mengatakan kamu tidak bisa membuat atau mengirim gambar/);
   assert.match(idx, /quotedText = quotedImageNote\(/, "kutipan gambar buatan bot dikenali");
   assert.match(idx, /await note\(imageSentNote\(req\.prompt, \{ edit: Boolean\(edit\) \}\), sent\)/);

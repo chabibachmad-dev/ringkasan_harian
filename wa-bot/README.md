@@ -958,7 +958,7 @@ Hanya voice note, tanpa teks terjemahan. Jawaban yang memuat tautan, kode, tabel
 
 Catatan: voice note MASUK di grup (balasan ke pesan bot) dikenali sebagai bahasa Indonesia (`VOICE_LANGUAGE=id`), jadi anggota grup yang membalas dengan voice note berbahasa Korea/Arab belum terbaca dengan baik; mereka bisa mengetik.
 
-## Jawab pakai teks, tabel yang terbaca, dan PDF (grup & chat)
+## Jawab pakai teks, tabel yang terbaca, dan berkas PDF/Word/Excel (grup & chat)
 
 **Minta teks, bukan suara.** Saat `/voice wag on`, bot biasanya membalas dengan voice note. Tulis di pesan: "bot, buatkan prompt ..., **jawab pakai teks**" (juga: "teks saja", "jangan pakai suara/voice", "tanpa voice", "bukan voice", "reply in text", "text only") maka **pesan itu** dijawab teks. Pesan berikutnya kembali mengikuti `/voice wag` (pengaturan tidak berubah).
 
@@ -969,14 +969,23 @@ Catatan: voice note MASUK di grup (balasan ke pesan bot) dikenali sebagai bahasa
 
 Judul `## ...` menjadi *tebal*, `**x**` menjadi `*x*`, garis `---` dibuang, `[teks](url)` menjadi `teks (url)`. Blok kode tidak diubah. Berlaku untuk balasan teks di grup maupun chat pribadi.
 
-**Jadikan PDF (khusus grup).**
-- `bot, jelaskan alur sertifikasi halal dalam bentuk PDF` → AI menjawab, lalu bot mengirim berkas PDF (bukan teks/suara).
-- Balas (reply) jawaban bot dengan `bot, jadikan pdf` → jawaban itu diubah jadi PDF tanpa memanggil AI lagi (jawaban yang masih diingat bot: 80 terakhir sejak bot menyala).
-- PDF A4 berisi judul, daftar, tabel sungguhan (header diulang di tiap halaman), blok kode, dan nomor halaman. Dibuat tanpa pustaka tambahan, jadi **tidak perlu `npm install`**.
-- Batas: hanya huruf Latin (emoji dibuang; Arab/Korea tampil `?`). Bila PDF gagal dibuat, jawaban tetap dikirim sebagai teks.
-- Permintaan yang bukan perintah membuat PDF ("apa itu pdf", "baca pdf ini", "kirim pdf peraturan PMK 62") tidak memicu fitur ini.
+**Jadikan PDF / Word / Excel (khusus grup).**
+- `bot, jelaskan alur sertifikasi halal dalam bentuk PDF` (atau `... dalam bentuk Word`, `... dalam bentuk Excel`) → AI menjawab, lalu bot mengirim berkasnya (bukan teks/suara).
+- Balas (reply) sebuah jawaban bot dengan `bot, jadikan pdf` / `bot, jadikan word` / `bot, jadikan excel` → jawaban itu diubah jadi berkas tanpa memanggil AI lagi (bot mengingat 80 jawaban terakhir sejak ia menyala; untuk jawaban lama, tulis ulang pertanyaannya).
+- **PDF**: A4 dengan judul, daftar, tabel sungguhan (judul kolom diulang tiap halaman), blok kode, nomor halaman. Hanya huruf Latin (emoji dibuang, Arab/Korea tampil `?`).
+- **Word (.docx)**: judul/heading bergaya, daftar, tabel Word sungguhan (halaman otomatis mendatar bila tabel 6 kolom atau lebih). Huruf Arab/Korea dan emoji tetap utuh.
+- **Excel (.xlsx)**: tiap tabel menjadi satu lembar (nama lembar dari judul di atas tabel), judul kolom dibekukan. Angka murni (`1250`, `1.250`, `3,5`, `1,234.50`) disimpan sebagai ANGKA; yang berawalan nol (`0812...`, NIK), memakai `Rp`/`%`, tanggal, atau berbentuk rumus (`=A1`) tetap TEKS (tidak pernah dijalankan sebagai rumus). Jawaban tanpa tabel masuk lembar "Teks".
+- Sapaan pembuka ("Halo <nama>!") dan promosi perintah bot di ujung jawaban dibuang otomatis dari isi berkas; tabel yang digambar AI dengan karakter `===`/`|` di dalam blok kode diubah menjadi tabel sungguhan. Judul berkas diambil dari judul jawaban, kalau tidak ada dari permintaan penanya.
+- Bila berkas gagal dibuat, jawabannya tetap dikirim sebagai teks.
+- Kalimat yang bukan perintah membuat berkas ("apa itu pdf", "cara bikin rumus di excel", "baca pdf ini", "kirim pdf peraturan PMK 62") tidak memicu fitur ini.
+- Jatah: `WA_GROUP_FILE_MAX_PER_DAY` berkas per orang per hari (bawaan 10; 0 = tanpa batas; hitungan kembali nol saat bot di-restart).
 
-Setelah patch: cukup `/restart` (tidak perlu `/rilis`).
+**Ubah PDF yang dibagikan di grup menjadi Excel/Word.** Ada yang membagikan PDF di grup? Balas (reply) file PDF itu dengan `bot, convert ke excel` atau `bot, jadikan word` (atau kirim PDF dengan keterangan `bot, convert ke excel`).
+- Dibaca dengan `pdftotext` (sudah dipakai Dokumen Pengetahuan; di Ubuntu: `sudo apt install poppler-utils`). Tidak memakai AI, jadi isi tidak diubah-ubah; tabel dikenali dari kolom yang rata, tabel yang terpotong antar halaman digabung, nomor halaman/judul berulang dibuang.
+- Batas: PDF **berisi teks** (bukan hasil scan/foto), maksimal 15 MB, 60 halaman pertama. PDF hasil scan dijawab dengan penjelasan (belum ada OCR). Tabel tanpa garis dengan kolom sangat rapat atau sel yang bergabung bisa meleset: bot selalu menulis di keterangan "Mohon dicek ulang". Satu konversi diproses satu per satu agar laptop tidak berat.
+- Hanya file PDF yang bisa dikonversi; file lain dijawab "baru PDF yang bisa".
+
+Setelah patch: cukup `/restart` (tidak perlu `/rilis`, tidak perlu `npm install`).
 
 ## Pembuat gambar (`/gambar`, "buatkan gambar ...")
 

@@ -70,7 +70,9 @@ import { classifyRoute, createAiRoute, parseRouteCommand } from "./ai-route.js";
 import { createNodin, parseNodinCommand, readNodinConfig } from "./nodin.js";
 import { createKas, parseKasCommand, readKasConfig } from "./kas.js";
 import { createGroupVoice, detectRequestedLang, detectTextOnlyRequest, langInstruction, readGroupVoiceConfig } from "./group-voice.js";
-import { formatForWhatsApp, detectPdfRequest } from "./wa-format.js";
+import { formatForWhatsApp, detectPdfRequest, detectOfficeRequest, cleanAnswerForFile, titleForFile } from "./wa-format.js";
+import { buildDocx, buildXlsx, officeFileName, MIME_DOCX, MIME_XLSX } from "./office-doc.js";
+import { pdfBufferToMarkdown, PDF_MAX_BYTES } from "./pdf-extract.js";
 import { buildPdf, titleFromText, pdfFileName } from "./pdf-doc.js";
 import { MAIN_ACCOUNT, SECOND_ACCOUNT, acctFields, createAccountRouter, isPairedCreds, isStalePairing, pairingInstructions, personaPrompt, readSecondAccountConfig } from "./wa-accounts.js";
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -317,12 +319,21 @@ KONTEKS GRUP: pesan ini datang dari GRUP WhatsApp (mis. grup keluarga), bukan ch
 // membuat gambar" lalu menyarankan DALL-E/Midjourney, padahal gambar tadi dibuat bot ini sendiri).
 const IMAGE_PROMPT_NOTE = `
 
-KEMAMPUAN GAMBAR: kamu (bot ini) BISA membuat gambar sendiri lewat pembuat gambar bawaan. Cara memintanya: anggota grup menulis "bot, buatkan gambar <deskripsi>" (mis. "bot, buatkan gambar kucing memakai topi astronot"); gambarnya dikirim langsung ke grup. JANGAN pernah mengatakan kamu tidak bisa membuat atau mengirim gambar, dan JANGAN menyarankan layanan lain (DALL-E, Midjourney, Stable Diffusion, dll). Foto bisa diedit: anggota grup mengirim foto dengan keterangan "bot, ubah jadi hitam putih" (atau membalas foto itu dengan "bot, edit foto ini jadi ...", termasuk gambar buatan bot); hasilnya dikirim ke grup. Kamu sendiri tidak bisa melihat isi foto yang dikirim anggota. Kalau ada yang minta gambar tetapi kalimatnya belum memakai pola itu, ajari pola di atas dengan singkat. Kamu juga BISA mengirim jawaban sebagai berkas PDF: anggota cukup menulis "bot, ... dalam bentuk PDF" atau membalas jawabanmu dengan "bot, jadikan pdf"; jangan pernah bilang tidak bisa membuat PDF. Baris riwayat berawalan "🖼️" atau kutipan berawalan "[GAMBAR" berarti BOT INI SENDIRI yang membuat dan mengirim gambar itu: jelaskan sesuai deskripsi permintaannya (kamu tidak bisa melihat pikselnya, jadi katakan "itu gambar yang tadi kubuat sesuai permintaan: ..." dan jangan mengarang detail yang tidak ada di deskripsi).`;
+KEMAMPUAN GAMBAR: kamu (bot ini) BISA membuat gambar sendiri lewat pembuat gambar bawaan. Cara memintanya: anggota grup menulis "bot, buatkan gambar <deskripsi>" (mis. "bot, buatkan gambar kucing memakai topi astronot"); gambarnya dikirim langsung ke grup. JANGAN pernah mengatakan kamu tidak bisa membuat atau mengirim gambar, dan JANGAN menyarankan layanan lain (DALL-E, Midjourney, Stable Diffusion, dll). Foto bisa diedit: anggota grup mengirim foto dengan keterangan "bot, ubah jadi hitam putih" (atau membalas foto itu dengan "bot, edit foto ini jadi ...", termasuk gambar buatan bot); hasilnya dikirim ke grup. Kamu sendiri tidak bisa melihat isi foto yang dikirim anggota. Kalau ada yang minta gambar tetapi kalimatnya belum memakai pola itu, ajari pola di atas dengan singkat. Kamu juga BISA mengirim jawaban sebagai berkas PDF: anggota cukup menulis "bot, ... dalam bentuk PDF" atau membalas jawabanmu dengan "bot, jadikan pdf"; jangan pernah bilang tidak bisa membuat PDF. Hasil juga bisa dikirim sebagai Word atau Excel ("bot, ... dalam bentuk Excel", atau balas jawabanmu dengan "bot, jadikan excel/word"); dan kalau ada anggota membagikan file PDF di grup, anggota bisa membalas file itu dengan "bot, convert ke excel" atau "bot, jadikan word" (khusus PDF yang berisi teks, bukan hasil scan). Baris riwayat berawalan "🖼️" atau kutipan berawalan "[GAMBAR" berarti BOT INI SENDIRI yang membuat dan mengirim gambar itu: jelaskan sesuai deskripsi permintaannya (kamu tidak bisa melihat pikselnya, jadi katakan "itu gambar yang tadi kubuat sesuai permintaan: ..." dan jangan mengarang detail yang tidak ada di deskripsi).`;
 
-// Permintaan "jadikan PDF": sistem yang membuat berkas PDF dari jawabanmu -- AI cukup menulis isinya.
-const PDF_PROMPT_NOTE = `
+// Permintaan "jadikan PDF/Word/Excel": sistem yang membuat berkasnya dari jawabanmu -- AI cukup menulis isinya.
+const FILE_NOTE_COMMON = ` Mulai LANGSUNG dengan judul "# ..." tanpa sapaan (jangan "Halo <nama>"), jangan menyebut nama penanya, dan jangan menyinggung perintah bot lain (mis. pembuatan gambar) atau menawarkan hal lain di akhir. Tabel WAJIB memakai sintaks tabel markdown (baris "| kolom | kolom |" lalu baris "|---|---|"); JANGAN menggambar tabel dengan karakter ===, +---+ atau di dalam blok kode.`;
+const FILE_NOTES = {
+  pdf: `
 
-PERMINTAAN PDF: jawabanmu akan DIKIRIM OLEH SISTEM sebagai berkas PDF. Jadi tulis LANGSUNG isi dokumennya (lengkap, rapi, terstruktur; boleh judul "# ...", daftar, dan tabel markdown). JANGAN bilang kamu tidak bisa membuat PDF dan jangan menyarankan aplikasi lain. Jangan menambah basa-basi seperti "berikut PDF-nya".`;
+PERMINTAAN PDF: jawabanmu akan DIKIRIM OLEH SISTEM sebagai berkas PDF. Jadi tulis LANGSUNG isi dokumennya (lengkap, rapi, terstruktur; boleh judul, daftar, dan tabel). JANGAN bilang kamu tidak bisa membuat PDF dan jangan menyarankan aplikasi lain.${FILE_NOTE_COMMON}`,
+  docx: `
+
+PERMINTAAN WORD: jawabanmu akan DIKIRIM OLEH SISTEM sebagai berkas Word (.docx). Jadi tulis LANGSUNG isi dokumennya (lengkap, rapi, terstruktur; boleh judul, daftar, dan tabel). JANGAN bilang kamu tidak bisa membuat file Word dan jangan menyarankan aplikasi lain.${FILE_NOTE_COMMON}`,
+  xlsx: `
+
+PERMINTAAN EXCEL: jawabanmu akan DIKIRIM OLEH SISTEM sebagai berkas Excel (.xlsx): setiap tabel menjadi satu lembar. Jadi tulis datanya sebagai TABEL, satu tabel per topik, dengan judul "## Nama Lembar" (maks 30 huruf) tepat sebelum tiap tabel. Tulis angka polos (mis. 3500000) dan taruh satuannya di judul kolom (mis. "Harga (Rp)"). JANGAN bilang kamu tidak bisa membuat file Excel dan jangan menyarankan aplikasi lain.${FILE_NOTE_COMMON}`
+};
 // Permintaan "jawab pakai teks": jawaban tertulis (bukan untuk dibacakan).
 const TEXT_PROMPT_NOTE = `
 
@@ -339,10 +350,10 @@ function withGroupNote(basePrompt, jid) {
   // Balasan grup berupa suara: bahasa jawaban dipaksa (/voice wag kor ...) atau diminta anggota grup ("jawab pakai bahasa Korea").
   const replyLang = waAccountContext.getStore()?.replyLang;
   const ctxFlags = waAccountContext.getStore();
-  const fileNote = ctxFlags?.wantPdf ? PDF_PROMPT_NOTE : ctxFlags?.textOnly ? TEXT_PROMPT_NOTE : "";
+  const fileNote = ctxFlags?.wantFile ? FILE_NOTES[ctxFlags.wantFile] || "" : ctxFlags?.textOnly ? TEXT_PROMPT_NOTE : "";
   let imageNote = "";
   try {
-    if (imageGen.available() && imageGen.groupEnabled()) imageNote = IMAGE_PROMPT_NOTE;
+    if (imageGen.available() && imageGen.groupEnabled() && !ctxFlags?.wantFile) imageNote = IMAGE_PROMPT_NOTE;
   } catch {
     /* pembuat gambar belum siap: tanpa catatan */
   }
@@ -2799,8 +2810,10 @@ async function handleGroupMessage(msg, sock) {
   if (groupAudio && !(waVoiceCfg.inGroups && transcriber.available())) return;
   // Foto + keterangan: dulu diabaikan; sekarang hanya diproses bila keterangannya perintah EDIT FOTO ("bot, ubah jadi hitam putih").
   const photo = groupAudio ? null : content.imageMessage || null;
-  const rawText = groupAudio ? "" : photo ? String(photo.caption ?? "") : extractText({ message: content });
-  if (!groupAudio && (!rawText || (!photo && rawText.startsWith("[")))) return;
+  // Dokumen + keterangan: hanya diproses bila keterangannya meminta PDF -> Excel/Word ("bot, convert ke excel").
+  const docAttached = groupAudio || photo ? null : content.documentMessage || null;
+  const rawText = groupAudio ? "" : photo ? String(photo.caption ?? "") : docAttached ? String(docAttached.caption ?? "") : extractText({ message: content });
+  if (!groupAudio && (!rawText || (!photo && !docAttached && rawText.startsWith("[")))) return;
 
   const ctx = getMessageContextInfo(content);
   const ownJids = getOwnJids(sock);
@@ -2870,8 +2883,14 @@ async function handleGroupMessage(msg, sock) {
   if (!groupAudio && !text) text = "(menandai tanpa pertanyaan, jawab/jelaskan pesan yang dikutip)";
   // "jawab pakai teks" -> pesan ini dijawab teks walau /voice wag on. "dalam bentuk PDF" / "jadikan pdf" -> jawaban dikirim sebagai berkas PDF.
   const textOnly = !groupAudio && detectTextOnlyRequest(text);
-  const pdfReq = groupAudio ? null : detectPdfRequest(text);
-  if (pdfReq && !pdfReq.only && pdfReq.rest) text = pdfReq.rest;
+  // Hasil berupa berkas: "dalam bentuk PDF/Excel/Word", "jadikan pdf/excel/word", "convert ke excel" (pada PDF yang dibagikan/dibalas).
+  const officeReq = groupAudio ? null : detectOfficeRequest(text);
+  const pdfReq = groupAudio || officeReq ? null : detectPdfRequest(text);
+  const fileReq = officeReq ? { format: officeReq.format, only: officeReq.only, rest: officeReq.rest } : pdfReq ? { format: "pdf", only: pdfReq.only, rest: pdfReq.rest } : null;
+  const quotedDoc = ctx?.quotedMessage ? unwrapMessageContent(ctx.quotedMessage)?.documentMessage || null : null;
+  if (docAttached && !(fileReq && fileReq.format !== "pdf")) return; // dokumen tanpa perintah Excel/Word: tetap diabaikan
+  const fileHint = fileReq && !fileReq.only ? fileReq.rest : "";
+  if (fileReq && !fileReq.only && fileReq.rest) text = fileReq.rest;
 
   // --- Jeda per orang (cegah spam & hemat kuota)
   const senderKey = `${groupJid}|${msg.key.participant || sender}`;
@@ -2927,19 +2946,42 @@ async function handleGroupMessage(msg, sock) {
     return;
   }
 
-  // "bot, jadikan pdf" (tanpa pertanyaan baru): ubah jawaban yang DIBALAS menjadi PDF, tanpa memanggil AI.
-  if (pdfReq?.only) {
+  // Permintaan berkas (PDF/Excel/Word): jatah per orang per hari, supaya jatah AI & laptop tidak habis oleh satu orang.
+  if (fileReq && !fileQuotaOk(msg.key.participant || sender)) {
+    await replyGroupText(sock, groupJid, msg, subject, `Jatah berkas (PDF/Excel/Word) untukmu hari ini sudah habis (${FILE_DAILY_MAX} berkas per hari). Besok bisa lagi ya.`);
+    return;
+  }
+  // PDF yang dibagikan (atau dibalas) + "convert ke excel/word": ubah isi PDF-nya, tanpa memanggil AI.
+  if (fileReq && fileReq.format !== "pdf" && (docAttached || quotedDoc)) {
+    const doc = docAttached || quotedDoc;
+    const source = docAttached
+      ? { key: msg.key, message: content }
+      : { key: { remoteJid: groupJid, id: ctx.stanzaId, participant: ctx.participant }, message: unwrapMessageContent(ctx.quotedMessage) };
+    sock.sendPresenceUpdate("composing", groupJid).catch(() => {});
+    await convertGroupDocument(sock, groupJid, { source, doc, format: fileReq.format, msg, subject });
+    sock.sendPresenceUpdate("paused", groupJid).catch(() => {});
+    return;
+  }
+  // "bot, jadikan pdf/excel/word" (tanpa pertanyaan baru): ubah jawaban yang DIBALAS menjadi berkas, tanpa memanggil AI.
+  if (fileReq?.only) {
+    const label = FILE_LABEL[fileReq.format];
     const fromReply = ctx?.stanzaId ? replySource.get(ctx.stanzaId) : null;
     const quotedPlain = quotedText && !quotedText.startsWith("[") ? quotedText : null;
     const source = fromReply || quotedPlain;
     if (!source) {
-      await replyGroupText(sock, groupJid, msg, subject, "Balas (reply) jawaban yang mau dijadikan PDF dengan: bot, jadikan pdf. Atau tulis pertanyaannya sekalian, mis.: bot, jelaskan alur sertifikasi halal dalam bentuk PDF.");
+      await replyGroupText(
+        sock,
+        groupJid,
+        msg,
+        subject,
+        `Balas (reply) jawaban yang mau dijadikan ${label} dengan: bot, jadikan ${label.toLowerCase()}. Atau tulis pertanyaannya sekalian, mis.: bot, buatkan tabel perbandingan ... dalam bentuk ${label}.${fileReq.format !== "pdf" ? " Untuk mengubah PDF yang dibagikan di grup: balas file PDF-nya dengan \"bot, convert ke " + label.toLowerCase() + "\"." : ""}`
+      );
       return;
     }
     sock.sendPresenceUpdate("composing", groupJid).catch(() => {});
-    const ok = await deliverGroupPdf(sock, groupJid, source, { quoted: msg, waName: subject || null });
+    const ok = await deliverGroupFile(sock, groupJid, fileReq.format, source, { quoted: msg, waName: subject || null });
     sock.sendPresenceUpdate("paused", groupJid).catch(() => {});
-    if (!ok) await replyGroupText(sock, groupJid, msg, subject, "Maaf, PDF-nya gagal dibuat. Coba lagi sebentar lagi ya.");
+    if (!ok) await replyGroupText(sock, groupJid, msg, subject, `Maaf, berkas ${label}-nya gagal dibuat. Coba lagi sebentar lagi ya.`);
     return;
   }
 
@@ -2956,12 +2998,12 @@ async function handleGroupMessage(msg, sock) {
   {
     const flags = waAccountContext.getStore();
     if (flags) {
-      flags.wantPdf = Boolean(pdfReq);
-      flags.textOnly = textOnly && !pdfReq;
+      flags.wantFile = fileReq ? fileReq.format : "";
+      flags.textOnly = textOnly && !fileReq;
     }
   }
   // Bahasa jawaban (hanya relevan bila balasan grup berupa suara): permintaan di pesan ini > pengaturan /voice wag > otomatis.
-  if (groupVoice.enabled() && !textOnly && !pdfReq) {
+  if (groupVoice.enabled() && !textOnly && !fileReq) {
     const wantedLang = detectRequestedLang(text) || groupVoice.lang();
     const acctCtx = waAccountContext.getStore();
     if (acctCtx && wantedLang) {
@@ -3006,11 +3048,11 @@ async function handleGroupMessage(msg, sock) {
   }
   sock.sendPresenceUpdate("paused", groupJid).catch(() => {});
   if (!result || !result.reply) return;
-  // Diminta PDF: kirim jawaban sebagai berkas. Gagal membuat PDF -> tetap dikirim sebagai teks.
-  if (pdfReq && (await deliverGroupPdf(sock, groupJid, result.reply, { quoted: msg, waName: subject || null, result }))) return;
+  // Diminta berkas (PDF/Excel/Word): kirim jawaban sebagai berkas. Gagal membuatnya -> tetap dikirim sebagai teks.
+  if (fileReq && (await deliverGroupFile(sock, groupJid, fileReq.format, result.reply, { quoted: msg, waName: subject || null, result, hint: fileHint }))) return;
   // /voice wag on: balasan grup berupa voice note saja (tanpa teks). Gagal/tidak layak dibacakan -> tetap dikirim teks.
   // Penanya minta "jawab pakai teks" -> tidak dibacakan (hanya untuk pesan ini).
-  if (groupVoice.enabled() && !textOnly) {
+  if (groupVoice.enabled() && !textOnly && !fileReq) {
     sock.sendPresenceUpdate("recording", groupJid).catch(() => {});
     const voice = await groupVoice.tryVoice(result.reply);
     sock.sendPresenceUpdate("paused", groupJid).catch(() => {});
@@ -3030,34 +3072,131 @@ async function replyGroupText(sock, groupJid, msg, subject, text) {
   return sent;
 }
 
+const FILE_LABEL = { pdf: "PDF", xlsx: "Excel", docx: "Word" };
+const FILE_DAILY_MAX = Math.max(0, Number(process.env.WA_GROUP_FILE_MAX_PER_DAY ?? 10) || 0);
+const fileQuota = new Map(); // "orang|tanggal" -> jumlah
+function fileQuotaOk(who) {
+  if (FILE_DAILY_MAX <= 0) return true;
+  const day = new Date().toLocaleDateString("en-CA", { timeZone: WA_TIMEZONE });
+  const key = `${who}|${day}`;
+  for (const k of fileQuota.keys()) if (!k.endsWith(`|${day}`)) fileQuota.delete(k);
+  const n = fileQuota.get(key) ?? 0;
+  if (n >= FILE_DAILY_MAX) return false;
+  fileQuota.set(key, n + 1);
+  return true;
+}
+// Pembuatan berkas dijalankan satu per satu (pdftotext & penyusunan berkas besar jangan menumpuk di laptop kantor).
+let fileJobChain = Promise.resolve();
+function runFileJob(fn) {
+  const p = fileJobChain.then(fn, fn);
+  fileJobChain = p.catch(() => {});
+  return p;
+}
+
 /**
- * Ubah teks (markdown) menjadi PDF lalu kirim sebagai dokumen ke grup. true = terkirim. Tidak pernah melempar galat.
- * result (opsional) = hasil AI: token pemakaiannya dicatat.
+ * Ubah teks (markdown) menjadi berkas PDF / Word / Excel lalu kirim sebagai dokumen ke grup. true = terkirim. Tidak pernah melempar galat.
+ * result (opsional) = hasil AI: token pemakaiannya dicatat. raw = isi apa adanya (hasil konversi PDF), tanpa pembersihan jawaban AI.
  */
-async function deliverGroupPdf(sock, jid, markdown, { quoted = null, waName = null, result = null } = {}) {
+async function deliverGroupFile(sock, jid, kind, markdown, { quoted = null, waName = null, result = null, hint = "", fileTitle = "", caption = "", raw = false } = {}) {
   try {
-    const title = titleFromText(markdown);
-    const when = `${formatClockInTimezone(Date.now())} ${WA_TIMEZONE_LABEL}`;
-    const pdf = buildPdf(markdown, { title, subtitle: `Dibuat oleh Ayyubi • ${new Date().toLocaleDateString("id-ID", { day: "numeric", month: "long", year: "numeric", timeZone: WA_TIMEZONE })} ${when}` });
-    const sent = await sock.sendMessage(jid, { document: pdf, mimetype: "application/pdf", fileName: pdfFileName(title), caption: title }, quoted ? { quoted } : undefined);
-    rememberReplySource(sent?.key?.id, markdown);
+    const clean = raw ? String(markdown ?? "") : cleanAnswerForFile(markdown);
+    const title = fileTitle || titleForFile(clean, hint);
+    const label = FILE_LABEL[kind] || "PDF";
+    let buf;
+    let mimetype;
+    let fileName;
+    if (kind === "xlsx") {
+      buf = buildXlsx(clean);
+      mimetype = MIME_XLSX;
+      fileName = officeFileName(title, "xlsx");
+    } else if (kind === "docx") {
+      buf = buildDocx(clean, { title });
+      mimetype = MIME_DOCX;
+      fileName = officeFileName(title, "docx");
+    } else {
+      const when = `${formatClockInTimezone(Date.now())} ${WA_TIMEZONE_LABEL}`;
+      buf = buildPdf(clean, { title, subtitle: `Dibuat oleh Ayyubi • ${new Date().toLocaleDateString("id-ID", { day: "numeric", month: "long", year: "numeric", timeZone: WA_TIMEZONE })} ${when}` });
+      mimetype = "application/pdf";
+      fileName = pdfFileName(title);
+    }
+    const sent = await sock.sendMessage(jid, { document: buf, mimetype, fileName, caption: caption || title }, quoted ? { quoted } : undefined);
+    rememberReplySource(sent?.key?.id, clean);
     const { error } = await supabase.from("whatsapp_messages").insert({
       wa_jid: jid,
       wa_name: waName,
       direction: "out",
-      content: `📄 [BOT mengirim PDF "${title.replace(/"/g, "'")}"]\n${formatForWhatsApp(markdown).slice(0, 1500)}`,
+      content: `📄 [BOT mengirim ${label} "${title.replace(/"/g, "'")}"]\n${formatForWhatsApp(clean).slice(0, 1500)}`,
       status: "sent",
       wa_message_id: sent?.key?.id ?? null,
       ...acctFields(currentAccountId())
     });
-    if (error) console.error("Gagal catat PDF terkirim:", error.message);
-    console.log(`📄 PDF "${title}" (${Math.round(pdf.length / 1024)} KB) terkirim ke ${jid}`);
+    if (error) console.error(`Gagal catat ${label} terkirim:`, error.message);
+    console.log(`📄 ${label} "${title}" (${Math.round(buf.length / 1024)} KB) terkirim ke ${jid}`);
     if (result) await recordTokenUsage(result.tokensUsed, result.costUsd);
     return true;
   } catch (e) {
-    console.error(`📄 Gagal membuat/mengirim PDF ke ${jid}:`, e instanceof Error ? e.message : String(e));
+    console.error(`📄 Gagal membuat/mengirim berkas ${kind} ke ${jid}:`, e instanceof Error ? e.message : String(e));
     return false;
   }
+}
+
+/** PDF yang dibagikan di grup -> Excel / Word (tanpa AI). Selalu menjawab: berkasnya, atau alasan kenapa tidak bisa. */
+async function convertGroupDocument(sock, groupJid, { source, doc, format, msg, subject }) {
+  const say = (t) => replyGroupText(sock, groupJid, msg, subject, t);
+  const label = FILE_LABEL[format];
+  const name = String(doc?.fileName || "dokumen");
+  const isPdf = /pdf/i.test(String(doc?.mimetype || "")) || /\.pdf$/i.test(name);
+  if (!isPdf) {
+    await say(`Baru file PDF yang bisa diubah ke ${label}. "${name}" bukan PDF.`);
+    return;
+  }
+  if (Number(doc?.fileLength) > PDF_MAX_BYTES) {
+    await say(`PDF-nya terlalu besar (maks ${Math.round(PDF_MAX_BYTES / 1024 / 1024)} MB). Kirim versi yang lebih kecil atau pisahkan per bagian.`);
+    return;
+  }
+  await runFileJob(async () => {
+    let buffer = null;
+    let lastErr = null;
+    for (let attempt = 0; attempt < 2 && !buffer; attempt++) {
+      try {
+        buffer = await downloadMediaMessage(source, "buffer", {}, { logger: pino({ level: "silent" }), reuploadRequest: sock.updateMediaMessage });
+      } catch (e) {
+        lastErr = e;
+        await new Promise((r) => setTimeout(r, 700));
+      }
+    }
+    if (!buffer) {
+      console.error(`📄 [Konversi] gagal mengunduh PDF: ${describeError(lastErr)}`);
+      await say("PDF-nya gagal diunduh (mungkin sudah kedaluwarsa). Kirim ulang filenya, lalu minta lagi.");
+      return;
+    }
+    let r;
+    try {
+      r = await pdfBufferToMarkdown(buffer);
+    } catch (e) {
+      console.error(`📄 [Konversi] ${name}: ${e instanceof Error ? e.message : String(e)}`);
+      const msgByKind = {
+        notool: "Bot belum bisa membaca PDF karena alat pdftotext belum terpasang di laptop kantor (pemilik bot perlu memasang poppler-utils).",
+        toobig: "PDF-nya terlalu besar.",
+        timeout: "PDF-nya terlalu rumit/lama diproses. Coba kirim sebagian halamannya saja.",
+        badpdf: "File ini tidak bisa dibaca sebagai PDF (rusak atau terkunci kata sandi)."
+      };
+      await say(msgByKind[e?.kind] || "PDF-nya gagal dibaca. Coba lagi sebentar lagi ya.");
+      return;
+    }
+    if (r.scanned || !r.markdown) {
+      await say("PDF ini tampaknya hasil scan (berupa gambar), jadi tidak ada teks yang bisa diambil. Kirim PDF aslinya (yang teksnya bisa diseleksi), ya.");
+      return;
+    }
+    const base = name.replace(/\.pdf$/i, "").replace(/[_-]+/g, " ").replace(/\s+/g, " ").trim() || "Hasil konversi";
+    const parts = [`Hasil konversi dari "${name}" ke ${label}`, `${r.pages} halaman`];
+    if (format === "xlsx") parts.push(r.tables > 0 ? `${r.tables} tabel (tiap tabel satu lembar)` : "tidak ada tabel terdeteksi: isi disalin per baris di lembar \"Teks\"");
+    else if (r.tables > 0) parts.push(`${r.tables} tabel`);
+    if (r.truncated) parts.push(`hanya ${r.pages > 60 ? 60 : r.pages} halaman pertama yang diproses`);
+    const caption = `${parts.join(" • ")}. Mohon dicek ulang, terutama kolom tabel.`;
+    const ok = await deliverGroupFile(sock, groupJid, format, r.markdown, { quoted: msg, waName: subject || null, fileTitle: base.slice(0, 70), caption, raw: true });
+    if (!ok) await say(`Maaf, berkas ${label}-nya gagal dibuat. Coba lagi sebentar lagi ya.`);
+  });
 }
 
 // ---------------- Pembuat gambar di WhatsApp ----------------

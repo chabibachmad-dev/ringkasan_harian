@@ -120,13 +120,14 @@ ok("judul dari heading/paragraf pertama (maks 70), nama berkas ASCII aman");
 // --- index.js: sambungan
 {
   const src = fs.readFileSync(new URL("./index.js", import.meta.url), "utf8");
-  const dg = src.slice(src.indexOf("async function deliverGroupPdf"));
+  const dg = src.slice(src.indexOf("async function deliverGroupFile"), src.indexOf("async function convertGroupDocument"));
   assert.match(dg, /buildPdf\(/);
-  assert.match(dg, /mimetype: "application\/pdf"/);
-  assert.match(dg, /fileName: pdfFileName\(/);
+  assert.match(dg, /mimetype = "application\/pdf"/);
+  assert.match(dg, /fileName = pdfFileName\(/);
+  assert.match(dg, /document: buf, mimetype, fileName/);
   assert.match(dg, /acctFields\(currentAccountId\(\)\)/, "baris pesan tercatat per akun WA");
   assert.match(dg, /catch/, "kegagalan tidak melempar ke penangan pesan");
-  const iOnly = src.indexOf("if (pdfReq?.only)");
+  const iOnly = src.indexOf("if (fileReq?.only)");
   assert.ok(iOnly > 0 && iOnly < src.indexOf("generateAutoReply(groupJid)", iOnly), "'jadikan pdf' saja tidak memanggil AI");
 }
 ok("index.js: dokumen PDF dikirim (mimetype, nama berkas), dicatat per akun, kegagalan tertangani, 'jadikan pdf' tanpa AI");

@@ -250,9 +250,9 @@ ok("detectTextOnlyRequest: 'jawab pakai teks', 'jangan pakai suara', 'text only'
 {
   const src = fs.readFileSync(new URL("./index.js", import.meta.url), "utf8");
   assert.match(src, /const textOnly = !groupAudio && detectTextOnlyRequest\(text\)/);
-  assert.match(src, /groupVoice\.enabled\(\) && !textOnly && !pdfReq/, "bahasa suara tidak diatur bila minta teks");
-  assert.match(src, /groupVoice\.enabled\(\) && !textOnly\) \{/, "jalur suara dilewati bila minta teks");
-  const i = src.indexOf("groupVoice.enabled() && !textOnly) {");
+  assert.match(src, /groupVoice\.enabled\(\) && !textOnly && !fileReq\) \{\n    const wantedLang/, "bahasa suara tidak diatur bila minta teks");
+  assert.match(src, /groupVoice\.enabled\(\) && !textOnly && !fileReq\) \{\n    sock\.sendPresenceUpdate\("recording"/, "jalur suara dilewati bila minta teks/berkas");
+  const i = src.indexOf("groupVoice.enabled() && !textOnly && !fileReq) {\n    sock.sendPresenceUpdate(\"recording\"");
   assert.ok(i > src.indexOf("result = await generateAutoReply(groupJid);"), "keputusan suara sesudah jawaban dibuat");
   assert.match(src, /TEXT_PROMPT_NOTE/);
   assert.ok(src.slice(i, i + 900).includes("deliverAutoReplyText") || src.indexOf("deliverAutoReplyText(", i) > i, "jatuh ke balasan teks");

@@ -66,7 +66,7 @@ const textW = (codes, fontKey, size) => (codes.reduce((a, c) => a + charW(c, fon
 
 // ---- penguraian inline -> runs [{ bytes, f }]
 const INLINE_RE = /(\*\*(?=\S)[^*\n]+?(?<=\S)\*\*|(?<![\w*])\*(?![\s*])[^*\n]+?(?<![\s*])\*(?![\w*])|(?<![\w_])_(?![\s_])[^_\n]+?(?<![\s_])_(?![\w_])|`[^`\n]+`)/g;
-function inlineRuns(text, base = "R") {
+export function inlineRuns(text, base = "R") {
   const runs = [];
   let last = 0;
   const s = String(text ?? "");
@@ -286,7 +286,7 @@ function drawTable(L, headers, rows) {
 }
 
 /** Markdown/teks WhatsApp -> blok. */
-function parseBlocks(text) {
+export function parseBlocks(text) {
   const lines = String(text ?? "").replace(/\r\n?/g, "\n").split("\n");
   const blocks = [];
   for (let i = 0; i < lines.length; ) {
