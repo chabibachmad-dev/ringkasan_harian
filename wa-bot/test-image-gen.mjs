@@ -571,4 +571,22 @@ ok("Telegram: /gambar status, saklar grup, kirim foto, deskripsi ditolak, tanpa 
 }
 ok("index.js: grup (diizinkan, setelah cek kontak, sebelum AI), chat pribadi hanya pemilik, tanpa keterangan");
 
+// --- AI percakapan sadar kemampuan gambar & mengenali kutipan gambar buatan bot
+{
+  const { imageSentNote, quotedImageNote } = await import("./image-gen.js");
+  const note = imageSentNote('kebakaran hutan "asap"\n tebal');
+  assert.ok(note.startsWith("🖼️") && /kebakaran hutan 'asap' tebal/.test(note), "satu baris, tanpa tanda kutip ganda di dalam");
+  assert.equal(quotedImageNote(note), `[GAMBAR buatan bot ini, permintaannya: "kebakaran hutan 'asap' tebal"]`);
+  assert.equal(quotedImageNote("halo apa kabar"), null);
+  assert.equal(quotedImageNote(null), null);
+  assert.ok(imageSentNote("x".repeat(500)).length < 300, "dipotong");
+  const idx = fs.readFileSync(new URL("./index.js", import.meta.url), "utf8");
+  assert.match(idx, /IMAGE_PROMPT_NOTE/);
+  assert.match(idx, /imageGen\.available\(\) && imageGen\.groupEnabled\(\)\) imageNote = IMAGE_PROMPT_NOTE/, "catatan hanya bila fitur aktif untuk grup");
+  assert.match(idx, /JANGAN pernah mengatakan kamu tidak bisa membuat atau mengirim gambar/);
+  assert.match(idx, /quotedText = quotedImageNote\(/, "kutipan gambar buatan bot dikenali");
+  assert.match(idx, /await note\(imageSentNote\(req\.prompt\), sent\)/);
+}
+ok("AI percakapan: tahu bisa membuat gambar, catatan riwayat jelas, kutipan gambar buatan bot dikenali");
+
 console.log(`\n${n} kelompok tes lulus ✅`);

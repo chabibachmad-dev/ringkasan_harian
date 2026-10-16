@@ -74,7 +74,7 @@ import { MAIN_ACCOUNT, SECOND_ACCOUNT, acctFields, createAccountRouter, isPaired
 import { AsyncLocalStorage } from "node:async_hooks";
 import { qrToPng } from "./qr-png.js";
 import { createGroupList } from "./group-list.js";
-import { createImageGen, readImageConfig } from "./image-gen.js";
+import { createImageGen, readImageConfig, imageSentNote, quotedImageNote } from "./image-gen.js";
 import { createEnvEditor } from "./env-edit.js";
 import { createMetaAi, readMetaAiConfig, parseMetaAiArg, unsafeTarget } from "./meta-ai.js";
 import { createWebSearch, readSearchConfig } from "./web-search.js";
@@ -311,6 +311,12 @@ const GROUP_PROMPT_NOTE = `
 
 KONTEKS GRUP: pesan ini datang dari GRUP WhatsApp (mis. grup keluarga), bukan chat pribadi. Banyak orang bisa bertanya; tiap pesan pengguna diawali "Nama: " (nama pengirim) dan kadang diikuti baris (mengutip: "...") berisi pesan yang dibalas pengirim. Jawab LANGSUNG ke orang yang bertanya di pesan TERAKHIR (boleh menyapa namanya), singkat dan santai, dan JANGAN menulis "Nama:" di awal jawabanmu. Kamu asisten AI, BUKAN pemilik nomor: jangan berbicara seolah-olah kamu pemiliknya dan jangan menjawab hal pribadi tentang pemilik nomor atau anggota grup.`;
 
+// Bila pembuat gambar aktif untuk grup: AI percakapan HARUS tahu bot punya kemampuan itu (kalau tidak, ia menjawab "tidak bisa
+// membuat gambar" lalu menyarankan DALL-E/Midjourney, padahal gambar tadi dibuat bot ini sendiri).
+const IMAGE_PROMPT_NOTE = `
+
+KEMAMPUAN GAMBAR: kamu (bot ini) BISA membuat gambar sendiri lewat pembuat gambar bawaan. Cara memintanya: anggota grup menulis "bot, buatkan gambar <deskripsi>" (mis. "bot, buatkan gambar kucing memakai topi astronot"); gambarnya dikirim langsung ke grup. JANGAN pernah mengatakan kamu tidak bisa membuat atau mengirim gambar, dan JANGAN menyarankan layanan lain (DALL-E, Midjourney, Stable Diffusion, dll). Kalau ada yang minta gambar tetapi kalimatnya belum memakai pola itu, ajari pola di atas dengan singkat. Baris riwayat berawalan "🖼️" atau kutipan berawalan "[GAMBAR" berarti BOT INI SENDIRI yang membuat dan mengirim gambar itu: jelaskan sesuai deskripsi permintaannya (kamu tidak bisa melihat pikselnya, jadi katakan "itu gambar yang tadi kubuat sesuai permintaan: ..." dan jangan mengarang detail yang tidak ada di deskripsi).`;
+
 function isGroupJid(jid) {
   return typeof jid === "string" && jid.endsWith("@g.us");
 }
@@ -321,7 +327,13 @@ function withGroupNote(basePrompt, jid) {
   if (!isGroupJid(jid)) return base;
   // Balasan grup berupa suara: bahasa jawaban dipaksa (/voice wag kor ...) atau diminta anggota grup ("jawab pakai bahasa Korea").
   const replyLang = waAccountContext.getStore()?.replyLang;
-  return `${base}${GROUP_PROMPT_NOTE}${replyLang ? langInstruction(replyLang) : ""}`;
+  let imageNote = "";
+  try {
+    if (imageGen.available() && imageGen.groupEnabled()) imageNote = IMAGE_PROMPT_NOTE;
+  } catch {
+    /* pembuat gambar belum siap: tanpa catatan */
+  }
+  return `${base}${GROUP_PROMPT_NOTE}${imageNote}${replyLang ? langInstruction(replyLang) : ""}`;
 }
 
 // Buang awalan "Nama: " & baris "(mengutip: ...)" supaya pencarian dokumen/web
@@ -2807,7 +2819,18 @@ async function handleGroupMessage(msg, sock) {
   }
 
   const sender = msg.pushName || "Anggota grup";
-  const quotedText = ctx?.quotedMessage ? extractText({ message: unwrapMessageContent(ctx.quotedMessage) }) : null;
+  let quotedText = ctx?.quotedMessage ? extractText({ message: unwrapMessageContent(ctx.quotedMessage) }) : null;
+  // Mengutip GAMBAR buatan bot ini (tanpa keterangan): ambil deskripsi permintaannya dari catatan keluar, supaya AI tahu itu gambar apa.
+  if (!quotedText && repliedToOwn && ctx?.stanzaId && unwrapMessageContent(ctx.quotedMessage || {})?.imageMessage) {
+    const { data: imgRow } = await supabase
+      .from("whatsapp_messages")
+      .select("content")
+      .eq("wa_jid", groupJid)
+      .eq("direction", "out")
+      .eq("wa_message_id", ctx.stanzaId)
+      .limit(1);
+    quotedText = quotedImageNote(imgRow?.[0]?.content) || quotedText;
+  }
   if (!groupAudio && !text && !quotedText) return;
   if (!groupAudio && !text) text = "(menandai tanpa pertanyaan, jawab/jelaskan pesan yang dikutip)";
 
@@ -2972,7 +2995,7 @@ async function handleImageRequestWa(sock, jid, req, { kind = "owner", who = "", 
   const { buffer, mime, model } = out.image;
   const sent = await send({ image: buffer, mimetype: mime || "image/png" });
   console.log(`🖼️ Gambar dibuat (${model}, ${Math.round(buffer.length / 1024)} KB) untuk ${jid}: ${String(req.prompt).slice(0, 60)}`);
-  await note(`🖼️ (gambar dibuat: ${String(req.prompt).slice(0, 200)})`, sent);
+  await note(imageSentNote(req.prompt), sent);
 }
 
 /** Pemilik meminta gambar di chat pribadi ("buatkan gambar ..." / "/gambar ..."). true = ditangani. */

@@ -229,6 +229,15 @@ function hariWita(ms) {
 /**
  * deps: { state?: {get,set}, config, fetchImpl?, log?, now? }
  */
+/** Teks catatan riwayat untuk gambar yang dikirim bot (dibaca AI percakapan; awalan 🖼️ dikenali di index.js). */
+export const imageSentNote = (prompt) => `🖼️ [BOT mengirim GAMBAR buatan AI sesuai permintaan: "${String(prompt ?? "").replace(/\s+/g, " ").replace(/"/g, "'").slice(0, 200)}"]`;
+
+/** Catatan riwayat gambar -> teks kutipan untuk AI ("[GAMBAR buatan bot ini, permintaannya: ...]"), atau null bila bukan catatan gambar. */
+export function quotedImageNote(content) {
+  const m = /^🖼️\s*\[BOT mengirim GAMBAR buatan AI sesuai permintaan: "([\s\S]*)"\]\s*$/.exec(String(content ?? ""));
+  return m ? `[GAMBAR buatan bot ini, permintaannya: "${m[1]}"]` : null;
+}
+
 export function createImageGen({ state = null, config = readImageConfig({}), fetchImpl = globalThis.fetch, log = console, now = () => Date.now(), translate = null } = {}) {
   let groupsOn = true;
   let quota = { day: hariWita(now()), owner: 0, group: 0, people: {} };
