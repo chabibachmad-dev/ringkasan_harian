@@ -2858,7 +2858,7 @@ async function handleGroupMessage(msg, sock) {
   }
   if (!triggered) {
     // Kalimat biasa yang tampak jelas seperti pengumuman jadwal ("besok rapat jam 9"): bot menawarkan mencatatnya (tanpa AI, tanpa menyimpan obrolan).
-    if (agenda.mightOffer(text) && !photo && !docAttached && !groupAudio) offerAgendaFromChat(sock, msg, groupJid, text).catch((e) => console.error("📅 Tawaran jadwal gagal:", e instanceof Error ? e.message : String(e)));
+    if (!photo && !docAttached && !groupAudio && agenda.mightOffer(rawText)) offerAgendaFromChat(sock, msg, groupJid, rawText).catch((e) => console.error("📅 Tawaran jadwal gagal:", e instanceof Error ? e.message : String(e)));
     return;
   }
 

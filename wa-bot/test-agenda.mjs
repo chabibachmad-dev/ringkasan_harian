@@ -260,7 +260,7 @@ const say = async (t, g = G, c = {}) => { const cmd = agenda.parse(t, c); assert
   const src = fs.readFileSync(new URL("./index.js", import.meta.url), "utf8");
   const grp = src.slice(src.indexOf("async function handleGroupMessage"), src.indexOf("async function deliverAutoReplyVoice"));
   const at2 = (s) => { const i = grp.indexOf(s); assert.ok(i >= 0, `handleGroupMessage tidak memuat: ${s}`); return i; };
-  assert.ok(at2("agenda.mightOffer(text)") < at2("  if (!triggered) {") + 400 && at2("  if (!triggered) {") < at2("// --- Grup ini diizinkan?"), "tawaran dari obrolan hanya untuk pesan yang tidak memanggil bot, sebelum urusan lain");
+  assert.ok(at2("agenda.mightOffer(rawText)") < at2("  if (!triggered) {") + 400 && at2("  if (!triggered) {") < at2("// --- Grup ini diizinkan?"), "tawaran dari obrolan hanya untuk pesan yang tidak memanggil bot, sebelum urusan lain");
   assert.match(src, /async function offerAgendaFromChat[\s\S]*?isGroupAllowed[\s\S]*?isAutoReplyEnabledForContact[\s\S]*?buildOffer/, "tawaran: grup diizinkan & izin kontak dicek sebelum menawarkan");
   assert.ok(at2("agenda.parse(") > at2("isAutoReplyEnabledForContact(groupJid)"), "perintah agenda setelah cek izin kontak");
   assert.ok(at2("agenda.parse(") < at2("generateAutoReply(groupJid)"), "agenda dijawab sebelum AI percakapan");
@@ -271,6 +271,58 @@ const say = async (t, g = G, c = {}) => { const cmd = agenda.parse(t, c); assert
   assert.match(src, /async function sendAgendaGroupText/);
   assert.match(src, /waAccountContext\.run\(\{ account \}/, "pengiriman terjadwal memakai akun yang benar");
   ok("index.js: urutan penanganan, penjadwal tiap menit, akun yang benar, ikut cadangan");
+}
+
+// ---- 8b. pengumuman berformat (multi-baris, banyak emoji, "WITA" padahal bot WIB)
+{
+  const msg = [
+    "📢 HEI, WARGA KPKNL DENPASAR! 📢",
+    "",
+    "🥹 Ada yang mau pindah kantor, tapi bukan berarti pindah hati! 😘",
+    "",
+    "Yuk, kumpul bareng untuk acara NYANYI-NYANYI, HEPI-HEPI, MAKAN-MAKAN! 🥳🍽️",
+    "",
+    "Sebelum rekan kita berlayar ke tempat tugas yang baru, mari nikmati kebersamaan, berbagi cerita, ketawa bareng, dan tentunya makan-makan sampai kenyang! 🤭",
+    "",
+    "📍 Tempat: Renoma Garden, Jl. Hayam Wuruk",
+    "📅 Hari/Tanggal: Selasa, 20 Oktober 2026",
+    "⏰ Waktu: 17.00 WITA – selesai",
+    "",
+    "👕 DRESS CODE: MONOKROM + JEANS",
+    "Jangan lupa hadir, yaa!",
+    "Yang penting kumpul, ketawa, dan kenyang. Urusan diet? Kita bahas Rabu saja! 🤣🍗",
+    "Beda kantor, tetap satu cerita. 🌸❤️✨"
+  ].join("\n");
+  assert.ok(msg.length > 400, "pesan contoh sengaja panjang");
+  const ev = detectScheduleMention(msg, { now: NOW, timeZone: TZ });
+  assert.ok(ev, "pengumuman berlabel dikenali walau panjang dan ada tanda tanya");
+  assert.equal(ev.title, "Nyanyi-nyanyi, hepi-hepi, makan-makan — Renoma Garden, Jl. Hayam Wuruk");
+  assert.equal(new Date(ev.startMs).toISOString(), "2026-10-20T09:00:00.000Z", "17.00 WITA = 16.00 WIB");
+  assert.equal(ev.tz, "Asia/Makassar");
+  const ag2 = createAgenda({ store, now: () => NOW, timeZone: TZ, tzLabel: "WIB", sendGroup: async () => {} });
+  const G3 = { account: "main", groupJid: "777@g.us", groupName: "KPKNL", sender: "Dewi" };
+  assert.ok(ag2.mightOffer(msg));
+  const offer = ag2.buildOffer(msg, G3);
+  assert.match(offer.text, /Selasa, 20 Okt 2026 • 17:00 WITA/, "jam ditampilkan dalam zona yang ditulis pengirim");
+  const r = await ag2.handle({ kind: "add_quoted", body: msg }, G3);
+  assert.match(r, /Jadwal dicatat/);
+  assert.match(r, /17:00 WITA/);
+  assert.match(await ag2.handle({ kind: "query", range: "day", offset: 2 }, G3).then(() => ag2.handle({ kind: "query", range: "upcoming" }, G3)), /17:00 WITA — Nyanyi-nyanyi/);
+  // pengingat 30 menit sebelum (16.00 WIB = 15.30 WIB), tetap tepat walau beda zona
+  const outbox = [];
+  const ag3 = createAgenda({ store, now: () => Date.parse("2026-10-20T08:35:00Z"), timeZone: TZ, tzLabel: "WIB", sendGroup: async (a, j, t) => outbox.push({ j, t }) });
+  await ag3.check();
+  const rem = outbox.find((o) => o.j === G3.groupJid && /menit lagi/.test(o.t));
+  assert.ok(rem, "pengingat terkirim");
+  assert.match(rem.t, /25 menit lagi.*17:00 WITA/s);
+  // kalimat pendek dengan zona: "jam 9 wita" juga dikonversi
+  const w = when("rapat besok jam 9 wita");
+  assert.equal(new Date(w.startMs).toISOString(), "2026-10-17T01:00:00.000Z");
+  assert.equal(when("rapat besok jam 9 wib").tz, undefined, "zona sama dengan bot: tidak perlu penanda");
+  assert.equal(when("tiap senin jam 8 wita rapat").tz, undefined, "jadwal berulang tidak dikonversi");
+  // tanda tanya biasa pada kalimat pendek tetap berarti pertanyaan
+  assert.equal(detectScheduleMention("rapat besok jam 9 jadi?", { now: NOW, timeZone: TZ }), null);
+  ok("pengumuman berformat panjang: judul dari isi, tempat, WITA -> dikonversi & ditampilkan WITA, pengingat tepat");
 }
 
 // ---- 9. berkas jadwal tidak boleh ikut ter-commit (/rilis menolak file sensitif)

@@ -36,7 +36,8 @@ const DATE_PATTERNS = [
   { name: "partini", re: /\b(?:(pagi|siang|sore|malam)\s+ini|nanti\s+(pagi|siang|sore|malam))\b/i, norm: () => "hari ini", partOf: (m) => m[1] || m[2] },
   { name: "dow", re: new RegExp(`\\b(?:hari\\s+)?(${DOW_RE})(?:\\s+(depan|ini))?(?:\\s+(pagi|siang|sore|malam))?\\b|\\bhari\\s+(minggu)(?:\\s+(depan|ini))?(?:\\s+(pagi|siang|sore|malam))?\\b|\\b(ahad)\\b`, "i"), dow: true }
 ];
-const TIME_RE = /\b(?:(?:jam|pukul|pkl\.?)\s*(\d{1,2})(?!\d)(?:[:.](\d{2})(?!\d))?|(\d{1,2})[:.](\d{2})(?!\d))(?:\s*(pagi|siang|sore|malam))?(?:\s*(?:wib|wita|wit)\b)?(?:\s*(?:-|–|—|s\.?\s?d\.?|sampai|hingga)\s*(?:(?:jam|pukul)\s*)?(\d{1,2})(?:[:.](\d{2}))?(?:\s*(?:wib|wita|wit|selesai)\b)?)?/i;
+const TIME_RE = /\b(?:(?:jam|pukul|pkl\.?)\s*(\d{1,2})(?!\d)(?:[:.](\d{2})(?!\d))?|(\d{1,2})[:.](\d{2})(?!\d))(?:\s*(pagi|siang|sore|malam))?(?:\s*(wib|wita|wit)\b)?(?:\s*(?:-|–|—|s\.?\s?d\.?|sampai|hingga)\s*(?:(?:(?:jam|pukul)\s*)?(\d{1,2})(?:[:.](\d{2}))?|selesai)(?:\s*(wib|wita|wit)\b)?)?/i;
+const TZ_OF = { wib: "Asia/Jakarta", wita: "Asia/Makassar", wit: "Asia/Jayapura" };
 const REPEAT_RE = new RegExp(`\\b(?:tiap|setiap)\\s+(hari|${DOW_RE}|ahad|(?:tanggal|tgl\\.?)\\s*\\d{1,2})\\b`, "i");
 const LEAD_IN = /(?:\b(?:pada|hari|tanggal|tgl\.?|pukul|jam|pkl\.?|senin|selasa|rabu|kamis|jum'?at|sabtu|minggu|ahad)\s+)+$/i;
 const TRAIL_TZ = /^\s*(?:wib|wita|wit)\b/i;
@@ -121,6 +122,7 @@ export function extractWhen(input, { now = Date.now(), timeZone = "Asia/Jakarta"
   let h = null;
   let mi = 0;
   let endText = "";
+  let tzWord = "";
   if (tm) {
     spans.push([tm.index, tm.index + tm[0].length]);
     h = Number(tm[1] ?? tm[3]);
@@ -132,9 +134,10 @@ export function extractWhen(input, { now = Date.now(), timeZone = "Asia/Jakarta"
     } else if (part === "siang") {
       if (h >= 1 && h <= 5) h += 12;
     } else if (!part && h >= 1 && h <= 6) h += 12; // kantor: "jam 2" = 14.00
-    if (tm[6] !== undefined) {
-      let eh = Number(tm[6]);
-      const emi = Number(tm[7] ?? 0);
+    tzWord = String(tm[6] || tm[9] || "").toLowerCase();
+    if (tm[7] !== undefined) {
+      let eh = Number(tm[7]);
+      const emi = Number(tm[8] ?? 0);
       if (eh >= 1 && eh <= 6 && h >= 12) eh += 12;
       endText = hhmm(eh % 24, emi);
     }
@@ -153,6 +156,15 @@ export function extractWhen(input, { now = Date.now(), timeZone = "Asia/Jakarta"
     if (weekStartKey(a.y, a.m, a.d) === weekStartKey(today.y, today.m, today.d)) startMs = zonedToUtc(a.y, a.m, a.d + 7, a.h, a.mi, timeZone);
   }
   const repeat = repeatMode ? parsed.repeat : null;
+  // "17.00 WITA" padahal zona bot WIB: jam dinding dibaca di zona yang ditulis (jadwal repeat & seharian tidak dikonversi)
+  let eventTz;
+  const msgTz = TZ_OF[tzWord];
+  if (msgTz && msgTz !== timeZone && !repeatMode && !allDay) {
+    const q = tzParts(startMs, timeZone);
+    startMs = zonedToUtc(q.y, q.m, q.d, q.h, q.mi, msgTz);
+    if (startMs <= now) return { ok: false, error: "Waktu itu sudah lewat.", found: true };
+    eventTz = msgTz;
+  }
 
   // judul = kalimat tanpa bagian waktu
   const merged = spans.sort((a, b) => a[0] - b[0]);
@@ -172,7 +184,55 @@ export function extractWhen(input, { now = Date.now(), timeZone = "Asia/Jakarta"
   }
   title += src.slice(pos);
   title = cleanTitle(title);
-  return { ok: true, startMs, repeat, allDay, title: title || "Kegiatan", endText, found: true };
+  return { ok: true, startMs, repeat, allDay, title: title || "Kegiatan", endText, tz: eventTz, found: true };
+}
+
+// ---------------------------------------------------------------- pengumuman berformat ("Tempat: ... / Hari/Tanggal: ... / Waktu: ...")
+const field = (labels) => new RegExp(`^[^\\p{L}\\p{N}\\n]*(?:${labels})\\s*[:：]\\s*(.+)$`, "imu");
+const F_DATE = field("hari\\s*\\/\\s*tanggal|hari\\s*,?\\s*tanggal|tanggal|tgl|hari");
+const F_TIME = field("waktu|jam|pukul|pkl");
+const F_PLACE = field("tempat|lokasi(?:\\s+acara)?|venue");
+const F_WHAT = field("acara|agenda|kegiatan|perihal|topik|tema");
+const stripEmoji = (t) => String(t ?? "").replace(/[\p{Extended_Pictographic}\u200d\ufe0f]/gu, " ").replace(/\s+/g, " ").trim();
+function sentenceCase(t) {
+  const s = String(t).trim();
+  const letters = s.replace(/[^\p{L}]/gu, "");
+  const upper = letters.replace(/[^\p{Lu}]/gu, "").length;
+  const base = letters.length >= 4 && upper / letters.length > 0.6 ? s.toLowerCase() : s;
+  return base ? base[0].toUpperCase() + base.slice(1) : base;
+}
+function announcementTitle(raw, what, place) {
+  let t = stripEmoji(what || "");
+  if (!t) {
+    const m = /\b(?:acara|kegiatan)\s+([^.!?\n]{3,90})/i.exec(stripEmoji(raw));
+    t = m ? m[1] : "";
+  }
+  if (!t) {
+    const line = raw.split(/\n/).map(stripEmoji).find((l) => EVENT_WORDS.test(l) && l.length >= 4 && l.length <= 90);
+    t = line || raw.split(/\n/).map(stripEmoji).find((l) => l.length >= 4) || "";
+  }
+  t = sentenceCase(t.replace(/^(?:yuk|ayo|mari|ayuk)[,\s]+/i, "").replace(/\s*[!.]+$/, "")).slice(0, 90);
+  const where = stripEmoji(place || "").slice(0, 60);
+  return where ? `${t || "Kegiatan"} — ${where}` : t;
+}
+
+/**
+ * Pengumuman berlabel (Hari/Tanggal + Waktu, boleh multi-baris, banyak emoji) -> sama seperti extractWhen, atau null bila bukan format itu.
+ */
+export function extractAnnouncement(raw, opts = {}) {
+  const text = String(raw ?? "");
+  const d = F_DATE.exec(text)?.[1];
+  const tm = F_TIME.exec(text)?.[1];
+  if (!d || !tm) return null;
+  const w = extractWhen(`${stripEmoji(d)} ${stripEmoji(tm)}`, opts);
+  if (!w.ok) return w;
+  const title = announcementTitle(text, F_WHAT.exec(text)?.[1], F_PLACE.exec(text)?.[1]);
+  return { ...w, title: title || w.title };
+}
+
+/** Pengumuman berlabel bila cocok, selain itu kalimat bebas. */
+export function extractSchedule(raw, opts = {}) {
+  return extractAnnouncement(raw, opts) ?? extractWhen(raw, opts);
 }
 
 export function cleanTitle(t) {
@@ -272,9 +332,18 @@ function queryRange(lower) {
  * Sengaja ketat: lebih baik terlewat daripada mengganggu grup.
  */
 export function detectScheduleMention(text, { now = Date.now(), timeZone = "Asia/Jakarta" } = {}) {
-  const t = String(text ?? "").replace(/\s+/g, " ").trim();
-  if (t.length < 15 || t.length > 400 || /^[/!.]/.test(t)) return null;
-  if (QUESTION.test(t) || NEGATION.test(t) || /^(?:bot|ayyubi|wongsobot)\b/i.test(t)) return null;
+  const raw = String(text ?? "");
+  const t = raw.replace(/\s+/g, " ").trim();
+  if (t.length < 15 || t.length > 2000 || /^[/!.]/.test(t)) return null;
+  if (/^(?:bot|ayyubi|wongsobot)\b/i.test(t)) return null;
+  if (NEGATION.test(t)) return null;
+  // pengumuman berlabel (Tempat / Hari-Tanggal / Waktu): boleh panjang dan banyak tanda tanya/emoji
+  if (t.length > 120 && F_DATE.test(raw) && F_TIME.test(raw)) {
+    if (!EVENT_WORDS.test(t)) return null;
+    const a = extractAnnouncement(raw, { now, timeZone });
+    return a && a.ok && !a.allDay && !a.repeat ? { ...a } : null;
+  }
+  if (t.length > 400 || QUESTION.test(t)) return null;
   if (!EVENT_WORDS.test(t)) return null;
   if (!TIME_RE.test(t)) return null; // harus ada jam yang jelas
   const w = extractWhen(t, { now, timeZone });
@@ -303,6 +372,11 @@ export async function openAgendaStore({ file, maxPerGroup = 200, log = console, 
   db.exec(
     "CREATE TABLE IF NOT EXISTS agenda_events (id INTEGER PRIMARY KEY AUTOINCREMENT, account TEXT NOT NULL DEFAULT 'main', group_jid TEXT NOT NULL, group_name TEXT, title TEXT NOT NULL, start_ms INTEGER NOT NULL, all_day INTEGER NOT NULL DEFAULT 0, repeat TEXT, created_by TEXT, created_ms INTEGER NOT NULL, pre_ms INTEGER NOT NULL DEFAULT 0)"
   );
+  try {
+    db.exec("ALTER TABLE agenda_events ADD COLUMN tz TEXT");
+  } catch {
+    /* kolom sudah ada */
+  }
   db.exec("CREATE INDEX IF NOT EXISTS agenda_group ON agenda_events (group_jid, start_ms)");
   db.exec("CREATE TABLE IF NOT EXISTS agenda_kv (k TEXT PRIMARY KEY, v TEXT)");
   const limit = Math.max(1, Math.floor(Number(maxPerGroup) || 200));
@@ -317,7 +391,8 @@ export async function openAgendaStore({ file, maxPerGroup = 200, log = console, 
     repeat: r.repeat ? JSON.parse(r.repeat) : null,
     createdBy: r.created_by || "",
     createdMs: Number(r.created_ms),
-    preMs: Number(r.pre_ms)
+    preMs: Number(r.pre_ms),
+    tz: r.tz || ""
   });
   return {
     limit,
@@ -327,18 +402,18 @@ export async function openAgendaStore({ file, maxPerGroup = 200, log = console, 
       const r = db.prepare("SELECT * FROM agenda_events WHERE id = ?").get(id);
       return r ? toRow(r) : null;
     },
-    add({ account = "main", groupJid, groupName = "", title, startMs, allDay = false, repeat = null, createdBy = "" }) {
+    add({ account = "main", groupJid, groupName = "", title, startMs, allDay = false, repeat = null, createdBy = "", tz = "" }) {
       const rows = this.listGroup(groupJid);
       if (rows.length >= limit) return { ok: false, reason: "full" };
       const dup = rows.find((r) => r.startMs === startMs && r.title.toLowerCase() === title.toLowerCase());
       if (dup) return { ok: false, reason: "duplicate", id: dup.id };
       const info = db
-        .prepare("INSERT INTO agenda_events (account, group_jid, group_name, title, start_ms, all_day, repeat, created_by, created_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
-        .run(account, groupJid, groupName, title, startMs, allDay ? 1 : 0, repeat ? JSON.stringify(repeat) : null, createdBy, now());
+        .prepare("INSERT INTO agenda_events (account, group_jid, group_name, title, start_ms, all_day, repeat, created_by, created_ms, tz) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+        .run(account, groupJid, groupName, title, startMs, allDay ? 1 : 0, repeat ? JSON.stringify(repeat) : null, createdBy, now(), tz || null);
       return { ok: true, id: Number(info.lastInsertRowid) };
     },
-    update(id, { startMs, allDay, repeat }) {
-      db.prepare("UPDATE agenda_events SET start_ms = ?, all_day = ?, repeat = ?, pre_ms = 0 WHERE id = ?").run(startMs, allDay ? 1 : 0, repeat ? JSON.stringify(repeat) : null, id);
+    update(id, { startMs, allDay, repeat, tz = "" }) {
+      db.prepare("UPDATE agenda_events SET start_ms = ?, all_day = ?, repeat = ?, tz = ?, pre_ms = 0 WHERE id = ?").run(startMs, allDay ? 1 : 0, repeat ? JSON.stringify(repeat) : null, tz || null, id);
     },
     remove(id, groupJid) {
       const row = this.get(id);
@@ -387,8 +462,13 @@ export function createAgenda({ store, sendGroup, now = () => Date.now(), timeZon
     const p = tzParts(ms, timeZone);
     return zonedToUtc(p.y, p.m, p.d + plusDays, 0, 0, timeZone);
   };
-  const dateLabel = (ms) => {
-    const p = tzParts(ms, timeZone);
+  const zoneLabel = (z) => ({ "Asia/Jakarta": "WIB", "Asia/Makassar": "WITA", "Asia/Jayapura": "WIT" })[z] || tzLabel;
+  const stamp = (ms, z) => {
+    const p = tzParts(ms, z || timeZone);
+    return `${hhmm(p.h, p.mi)} ${z ? zoneLabel(z) : tzLabel}`;
+  };
+  const dateLabel = (ms, z) => {
+    const p = tzParts(ms, z || timeZone);
     return `${DAY_NAMES[p.dow]}, ${p.d} ${MONTH_SHORT[p.m - 1]} ${p.y}`;
   };
   const clock = (ms) => {
@@ -412,7 +492,7 @@ export function createAgenda({ store, sendGroup, now = () => Date.now(), timeZon
   }
 
   const line = (o) => {
-    const when = o.ev.allDay ? "Seharian" : clock(o.startMs);
+    const when = o.ev.allDay ? "Seharian" : o.ev.tz ? stamp(o.startMs, o.ev.tz) : clock(o.startMs);
     return `• ${when} — ${o.ev.title}${o.ev.repeat ? " 🔁" : ""} _(#${o.ev.id})_`;
   };
   function renderList(occ, { perDay = false, max = 25 } = {}) {
@@ -437,7 +517,7 @@ export function createAgenda({ store, sendGroup, now = () => Date.now(), timeZon
     [
       `✅ Jadwal dicatat (#${id})${who ? ` — disetujui ${who}` : ""}`,
       `*${w.title}*`,
-      w.repeat ? `🔁 ${describeRepeat(w.repeat)} ${tzLabel}` : `🗓 ${dateLabel(w.startMs)}${w.allDay ? " • seharian" : ` • ${clock(w.startMs)} ${tzLabel}${w.endText ? ` s.d. ${w.endText}` : ""}`}`,
+      w.repeat ? `🔁 ${describeRepeat(w.repeat)} ${tzLabel}` : `🗓 ${dateLabel(w.startMs, w.tz)}${w.allDay ? " • seharian" : ` • ${stamp(w.startMs, w.tz)}${w.endText ? ` s.d. ${w.endText}` : ""}`}`,
       w.allDay ? "Jam tidak disebut, jadi dicatat sebagai acara seharian (tanpa pengingat jam)." : lead > 0 ? `Saya ingatkan ${lead} menit sebelumnya, dan masuk rekap pagi (${hhmm(Math.floor(morningMin / 60), morningMin % 60)}).` : `Masuk rekap pagi (${hhmm(Math.floor(morningMin / 60), morningMin % 60)}).`,
       `Salah? Balas: bot, hapus jadwal ${id}  •  bot, pindah jadwal ${id} ke jumat jam 13.00`
     ].join("\n");
@@ -455,7 +535,7 @@ export function createAgenda({ store, sendGroup, now = () => Date.now(), timeZon
     ].join("\n");
 
   function addEvent(w, ctx, who = "") {
-    const r = store.add({ account: ctx.account, groupJid: ctx.groupJid, groupName: ctx.groupName, title: w.title, startMs: w.startMs, allDay: w.allDay, repeat: w.repeat, createdBy: ctx.sender || "" });
+    const r = store.add({ account: ctx.account, groupJid: ctx.groupJid, groupName: ctx.groupName, title: w.title, startMs: w.startMs, allDay: w.allDay, repeat: w.repeat, createdBy: ctx.sender || "", tz: w.tz || "" });
     if (!r.ok) {
       if (r.reason === "full") return `Jadwal di grup ini sudah penuh (maks ${store.limit}). Hapus yang sudah tidak dipakai dulu: bot, hapus jadwal <nomor>.`;
       return `Jadwal yang sama sudah tercatat (#${r.id}).`;
@@ -473,7 +553,7 @@ export function createAgenda({ store, sendGroup, now = () => Date.now(), timeZon
         return usage();
       case "add":
       case "add_quoted": {
-        const w = extractWhen(cmd.body, opts);
+        const w = extractSchedule(cmd.body, opts);
         if (!w.ok) {
           if (w.found === false) return `Tanggalnya belum terbaca. Contoh: bot, catat rapat evaluasi Kamis 22 Oktober jam 10.00\n(${"hari ini/besok/lusa, nama hari, atau tanggal 22 Oktober"})`;
           return `${w.error}\nContoh: bot, catat rapat evaluasi besok jam 10.00`;
@@ -495,15 +575,15 @@ export function createAgenda({ store, sendGroup, now = () => Date.now(), timeZon
       case "delete": {
         const row = store.remove(cmd.id, ctx.groupJid);
         if (!row) return `Jadwal #${cmd.id} tidak ditemukan di grup ini. Lihat nomornya: bot, jadwal berikutnya`;
-        return `🗑 Jadwal #${row.id} dihapus: ${row.title}${row.repeat ? ` (${describeRepeat(row.repeat)})` : row.allDay ? ` (${dateLabel(row.startMs)})` : ` (${dateLabel(row.startMs)} ${clock(row.startMs)})`}`;
+        return `🗑 Jadwal #${row.id} dihapus: ${row.title}${row.repeat ? ` (${describeRepeat(row.repeat)})` : row.allDay ? ` (${dateLabel(row.startMs)})` : ` (${dateLabel(row.startMs, row.tz)} ${stamp(row.startMs, row.tz)})`}`;
       }
       case "move": {
         const row = store.get(cmd.id);
         if (!row || row.groupJid !== ctx.groupJid) return `Jadwal #${cmd.id} tidak ditemukan di grup ini.`;
         const w = extractWhen(`x ${cmd.body}`, opts);
         if (!w.ok) return w.found === false ? "Waktu barunya belum terbaca. Contoh: bot, pindah jadwal 5 ke jumat jam 13.00" : w.error;
-        store.update(row.id, { startMs: w.startMs, allDay: w.allDay, repeat: w.repeat });
-        return `✏️ Jadwal #${row.id} dipindah.\n*${row.title}*\n${w.repeat ? `🔁 ${describeRepeat(w.repeat)} ${tzLabel}` : `🗓 ${dateLabel(w.startMs)}${w.allDay ? " • seharian" : ` • ${clock(w.startMs)} ${tzLabel}`}`}`;
+        store.update(row.id, { startMs: w.startMs, allDay: w.allDay, repeat: w.repeat, tz: w.tz || "" });
+        return `✏️ Jadwal #${row.id} dipindah.\n*${row.title}*\n${w.repeat ? `🔁 ${describeRepeat(w.repeat)} ${tzLabel}` : `🗓 ${dateLabel(w.startMs, w.tz)}${w.allDay ? " • seharian" : ` • ${stamp(w.startMs, w.tz)}`}`}`;
       }
       case "query":
         return answerQuery(cmd, ctx, t0);
@@ -600,7 +680,7 @@ export function createAgenda({ store, sendGroup, now = () => Date.now(), timeZon
     lastOfferAt.set(ctx.groupJid, t0);
     return {
       ev,
-      text: `📅 Mau saya catat sebagai jadwal?\n*${ev.title}*\n🗓 ${dateLabel(ev.startMs)} • ${clock(ev.startMs)} ${tzLabel}${ev.endText ? ` s.d. ${ev.endText}` : ""}\nBalas pesan ini dengan *ya* untuk mencatat (saya ingatkan sebelum acara), atau abaikan saja.`
+      text: `📅 Mau saya catat sebagai jadwal?\n*${ev.title}*\n🗓 ${dateLabel(ev.startMs, ev.tz)} • ${stamp(ev.startMs, ev.tz)}${ev.endText ? ` s.d. ${ev.endText}` : ""}\nBalas pesan ini dengan *ya* untuk mencatat (saya ingatkan sebelum acara), atau abaikan saja.`
     };
   }
   /** Murah & tanpa efek samping: layak dipertimbangkan sebagai tawaran? (dipakai sebelum cek jaringan/DB) */
@@ -638,7 +718,7 @@ export function createAgenda({ store, sendGroup, now = () => Date.now(), timeZon
             if (o.ev.allDay || o.startMs <= t0 || o.ev.preMs === o.startMs) continue;
             const mins = Math.max(1, Math.round((o.startMs - t0) / 60_000));
             try {
-              await sendGroup(g.account, g.groupJid, `⏰ *${mins} menit lagi* — ${o.ev.title}\n🕒 ${clock(o.startMs)} ${tzLabel}`);
+              await sendGroup(g.account, g.groupJid, `⏰ *${mins} menit lagi* — ${o.ev.title}\n🕒 ${stamp(o.startMs, o.ev.tz)}`);
               store.setPre(o.ev.id, o.startMs);
             } catch (e) {
               log.error?.(`📅 Pengingat acara #${o.ev.id} gagal: ${e instanceof Error ? e.message : e}`);
