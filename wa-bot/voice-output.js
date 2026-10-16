@@ -15,6 +15,7 @@
 // ================================================================
 
 import { spawn } from "node:child_process";
+import { findVoice, cleanStyle } from "./persona-voice.js";
 
 export const DEFAULT_TTS_MODELS = ["gemini-3.8-flash-lite-tts", "gemini-3.1-flash-tts-preview", "gemini-3.8-flash-tts", "gemini-2.5-flash-preview-tts"];
 const DEFAULT_VOICE = "Sulafat";
@@ -199,10 +200,12 @@ export function createSpeaker({ config = readTtsConfig(), fetchImpl = globalThis
   }
 
   /** Teks -> WAV (Buffer) lewat Gemini TTS. Melempar Error dengan .quota=true bila semua key/model kehabisan kuota. */
-  async function synthWav(text) {
+  async function synthWav(text, opts = {}) {
     if (config.geminiKeys.length === 0) throw new Error("Tidak ada GEMINI_API_KEYS untuk suara.");
-    const voice = config.voice;
-    const style = DEFAULT_STYLE;
+    // Suara & gaya per bot (persona-voice.js); tidak ada / tidak valid = suara bawaan sistem.
+    const voice = findVoice(opts?.voice) || config.voice;
+    const customStyle = cleanStyle(opts?.style);
+    const style = customStyle || DEFAULT_STYLE;
     let lastErr = null;
     let sawQuota = false;
     let tried = false;
@@ -225,7 +228,7 @@ export function createSpeaker({ config = readTtsConfig(), fetchImpl = globalThis
             }),
           () =>
             request(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, key, {
-              contents: [{ role: "user", parts: [{ text: `Say this in a ${style} voice: ${text}` }] }],
+              contents: [{ role: "user", parts: [{ text: customStyle ? `Say this in the following voice style (${style}): ${text}` : `Say this in a ${style} voice: ${text}` }] }],
               generationConfig: { responseModalities: ["AUDIO"], speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: voice } } } }
             })
         ];
@@ -271,10 +274,10 @@ export function createSpeaker({ config = readTtsConfig(), fetchImpl = globalThis
   }
 
   /**
-   * Teks -> voice note Telegram. Mengembalikan { ogg: Buffer, text } (text = yang benar-benar diucapkan) atau null bila tak ada yang bisa diucapkan.
+   * Teks -> voice note Telegram. opts = { voice, style } (opsional; suara per bot). Mengembalikan { ogg: Buffer, text } (text = yang benar-benar diucapkan) atau null bila tak ada yang bisa diucapkan.
    * Melempar Error dengan .code = "ffmpeg" (ffmpeg/libopus belum terpasang), atau .quota = true (kuota habis).
    */
-  async function speak(text) {
+  async function speak(text, opts = {}) {
     const say = speakableText(text, config.maxChars);
     if (!say) return null;
     const ff = await checkFfmpeg();
@@ -283,7 +286,7 @@ export function createSpeaker({ config = readTtsConfig(), fetchImpl = globalThis
       e.code = "ffmpeg";
       throw e;
     }
-    const wav = await synthWav(say);
+    const wav = await synthWav(say, opts);
     const ogg = await toOggOpus(wav);
     if (!ogg || ogg.length < 500) throw new Error("Konversi audio menghasilkan berkas kosong.");
     return { ogg, text: say };

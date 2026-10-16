@@ -73,6 +73,7 @@ import { createGroupVoice, detectRequestedLang, detectTextOnlyRequest, langInstr
 import { formatForWhatsApp, detectPdfRequest, detectOfficeRequest, cleanAnswerForFile, titleForFile } from "./wa-format.js";
 import { buildDocx, buildXlsx, officeFileName, MIME_DOCX, MIME_XLSX } from "./office-doc.js";
 import { pdfBufferToMarkdown, PDF_MAX_BYTES } from "./pdf-extract.js";
+import { createPersonaVoice } from "./persona-voice.js";
 import { buildPdf, titleFromText, pdfFileName } from "./pdf-doc.js";
 import { MAIN_ACCOUNT, SECOND_ACCOUNT, acctFields, createAccountRouter, isPairedCreds, isStalePairing, pairingInstructions, personaPrompt, readSecondAccountConfig } from "./wa-accounts.js";
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -4109,10 +4110,15 @@ const aiRoute = createAiRoute({
 });
 aiRoute.load().then(() => console.log(`🔀 Urutan AI balasan WA: ${aiRoute.describe()}`)).catch(() => {});
 
+// Suara per bot (Ayyubi / bot nomor kedua): /suara daftar|coba|pakai dari Telegram, tersimpan di bot_state. Lihat persona-voice.js.
+const personaVoice = createPersonaVoice({ state: botStateStore, env: process.env, secondName: wa2Config.enabled ? wa2Config.botName || wa2Config.label || "Nomor 2" : "", secondEnabled: wa2Config.enabled });
+personaVoice.load().catch(() => {});
+
 // Balasan SUARA di grup WhatsApp (/voice wag on|off dari Telegram; tersimpan di bot_state). Lihat group-voice.js.
 const groupVoice = createGroupVoice({
   state: botStateStore,
-  speak: speaker.available() ? (text) => speaker.speak(text) : null,
+  // suara & gaya mengikuti bot yang sedang menjawab (nomor utama = Ayyubi, nomor kedua = mis. Wongsobot)
+  speak: speaker.available() ? (text) => speaker.speak(text, personaVoice.get(currentAccountId())) : null,
   check: checkVoiceOutput,
   notify: (text) => sendToOwner(text),
   config: readGroupVoiceConfig(process.env, ttsConfig.maxChars)
@@ -4520,7 +4526,8 @@ const telegram = createTelegram({
     chat: (history) => generateTelegramReply(history),
     transcribe: transcriber.available() ? (buffer, opts) => transcriber.transcribe(buffer, opts) : null,
     tutor: GEMINI_API_KEYS.length > 0 || llmFallback.available() ? generateTutorTurn : null,
-    speak: speaker.available() ? (text) => speaker.speak(text) : null,
+    speak: speaker.available() ? (text, opts) => speaker.speak(text, opts) : null,
+    personaVoice,
     voiceCheck: checkVoiceOutput,
     simab,
     summary: () => buildDailySummaryText(zonedParts(Date.now(), WA_TIMEZONE).dateStr, { allowAi: true }),

@@ -987,6 +987,27 @@ Judul `## ...` menjadi *tebal*, `**x**` menjadi `*x*`, garis `---` dibuang, `[te
 
 Setelah patch: cukup `/restart` (tidak perlu `/rilis`, tidak perlu `npm install`).
 
+## Suara tiap bot (`/suara daftar`, `/suara coba`, `/suara pakai`)
+
+Ayyubi (nomor utama) dan bot nomor kedua (mis. Wongsobot) bisa punya **suara dan gaya bicara sendiri** di balasan suara grup WhatsApp (`/voice wag on`). Contoh: Ayyubi anak laki-laki, Wongsobot bapak-bapak. Semua diatur dari Telegram, tersimpan di `bot_state`, dan **langsung berlaku tanpa restart**.
+
+| Perintah | Fungsi |
+|---|---|
+| `/suara daftar` | daftar 30 suara Gemini (16 pria, 14 wanita) + pengaturan sekarang |
+| `/suara coba Puck anak laki-laki ceria` | kirim CONTOH suara (tidak menyimpan). Tambah `\| teks sendiri` untuk teks contoh: `/suara coba Puck santai \| Halo semuanya` |
+| `/suara coba wongsobot` | contoh dengan pengaturan Wongsobot sekarang |
+| `/suara pakai ayyubi Puck anak laki-laki ceria` | simpan untuk Ayyubi (langsung dikirim contohnya) |
+| `/suara pakai wongsobot Charon bapak-bapak tenang dan berwibawa` | simpan untuk Wongsobot |
+| `/suara ayyubi` / `/suara wongsobot` | lihat pengaturan satu bot |
+| `/suara reset ayyubi` | kembali ke suara bawaan (Sulafat) |
+
+- **Suara** = nama salah satu suara siap pakai Gemini TTS. **Gaya** = kalimat bebas yang mengarahkan cara bicara (nada, kira-kira usia, tempo), maks 240 huruf. Tanda kutip, kurung siku, dan baris baru dibuang otomatis.
+- Gemini **tidak punya suara anak-anak**; "anak laki-laki ceria" hanya mengarahkan gaya pada suara pria yang dipilih, hasilnya bisa terdengar seperti pemuda yang ceria. Dokumentasi Google tidak menjanjikan umur tertentu, jadi dengarkan dulu dengan `/suara coba` sebelum menyimpan.
+- Bawaan awal dari `.env` (opsional): `WA_VOICE`, `WA_VOICE_STYLE` (Ayyubi), `WA2_VOICE`, `WA2_VOICE_STYLE` (nomor kedua). Pengaturan dari Telegram menang atas `.env`.
+- Berlaku untuk **balasan suara grup WhatsApp**. Balasan suara di Telegram, tutor `/speak`, dan tutor WhatsApp tetap memakai suara bawaan (`TELEGRAM_TTS_VOICE`).
+- `/voice` (tanpa argumen) juga menampilkan suara tiap bot. Setiap contoh memakai kuota suara Gemini yang sama dengan balasan biasa.
+- Setelah patch: `/restart` (tanpa `/rilis`, tanpa `npm install`).
+
 ## Pembuat gambar (`/gambar`, "buatkan gambar ...")
 
 Bot bisa membuat gambar dari deskripsi memakai Gemini ("Nano Banana"), dengan `GEMINI_API_KEYS` yang sama. Tidak ada kunci baru.

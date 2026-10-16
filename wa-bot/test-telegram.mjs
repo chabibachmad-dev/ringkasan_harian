@@ -731,5 +731,60 @@ for (const mode of ["ok", "gagal"]) {
   }
 }
 
+// ---- suara per bot: /suara daftar | coba | pakai | reset
+{
+  const { createPersonaVoice } = await import("./persona-voice.js");
+  const f0 = fakeApi();
+  const f = async (url, init) => {
+    if (String(url).endsWith("/sendVoice")) {
+      f.voices.push({ chat: init.body.get("chat_id") });
+      return { status: 200, json: async () => ({ ok: true, result: { message_id: 5 } }) };
+    }
+    return f0(url, init);
+  };
+  f.voices = [];
+  f.texts = f0.texts;
+  const store = new Map();
+  const state = { get: async (k) => store.get(k) ?? null, set: async (k, v) => void store.set(k, v) };
+  const spoken = [];
+  const pv = createPersonaVoice({ state, env: {}, secondName: "Wongsobot", log: quiet });
+  const deps = {
+    chat: async () => "ok",
+    speak: async (text, opts) => { spoken.push({ text, ...opts }); return { ogg: Buffer.alloc(1200, 1), text }; },
+    voiceCheck: async () => ({ ok: true }),
+    personaVoice: pv,
+    state
+  };
+  const tg = createTelegram({ config: cfg(), deps, fetchImpl: f, log: quiet });
+  const T = (text) => tg.handleUpdate(msg(111, text));
+
+  await T("/suara daftar");
+  check(f.texts(111).at(-1).includes("Puck") && f.texts(111).at(-1).includes("Zephyr") && f.texts(111).at(-1).includes("Wongsobot"), "suara-bot: /suara daftar menampilkan suara pria & wanita dan pengaturan sekarang");
+  await T("/suara coba Puck anak laki-laki ceria");
+  check(spoken.at(-1).voice === "Puck" && spoken.at(-1).style === "anak laki-laki ceria" && f.voices.length === 1 && f.texts(111).at(-1).includes("Contoh: Puck"), "suara-bot: /suara coba mengirim contoh dengan suara & gaya itu (tanpa menyimpan)");
+  check(store.size === 0, "suara-bot: /suara coba tidak menyimpan apa pun");
+  await T("/suara coba Puck gaya santai | Halo teman-teman semua");
+  check(spoken.at(-1).text === "Halo teman-teman semua" && spoken.at(-1).style === "gaya santai", "suara-bot: teks contoh sendiri setelah tanda |");
+  await T("/suara coba Ngawur");
+  check(f.texts(111).at(-1).includes("tidak dikenal") && f.voices.length === 2, "suara-bot: nama suara salah -> pesan jelas, tanpa suara");
+  await T("/suara pakai ayyubi puck anak laki-laki ceria");
+  check(pv.get("main").voice === "Puck" && pv.get("main").style === "anak laki-laki ceria" && JSON.parse(store.get("persona_voice:main")).voice === "Puck", "suara-bot: /suara pakai ayyubi menyimpan ke bot_state");
+  check(f.voices.length === 3 && /Ayyubi/.test(spoken.at(-1).text), "suara-bot: setelah menyimpan langsung dikirim contohnya (memakai nama bot)");
+  await T("/suara pakai wongsobot Charon bapak-bapak tenang dan berwibawa");
+  check(pv.get("wa2").voice === "Charon" && pv.get("main").voice === "Puck", "suara-bot: Wongsobot punya suara sendiri, Ayyubi tidak ikut berubah");
+  await T("/suara coba wongsobot");
+  check(spoken.at(-1).voice === "Charon" && /Wongsobot/.test(spoken.at(-1).text), "suara-bot: /suara coba wongsobot memakai pengaturannya sekarang");
+  await T("/suara wongsobot");
+  check(f.texts(111).at(-1).includes("Charon"), "suara-bot: /suara <bot> menampilkan pengaturannya");
+  await T("/suara reset ayyubi");
+  check(pv.get("main").voice === null && store.get("persona_voice:main") === "", "suara-bot: /suara reset mengembalikan ke bawaan");
+  await T("/suara pakai ayyubi");
+  check(f.texts(111).at(-1).includes("Pakai:"), "suara-bot: perintah kurang lengkap -> contoh pemakaian");
+  await T("/voice");
+  check(f.texts(111).at(-1).includes("Suara bot") || f.texts(111).at(-1).includes("Fitur balasan suara grup belum aktif"), "suara-bot: /voice tidak error");
+  await T("/suara on");
+  check(f.texts(111).at(-1).includes("selalu dibalas suara"), "suara-bot: /suara on|off|auto tetap berfungsi");
+}
+
 if (fails) { console.log(`\n${fails} GAGAL`); process.exit(1); }
 console.log("\nsemua ok");

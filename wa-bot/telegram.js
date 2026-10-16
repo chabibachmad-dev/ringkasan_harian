@@ -23,6 +23,7 @@
 
 import { voiceToCommand, describeError } from "./voice-input.js";
 import { parseVoiceArg } from "./group-voice.js";
+import { sampleText } from "./persona-voice.js";
 import { isFarewellFor, formatTutorMessage, TUTOR_STT_HINT, TUTOR_STT_HINT_ID, TUTOR_TEXT_MAX, TUTOR_TEXT_MAX_ID } from "./tutor.js";
 
 const API = "https://api.telegram.org";
@@ -451,7 +452,46 @@ export function createTelegram({ config, deps = {}, fetchImpl = globalThis.fetch
     return mode;
   }
 
+  /** Contoh suara (untuk memilih suara/gaya bot). Tidak menyimpan apa pun. */
+  async function sendVoiceSample(chatId, { who = null, voice = null, style = "", text = "" } = {}) {
+    const pv = deps.personaVoice;
+    if (!deps.speak) return void (await send(chatId, "Suara belum aktif di bot ini (butuh GEMINI_API_KEYS dan ffmpeg)."));
+    const cfg = voice ? { voice, style } : pv.get(who);
+    const say = text || sampleText(who ? pv.label(who) : "");
+    const desc = `${cfg.voice || "suara bawaan"}${cfg.style ? ` — gaya: ${cfg.style}` : ""}`;
+    try {
+      const out = await withAction(chatId, "record_voice", () => deps.speak(say, { voice: cfg.voice, style: cfg.style }));
+      if (!out?.ogg) return void (await send(chatId, "Tidak ada yang bisa diucapkan dari teks contoh itu."));
+      await send(chatId, `🔊 Contoh: ${desc}`);
+      await sendVoice(chatId, out.ogg);
+    } catch (e) {
+      if (e?.code === "ffmpeg") await send(chatId, `🔇 Suara belum bisa: ${e.message} Pasang dengan: sudo apt install ffmpeg`);
+      else if (e?.quota) await send(chatId, "🔇 Kuota suara Gemini sedang habis. Coba lagi nanti.");
+      else await send(chatId, `🔇 Contoh suara gagal dibuat: ${String(e?.message || e).slice(0, 160)}`);
+    }
+  }
+
+  /** /suara daftar | coba | pakai | reset | <nama bot>: suara & gaya bicara per bot (persona-voice.js). */
+  async function handlePersonaVoice(chatId, cmd) {
+    const pv = deps.personaVoice;
+    if (cmd.kind === "error") return void (await send(chatId, cmd.error));
+    if (cmd.kind === "list") return void (await send(chatId, pv.listText()));
+    if (cmd.kind === "show") return void (await send(chatId, `🔊 Suara bot\n${pv.line(cmd.who)}\n\nCoba: /suara coba ${pv.label(cmd.who).split(/\s+/)[0].toLowerCase()}\nUbah: /suara pakai ${pv.label(cmd.who).split(/\s+/)[0].toLowerCase()} <NamaSuara> [gaya]  •  Daftar: /suara daftar`));
+    if (cmd.kind === "reset") {
+      const r = await pv.reset(cmd.who);
+      return void (await send(chatId, `🔊 Suara ${pv.label(cmd.who)} dikembalikan ke bawaan${r.saved ? "." : " (gagal disimpan: berlaku sampai bot restart)."}`));
+    }
+    if (cmd.kind === "set") {
+      const r = await pv.set(cmd.who, cmd.voice, cmd.style);
+      await send(chatId, `🔊 Suara ${pv.label(cmd.who)} sekarang: ${cmd.voice}${cmd.style ? ` — gaya: ${cmd.style}` : ""}.${r.saved ? " Langsung berlaku di grup WhatsApp (tanpa restart)." : "\n⚠️ Gagal disimpan; berlaku sampai bot restart."}`);
+      return void (await sendVoiceSample(chatId, { who: cmd.who }));
+    }
+    return void (await sendVoiceSample(chatId, cmd));
+  }
+
   async function handleVoiceCommand(chatId, arg) {
+    const pcmd = deps.personaVoice ? deps.personaVoice.parse(arg) : null;
+    if (pcmd) return handlePersonaVoice(chatId, pcmd);
     const a = arg.toLowerCase();
     const map = { on: "on", aktif: "on", nyala: "on", selalu: "on", off: "off", mati: "off", matikan: "off", auto: "auto", otomatis: "auto" };
     const mode = map[a];
@@ -460,7 +500,9 @@ export function createTelegram({ config, deps = {}, fetchImpl = globalThis.fetch
       const cur = await getVoiceMode(chatId);
       return void (await send(chatId, `🔊 Balasan suara: ${label[cur]}.
 
-Ubah: /suara auto • /suara on • /suara off`));
+Ubah: /suara auto • /suara on • /suara off
+
+Suara tiap bot (Ayyubi/Wongsobot): /suara daftar • /suara coba <NamaSuara> [gaya] • /suara pakai <bot> <NamaSuara> [gaya]`));
     }
     voiceModes.set(chatId, mode);
     try {
@@ -488,7 +530,7 @@ Ubah: /suara auto • /suara on • /suara off`));
     if ((cmd.kind === "status" || cmd.value === null) && !cmd.lang) {
       const tg = await getVoiceMode(chatId);
       const tgLabel = { auto: "otomatis", on: "selalu suara", off: "teks saja" }[tg] || tg;
-      return void (await send(chatId, `🔊 *Pengaturan suara*\n• Grup WhatsApp: ${gv.describe()}\n• Telegram: ${tgLabel}\n\nUbah: /voice wag on • /voice wag off\nBahasa suara grup: /voice wag auto • id • eng • kor • arb • jawa\n/voice tg auto|on|off`));
+      return void (await send(chatId, `🔊 *Pengaturan suara*\n• Grup WhatsApp: ${gv.describe()}\n• Telegram: ${tgLabel}${deps.personaVoice ? `\n\n*Suara bot*\n${deps.personaVoice.describe()}\n(ubah: /suara daftar)` : ""}\n\nUbah: /voice wag on • /voice wag off\nBahasa suara grup: /voice wag auto • id • eng • kor • arb • jawa\n/voice tg auto|on|off`));
     }
     if (cmd.lang) {
       const l = await gv.setLang(cmd.lang);
@@ -1184,7 +1226,7 @@ Ubah: /suara auto • /suara on • /suara off`));
           { command: "baru", description: "Mulai obrolan baru" },
           { command: "speak", description: "Ngobrol dengan tutor suara: Inggris, atau \"/speak id\" Indonesia" },
           { command: "selesai", description: "Akhiri sesi Speaking" },
-          { command: "suara", description: "Atur balasan suara: auto / on / off" },
+          { command: "suara", description: "Balasan suara + pilih suara tiap bot (daftar/coba/pakai)" },
           { command: "help", description: "Bantuan" }
         ]
       }).catch(() => {});

@@ -170,5 +170,28 @@ const cfg = (o = {}) => ({ geminiKeys: ["k1", "k2"], models: ["m1", "m2"], voice
   check((await s3.checkFfmpeg()) === "ok", "speaker: setelah >60 detik dicek ulang dan berhasil (tanpa restart)");
 }
 
+// ---- suara & gaya per bot (persona-voice.js) dipakai saat membuat suara
+{
+  const g = fakeGemini(() => ({ status: 200, body: wavBody() }));
+  const s = createSpeaker({ config: cfg(), fetchImpl: g, spawnImpl: fakeSpawn(), log: quiet });
+  await s.speak("Halo semuanya", { voice: "puck", style: "anak laki-laki ceria" });
+  const b = g.calls[0].body;
+  check(b.generation_config.speech_config[0].voice === "Puck", "persona: nama suara dipetakan ke ejaan resmi (puck -> Puck)");
+  check(b.input[0].content[0].annotations[0].style === "anak laki-laki ceria", "persona: gaya bicara khusus dikirim sebagai speech_metadata");
+  await s.speak("Halo lagi", { voice: "NamaNgawur", style: "" });
+  check(g.calls[1].body.generation_config.speech_config[0].voice === "Sulafat" && /warm, friendly/.test(g.calls[1].body.input[0].content[0].annotations[0].style), "persona: suara tak dikenal / gaya kosong -> bawaan sistem");
+  await s.speak("Tanpa opsi");
+  check(g.calls[2].body.generation_config.speech_config[0].voice === "Sulafat", "persona: tanpa opsi tetap suara bawaan (Telegram tidak berubah)");
+  const g2 = fakeGemini((k, kind) => (kind === "inter" ? { status: 404, body: "no" } : { status: 200, body: wavBody() }));
+  const s2 = createSpeaker({ config: cfg(), fetchImpl: g2, spawnImpl: fakeSpawn(), log: quiet });
+  await s2.speak("Halo", { voice: "Charon", style: "bapak-bapak tenang" });
+  const classic = g2.calls.find((c) => c.kind === "classic");
+  check(classic.body.generationConfig.speechConfig.voiceConfig.prebuiltVoiceConfig.voiceName === "Charon" && /following voice style \(bapak-bapak tenang\)/.test(classic.body.contents[0].parts[0].text), "persona: bentuk klasik juga memakai suara & gaya khusus");
+  const g3 = fakeGemini(() => ({ status: 200, body: wavBody() }));
+  const s3 = createSpeaker({ config: cfg(), fetchImpl: g3, spawnImpl: fakeSpawn(), log: quiet });
+  await s3.speak("Halo", { voice: "Puck", style: "[shouting] <b>x</b> \"kutip\"\nbaris" });
+  check(!/[\[\]<>"\n]/.test(g3.calls[0].body.input[0].content[0].annotations[0].style), "persona: gaya dibersihkan dari penanda/kutip/baris baru");
+}
+
 if (fails) { console.log(`\n${fails} GAGAL`); process.exit(1); }
 console.log("\nsemua ok");
