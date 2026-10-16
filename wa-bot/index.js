@@ -101,6 +101,7 @@ import { createLocalChat, parseLocalChatCommand } from "./local-chat.js";
 import { createMarketBrief, createMarketData, parseMarketCommand, readMarketBriefConfig } from "./market-brief.js";
 import { handleMemoryCommand, openOwnerMemory, parseMemoryCommand } from "./owner-memory.js";
 import { createReminders, openReminderStore, parseReminderCommand } from "./reminders.js";
+import { createAgenda, openAgendaStore } from "./agenda.js";
 import { createBackup, parseBackupCommand, readBackupConfig } from "./backup.js";
 import { backupCheck, createHealth, createRestartTracker, databaseCheck, diskCheck, memoryCheck, ollamaCheck, parseHealthCommand, readHealthConfig, whatsappCheck } from "./health.js";
 
@@ -2855,7 +2856,11 @@ async function handleGroupMessage(msg, sock) {
       .limit(1);
     if (botMsg && botMsg.length > 0) triggered = true;
   }
-  if (!triggered) return;
+  if (!triggered) {
+    // Kalimat biasa yang tampak jelas seperti pengumuman jadwal ("besok rapat jam 9"): bot menawarkan mencatatnya (tanpa AI, tanpa menyimpan obrolan).
+    if (agenda.mightOffer(text) && !photo && !docAttached && !groupAudio) offerAgendaFromChat(sock, msg, groupJid, text).catch((e) => console.error("📅 Tawaran jadwal gagal:", e instanceof Error ? e.message : String(e)));
+    return;
+  }
 
   // --- Grup ini diizinkan?
   const subject = await getGroupSubject(sock, groupJid);
@@ -2935,6 +2940,18 @@ async function handleGroupMessage(msg, sock) {
   if (!(await isAutoReplyEnabledForContact(groupJid))) {
     console.log(`🔕 Auto-reply dimatikan khusus utk grup ${groupJid}, dilewati.`);
     return;
+  }
+
+  // Jadwal kantor (catat / tanya "ada jadwal apa hari ini" / hapus / pindah / jawab tawaran "mau dicatat?"): dijawab dari catatan lokal, tanpa AI.
+  if (agenda.enabled && !photo && !docAttached) {
+    const agendaCmd = agenda.parse(text, { quotedText: quotedText && !quotedText.startsWith("[") ? quotedText : "", offerKey: ctx?.stanzaId ? `${groupJid}|${ctx.stanzaId}` : "" });
+    if (agendaCmd) {
+      const reply = await agenda.handle(agendaCmd, { account: currentAccountId(), groupJid, groupName: subject || "", sender });
+      if (reply) {
+        await replyGroupText(sock, groupJid, msg, subject, reply);
+        return;
+      }
+    }
   }
 
   // Permintaan EDIT foto ("bot, ubah jadi hitam putih" + foto/balas foto): ditangani pembuat gambar, bukan AI percakapan.
@@ -3085,6 +3102,18 @@ async function replyGroupText(sock, groupJid, msg, subject, text) {
   const { error } = await supabase.from("whatsapp_messages").insert({ wa_jid: groupJid, wa_name: subject || null, direction: "out", content: text, status: "sent", wa_message_id: sent?.key?.id ?? null, ...acctFields(currentAccountId()) });
   if (error) console.error("Gagal catat balasan grup:", error.message);
   return sent;
+}
+
+/** Tawarkan mencatat jadwal dari kalimat biasa di grup (hanya grup yang diizinkan; harus dikonfirmasi dengan "ya"). */
+async function offerAgendaFromChat(sock, msg, groupJid, text) {
+  const subject = await getGroupSubject(sock, groupJid);
+  if (!isGroupAllowed(groupJid, subject, sock)) return;
+  if (!(await isAutoReplyEnabledForContact(groupJid))) return;
+  const account = currentAccountId();
+  const offer = agenda.buildOffer(text, { groupJid, account });
+  if (!offer) return;
+  const sent = await replyGroupText(sock, groupJid, msg, subject, offer.text);
+  if (sent?.key?.id) agenda.rememberOffer(`${groupJid}|${sent.key.id}`, offer.ev, { account, groupJid, groupName: subject || "" });
 }
 
 const FILE_LABEL = { pdf: "PDF", xlsx: "Excel", docx: "Word" };
@@ -4159,6 +4188,7 @@ async function buildBotStatusText() {
   lines.push(`📜 Pantauan peraturan: ${regMonitor.describe()}`);
   lines.push(`📈 Pasar pagi (IHSG, emas): ${marketBrief.describe()}`);
   lines.push(`⏰ Pengingat: ${reminders.describe()}`);
+  lines.push(`📅 Agenda grup: ${agenda.describe()}`);
   lines.push(`💾 Cadangan: ${backup.describe()}`);
   lines.push(`🩺 Kesehatan: ${health.describe()}`);
   lines.push(`✈️ Telegram: ${telegram.describe()}`);
@@ -4392,6 +4422,41 @@ setInterval(() => {
 }, 30_000);
 console.log(`⏰ Pengingat: ${reminders.describe()}`);
 
+// Agenda/jadwal kantor di grup (agenda.js): SQLite lokal, rekap pagi + pengingat sebelum acara, dikirim dari nomor yang mencatatnya.
+const AGENDA_FILE = process.env.AGENDA_FILE?.trim() || fileURLToPath(new URL("./agenda.sqlite", import.meta.url));
+let agendaStore = null;
+if (!["0", "false", "off", "tidak", "no"].includes(String(process.env.AGENDA_ENABLED ?? "true").trim().toLowerCase())) {
+  try {
+    agendaStore = await openAgendaStore({ file: AGENDA_FILE, maxPerGroup: Number(process.env.AGENDA_MAX_PER_GROUP) || 200 });
+  } catch (e) {
+    console.error("📅 Agenda grup tidak bisa dibuka:", e instanceof Error ? e.message : String(e));
+  }
+}
+async function sendAgendaGroupText(account, jid, text) {
+  const sk = account === SECOND_ACCOUNT ? WA2_ACCOUNT_DEF?.sock : currentSock;
+  if (!sk) throw new Error("WhatsApp belum tersambung");
+  const subject = await getGroupSubject(sk, jid);
+  if (!AUTO_REPLY_ACTIVE || !groupRulesFor(sk).enabled || !isGroupAllowed(jid, subject, sk)) return; // grup sudah tidak diizinkan: jangan kirim
+  await waAccountContext.run({ account }, async () => {
+    const sent = await sk.sendMessage(jid, { text });
+    const { error } = await supabase.from("whatsapp_messages").insert({ wa_jid: jid, wa_name: subject || null, direction: "out", content: text, status: "sent", wa_message_id: sent?.key?.id ?? null, ...acctFields(currentAccountId()) });
+    if (error) console.error("Gagal catat pesan agenda:", error.message);
+  });
+}
+const agenda = createAgenda({
+  store: agendaStore,
+  sendGroup: sendAgendaGroupText,
+  timeZone: WA_TIMEZONE,
+  tzLabel: WA_TIMEZONE_LABEL,
+  morningTime: process.env.AGENDA_MORNING_TIME || "07:30",
+  remindBeforeMin: process.env.AGENDA_REMIND_BEFORE_MIN === undefined || process.env.AGENDA_REMIND_BEFORE_MIN === "" ? 30 : Number(process.env.AGENDA_REMIND_BEFORE_MIN),
+  suggest: !["0", "false", "off", "tidak", "no"].includes(String(process.env.AGENDA_SUGGEST ?? "true").trim().toLowerCase())
+});
+setInterval(() => {
+  agenda.check().catch((e) => console.error("📅 Pemeriksaan agenda error:", e instanceof Error ? e.message : String(e)));
+}, 60_000);
+console.log(`📅 Agenda grup: ${agenda.describe()}`);
+
 // Cadangan otomatis tiap malam (catatan, pengingat, skill, sesi WhatsApp) ke folder bertanggal di laptop. Lihat backup.js.
 const BOT_DIR = fileURLToPath(new URL(".", import.meta.url));
 const backupConfig = readBackupConfig(process.env);
@@ -4400,6 +4465,7 @@ const backup = createBackup({
   sources: [
     { name: "catatan", kind: "sqlite", path: OWNER_MEMORY_FILE },
     { name: "pengingat", kind: "sqlite", path: REMINDERS_FILE },
+    ...(agendaStore ? [{ name: "agenda grup", kind: "sqlite", path: AGENDA_FILE }] : []),
     { name: "skill", kind: "dir", path: fileURLToPath(new URL("./skills", import.meta.url)) },
     { name: "sesi WhatsApp", kind: "auth", path: path.resolve("auth_session") }, // sama dengan useMultiFileAuthState("auth_session")
     ...(WA2_ACCOUNT_DEF ? [{ name: "sesi WhatsApp nomor 2", kind: "auth", path: path.resolve(WA2_ACCOUNT_DEF.authDir) }] : []),

@@ -994,6 +994,28 @@ Judul `## ...` menjadi *tebal*, `**x**` menjadi `*x*`, garis `---` dibuang, `[te
 
 Setelah patch: cukup `/restart` (tidak perlu `/rilis`, tidak perlu `npm install`).
 
+## Jadwal kantor di grup (catat, tanya, rekap pagi, pengingat)
+
+Bot di grup bisa **mencatat jadwal**, **menjawab "ada jadwal apa hari ini?"**, **merekap jadwal tiap pagi**, dan **mengingatkan sebelum acara**. Semua dari catatan lokal (`agenda.sqlite`), **tanpa AI dan tanpa biaya**, per grup (jadwal grup A tidak tampil di grup B). Siapa pun di grup boleh mencatat dan menghapus.
+
+| Ketik di grup | Hasil |
+|---|---|
+| `bot, catat rapat evaluasi Kamis 22 Oktober jam 10.00 di ruang rapat` | dicatat (#nomor); boleh juga `besok`, `lusa`, `senin depan`, `25/10`, `tanggal 3` |
+| `bot, jadwalkan apel tiap senin jam 07.30` | jadwal berulang (`tiap hari`, `tiap senin`, `tiap tanggal 25`) |
+| balas (reply) pesan jadwal dengan `bot, catat ini` | mencatat dari pesan yang dikutip |
+| `bot, ada jadwal apa hari ini?` / `jadwal besok` / `agenda minggu ini` / `minggu depan` / `jadwal kamis` / `jadwal berikutnya` | daftar jadwal grup itu |
+| `bot, hapus jadwal 5` · `bot, pindah jadwal 5 ke jumat jam 13.00` | hapus / pindah (hanya jadwal di grup yang sama) |
+| `bot, bantuan jadwal` | ringkasan perintah |
+
+- **Tawaran otomatis.** Bot menyimak pola kalimat (tanpa AI, obrolan tidak disimpan). Bila ada kalimat yang jelas berupa pengumuman, mis. "besok rapat koordinasi jam 9 ya", bot bertanya *"Mau saya catat sebagai jadwal?"*; baru **dicatat bila ada yang membalas pesan itu dengan "ya"** ("tidak" / diabaikan = tidak dicatat). Syaratnya ketat: ada kata acara (rapat, apel, bimtek, zoom, dst.) **dan** tanggal **dan** jam; pertanyaan, pembatalan ("dibatalkan", "ditunda"), dan kalimat tanpa jam diabaikan. Maksimal satu tawaran per grup per 90 detik; tawaran kedaluwarsa setelah 6 jam dan hilang bila bot di-restart. Matikan dengan `AGENDA_SUGGEST=false`.
+- **Rekap pagi.** Tiap hari pukul `AGENDA_MORNING_TIME` (bawaan 07:30) bot mengirim jadwal hari itu ke grup. **Bila hari itu tidak ada jadwal, bot diam.** Bila bot baru menyala siang hari (sebelum 13:00), rekap tetap dikirim satu kali.
+- **Pengingat sebelum acara.** `AGENDA_REMIND_BEFORE_MIN` menit (bawaan 30; 0 = mati) sebelum jam acara: "⏰ 25 menit lagi — Rapat anggaran". Hanya untuk acara yang jamnya disebut.
+- **Aturan membaca waktu.** Jam tidak disebut = acara *seharian* (masuk rekap pagi, tanpa pengingat jam). "jam 2" tanpa "pagi/siang/sore/malam" dianggap 14.00 (jam 1-6 = siang/sore, 7-11 = pagi). "senin depan" = Senin pekan depan. "tanggal 3" yang sudah lewat bulan ini = bulan depan. Bot **selalu menulis ulang hari, tanggal, dan jam yang ia pahami** di konfirmasi, jadi salah baca langsung terlihat dan bisa dipindah/dihapus. Jadwal sekali yang sudah lewat dibersihkan otomatis setelah 36 jam.
+- **Tidak merebut permintaan lain.** "jadwal sholat", "jadwal kereta", "buatkan jadwal piket", atau "apa itu agenda" tetap dijawab AI seperti biasa. Hanya pola seperti "ada jadwal apa hari ini", "jadwal besok", "catat ... jam ..." yang ditangani fitur ini.
+- Dikirim dari **nomor yang mencatatnya** (Ayyubi atau nomor kedua), dan hanya ke grup yang masih diizinkan (`/grup`). Ikut cadangan otomatis (`/backup`).
+- Pengaturan di `.env`: `AGENDA_ENABLED`, `AGENDA_SUGGEST`, `AGENDA_MORNING_TIME`, `AGENDA_REMIND_BEFORE_MIN`, `AGENDA_MAX_PER_GROUP` (bawaan 200), `AGENDA_FILE`. Butuh Node 22+ (`node:sqlite`, sama seperti Pengingat pribadi).
+- Setelah patch: cukup `/restart` (tidak perlu `/rilis`, tidak perlu `npm install`).
+
 ## Suara tiap bot (`/suara daftar`, `/suara coba`, `/suara pakai`)
 
 Ayyubi (nomor utama) dan bot nomor kedua (mis. Wongsobot) bisa punya **suara dan gaya bicara sendiri** di balasan suara grup WhatsApp (`/voice wag on`). Contoh: Ayyubi anak laki-laki, Wongsobot bapak-bapak. Semua diatur dari Telegram, tersimpan di `bot_state`, dan **langsung berlaku tanpa restart**.
