@@ -502,6 +502,12 @@ mark.chat-search-hit--active {
   gap: 12px;
 }
 
+/* Pesan WhatsApp ditampilkan apa adanya (textContent): pertahankan baris baru & spasi. Tanpa ini balasan bot yang
+   berbaris-baris (daftar, tabel monospace, "kartu") menyatu jadi satu paragraf di layar WhatsApp aplikasi. */
+#wa-thread .chat-bubble-text {
+  white-space: pre-wrap;
+}
+
 .chat-input-bar {
   position: sticky;
   bottom: 0;
