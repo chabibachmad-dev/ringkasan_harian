@@ -541,7 +541,7 @@ export function findPhrase(page, phrase) {
   const needle = norm(phrase);
   const hits = [];
   if (!needle) return hits;
-  for (const line of page.lines) {
+  for (const [li, line] of page.lines.entries()) {
     let text = "";
     const spans = []; // karakter -> kata
     line.words.forEach((w, wi) => {
@@ -570,6 +570,7 @@ export function findPhrase(page, phrase) {
       const used = line.words.slice(wA.wi, wB.wi + 1);
       const rest = line.words.slice(wB.wi + 1);
       hits.push({
+        li,
         x0,
         x1,
         y0: Math.min(...used.map((w) => w.y0)),
@@ -717,7 +718,23 @@ export async function overlayReplacePdf(buf, pairs, { exec = run, tmpDir = os.tm
         const rectL = centered ? Math.min(h.x0, xText) : h.x0;
         const rectR = centered ? Math.max(h.x1, xText + w) : h.x1;
         used.add(key);
-        ops.rects.push({ x: box.llx + rectL - 0.6, y: box.ury - (h.y1 + 0.6), w: rectR - rectL + 1.2, h: H * 0.94 + 0.6 });
+        // kotak sedikit melebihi kotak kata (huruf tinggi seperti "K", "b", "A" sering menembus tinggi yang dilaporkan),
+        // tapi tidak sampai menimpa baris di atas/bawahnya
+        let above = -Infinity;
+        let below = Infinity;
+        for (const [li, l] of pg.lines.entries()) {
+          if (li === h.li) continue;
+          const lx0 = l.words[0].x0;
+          const lx1 = l.words.at(-1).x1;
+          if (lx1 < rectL || lx0 > rectR) continue;
+          const ly0 = Math.min(...l.words.map((w) => w.y0));
+          const ly1 = Math.max(...l.words.map((w) => w.y1));
+          if (ly1 <= cy) above = Math.max(above, ly1);
+          else if (ly0 >= cy) below = Math.min(below, ly0);
+        }
+        const top = Math.min(h.y0 + 0.06 * H, Math.max(h.y0 - 0.16 * H, above + 0.3));
+        const bottom = Math.max(h.y1 + 0.6 - 0.6, Math.min(h.y1 + 0.1 * H, below - 0.3));
+        ops.rects.push({ x: box.llx + rectL - 0.8, y: box.ury - bottom, w: rectR - rectL + 1.6, h: bottom - top });
         if (text) ops.texts.push({ key, size: s, color, x: box.llx + xText, y: box.ury - (h.y1 - 0.21 * size), bytes: enc.bytes });
         counts[pi]++;
       }
