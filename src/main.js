@@ -2737,7 +2737,7 @@ async function renderCloudflareImages() {
 
     const meta = document.createElement("div");
     meta.className = "kb-doc-meta";
-    meta.textContent = `${a.ok} ${L("sys_img_images")} ≈ ${a.usedNeurons.toLocaleString()}/${a.freeNeurons.toLocaleString()} ${L("sys_img_neurons")} · ${L("sys_img_left")} ±${a.imagesLeft}${a.fail ? ` · ${a.fail} ${L("sys_img_fail")}` : ""}`;
+    meta.textContent = `${a.ok} ${L("sys_img_images")} ≈ ${a.usedNeurons.toLocaleString()}/${a.freeNeurons.toLocaleString()} ${L("sys_img_neurons")} · ${L("sys_img_left")} ±${a.imagesLeft}${a.edits ? ` · ${a.edits} ${L("sys_img_edits")}` : ""}${a.fail ? ` · ${a.fail} ${L("sys_img_fail")}` : ""}`;
 
     main.append(head, bar, meta);
     if (a.resting && a.restUntil) {

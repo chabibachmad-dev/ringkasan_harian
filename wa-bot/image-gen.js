@@ -18,6 +18,8 @@
 //   2. generateContent   POST /v1beta/models/{m}:generateContent  (cadangan, responseModalities TEXT+IMAGE)
 // ================================================================
 
+import { spawn } from "node:child_process";
+
 export const STATE_KEY = "wa_image_gen";
 export const QUOTA_KEY = "wa_image_quota";
 export const DEFAULT_IMAGE_MODELS = ["gemini-nano-banana-2.1", "gemini-3.1-flash-lite-image", "gemini-3.1-flash-image", "gemini-2.5-flash-image"];
@@ -26,6 +28,8 @@ export const STATS_KEY = "wa_image_stats";
 export const CF_FREE_NEURONS = 10000; // jatah gratis Cloudflare Workers AI per akun per hari (reset 00:00 UTC)
 export const CF_NEURONS_PER_IMAGE = 57.6; // FLUX.1 schnell 1024x1024, 4 langkah (perkiraan)
 export const DEFAULT_CF_IMAGE_MODELS = ["@cf/black-forest-labs/flux-1-schnell"];
+export const DEFAULT_CF_EDIT_MODELS = ["@cf/black-forest-labs/flux-2-klein-9b", "@cf/black-forest-labs/flux-2-klein-4b"]; // menerima foto referensi (multipart input_image_0)
+export const EDIT_INPUT_MAX = 480; // sisi terpanjang foto yang dikirim (batas Cloudflare: lebih kecil dari 512x512)
 export const DEFAULT_OR_IMAGE_MODELS = ["google/gemini-2.5-flash-image"];
 const OR_URL = "https://openrouter.ai/api/v1/chat/completions";
 const API_BASE = "https://generativelanguage.googleapis.com/v1beta";
@@ -66,6 +70,7 @@ export function readImageConfig(env = process.env) {
     // Penyedia yang dipakai. Kosong = otomatis: bila Cloudflare terisi, HANYA Cloudflare; bila tidak, Gemini lalu OpenRouter.
     providers: splitList(env.IMAGE_PROVIDERS).map((x) => x.toLowerCase()).filter((x) => IMAGE_PROVIDER_ORDER.includes(x)),
     cfModels: splitList(env.CLOUDFLARE_IMAGE_MODELS).length ? splitList(env.CLOUDFLARE_IMAGE_MODELS) : DEFAULT_CF_IMAGE_MODELS,
+    cfEditModels: splitList(env.CLOUDFLARE_EDIT_MODELS).length ? splitList(env.CLOUDFLARE_EDIT_MODELS) : DEFAULT_CF_EDIT_MODELS,
     orKeys: splitList(env.OPENROUTER_API_KEYS || env.OPENROUTER_API_KEY),
     orModels: splitList(env.OPENROUTER_IMAGE_MODELS).length ? splitList(env.OPENROUTER_IMAGE_MODELS) : DEFAULT_OR_IMAGE_MODELS,
     timeoutMs: Math.max(10_000, num(env.IMAGE_TIMEOUT_MS, 90_000)),
@@ -116,6 +121,121 @@ export function cleanPrompt(raw) {
   for (let i = 0; i < 3; i++) p = p.replace(/[\s,;:!.]+(?:dong|ya|yah|deh|nih|please|pls|kak|bro|min|donk)$/i, "");
   p = p.replace(/[\s,;:]+$/, "");
   return p.slice(0, 600).trim();
+}
+
+// ---------------------------------------------------------------- edit foto
+const EDIT_STRONG = "edit(?:lah|kan)?|ubah(?:lah|kan)?|ganti(?:kan|lah)?|jadikan|modifikasi|hapus(?:kan)?|hilangkan|tambah(?:kan)?|beri(?:kan)?|warnai|percantik|perbaiki|cerahkan|pertajam|gelapkan|retouch|remove|erase|add|change|replace|enhance|colori[sz]e|transform|convert|turn|restyle|swap|make";
+const EDIT_WEAK = "buat(?:kan|in|lah)?|bikin(?:kan|in)?";
+const EDIT_FILLER = "(?:tolong|coba|bisa|dong|ya|yah|please|pls|kak|bro|min|bang|mas|mbak|bisakah|boleh)";
+const EDIT_STRONG_RE = new RegExp(`^(?:${EDIT_FILLER}[\\s,]+)*(?:${EDIT_STRONG})\\b\\s*(.*)$`, "is");
+const EDIT_WEAK_RE = new RegExp(`^(?:${EDIT_FILLER}[\\s,]+)*(?:${EDIT_WEAK})\\s+(?:(?:foto|gambar|image|picture)(?:nya)?\\s*)?(?:ini|itu|tadi|tersebut)?\\s*((?:jadi|menjadi|seperti|ala|bergaya)\\b.*)$`, "is");
+const EDIT_NOUN_RE = new RegExp(`^(?:${EDIT_FILLER}[\\s,]+)*(?:${EDIT_STRONG}|${EDIT_WEAK})\\b\\s*(?:foto|gambar|image|picture|pic)(?:nya)?\\s+(?:ini|itu|tadi|tersebut)\\b\\s*(.*)$`, "is");
+
+/**
+ * Teks pengguna -> { prompt, needsImage } bila ini permintaan MENGEDIT foto, selain itu null.
+ * hasImage = pesan ini membawa foto atau membalas foto: cukup kata kerja edit ("ubah jadi hitam putih", "hapus orang di belakang").
+ * Tanpa foto: harus eksplisit menyebut foto/gambar ("edit foto ini ...") -> needsImage:true (pemanggil membalas petunjuk).
+ */
+export function detectEditRequest(text, { hasImage = false } = {}) {
+  const t = String(text ?? "").replace(/\s+/g, " ").trim();
+  if (!t || /^\//.test(t)) return null;
+  const noun = EDIT_NOUN_RE.exec(t);
+  if (noun) {
+    const prompt = cleanPrompt(noun[1].replace(/^[:,\-]+\s*/, ""));
+    return hasImage ? { prompt, needsImage: false } : { prompt, needsImage: true };
+  }
+  if (!hasImage) return null;
+  const weak = EDIT_WEAK_RE.exec(t);
+  if (weak) return { prompt: cleanPrompt(weak[1]), needsImage: false };
+  if (detectImageRequest(t)?.prompt) return null; // "buatkan gambar kucing" = gambar baru, bukan edit
+  const strong = EDIT_STRONG_RE.exec(t);
+  if (strong) {
+    const prompt = cleanPrompt(t.replace(/^(?:\s*(?:tolong|coba|dong|ya|please|pls|kak|bro)[\s,]+)*/i, ""));
+    return { prompt, needsImage: false };
+  }
+  return null;
+}
+
+const EDIT_BLOCK_RES = [
+  /\b(?:buka|lepas|copot|tanggalkan|hilangkan|undress|remove)\s+(?:semua\s+)?(?:baju|pakaian|bajunya|pakaiannya|clothes?|clothing|kerudung|jilbab|hijab)\b/i,
+  /\b(?:tanpa|without)\s+(?:busana|baju|pakaian|clothes|clothing)\b/i,
+  /\b(?:bikini|lingerie|pakaian dalam|underwear|swimsuit|baju renang)\b/i
+];
+
+/** Aturan tambahan khusus edit foto orang sungguhan. -> alasan penolakan atau null. */
+export function editPromptProblem(prompt) {
+  const p = String(prompt ?? "");
+  if (EDIT_BLOCK_RES.some((re) => re.test(p))) return "Maaf, permintaan edit foto seperti itu tidak bisa saya kerjakan.";
+  return null;
+}
+
+/** Lebar x tinggi PNG dari header (null bila bukan PNG). */
+export function pngSize(buf) {
+  if (!buf || buf.length < 24 || buf[0] !== 0x89 || buf[1] !== 0x50 || buf.toString("ascii", 12, 16) !== "IHDR") return null;
+  return { width: buf.readUInt32BE(16), height: buf.readUInt32BE(20) };
+}
+
+/** Ukuran hasil: sisi terpanjang 1024, rasio sama dengan foto, kelipatan 16, dalam 256-1920. */
+export function editSize(w, h, longest = 1024) {
+  const ww = Math.max(1, Number(w) || 1);
+  const hh = Math.max(1, Number(h) || 1);
+  const k = longest / Math.max(ww, hh);
+  const snap = (v) => Math.min(1920, Math.max(256, Math.round((v * k) / 16) * 16));
+  return { width: snap(ww), height: snap(hh) };
+}
+
+/**
+ * Foto apa pun (jpeg/png/webp) -> PNG kecil (sisi terpanjang <= EDIT_INPUT_MAX) lewat ffmpeg.
+ * -> { png, width, height, outWidth, outHeight }. Galat: Error dengan .kind "noffmpeg" | "badimage".
+ */
+export function prepareEditInput(buffer, { spawnImpl = spawn, timeoutMs = 20_000, max = EDIT_INPUT_MAX } = {}) {
+  return new Promise((resolve, reject) => {
+    const bad = (kind, msg) => reject(Object.assign(new Error(msg), { kind }));
+    if (!Buffer.isBuffer(buffer) || buffer.length < 100) return bad("badimage", "foto kosong");
+    let child;
+    try {
+      child = spawnImpl(
+        "ffmpeg",
+        ["-hide_banner", "-loglevel", "error", "-i", "pipe:0", "-frames:v", "1", "-vf", `scale=w=${max}:h=${max}:force_original_aspect_ratio=decrease`, "-f", "image2pipe", "-vcodec", "png", "pipe:1"],
+        { stdio: ["pipe", "pipe", "pipe"] }
+      );
+    } catch (e) {
+      return bad("noffmpeg", e instanceof Error ? e.message : String(e));
+    }
+    const out = [];
+    let errText = "";
+    let done = false;
+    const finish = (fn) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      fn();
+    };
+    const timer = setTimeout(() => {
+      try {
+        child.kill?.("SIGKILL");
+      } catch {
+        /* sudah selesai */
+      }
+      finish(() => bad("badimage", "ffmpeg terlalu lama"));
+    }, timeoutMs);
+    child.on("error", (e) => finish(() => bad(e?.code === "ENOENT" ? "noffmpeg" : "badimage", e instanceof Error ? e.message : String(e))));
+    child.stdout.on("data", (d) => out.push(d));
+    child.stderr?.on("data", (d) => {
+      errText += String(d).slice(0, 300);
+    });
+    child.on("close", (code) =>
+      finish(() => {
+        const png = Buffer.concat(out);
+        const size = pngSize(png);
+        if (code !== 0 || !size) return bad("badimage", `ffmpeg gagal (${code}): ${errText.replace(/\s+/g, " ").slice(0, 120)}`);
+        const o = editSize(size.width, size.height);
+        resolve({ png, width: size.width, height: size.height, outWidth: o.width, outHeight: o.height });
+      })
+    );
+    child.stdin.on("error", () => {});
+    child.stdin.end(buffer);
+  });
 }
 
 // ---------------------------------------------------------------- filter deskripsi
@@ -213,6 +333,9 @@ export const KIND_TEXT = {
   auth: "Kunci pembuat gambar ditolak. Pemilik sudah diberi tahu.",
   unavailable: "Pembuat gambar sedang tidak tersedia. Coba lagi sebentar lagi.",
   blocked: "Maaf, gambar itu tidak bisa dibuat (ditolak oleh filter keamanan). Coba deskripsi lain.",
+  noedit: "Edit foto butuh Cloudflare (gratis): isi CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN lewat /env, dan jangan mematikan Cloudflare di IMAGE_PROVIDERS.",
+  noffmpeg: "Edit foto belum bisa: ffmpeg belum terpasang di laptop bot (sudo apt install ffmpeg). Pemilik sudah diberi tahu.",
+  badimage: "Fotonya tidak bisa dibaca. Coba kirim ulang fotonya (JPG/PNG).",
   nokey: "Pembuat gambar belum aktif: isi CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN (gratis) atau GEMINI_API_KEYS di .env bot."
 };
 
@@ -230,12 +353,14 @@ function hariWita(ms) {
  * deps: { state?: {get,set}, config, fetchImpl?, log?, now? }
  */
 /** Teks catatan riwayat untuk gambar yang dikirim bot (dibaca AI percakapan; awalan 🖼️ dikenali di index.js). */
-export const imageSentNote = (prompt) => `🖼️ [BOT mengirim GAMBAR buatan AI sesuai permintaan: "${String(prompt ?? "").replace(/\s+/g, " ").replace(/"/g, "'").slice(0, 200)}"]`;
+export const imageSentNote = (prompt, { edit = false } = {}) =>
+  `🖼️ [BOT mengirim GAMBAR ${edit ? "hasil EDIT foto" : "buatan AI"} sesuai permintaan: "${String(prompt ?? "").replace(/\s+/g, " ").replace(/"/g, "'").slice(0, 200)}"]`;
 
 /** Catatan riwayat gambar -> teks kutipan untuk AI ("[GAMBAR buatan bot ini, permintaannya: ...]"), atau null bila bukan catatan gambar. */
 export function quotedImageNote(content) {
-  const m = /^🖼️\s*\[BOT mengirim GAMBAR buatan AI sesuai permintaan: "([\s\S]*)"\]\s*$/.exec(String(content ?? ""));
-  return m ? `[GAMBAR buatan bot ini, permintaannya: "${m[1]}"]` : null;
+  const m = /^🖼️\s*\[BOT mengirim GAMBAR (buatan AI|hasil EDIT foto) sesuai permintaan: "([\s\S]*)"\]\s*$/.exec(String(content ?? ""));
+  if (!m) return null;
+  return m[1] === "buatan AI" ? `[GAMBAR buatan bot ini, permintaannya: "${m[2]}"]` : `[GAMBAR hasil EDIT foto oleh bot ini, instruksinya: "${m[2]}"]`;
 }
 
 export function createImageGen({ state = null, config = readImageConfig({}), fetchImpl = globalThis.fetch, log = console, now = () => Date.now(), translate = null } = {}) {
@@ -264,13 +389,15 @@ export function createImageGen({ state = null, config = readImageConfig({}), fet
   const saveStats = () => {
     Promise.resolve(state?.set(STATS_KEY, stats)).catch(() => {});
   };
-  function bump(provider, ok, account = null, err = "") {
+  function bump(provider, ok, account = null, err = "", edit = false) {
     rollStats();
     const p = (stats.prov[provider] ||= { ok: 0, fail: 0 });
     p[ok ? "ok" : "fail"] += 1;
     if (account) {
       const a = (stats.acct[account] ||= { ok: 0, fail: 0 });
-      a[ok ? "ok" : "fail"] += 1;
+      // Edit foto dihitung terpisah: biaya neuronnya beda dengan gambar biasa, jadi tidak ikut perkiraan neuron.
+      if (edit && ok) a.edit = (a.edit || 0) + 1;
+      else a[ok ? "ok" : "fail"] += 1;
     }
     if (ok) stats.lastOkAt = now();
     else {
@@ -617,6 +744,7 @@ export function createImageGen({ state = null, config = readImageConfig({}), fet
         id: tail(acc.account),
         ok: a.ok,
         fail: a.fail,
+        edits: a.edit || 0,
         usedNeurons: used,
         freeNeurons: CF_FREE_NEURONS,
         imagesLeft: Math.max(0, Math.floor((CF_FREE_NEURONS - used) / CF_NEURONS_PER_IMAGE)),
@@ -651,7 +779,7 @@ export function createImageGen({ state = null, config = readImageConfig({}), fet
     const parts = [`${m.providers.join(" > ") || "-"} • grup ${m.groupsOn ? "aktif" : "mati"} • hari ini ${okTotal} berhasil, ${failTotal} gagal`];
     for (const a of m.cloudflare) {
       parts.push(
-        `  Cloudflare ${a.id}: ${a.ok} gambar ≈ ${a.usedNeurons.toLocaleString("id-ID")}/${a.freeNeurons.toLocaleString("id-ID")} neuron (sisa ±${a.imagesLeft} gambar)` +
+        `  Cloudflare ${a.id}: ${a.ok} gambar${a.edits ? ` + ${a.edits} edit foto (neuron edit tidak ikut dihitung)` : ""} ≈ ${a.usedNeurons.toLocaleString("id-ID")}/${a.freeNeurons.toLocaleString("id-ID")} neuron (sisa ±${a.imagesLeft} gambar)` +
           (a.resting ? `, JATAH HABIS (pulih ${fmtClock(a.restUntil)})` : `, reset ${fmtClock(m.resetAt)}`)
       );
     }
@@ -672,6 +800,123 @@ export function createImageGen({ state = null, config = readImageConfig({}), fet
     );
   }
 
+  const canEdit = () => on("cloudflare") && hasCf() && typeof fetchImpl === "function";
+
+  /**
+   * Edit foto lewat Cloudflare (FLUX.2 klein menerima foto referensi). prepared = hasil prepareEditInput().
+   * -> { buffer, mime, model }. Galat: Error dengan .kind dan pesan siap tampil (sama seperti generate()).
+   */
+  async function editImage(prompt, prepared) {
+    const details = [];
+    const addDetail = (line) => {
+      if (!details.includes(line)) details.push(line);
+    };
+    const fail = (kind, extra = "") => Object.assign(new Error(KIND_TEXT[kind] + (extra ? ` (${extra})` : "")), { kind, detail: details.join("\n") });
+    if (!canEdit()) throw fail("noedit");
+    const p = String(prompt ?? "").trim().slice(0, config.promptMax);
+    if (!p) throw fail("blocked");
+    let instruction = p;
+    if (translate) {
+      try {
+        const t = String((await translate(p)) ?? "").replace(/\s+/g, " ").trim();
+        if (t && t.length <= 800) instruction = t;
+      } catch (e) {
+        log.warn?.(`🖼️ [Edit] terjemahan instruksi gagal, pakai aslinya: ${e instanceof Error ? e.message : e}`);
+      }
+    }
+    const fullPrompt = `Edit the photo (image 0): ${instruction}. Keep everything else, including people's faces and the composition, unchanged unless asked.`;
+    const nextUtcMidnight = () => {
+      const d = new Date(now());
+      return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1);
+    };
+    let worst = null;
+    const rank = { quota: 4, billing: 3, auth: 2, unavailable: 1 };
+    const note = (kind) => {
+      if (!worst || rank[kind] > rank[worst]) worst = kind;
+    };
+    for (const model of config.cfEditModels || []) {
+      const accts = cfList();
+      const startAt = cfRr++ % accts.length;
+      let triedAny = false;
+      for (let i = 0; i < accts.length; i++) {
+        const acc = accts[(startAt + i) % accts.length];
+        if ((cfRest.get(acc.account) || 0) > now()) continue;
+        triedAny = true;
+        let r;
+        try {
+          const fd = new FormData();
+          fd.append("prompt", fullPrompt);
+          fd.append("width", String(prepared.outWidth));
+          fd.append("height", String(prepared.outHeight));
+          fd.append("input_image_0", new Blob([prepared.png], { type: "image/png" }), "input.png");
+          const res = await fetchImpl(`https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(acc.account)}/ai/run/${model}`, {
+            method: "POST",
+            headers: { authorization: `Bearer ${acc.token}` },
+            body: fd,
+            signal: AbortSignal.timeout(config.timeoutMs)
+          });
+          const ct = String(res.headers?.get?.("content-type") || "");
+          if (res.ok && /^image\//i.test(ct) && typeof res.arrayBuffer === "function") {
+            const buffer = Buffer.from(await res.arrayBuffer());
+            r = { status: res.status, ok: true, raw: "", json: null, buffer };
+          } else {
+            const raw = await res.text();
+            let json = null;
+            try {
+              json = JSON.parse(raw);
+            } catch {
+              /* bukan JSON */
+            }
+            r = { status: res.status, ok: res.ok, raw, json };
+          }
+        } catch (e) {
+          log.warn?.(`🖼️ [Edit] Cloudflare ${tail(acc.account)} ${model}: ${e instanceof Error ? e.message : e}`);
+          addDetail(`Cloudflare ${tail(acc.account)} ${model}: ${e instanceof Error ? e.message : e}`);
+          bump("cloudflare", false, acc.account, e instanceof Error ? e.message : String(e), true);
+          note("unavailable");
+          continue;
+        }
+        const b64 = r.json?.result?.image;
+        const buffer = r.buffer || (r.ok && typeof b64 === "string" && b64.length > 400 ? Buffer.from(b64, "base64") : null);
+        if (buffer && buffer.length > 300) {
+          bump("cloudflare", true, acc.account, "", true);
+          return { buffer, mime: mimeFromBytes(buffer) || "image/jpeg", model: `cloudflare:${model}`, text: "" };
+        }
+        const kind = r.ok ? "server" : errorKind(r.status, r.raw);
+        log.warn?.(`🖼️ [Edit] Cloudflare ${tail(acc.account)} ${model} HTTP ${r.status} (${kind}): ${String(r.raw).replace(/\s+/g, " ").slice(0, 160)}`);
+        addDetail(`Cloudflare ${tail(acc.account)} ${model}: HTTP ${r.status} ${kind} — ${apiMessage(r)}`);
+        if (/nsfw|moderat|flagged|inappropriate/i.test(r.raw)) throw fail("blocked");
+        bump("cloudflare", false, acc.account, `HTTP ${r.status} ${kind}`, true);
+        if (kind === "quota") cfRest.set(acc.account, nextUtcMidnight());
+        else if (kind === "auth") cfRest.set(acc.account, now() + 3600_000);
+        note(kind === "api" || kind === "server" ? "unavailable" : kind);
+        if (kind === "api") break; // model tidak ada/ditolak -> model berikutnya
+      }
+      if (!triedAny) {
+        addDetail("Cloudflare: semua akun sedang istirahat (jatah harian habis / token ditolak)");
+        note("quota");
+      }
+    }
+    throw fail(worst || "unavailable");
+  }
+
+  /** Satu paket edit foto untuk pemanggil: cek instruksi -> jatah -> edit (jatah dikembalikan bila gagal). -> { image } atau { error, kind, detail } */
+  async function makeEdit(prompt, prepared, kind = "group", who = "") {
+    const p = cleanPrompt(prompt);
+    if (!p) return { error: "Mau diedit jadi apa? Contoh: bot, ubah foto ini jadi hitam putih.", kind: "empty" };
+    const bad = promptProblem(p) || editPromptProblem(p);
+    if (bad) return { error: bad, kind: "refused" };
+    if (!canEdit()) return { error: KIND_TEXT.noedit, kind: "noedit" };
+    const slot = await reserve(kind, who);
+    if (!slot.ok) return { error: slot.reason, kind: "limit" };
+    try {
+      return { image: await editImage(p, prepared) };
+    } catch (e) {
+      await slot.release().catch(() => {});
+      return { error: e instanceof Error ? e.message : String(e), kind: e?.kind || "unavailable", detail: e?.detail || "" };
+    }
+  }
+
   /** Perintah /gambar dari Telegram: tanpa argumen = status; "grup on|off" = saklar; selain itu = deskripsi (ditangani pemanggil). */
   function parseCommand(arg) {
     const a = String(arg ?? "").trim();
@@ -689,5 +934,5 @@ export function createImageGen({ state = null, config = readImageConfig({}), fet
     geminiRest = 0;
   }
 
-  return { available, load, groupEnabled, setGroup, reserve, generate, make, describe, parseCommand, reconfigure, monitor, monitorText, detect: detectImageRequest, problem: promptProblem };
+  return { available, canEdit, load, groupEnabled, setGroup, reserve, generate, make, makeEdit, editImage, describe, parseCommand, reconfigure, monitor, monitorText, detect: detectImageRequest, detectEdit: detectEditRequest, problem: promptProblem };
 }

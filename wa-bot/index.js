@@ -74,7 +74,7 @@ import { MAIN_ACCOUNT, SECOND_ACCOUNT, acctFields, createAccountRouter, isPaired
 import { AsyncLocalStorage } from "node:async_hooks";
 import { qrToPng } from "./qr-png.js";
 import { createGroupList } from "./group-list.js";
-import { createImageGen, readImageConfig, imageSentNote, quotedImageNote } from "./image-gen.js";
+import { createImageGen, readImageConfig, imageSentNote, quotedImageNote, prepareEditInput, KIND_TEXT as IMAGE_KIND_TEXT } from "./image-gen.js";
 import { createEnvEditor } from "./env-edit.js";
 import { createMetaAi, readMetaAiConfig, parseMetaAiArg, unsafeTarget } from "./meta-ai.js";
 import { createWebSearch, readSearchConfig } from "./web-search.js";
@@ -315,7 +315,7 @@ KONTEKS GRUP: pesan ini datang dari GRUP WhatsApp (mis. grup keluarga), bukan ch
 // membuat gambar" lalu menyarankan DALL-E/Midjourney, padahal gambar tadi dibuat bot ini sendiri).
 const IMAGE_PROMPT_NOTE = `
 
-KEMAMPUAN GAMBAR: kamu (bot ini) BISA membuat gambar sendiri lewat pembuat gambar bawaan. Cara memintanya: anggota grup menulis "bot, buatkan gambar <deskripsi>" (mis. "bot, buatkan gambar kucing memakai topi astronot"); gambarnya dikirim langsung ke grup. JANGAN pernah mengatakan kamu tidak bisa membuat atau mengirim gambar, dan JANGAN menyarankan layanan lain (DALL-E, Midjourney, Stable Diffusion, dll). Kalau ada yang minta gambar tetapi kalimatnya belum memakai pola itu, ajari pola di atas dengan singkat. Baris riwayat berawalan "🖼️" atau kutipan berawalan "[GAMBAR" berarti BOT INI SENDIRI yang membuat dan mengirim gambar itu: jelaskan sesuai deskripsi permintaannya (kamu tidak bisa melihat pikselnya, jadi katakan "itu gambar yang tadi kubuat sesuai permintaan: ..." dan jangan mengarang detail yang tidak ada di deskripsi).`;
+KEMAMPUAN GAMBAR: kamu (bot ini) BISA membuat gambar sendiri lewat pembuat gambar bawaan. Cara memintanya: anggota grup menulis "bot, buatkan gambar <deskripsi>" (mis. "bot, buatkan gambar kucing memakai topi astronot"); gambarnya dikirim langsung ke grup. JANGAN pernah mengatakan kamu tidak bisa membuat atau mengirim gambar, dan JANGAN menyarankan layanan lain (DALL-E, Midjourney, Stable Diffusion, dll). Foto bisa diedit: anggota grup mengirim foto dengan keterangan "bot, ubah jadi hitam putih" (atau membalas foto itu dengan "bot, edit foto ini jadi ...", termasuk gambar buatan bot); hasilnya dikirim ke grup. Kamu sendiri tidak bisa melihat isi foto yang dikirim anggota. Kalau ada yang minta gambar tetapi kalimatnya belum memakai pola itu, ajari pola di atas dengan singkat. Baris riwayat berawalan "🖼️" atau kutipan berawalan "[GAMBAR" berarti BOT INI SENDIRI yang membuat dan mengirim gambar itu: jelaskan sesuai deskripsi permintaannya (kamu tidak bisa melihat pikselnya, jadi katakan "itu gambar yang tadi kubuat sesuai permintaan: ..." dan jangan mengarang detail yang tidak ada di deskripsi).`;
 
 function isGroupJid(jid) {
   return typeof jid === "string" && jid.endsWith("@g.us");
@@ -2768,8 +2768,10 @@ async function handleGroupMessage(msg, sock) {
   // Voice note di grup tidak bisa me-mention bot; yang dihitung memanggil bot = voice note yang membalas (reply) pesan bot.
   const groupAudio = audioOf(content);
   if (groupAudio && !(waVoiceCfg.inGroups && transcriber.available())) return;
-  const rawText = groupAudio ? "" : extractText({ message: content });
-  if (!groupAudio && (!rawText || rawText.startsWith("["))) return;
+  // Foto + keterangan: dulu diabaikan; sekarang hanya diproses bila keterangannya perintah EDIT FOTO ("bot, ubah jadi hitam putih").
+  const photo = groupAudio ? null : content.imageMessage || null;
+  const rawText = groupAudio ? "" : photo ? String(photo.caption ?? "") : extractText({ message: content });
+  if (!groupAudio && (!rawText || (!photo && rawText.startsWith("[")))) return;
 
   const ctx = getMessageContextInfo(content);
   const ownJids = getOwnJids(sock);
@@ -2819,6 +2821,10 @@ async function handleGroupMessage(msg, sock) {
   }
 
   const sender = msg.pushName || "Anggota grup";
+  // Edit foto: foto di pesan ini, atau foto yang DIBALAS (termasuk gambar buatan bot sendiri).
+  const quotedImage = !photo && ctx?.quotedMessage ? unwrapMessageContent(ctx.quotedMessage)?.imageMessage || null : null;
+  const editReq = imageGen.groupEnabled() ? imageGen.detectEdit(text, { hasImage: Boolean(photo || quotedImage) }) : null;
+  if (photo && !editReq) return; // foto dengan keterangan biasa: tetap diabaikan seperti sebelumnya
   let quotedText = ctx?.quotedMessage ? extractText({ message: unwrapMessageContent(ctx.quotedMessage) }) : null;
   // Mengutip GAMBAR buatan bot ini (tanpa keterangan): ambil deskripsi permintaannya dari catatan keluar, supaya AI tahu itu gambar apa.
   if (!quotedText && repliedToOwn && ctx?.stanzaId && unwrapMessageContent(ctx.quotedMessage || {})?.imageMessage) {
@@ -2872,6 +2878,21 @@ async function handleGroupMessage(msg, sock) {
 
   if (!(await isAutoReplyEnabledForContact(groupJid))) {
     console.log(`🔕 Auto-reply dimatikan khusus utk grup ${groupJid}, dilewati.`);
+    return;
+  }
+
+  // Permintaan EDIT foto ("bot, ubah jadi hitam putih" + foto/balas foto): ditangani pembuat gambar, bukan AI percakapan.
+  if (editReq) {
+    if (editReq.needsImage) {
+      const hint = "Fotonya belum ada. Kirim foto dengan keterangan perintah edit (mis. \"bot, ubah jadi hitam putih\"), atau balas (reply) foto yang mau diedit dengan: bot, edit foto ini jadi ...";
+      const sentHint = await sock.sendMessage(groupJid, { text: hint }, { quoted: msg }).catch(() => null);
+      await supabase.from("whatsapp_messages").insert({ wa_jid: groupJid, wa_name: subject || null, direction: "out", content: hint, status: "sent", wa_message_id: sentHint?.key?.id ?? null, ...acctFields(currentAccountId()) });
+      return;
+    }
+    const source = photo
+      ? { key: msg.key, message: content }
+      : { key: { remoteJid: groupJid, id: ctx.stanzaId, participant: ctx.participant }, message: unwrapMessageContent(ctx.quotedMessage) };
+    await handleImageRequestWa(sock, groupJid, { prompt: editReq.prompt }, { kind: "group", who: msg.key.participant || sender, quoted: msg, waName: subject || null, record: true, edit: { source } });
     return;
   }
 
@@ -2944,17 +2965,49 @@ async function handleGroupMessage(msg, sock) {
 // ---------------- Pembuat gambar di WhatsApp ----------------
 const imageNoticeAt = new Map(); // jenis galat -> waktu pemberitahuan terakhir ke pemilik
 async function tellOwnerImageProblem(kind, text, detail = "") {
-  if (!["billing", "auth", "nokey", "quota"].includes(kind)) return;
+  if (!["billing", "auth", "nokey", "quota", "noffmpeg", "noedit"].includes(kind)) return;
   if (Date.now() - (imageNoticeAt.get(kind) || 0) < 6 * 3600_000) return;
   imageNoticeAt.set(kind, Date.now());
+  if (kind === "noffmpeg" || kind === "noedit") {
+    await sendToOwner(`🖼️ Edit foto belum bisa dipakai: ${text}${detail ? `\n\nRincian:\n${detail}` : ""}`).catch(() => {});
+    return;
+  }
   await sendToOwner(`🖼️ Pembuat gambar bermasalah: ${text}${detail ? `\n\nRincian:\n${detail}` : ""}\n\nSolusi gratis: isi token Cloudflare lewat /env (CLOUDFLARE_ACCOUNT_ID dan CLOUDFLARE_API_TOKEN), lalu tes /gambar kucing lucu. Alternatif berbayar: saldo OpenRouter minimal $1. Kunci Gemini gratis memang tidak punya jatah untuk model gambar.`).catch(() => {});
+}
+
+/** Unduh foto yang mau diedit & perkecil (ffmpeg). -> { prepared } atau { error, kind } siap tampil. */
+async function loadEditSource(sock, source) {
+  try {
+    const img = source?.message?.imageMessage;
+    if (!img) return { error: IMAGE_KIND_TEXT.badimage, kind: "badimage" };
+    if (Number(img.fileLength) > 12 * 1024 * 1024) return { error: "Fotonya terlalu besar (maks 12 MB). Kirim versi yang lebih kecil.", kind: "badimage" };
+    let buffer = null;
+    let lastErr = null;
+    for (let attempt = 0; attempt < 2 && !buffer; attempt++) {
+      try {
+        buffer = await downloadMediaMessage(source, "buffer", {}, { logger: pino({ level: "silent" }), reuploadRequest: sock.updateMediaMessage });
+      } catch (e) {
+        lastErr = e;
+        await new Promise((r) => setTimeout(r, 700));
+      }
+    }
+    if (!buffer) {
+      console.error(`🖼️ [Edit] gagal mengunduh foto: ${describeError(lastErr)}`);
+      return { error: "Fotonya gagal diunduh (mungkin sudah kedaluwarsa). Kirim ulang fotonya, lalu minta lagi.", kind: "badimage" };
+    }
+    return { prepared: await prepareEditInput(buffer) };
+  } catch (e) {
+    const kind = e?.kind === "noffmpeg" ? "noffmpeg" : "badimage";
+    console.error(`🖼️ [Edit] foto tidak bisa disiapkan (${kind}): ${e instanceof Error ? e.message : String(e)}`);
+    return { error: IMAGE_KIND_TEXT[kind], kind, detail: e instanceof Error ? e.message : String(e) };
+  }
 }
 
 /**
  * Buat gambar lalu kirim ke chat WA (tanpa keterangan, supaya tidak terbaca sebagai pesan teks saat bot membaca chatnya sendiri).
  * kind: "owner" | "group". Dimintakan jatah dulu; gagal -> pesan alasan. group: hasil dicatat ke whatsapp_messages.
  */
-async function handleImageRequestWa(sock, jid, req, { kind = "owner", who = "", quoted = null, waName = null, record = false } = {}) {
+async function handleImageRequestWa(sock, jid, req, { kind = "owner", who = "", quoted = null, waName = null, record = false, edit = null } = {}) {
   const send = async (content) => {
     const sent = await sock.sendMessage(jid, content, quoted ? { quoted } : undefined).catch((e) => {
       console.error(`🖼️ Gagal kirim ke ${jid}:`, e instanceof Error ? e.message : String(e));
@@ -2980,7 +3033,12 @@ async function handleImageRequestWa(sock, jid, req, { kind = "owner", who = "", 
   const timer = setInterval(tick, 4500);
   let out;
   try {
-    out = await imageGen.make(req.prompt, kind, who);
+    if (edit) {
+      const src = await loadEditSource(sock, edit.source);
+      out = src.error ? src : await imageGen.makeEdit(req.prompt, src.prepared, kind, who);
+    } else {
+      out = await imageGen.make(req.prompt, kind, who);
+    }
   } finally {
     clearInterval(timer);
     sock.sendPresenceUpdate("paused", jid).catch(() => {});
@@ -2995,7 +3053,7 @@ async function handleImageRequestWa(sock, jid, req, { kind = "owner", who = "", 
   const { buffer, mime, model } = out.image;
   const sent = await send({ image: buffer, mimetype: mime || "image/png" });
   console.log(`🖼️ Gambar dibuat (${model}, ${Math.round(buffer.length / 1024)} KB) untuk ${jid}: ${String(req.prompt).slice(0, 60)}`);
-  await note(imageSentNote(req.prompt), sent);
+  await note(imageSentNote(req.prompt, { edit: Boolean(edit) }), sent);
 }
 
 /** Pemilik meminta gambar di chat pribadi ("buatkan gambar ..." / "/gambar ..."). true = ditangani. */

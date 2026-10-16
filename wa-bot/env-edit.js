@@ -30,6 +30,7 @@ export const ENV_KEYS = {
     validate: (v) => (parseCfAccounts({ CLOUDFLARE_ACCOUNTS: v }).length ? null : "format: idAkun1:token1,idAkun2:token2 (ID huruf/angka 8-64, token ≥ 8)")
   },
   CLOUDFLARE_IMAGE_MODELS: { secret: false, hint: "model gambar Cloudflare", validate: modelList },
+  CLOUDFLARE_EDIT_MODELS: { secret: false, hint: "model edit foto Cloudflare (menerima foto referensi)", validate: modelList },
   GEMINI_IMAGE_MODELS: { secret: false, hint: "model gambar Gemini", validate: modelList },
   OPENROUTER_IMAGE_MODELS: { secret: false, hint: "model gambar OpenRouter", validate: modelList },
   IMAGE_PROVIDERS: {

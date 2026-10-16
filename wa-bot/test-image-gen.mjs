@@ -561,8 +561,8 @@ ok("Telegram: /gambar status, saklar grup, kirim foto, deskripsi ditolak, tanpa 
   const idx = fs.readFileSync(new URL("./index.js", import.meta.url), "utf8");
   const grp = idx.slice(idx.indexOf("async function handleGroupMessage"), idx.indexOf("async function deliverAutoReplyVoice"));
   assert.match(grp, /imageGen\.groupEnabled\(\)/, "grup: hanya bila diizinkan");
-  assert.ok(grp.indexOf("isAutoReplyEnabledForContact") < grp.indexOf("imageGen.detect"), "grup: setelah cek izin kontak & jeda");
-  assert.ok(grp.indexOf("imageGen.detect") < grp.indexOf("generateAutoReply(groupJid)"), "gambar ditangani sebelum AI percakapan");
+  assert.ok(grp.indexOf("isAutoReplyEnabledForContact") < grp.indexOf("imageGen.detect(text)"), "grup: setelah cek izin kontak & jeda");
+  assert.ok(grp.indexOf("imageGen.detect(text)") < grp.indexOf("generateAutoReply(groupJid)"), "gambar ditangani sebelum AI percakapan");
   assert.match(grp, /kind: "group"/);
   const own = idx.slice(idx.indexOf("handleWaKasCommand(sock, jid, text))) return;"), idx.indexOf("Tutor suara (/speak"));
   assert.match(own, /isOwnerSender\(msg, isSelfChat\) && !isGroupJid\(jid\) && \(await handleWaImageCommand/, "chat pribadi: hanya pemilik");
@@ -585,8 +585,155 @@ ok("index.js: grup (diizinkan, setelah cek kontak, sebelum AI), chat pribadi han
   assert.match(idx, /imageGen\.available\(\) && imageGen\.groupEnabled\(\)\) imageNote = IMAGE_PROMPT_NOTE/, "catatan hanya bila fitur aktif untuk grup");
   assert.match(idx, /JANGAN pernah mengatakan kamu tidak bisa membuat atau mengirim gambar/);
   assert.match(idx, /quotedText = quotedImageNote\(/, "kutipan gambar buatan bot dikenali");
-  assert.match(idx, /await note\(imageSentNote\(req\.prompt\), sent\)/);
+  assert.match(idx, /await note\(imageSentNote\(req\.prompt, \{ edit: Boolean\(edit\) \}\), sent\)/);
 }
 ok("AI percakapan: tahu bisa membuat gambar, catatan riwayat jelas, kutipan gambar buatan bot dikenali");
+
+// --- EDIT FOTO (Cloudflare FLUX.2 klein dengan foto referensi)
+{
+  const { detectEditRequest, editPromptProblem, pngSize, editSize, prepareEditInput, EDIT_INPUT_MAX } = await import("./image-gen.js");
+  const { spawnSync, spawn } = await import("node:child_process");
+  const E = (t, hasImage = true) => detectEditRequest(t, { hasImage });
+
+  // pengenalan perintah
+  assert.deepEqual(E("ubah jadi hitam putih"), { prompt: "ubah jadi hitam putih", needsImage: false });
+  assert.equal(E("tolong hapus orang di belakang").prompt, "hapus orang di belakang");
+  assert.equal(E("ganti latarnya jadi pantai").needsImage, false);
+  assert.equal(E("buatkan foto ini jadi anime").prompt, "jadi anime");
+  assert.equal(E("buatkan jadi kartun").prompt, "jadi kartun");
+  assert.equal(E("make it look like a painting").needsImage, false);
+  assert.equal(E("edit foto ini: jadi hitam putih", false).needsImage, true, "tanpa foto -> minta fotonya");
+  assert.equal(E("edit foto ini jadi hitam putih", true).prompt, "jadi hitam putih");
+  for (const [t, has] of [["buatkan gambar kucing", true], ["ini foto apa?", true], ["ubah jadwal rapat jadi jam 3", false], ["halo", true], ["/gambar kucing", true], ["", true], ["kirim fotonya dong", true], ["jelaskan foto ini", true]]) {
+    assert.equal(E(t, has), null, `bukan edit: ${t}`);
+  }
+  // tanpa foto, kalimat umum berkata kerja edit TIDAK memicu petunjuk
+  assert.equal(E("hapus file lama", false), null);
+  assert.ok(editPromptProblem("buka baju orang di foto"));
+  assert.ok(editPromptProblem("ganti dengan bikini"));
+  assert.ok(editPromptProblem("tanpa busana"));
+  assert.equal(editPromptProblem("ubah jadi hitam putih"), null);
+
+  // ukuran
+  assert.deepEqual(editSize(480, 360), { width: 1024, height: 768 });
+  assert.deepEqual(editSize(100, 400), { width: 256, height: 1024 });
+  assert.deepEqual(editSize(3000, 100), { width: 1024, height: 256 });
+  assert.equal(pngSize(Buffer.from("bukan png")), null);
+  assert.deepEqual(pngSize(png).width > 0 && true, true);
+
+  // ffmpeg sungguhan (bila terpasang): foto 800x600 -> sisi terpanjang <= 480, hasil 1024x768
+  const probe = spawnSync("ffmpeg", ["-version"]);
+  if (probe.status === 0) {
+    const big = spawnSync("ffmpeg", ["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=red:s=800x600", "-frames:v", "1", "-f", "image2pipe", "-vcodec", "png", "pipe:1"], { maxBuffer: 20e6 }).stdout;
+    const jpg = spawnSync("ffmpeg", ["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=blue:s=300x900", "-frames:v", "1", "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1"], { maxBuffer: 20e6 }).stdout;
+    const a = await prepareEditInput(big);
+    assert.deepEqual([a.width, a.height, a.outWidth, a.outHeight], [480, 360, 1024, 768]);
+    assert.ok(a.png.length > 100 && Math.max(a.width, a.height) <= EDIT_INPUT_MAX);
+    const b = await prepareEditInput(jpg); // JPEG tinggi: 300x900 -> 160x480
+    assert.deepEqual([b.width, b.height], [160, 480]);
+    assert.ok(b.outHeight === 1024 && b.outWidth === 336, `${b.outWidth}x${b.outHeight}`);
+    await assert.rejects(prepareEditInput(Buffer.alloc(500, 7)), (e) => e.kind === "badimage");
+  }
+  await assert.rejects(prepareEditInput(Buffer.alloc(10)), (e) => e.kind === "badimage");
+  const missing = () => { const c = spawn("ffmpeg-tidak-ada-xyz", []); return c; };
+  await assert.rejects(prepareEditInput(Buffer.alloc(500, 1), { spawnImpl: missing }), (e) => e.kind === "noffmpeg");
+  const prepared = { png, width: 480, height: 360, outWidth: 1024, outHeight: 768 };
+
+  // pemanggilan Cloudflare: multipart, model berurutan, rotasi akun, istirahat
+  const editCfg = (over = {}) => ({ ...cfg(), keys: [], cfAccounts: [{ account: "acc111111", token: "tok1" }, { account: "acc222222", token: "tok2" }], cfEditModels: ["@cf/black-forest-labs/flux-2-klein-9b", "@cf/black-forest-labs/flux-2-klein-4b"], providers: ["cloudflare"], ...over });
+  const seen = [];
+  const okFetch = async (url, init) => { seen.push({ url, init }); return res(200, { success: true, result: { image: b64 } }); };
+  let tclock = Date.parse("2026-10-15T10:00:00Z");
+  const st = mem();
+  const g = createImageGen({ state: st, config: editCfg(), fetchImpl: okFetch, log: silent, now: () => tclock, translate: async (x) => `EN(${x})` });
+  assert.equal(g.canEdit(), true);
+  const out = await g.makeEdit("ubah jadi hitam putih", prepared, "group", "p1");
+  assert.ok(out.image && out.image.buffer.length > 300, JSON.stringify(out).slice(0, 200));
+  const call = seen[0];
+  assert.match(call.url, /accounts\/acc\w+\/ai\/run\/@cf\/black-forest-labs\/flux-2-klein-9b$/);
+  assert.ok(call.init.body instanceof FormData, "multipart/form-data");
+  assert.equal(call.init.headers["content-type"], undefined, "content-type diatur otomatis (boundary)");
+  assert.match(call.init.headers.authorization, /^Bearer tok[12]$/);
+  assert.match(String(call.init.body.get("prompt")), /EN\(ubah jadi hitam putih\)/);
+  assert.match(String(call.init.body.get("prompt")), /unchanged/);
+  assert.equal(call.init.body.get("width"), "1024");
+  assert.equal(call.init.body.get("height"), "768");
+  const f = call.init.body.get("input_image_0");
+  assert.ok(f && typeof f.size === "number" && f.size === png.length && f.type === "image/png", "foto dikirim sebagai input_image_0");
+
+  // jatah bersama pembuat gambar: dipesan & dikembalikan bila gagal
+  const q = createImageGen({ state: mem(), config: editCfg({ personDaily: 1, groupDaily: 5 }), fetchImpl: okFetch, log: silent });
+  assert.ok((await q.makeEdit("ubah jadi kartun", prepared, "group", "x")).image);
+  const lim = await q.makeEdit("ubah jadi kartun", prepared, "group", "x");
+  assert.equal(lim.kind, "limit");
+  const failing = createImageGen({ state: mem(), config: editCfg({ personDaily: 1 }), fetchImpl: async () => res(500, "boom"), log: silent });
+  const f1 = await failing.makeEdit("ubah jadi kartun", prepared, "group", "y");
+  assert.ok(f1.error && f1.kind === "unavailable");
+  const failOk = createImageGen({ state: mem(), config: editCfg({ personDaily: 1 }), fetchImpl: async () => res(500, "boom"), log: silent });
+  await failOk.makeEdit("a", prepared, "group", "y");
+  assert.equal((await failOk.reserve("group", "y")).ok, true, "jatah dikembalikan setelah gagal");
+
+  // model pertama ditolak (404) -> model kedua
+  const urls = [];
+  const second = createImageGen({ config: editCfg({ cfAccounts: [{ account: "acc111111", token: "t" }] }), fetchImpl: async (u) => { urls.push(u); return u.endsWith("9b") ? res(404, { errors: [{ message: "No route for that URI" }] }) : res(200, { result: { image: b64 } }); }, log: silent });
+  assert.ok((await second.makeEdit("ubah jadi kartun", prepared)).image);
+  assert.equal(urls.length, 2);
+  assert.match(urls[1], /klein-4b$/);
+
+  // jatah Cloudflare habis -> akun istirahat; akun lain dipakai; semua habis -> kind quota
+  let calls = 0;
+  const quotaFetch = async (u, init) => { calls++; return String(init.headers.authorization).includes("tok1") ? res(429, { errors: [{ code: 4006, message: "daily free allocation of 10,000 neurons used up" }] }) : res(200, { result: { image: b64 } }); };
+  const rot = createImageGen({ config: editCfg(), fetchImpl: quotaFetch, log: silent, now: () => tclock });
+  for (let i = 0; i < 4; i++) assert.ok((await rot.makeEdit("ubah jadi kartun", prepared, "group", `u${i}`)).image);
+  const all = createImageGen({ config: editCfg(), fetchImpl: async () => res(429, { errors: [{ code: 4006, message: "daily free allocation neurons" }] }), log: silent, now: () => tclock });
+  const al = await all.makeEdit("ubah jadi kartun", prepared);
+  assert.equal(al.kind, "quota");
+  assert.ok(/Cloudflare/.test(al.detail || ""));
+
+  // moderasi, respons gambar biner, penolakan filter, tanpa Cloudflare
+  const mod = createImageGen({ config: editCfg(), fetchImpl: async () => res(400, { errors: [{ message: "NSFW content flagged" }] }), log: silent });
+  assert.equal((await mod.makeEdit("ubah jadi kartun", prepared)).kind, "blocked");
+  const bin = createImageGen({ config: editCfg(), log: silent, fetchImpl: async () => ({ status: 200, ok: true, headers: { get: () => "image/png" }, arrayBuffer: async () => png.buffer.slice(png.byteOffset, png.byteOffset + png.byteLength), text: async () => "" }) });
+  const bo = await bin.makeEdit("ubah jadi kartun", prepared);
+  assert.ok(bo.image && bo.image.mime === "image/png");
+  assert.equal((await g.makeEdit("buka baju", prepared)).kind, "refused");
+  assert.equal((await g.makeEdit("gambar telanjang", prepared)).kind, "refused");
+  assert.equal((await g.makeEdit("", prepared)).kind, "empty");
+  const noCf = createImageGen({ config: cfg(), fetchImpl: okFetch, log: silent });
+  assert.equal(noCf.canEdit(), false);
+  assert.equal((await noCf.makeEdit("ubah jadi kartun", prepared)).kind, "noedit");
+  const noProv = createImageGen({ config: editCfg({ providers: ["gemini"] }), fetchImpl: okFetch, log: silent });
+  assert.equal(noProv.canEdit(), false, "Cloudflare dimatikan lewat IMAGE_PROVIDERS");
+
+  // pemantauan: edit dihitung terpisah, tidak masuk perkiraan neuron
+  const mon = g.monitor();
+  const total = mon.cloudflare.reduce((acc, a) => ({ ok: acc.ok + a.ok, edits: acc.edits + a.edits, used: acc.used + a.usedNeurons }), { ok: 0, edits: 0, used: 0 });
+  assert.deepEqual(total, { ok: 0, edits: 1, used: 0 });
+  assert.match(g.monitorText(), /1 edit foto/);
+  assert.equal(readImageConfig({ CLOUDFLARE_EDIT_MODELS: "@cf/x/y" }).cfEditModels[0], "@cf/x/y");
+  assert.ok(readImageConfig({}).cfEditModels[0].endsWith("flux-2-klein-9b"));
+}
+ok("edit foto: perintah dikenali ketat, foto diperkecil (ffmpeg), multipart ke FLUX.2 klein, jatah, rotasi akun, moderasi, pemantauan terpisah");
+
+// --- pemasangan edit foto di index.js (pemeriksaan teks sumber)
+{
+  const idx = fs.readFileSync(new URL("./index.js", import.meta.url), "utf8");
+  const grp = idx.slice(idx.indexOf("async function handleGroupMessage"), idx.indexOf("async function deliverAutoReplyVoice"));
+  assert.match(grp, /const photo = groupAudio \? null : content\.imageMessage/, "foto + keterangan dibaca");
+  assert.match(grp, /if \(photo && !editReq\) return;/, "foto dengan keterangan biasa tetap diabaikan");
+  assert.match(grp, /imageGen\.groupEnabled\(\) \? imageGen\.detectEdit\(text, \{ hasImage: Boolean\(photo \|\| quotedImage\) \}\)/, "edit hanya bila fitur gambar grup aktif");
+  assert.ok(grp.indexOf("isAutoReplyEnabledForContact") < grp.indexOf("if (editReq) {"), "edit setelah cek izin kontak");
+  assert.ok(grp.indexOf("if (editReq) {") < grp.indexOf("imageGen.detect(text)"), "edit dicek sebelum pembuatan gambar & AI");
+  assert.ok(grp.indexOf("if (editReq) {") < grp.indexOf("generateAutoReply(groupJid)"));
+  assert.match(grp, /edit: \{ source \}/);
+  assert.match(grp, /ctx\.stanzaId/, "membalas foto: unduh foto yang dikutip");
+  assert.match(idx, /prepareEditInput\(buffer\)/);
+  assert.match(idx, /imageSentNote\(req\.prompt, \{ edit: Boolean\(edit\) \}\)/);
+  assert.match(idx, /"noffmpeg", "noedit"/, "pemilik diberi tahu bila ffmpeg tidak ada");
+  const { imageSentNote, quotedImageNote } = await import("./image-gen.js");
+  assert.match(quotedImageNote(imageSentNote("ubah jadi hitam putih", { edit: true })), /^\[GAMBAR hasil EDIT foto oleh bot ini, instruksinya: "ubah jadi hitam putih"\]$/);
+  assert.match(idx, /Foto bisa diedit/, "AI percakapan tahu fitur edit");
+}
+ok("index.js: foto di grup hanya diproses bila perintah edit, setelah izin, sebelum AI; catatan riwayat edit dikenali");
 
 console.log(`\n${n} kelompok tes lulus ✅`);
