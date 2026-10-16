@@ -958,6 +958,26 @@ Hanya voice note, tanpa teks terjemahan. Jawaban yang memuat tautan, kode, tabel
 
 Catatan: voice note MASUK di grup (balasan ke pesan bot) dikenali sebagai bahasa Indonesia (`VOICE_LANGUAGE=id`), jadi anggota grup yang membalas dengan voice note berbahasa Korea/Arab belum terbaca dengan baik; mereka bisa mengetik.
 
+## Jawab pakai teks, tabel yang terbaca, dan PDF (grup & chat)
+
+**Minta teks, bukan suara.** Saat `/voice wag on`, bot biasanya membalas dengan voice note. Tulis di pesan: "bot, buatkan prompt ..., **jawab pakai teks**" (juga: "teks saja", "jangan pakai suara/voice", "tanpa voice", "bukan voice", "reply in text", "text only") maka **pesan itu** dijawab teks. Pesan berikutnya kembali mengikuti `/voice wag` (pengaturan tidak berubah).
+
+**Tabel di gelembung WhatsApp.** WhatsApp tidak punya tabel, jadi tabel dari AI otomatis ditata ulang:
+- tabel sempit (lebar total sampai 34 huruf) → blok monospace berkolom rata;
+- tabel dua kolom → daftar `• *Istilah* — penjelasan`;
+- tabel lebar → "kartu" per baris (judul tebal, lalu `• Kolom: nilai`); kolom "No" dipakai sebagai nomor.
+
+Judul `## ...` menjadi *tebal*, `**x**` menjadi `*x*`, garis `---` dibuang, `[teks](url)` menjadi `teks (url)`. Blok kode tidak diubah. Berlaku untuk balasan teks di grup maupun chat pribadi.
+
+**Jadikan PDF (khusus grup).**
+- `bot, jelaskan alur sertifikasi halal dalam bentuk PDF` → AI menjawab, lalu bot mengirim berkas PDF (bukan teks/suara).
+- Balas (reply) jawaban bot dengan `bot, jadikan pdf` → jawaban itu diubah jadi PDF tanpa memanggil AI lagi (jawaban yang masih diingat bot: 80 terakhir sejak bot menyala).
+- PDF A4 berisi judul, daftar, tabel sungguhan (header diulang di tiap halaman), blok kode, dan nomor halaman. Dibuat tanpa pustaka tambahan, jadi **tidak perlu `npm install`**.
+- Batas: hanya huruf Latin (emoji dibuang; Arab/Korea tampil `?`). Bila PDF gagal dibuat, jawaban tetap dikirim sebagai teks.
+- Permintaan yang bukan perintah membuat PDF ("apa itu pdf", "baca pdf ini", "kirim pdf peraturan PMK 62") tidak memicu fitur ini.
+
+Setelah patch: cukup `/restart` (tidak perlu `/rilis`).
+
 ## Pembuat gambar (`/gambar`, "buatkan gambar ...")
 
 Bot bisa membuat gambar dari deskripsi memakai Gemini ("Nano Banana"), dengan `GEMINI_API_KEYS` yang sama. Tidak ada kunci baru.

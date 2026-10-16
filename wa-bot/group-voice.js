@@ -62,6 +62,23 @@ export function detectRequestedLang(text) {
   return null;
 }
 
+/**
+ * Anggota grup meminta jawaban TEKS ("bot, jawab pakai teks", "tolong teks saja", "jangan pakai suara", "reply in text") -> true.
+ * Dipakai untuk melewati balasan suara pada pesan itu saja (pengaturan /voice wag tidak berubah).
+ */
+const TEXT_ONLY_RES = [
+  /\b(?:jawab|balas|bales|kirim|tulis|ketik|jelaskan|tampilkan|berikan|kasih|beri|tuliskan|ketikkan)(?:kan|in)?\b[^.!?\n]{0,30}?\b(?:pakai|pake|dengan|via|lewat|dalam|secara|bentuk|berupa|format|sebagai|jadi)?\s*(?:teks|text|tulisan|ketikan)\b/i,
+  /\b(?:pakai|pake|dengan|via|lewat|secara|dalam bentuk|berupa)\s+(?:teks|text|tulisan|ketikan)\b/i,
+  /\b(?:teks|text|tulisan|ketikan)\s+(?:saja|aja|doang|dulu|ya|dong|please|pls)\b/i,
+  /\b(?:jangan|ga usah|gak usah|nggak usah|enggak usah|tidak usah|tanpa|stop|bukan)\s+(?:usah\s+)?(?:pakai\s+|pake\s+|kirim\s+|dengan\s+|dalam bentuk\s+)?(?:suara|voice|vn|audio|rekaman|voice note)\b/i,
+  /\b(?:text only|in text|as text|reply in text|answer in text|no voice|without voice|text please|type it)\b/i
+];
+export function detectTextOnlyRequest(text) {
+  const t = String(text ?? "").replace(/\s+/g, " ").trim();
+  if (!t) return false;
+  return TEXT_ONLY_RES.some((re) => re.test(t));
+}
+
 export function readGroupVoiceConfig(env = process.env, ttsMax = 700) {
   const num = (v, d) => (Number(v) > 0 ? Number(v) : d);
   return {

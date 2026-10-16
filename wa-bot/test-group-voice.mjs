@@ -1,6 +1,6 @@
 // Tes balasan suara grup WhatsApp (/voice wag on|off). Jalankan: node test-group-voice.mjs
 import assert from "node:assert/strict";
-import { parseVoiceArg, decideGroupVoice, createGroupVoice, readGroupVoiceConfig, STATE_KEY, LANG_STATE_KEY, parseLangWord, detectRequestedLang, langInstruction, VOICE_LANGS } from "./group-voice.js";
+import { parseVoiceArg, decideGroupVoice, createGroupVoice, readGroupVoiceConfig, STATE_KEY, LANG_STATE_KEY, parseLangWord, detectRequestedLang, detectTextOnlyRequest, langInstruction, VOICE_LANGS } from "./group-voice.js";
 import fs from "node:fs";
 import { createTelegram } from "./telegram.js";
 
@@ -237,5 +237,26 @@ ok("Telegram: /voice wag kor|arb|jawa|eng|id|auto memilih bahasa (menyalakan sua
   assert.ok(src.slice(i - 400, i).includes("groupVoice.enabled()"), "hanya bila balasan grup berupa suara");
 }
 ok("index.js: bahasa diatur sebelum AI menjawab, hanya saat suara grup menyala");
+
+// --- "jawab pakai teks" -> bukan suara
+for (const t of ["bot, jawab pakai teks ya", "teks saja dong", "jangan pakai suara", "jangan pake voice", "tanpa voice", "bukan voice", "reply in text", "text only please", "buatkan prompt, jawab pakai teks"]) {
+  assert.equal(detectTextOnlyRequest(t), true, `harus teks: ${t}`);
+}
+for (const t of ["jelaskan alur halal", "apa itu teks proklamasi", "bot kirim suara dong", "", null, undefined]) {
+  assert.equal(detectTextOnlyRequest(t), false, `bukan permintaan teks: ${t}`);
+}
+ok("detectTextOnlyRequest: 'jawab pakai teks', 'jangan pakai suara', 'text only' dikenali; pertanyaan biasa tidak");
+
+{
+  const src = fs.readFileSync(new URL("./index.js", import.meta.url), "utf8");
+  assert.match(src, /const textOnly = !groupAudio && detectTextOnlyRequest\(text\)/);
+  assert.match(src, /groupVoice\.enabled\(\) && !textOnly && !pdfReq/, "bahasa suara tidak diatur bila minta teks");
+  assert.match(src, /groupVoice\.enabled\(\) && !textOnly\) \{/, "jalur suara dilewati bila minta teks");
+  const i = src.indexOf("groupVoice.enabled() && !textOnly) {");
+  assert.ok(i > src.indexOf("result = await generateAutoReply(groupJid);"), "keputusan suara sesudah jawaban dibuat");
+  assert.match(src, /TEXT_PROMPT_NOTE/);
+  assert.ok(src.slice(i, i + 900).includes("deliverAutoReplyText") || src.indexOf("deliverAutoReplyText(", i) > i, "jatuh ke balasan teks");
+}
+ok("index.js: permintaan teks melewati jalur suara (hanya untuk pesan itu), AI diberi catatan tanpa tabel/pdf");
 
 console.log(`\nSemua ${n} kelompok tes suara grup lulus.`);

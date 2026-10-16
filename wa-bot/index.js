@@ -69,7 +69,9 @@ import { createFallbackChain, readFallbackConfig } from "./llm-fallback.js";
 import { classifyRoute, createAiRoute, parseRouteCommand } from "./ai-route.js";
 import { createNodin, parseNodinCommand, readNodinConfig } from "./nodin.js";
 import { createKas, parseKasCommand, readKasConfig } from "./kas.js";
-import { createGroupVoice, detectRequestedLang, langInstruction, readGroupVoiceConfig } from "./group-voice.js";
+import { createGroupVoice, detectRequestedLang, detectTextOnlyRequest, langInstruction, readGroupVoiceConfig } from "./group-voice.js";
+import { formatForWhatsApp, detectPdfRequest } from "./wa-format.js";
+import { buildPdf, titleFromText, pdfFileName } from "./pdf-doc.js";
 import { MAIN_ACCOUNT, SECOND_ACCOUNT, acctFields, createAccountRouter, isPairedCreds, isStalePairing, pairingInstructions, personaPrompt, readSecondAccountConfig } from "./wa-accounts.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { qrToPng } from "./qr-png.js";
@@ -315,7 +317,16 @@ KONTEKS GRUP: pesan ini datang dari GRUP WhatsApp (mis. grup keluarga), bukan ch
 // membuat gambar" lalu menyarankan DALL-E/Midjourney, padahal gambar tadi dibuat bot ini sendiri).
 const IMAGE_PROMPT_NOTE = `
 
-KEMAMPUAN GAMBAR: kamu (bot ini) BISA membuat gambar sendiri lewat pembuat gambar bawaan. Cara memintanya: anggota grup menulis "bot, buatkan gambar <deskripsi>" (mis. "bot, buatkan gambar kucing memakai topi astronot"); gambarnya dikirim langsung ke grup. JANGAN pernah mengatakan kamu tidak bisa membuat atau mengirim gambar, dan JANGAN menyarankan layanan lain (DALL-E, Midjourney, Stable Diffusion, dll). Foto bisa diedit: anggota grup mengirim foto dengan keterangan "bot, ubah jadi hitam putih" (atau membalas foto itu dengan "bot, edit foto ini jadi ...", termasuk gambar buatan bot); hasilnya dikirim ke grup. Kamu sendiri tidak bisa melihat isi foto yang dikirim anggota. Kalau ada yang minta gambar tetapi kalimatnya belum memakai pola itu, ajari pola di atas dengan singkat. Baris riwayat berawalan "🖼️" atau kutipan berawalan "[GAMBAR" berarti BOT INI SENDIRI yang membuat dan mengirim gambar itu: jelaskan sesuai deskripsi permintaannya (kamu tidak bisa melihat pikselnya, jadi katakan "itu gambar yang tadi kubuat sesuai permintaan: ..." dan jangan mengarang detail yang tidak ada di deskripsi).`;
+KEMAMPUAN GAMBAR: kamu (bot ini) BISA membuat gambar sendiri lewat pembuat gambar bawaan. Cara memintanya: anggota grup menulis "bot, buatkan gambar <deskripsi>" (mis. "bot, buatkan gambar kucing memakai topi astronot"); gambarnya dikirim langsung ke grup. JANGAN pernah mengatakan kamu tidak bisa membuat atau mengirim gambar, dan JANGAN menyarankan layanan lain (DALL-E, Midjourney, Stable Diffusion, dll). Foto bisa diedit: anggota grup mengirim foto dengan keterangan "bot, ubah jadi hitam putih" (atau membalas foto itu dengan "bot, edit foto ini jadi ...", termasuk gambar buatan bot); hasilnya dikirim ke grup. Kamu sendiri tidak bisa melihat isi foto yang dikirim anggota. Kalau ada yang minta gambar tetapi kalimatnya belum memakai pola itu, ajari pola di atas dengan singkat. Kamu juga BISA mengirim jawaban sebagai berkas PDF: anggota cukup menulis "bot, ... dalam bentuk PDF" atau membalas jawabanmu dengan "bot, jadikan pdf"; jangan pernah bilang tidak bisa membuat PDF. Baris riwayat berawalan "🖼️" atau kutipan berawalan "[GAMBAR" berarti BOT INI SENDIRI yang membuat dan mengirim gambar itu: jelaskan sesuai deskripsi permintaannya (kamu tidak bisa melihat pikselnya, jadi katakan "itu gambar yang tadi kubuat sesuai permintaan: ..." dan jangan mengarang detail yang tidak ada di deskripsi).`;
+
+// Permintaan "jadikan PDF": sistem yang membuat berkas PDF dari jawabanmu -- AI cukup menulis isinya.
+const PDF_PROMPT_NOTE = `
+
+PERMINTAAN PDF: jawabanmu akan DIKIRIM OLEH SISTEM sebagai berkas PDF. Jadi tulis LANGSUNG isi dokumennya (lengkap, rapi, terstruktur; boleh judul "# ...", daftar, dan tabel markdown). JANGAN bilang kamu tidak bisa membuat PDF dan jangan menyarankan aplikasi lain. Jangan menambah basa-basi seperti "berikut PDF-nya".`;
+// Permintaan "jawab pakai teks": jawaban tertulis (bukan untuk dibacakan).
+const TEXT_PROMPT_NOTE = `
+
+PERMINTAAN TEKS: penanya minta jawaban TERTULIS (bukan suara). Tulis jawaban lengkap sebagai teks biasa yang enak dibaca/disalin (boleh memakai daftar atau tabel); tidak perlu disesuaikan untuk dibacakan.`;
 
 function isGroupJid(jid) {
   return typeof jid === "string" && jid.endsWith("@g.us");
@@ -327,13 +338,15 @@ function withGroupNote(basePrompt, jid) {
   if (!isGroupJid(jid)) return base;
   // Balasan grup berupa suara: bahasa jawaban dipaksa (/voice wag kor ...) atau diminta anggota grup ("jawab pakai bahasa Korea").
   const replyLang = waAccountContext.getStore()?.replyLang;
+  const ctxFlags = waAccountContext.getStore();
+  const fileNote = ctxFlags?.wantPdf ? PDF_PROMPT_NOTE : ctxFlags?.textOnly ? TEXT_PROMPT_NOTE : "";
   let imageNote = "";
   try {
     if (imageGen.available() && imageGen.groupEnabled()) imageNote = IMAGE_PROMPT_NOTE;
   } catch {
     /* pembuat gambar belum siap: tanpa catatan */
   }
-  return `${base}${GROUP_PROMPT_NOTE}${imageNote}${replyLang ? langInstruction(replyLang) : ""}`;
+  return `${base}${GROUP_PROMPT_NOTE}${imageNote}${fileNote}${replyLang ? langInstruction(replyLang) : ""}`;
 }
 
 // Buang awalan "Nama: " & baris "(mengutip: ...)" supaya pencarian dokumen/web
@@ -1873,19 +1886,35 @@ async function processRetryQueue(socks) {
 
 // Kirim teks balasan AI ke kontak + catat ke whatsapp_messages + catat token.
 // Dipakai balasan normal (sendAutoReply) DAN balasan ulang dari antrean.
+// Teks ASLI (markdown) balasan bot per id pesan WA -- untuk "jadikan pdf" pada balasan yang tabelnya sudah dirapikan di WhatsApp.
+const replySource = new Map();
+function rememberReplySource(id, markdown) {
+  if (!id || !markdown) return;
+  replySource.set(id, String(markdown));
+  while (replySource.size > 80) replySource.delete(replySource.keys().next().value);
+}
+
 async function deliverAutoReplyText(sock, jid, result, logLabel = "🤖 Auto-reply", { quoted = null, waName = null } = {}) {
+  // Tabel markdown -> tampilan yang terbaca di gelembung WhatsApp (jangan sampai perapian menggagalkan pengiriman).
+  let outText = result.reply;
   try {
-    const sent = await sock.sendMessage(jid, { text: result.reply }, quoted ? { quoted } : undefined);
+    outText = formatForWhatsApp(result.reply) || result.reply;
+  } catch (e) {
+    console.error("Gagal merapikan balasan untuk WhatsApp:", e instanceof Error ? e.message : String(e));
+  }
+  try {
+    const sent = await sock.sendMessage(jid, { text: outText }, quoted ? { quoted } : undefined);
+    rememberReplySource(sent?.key?.id, result.reply);
     await supabase.from("whatsapp_messages").insert({
       wa_jid: jid,
       wa_name: waName,
       direction: "out",
-      content: result.reply,
+      content: outText,
       status: "sent",
       wa_message_id: sent?.key?.id ?? null,
       ...acctFields(currentAccountId())
     });
-    console.log(`${logLabel} ke ${jid}: ${result.reply.slice(0, 60)}`);
+    console.log(`${logLabel} ke ${jid}: ${outText.slice(0, 60)}`);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error(`Gagal kirim auto-reply ke ${jid}:`, msg);
@@ -2839,6 +2868,10 @@ async function handleGroupMessage(msg, sock) {
   }
   if (!groupAudio && !text && !quotedText) return;
   if (!groupAudio && !text) text = "(menandai tanpa pertanyaan, jawab/jelaskan pesan yang dikutip)";
+  // "jawab pakai teks" -> pesan ini dijawab teks walau /voice wag on. "dalam bentuk PDF" / "jadikan pdf" -> jawaban dikirim sebagai berkas PDF.
+  const textOnly = !groupAudio && detectTextOnlyRequest(text);
+  const pdfReq = groupAudio ? null : detectPdfRequest(text);
+  if (pdfReq && !pdfReq.only && pdfReq.rest) text = pdfReq.rest;
 
   // --- Jeda per orang (cegah spam & hemat kuota)
   const senderKey = `${groupJid}|${msg.key.participant || sender}`;
@@ -2884,15 +2917,29 @@ async function handleGroupMessage(msg, sock) {
   // Permintaan EDIT foto ("bot, ubah jadi hitam putih" + foto/balas foto): ditangani pembuat gambar, bukan AI percakapan.
   if (editReq) {
     if (editReq.needsImage) {
-      const hint = "Fotonya belum ada. Kirim foto dengan keterangan perintah edit (mis. \"bot, ubah jadi hitam putih\"), atau balas (reply) foto yang mau diedit dengan: bot, edit foto ini jadi ...";
-      const sentHint = await sock.sendMessage(groupJid, { text: hint }, { quoted: msg }).catch(() => null);
-      await supabase.from("whatsapp_messages").insert({ wa_jid: groupJid, wa_name: subject || null, direction: "out", content: hint, status: "sent", wa_message_id: sentHint?.key?.id ?? null, ...acctFields(currentAccountId()) });
+      await replyGroupText(sock, groupJid, msg, subject, "Fotonya belum ada. Kirim foto dengan keterangan perintah edit (mis. \"bot, ubah jadi hitam putih\"), atau balas (reply) foto yang mau diedit dengan: bot, edit foto ini jadi ...");
       return;
     }
     const source = photo
       ? { key: msg.key, message: content }
       : { key: { remoteJid: groupJid, id: ctx.stanzaId, participant: ctx.participant }, message: unwrapMessageContent(ctx.quotedMessage) };
     await handleImageRequestWa(sock, groupJid, { prompt: editReq.prompt }, { kind: "group", who: msg.key.participant || sender, quoted: msg, waName: subject || null, record: true, edit: { source } });
+    return;
+  }
+
+  // "bot, jadikan pdf" (tanpa pertanyaan baru): ubah jawaban yang DIBALAS menjadi PDF, tanpa memanggil AI.
+  if (pdfReq?.only) {
+    const fromReply = ctx?.stanzaId ? replySource.get(ctx.stanzaId) : null;
+    const quotedPlain = quotedText && !quotedText.startsWith("[") ? quotedText : null;
+    const source = fromReply || quotedPlain;
+    if (!source) {
+      await replyGroupText(sock, groupJid, msg, subject, "Balas (reply) jawaban yang mau dijadikan PDF dengan: bot, jadikan pdf. Atau tulis pertanyaannya sekalian, mis.: bot, jelaskan alur sertifikasi halal dalam bentuk PDF.");
+      return;
+    }
+    sock.sendPresenceUpdate("composing", groupJid).catch(() => {});
+    const ok = await deliverGroupPdf(sock, groupJid, source, { quoted: msg, waName: subject || null });
+    sock.sendPresenceUpdate("paused", groupJid).catch(() => {});
+    if (!ok) await replyGroupText(sock, groupJid, msg, subject, "Maaf, PDF-nya gagal dibuat. Coba lagi sebentar lagi ya.");
     return;
   }
 
@@ -2906,8 +2953,15 @@ async function handleGroupMessage(msg, sock) {
   }
 
   sock.sendPresenceUpdate("composing", groupJid).catch(() => {});
+  {
+    const flags = waAccountContext.getStore();
+    if (flags) {
+      flags.wantPdf = Boolean(pdfReq);
+      flags.textOnly = textOnly && !pdfReq;
+    }
+  }
   // Bahasa jawaban (hanya relevan bila balasan grup berupa suara): permintaan di pesan ini > pengaturan /voice wag > otomatis.
-  if (groupVoice.enabled()) {
+  if (groupVoice.enabled() && !textOnly && !pdfReq) {
     const wantedLang = detectRequestedLang(text) || groupVoice.lang();
     const acctCtx = waAccountContext.getStore();
     if (acctCtx && wantedLang) {
@@ -2952,14 +3006,58 @@ async function handleGroupMessage(msg, sock) {
   }
   sock.sendPresenceUpdate("paused", groupJid).catch(() => {});
   if (!result || !result.reply) return;
+  // Diminta PDF: kirim jawaban sebagai berkas. Gagal membuat PDF -> tetap dikirim sebagai teks.
+  if (pdfReq && (await deliverGroupPdf(sock, groupJid, result.reply, { quoted: msg, waName: subject || null, result }))) return;
   // /voice wag on: balasan grup berupa voice note saja (tanpa teks). Gagal/tidak layak dibacakan -> tetap dikirim teks.
-  if (groupVoice.enabled()) {
+  // Penanya minta "jawab pakai teks" -> tidak dibacakan (hanya untuk pesan ini).
+  if (groupVoice.enabled() && !textOnly) {
     sock.sendPresenceUpdate("recording", groupJid).catch(() => {});
     const voice = await groupVoice.tryVoice(result.reply);
     sock.sendPresenceUpdate("paused", groupJid).catch(() => {});
     if (voice && (await deliverAutoReplyVoice(sock, groupJid, result, voice, { quoted: msg, waName: subject || null }))) return;
   }
   await deliverAutoReplyText(sock, groupJid, result, "👥 Balasan grup", { quoted: msg, waName: subject || null });
+}
+
+/** Balas pesan di grup dengan teks biasa & catat ke riwayat. */
+async function replyGroupText(sock, groupJid, msg, subject, text) {
+  const sent = await sock.sendMessage(groupJid, { text }, { quoted: msg }).catch((e) => {
+    console.error(`Gagal kirim pesan ke ${groupJid}:`, e instanceof Error ? e.message : String(e));
+    return null;
+  });
+  const { error } = await supabase.from("whatsapp_messages").insert({ wa_jid: groupJid, wa_name: subject || null, direction: "out", content: text, status: "sent", wa_message_id: sent?.key?.id ?? null, ...acctFields(currentAccountId()) });
+  if (error) console.error("Gagal catat balasan grup:", error.message);
+  return sent;
+}
+
+/**
+ * Ubah teks (markdown) menjadi PDF lalu kirim sebagai dokumen ke grup. true = terkirim. Tidak pernah melempar galat.
+ * result (opsional) = hasil AI: token pemakaiannya dicatat.
+ */
+async function deliverGroupPdf(sock, jid, markdown, { quoted = null, waName = null, result = null } = {}) {
+  try {
+    const title = titleFromText(markdown);
+    const when = `${formatClockInTimezone(Date.now())} ${WA_TIMEZONE_LABEL}`;
+    const pdf = buildPdf(markdown, { title, subtitle: `Dibuat oleh Ayyubi • ${new Date().toLocaleDateString("id-ID", { day: "numeric", month: "long", year: "numeric", timeZone: WA_TIMEZONE })} ${when}` });
+    const sent = await sock.sendMessage(jid, { document: pdf, mimetype: "application/pdf", fileName: pdfFileName(title), caption: title }, quoted ? { quoted } : undefined);
+    rememberReplySource(sent?.key?.id, markdown);
+    const { error } = await supabase.from("whatsapp_messages").insert({
+      wa_jid: jid,
+      wa_name: waName,
+      direction: "out",
+      content: `📄 [BOT mengirim PDF "${title.replace(/"/g, "'")}"]\n${formatForWhatsApp(markdown).slice(0, 1500)}`,
+      status: "sent",
+      wa_message_id: sent?.key?.id ?? null,
+      ...acctFields(currentAccountId())
+    });
+    if (error) console.error("Gagal catat PDF terkirim:", error.message);
+    console.log(`📄 PDF "${title}" (${Math.round(pdf.length / 1024)} KB) terkirim ke ${jid}`);
+    if (result) await recordTokenUsage(result.tokensUsed, result.costUsd);
+    return true;
+  } catch (e) {
+    console.error(`📄 Gagal membuat/mengirim PDF ke ${jid}:`, e instanceof Error ? e.message : String(e));
+    return false;
+  }
 }
 
 // ---------------- Pembuat gambar di WhatsApp ----------------
@@ -3069,6 +3167,7 @@ async function handleWaImageCommand(sock, jid, msg, text) {
 async function deliverAutoReplyVoice(sock, jid, result, voice, { quoted = null, waName = null } = {}) {
   try {
     const sent = await sock.sendMessage(jid, { audio: voice.ogg, mimetype: "audio/ogg; codecs=opus", ptt: true }, quoted ? { quoted } : undefined);
+    rememberReplySource(sent?.key?.id, result.reply);
     // Yang dicatat tetap TEKS jawabannya: konteks percakapan grup untuk AI tidak boleh kosong, dan id pesan suara dipakai
     // untuk mengenali balasan-ke-bot (voice note itu bisa di-reply).
     await supabase.from("whatsapp_messages").insert({
