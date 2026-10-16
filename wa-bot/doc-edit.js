@@ -9,7 +9,7 @@
 //   numberDiff(asli, hasil)        angka yang berubah setelah suntingan AI (pagar pengaman terhadap AI yang mengarang)
 //   buildEditPrompt()              instruksi sistem untuk suntingan AI
 //
-// PDF tidak bisa diedit "di tempat": isinya dibaca (pdf-extract.js), diubah, lalu dikirim sebagai berkas BARU (tata letak asli tidak ikut).
+// PDF + ganti kata: ditimpa langsung (pdf-overlay.js: kotak putih + kata baru). Cadangan/permintaan AI: isinya dibaca (pdf-extract.js), diubah, lalu dikirim sebagai berkas BARU (tata letak asli tidak ikut).
 // ================================================================
 import { readZip } from "./zip-lite.js";
 import { buildZip } from "./nodin.js";

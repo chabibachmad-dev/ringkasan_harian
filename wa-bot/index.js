@@ -76,6 +76,7 @@ import { pdfBufferToMarkdown, PDF_MAX_BYTES } from "./pdf-extract.js";
 import { detectEditRequest, replaceInText, replaceInDocx, docxToMarkdown, numberDiff, buildEditPrompt, buildEditUserMessage, unwrapFence, hasESignature, AI_EDIT_MAX_CHARS } from "./doc-edit.js";
 import { createPersonaVoice } from "./persona-voice.js";
 import { buildPdf, titleFromText, pdfFileName } from "./pdf-doc.js";
+import { overlayReplacePdf } from "./pdf-overlay.js";
 import { MAIN_ACCOUNT, SECOND_ACCOUNT, acctFields, createAccountRouter, isPairedCreds, isStalePairing, pairingInstructions, personaPrompt, readSecondAccountConfig } from "./wa-accounts.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { qrToPng } from "./qr-png.js";
@@ -3266,10 +3267,38 @@ async function aiEditMarkdown(instruction, markdown) {
 const E_SIGN_WARN = "⚠️ Dokumen asli memuat tanda tangan elektronik. Hasil suntingan ini BUKAN dokumen bertanda tangan elektronik yang sah (tanda tangan, QR code, dan sertifikatnya tidak berlaku lagi); jangan dipakai sebagai pengganti dokumen asli.";
 const shortQ = (s, n = 40) => `"${String(s).length > n ? String(s).slice(0, n - 1) + "…" : s}"`;
 
+const OVERLAY_ERR_NOTE = {
+  encrypted: "PDF-nya terkunci/terenkripsi, jadi tidak bisa ditimpa langsung.",
+  unsupported: "Struktur PDF-nya belum bisa ditimpa langsung.",
+  badpdf: "Struktur PDF-nya tidak terbaca untuk ditimpa langsung.",
+  toobig: "PDF-nya terlalu besar untuk ditimpa langsung.",
+  timeout: "Pembacaan posisi tulisan kelamaan.",
+  notool: "Alat pembaca posisi tulisan (poppler) belum terpasang."
+};
+
+/**
+ * Coba ganti kata langsung di PDF (kotak putih + tulisan baru). -> { result } bila berhasil,
+ * { note } bila harus pakai cara buat-ulang, { stop } (pesan) bila kata berkutip memang tidak ada.
+ */
+async function tryPdfOverlay(buffer, pairs, name) {
+  let r;
+  try {
+    r = await overlayReplacePdf(buffer, pairs);
+  } catch (e) {
+    console.error(`📝 [Ubah isi] timpa PDF gagal untuk ${name}: ${e instanceof Error ? e.message : String(e)}`);
+    return { note: `${OVERLAY_ERR_NOTE[e?.kind] || "PDF-nya gagal ditimpa langsung."} Sebagai gantinya dibuat berkas baru dari isinya.` };
+  }
+  if (r.buf) return { result: r };
+  if (r.multiline.length) return { note: `Kata ${r.multiline.map((s) => shortQ(s)).join(", ")} terbagi di dua baris atau lebih, jadi tidak bisa ditimpa langsung. Sebagai gantinya dibuat berkas baru dari isinya.` };
+  if (r.notes.length) return { note: `${r.notes[0]} Sebagai gantinya dibuat berkas baru dari isinya.` };
+  return {}; // tidak ketemu di PDF: biarkan jalur lama (teks hasil ekstraksi, atau AI) yang memutuskan
+}
+
 /**
  * Ubah isi PDF / Word yang dibagikan di grup. Selalu menjawab: berkas BARU "<nama>-revisi", atau alasan kenapa tidak bisa. Berkas asli tidak disentuh.
  *  - Word + ganti kata: dilakukan langsung di dalam berkas (format asli utuh).
- *  - PDF, atau permintaan AI ("perbaiki", "ringkas"): isi dibaca -> disunting -> dibuat ulang (tata letak asli tidak ikut).
+ *  - PDF + ganti kata: kata lama ditutup kotak putih dan kata baru ditulis di atasnya (tampilan asli utuh; cap "REVISI" bila bertanda tangan elektronik).
+ *  - PDF yang tak bisa ditimpa, atau permintaan AI ("perbaiki", "ringkas"): isi dibaca -> disunting -> dibuat ulang (tata letak asli tidak ikut).
  */
 async function editGroupDocument(sock, groupJid, { source, doc, req, instruction, outFormat, msg, subject }) {
   const say = (t) => replyGroupText(sock, groupJid, msg, subject, t);
@@ -3309,10 +3338,31 @@ async function editGroupDocument(sock, groupJid, { source, doc, req, instruction
     }
     const countsText = (pairs, counts) => pairs.map((p, i) => (counts[i] > 0 ? `${shortQ(p.from)} → ${shortQ(p.to)} (${counts[i]}x)` : `${shortQ(p.from)} tidak ditemukan`)).join("; ");
     let useAi = req.kind === "ai";
+    let overlayNote = "";
 
     // 1) Ganti kata. Word tanpa ganti format: langsung di dalam berkas.
     if (req.kind === "replace") {
       try {
+        if (isPdf && kind === "pdf") {
+          // Ganti kata PDF: tutup kata lama dengan kotak putih, tulis kata baru di atasnya (tampilan asli utuh).
+          const ov = await tryPdfOverlay(buffer, req.pairs, name);
+          if (ov.result?.buf) {
+            const r = ov.result;
+            const parts = [`Sudah diganti: ${countsText(req.pairs, r.counts)}.`, "Tampilan PDF aslinya (logo, QR code, tata letak) tetap utuh; file asli tidak diubah."];
+            parts.push(...r.notes.slice(0, 3));
+            parts.push("Kata lama hanya tertutup kotak putih (masih bisa ditemukan lewat pencarian/salin teks), jadi jangan dipakai untuk menyembunyikan data rahasia; hurufnya juga hanya mirip dengan aslinya.");
+            if (r.signed) parts.push(`${E_SIGN_WARN} Setiap halaman diberi cap merah "REVISI - bukan dokumen asli".`);
+            parts.push("Mohon dicek ulang sebelum dipakai.");
+            const ok = await deliverGroupFile(sock, groupJid, "pdf", `(${name} diedit langsung)`, { quoted: msg, waName: subject || null, fileTitle: base.slice(0, 70), caption: parts.join(" "), raw: true, prebuilt: { buf: r.buf, mimetype: "application/pdf", fileName: pdfFileName(fileBase) } });
+            if (!ok) await say("Maaf, berkas PDF-nya gagal dibuat. Coba lagi sebentar lagi ya.");
+            return;
+          }
+          overlayNote = ov.note;
+          if (ov.stop) {
+            await say(ov.stop);
+            return;
+          }
+        }
         if (isDocx && kind === "docx") {
           const r = replaceInDocx(buffer, req.pairs);
           if (r.counts.some((c) => c > 0)) {
@@ -3393,7 +3443,7 @@ async function editGroupDocument(sock, groupJid, { source, doc, req, instruction
       if (!summarize && edited.length < md.length * 0.5) notes.push("⚠️ Hasilnya jauh lebih pendek dari aslinya.");
       notes.unshift("Disunting oleh AI sesuai permintaanmu.");
     }
-    if (isPdf) notes.push("Tata letak PDF asli tidak ikut (logo, gambar, dan QR code juga tidak terbawa); ini berkas baru dari isinya.");
+    if (isPdf) notes.push(`${overlayNote ? `${overlayNote} ` : ""}Tata letak PDF asli tidak ikut (logo, gambar, dan QR code juga tidak terbawa); ini berkas baru dari isinya.`);
     if (hasESignature(md)) notes.push(E_SIGN_WARN);
     notes.push("Mohon dicek ulang sebelum dipakai; file asli tidak diubah.");
 
