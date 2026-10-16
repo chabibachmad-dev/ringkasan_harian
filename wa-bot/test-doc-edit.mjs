@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { detectEditRequest, replaceInText, replaceInDocx, docxToMarkdown, numberDiff, buildEditPrompt, buildEditUserMessage, unwrapFence, AI_EDIT_MAX_CHARS, MAX_PAIRS } from "./doc-edit.js";
+import { detectEditRequest, replaceInText, replaceInDocx, docxToMarkdown, numberDiff, buildEditPrompt, buildEditUserMessage, unwrapFence, hasESignature, AI_EDIT_MAX_CHARS, MAX_PAIRS } from "./doc-edit.js";
 import { buildDocx } from "./office-doc.js";
 import { buildZip } from "./nodin.js";
 import { readZip } from "./zip-lite.js";
@@ -134,6 +134,17 @@ print("|".join(p.text for p in d.paragraphs)); print("|".join(c.text for row in 
   ok("unwrapFence & prompt AI");
 }
 
+// ---- 5b. peringatan tanda tangan elektronik
+{
+  assert.ok(hasESignature("Ditandatangani secara elektronik\nI Ketut"));
+  assert.ok(hasESignature("diterbitkan oleh Balai Besar Sertifikasi Elektronik (BSrE), BSSN"));
+  assert.ok(hasESignature("menggunakan sertifikat elektronik yang diterbitkan"));
+  assert.ok(hasESignature("Dokumen ini ditandatangani dengan TTE"));
+  assert.ok(!hasESignature("Surat biasa tanpa tanda tangan digital apa pun, hanya elektronik kantor"));
+  assert.ok(!hasESignature(""));
+  ok("hasESignature: mengenali pernyataan tanda tangan elektronik");
+}
+
 // ---- 6. sambungan di index.js
 {
   const src = fs.readFileSync(new URL("./index.js", import.meta.url), "utf8");
@@ -145,6 +156,8 @@ print("|".join(p.text for p in d.paragraphs)); print("|".join(c.text for row in 
   assert.ok(/fileReq\?\.format === "xlsx" \? null/.test(src), "permintaan Excel tidak dianggap ubah isi");
   assert.ok(src.includes("if (!prebuilt) rememberReplySource"), "berkas hasil edit langsung tidak dicatat sebagai sumber balasan");
   assert.ok(src.includes("numberDiff(md, edited)") && src.includes("md.length > AI_EDIT_MAX_CHARS"), "pagar angka & batas panjang");
+  assert.ok(src.includes("hasESignature(md)") && src.includes("hasESignature(docxToMarkdown(buffer))"), "peringatan tanda tangan elektronik di jalur AI/PDF dan jalur Word langsung");
+  assert.ok(src.includes('(?:\\.(?:pdf|docx))+$'), "ekstensi ganda (.pdf.pdf) dibuang dari nama dasar");
   ok("index.js: urutan cabang, jatah, pagar angka");
 }
 

@@ -219,6 +219,9 @@ export function numberDiff(original, edited) {
   return { added, removed };
 }
 
+/** Dokumen memuat pernyataan tanda tangan elektronik / segel sertifikat (BSrE, TTE, QR verifikasi)? */
+export const hasESignature = (text) => /ditandatangani\s+secara\s+elektronik|tanda\s+tangan\s+elektronik|sertifikat\s+elektronik|\bBSrE\b|\bTTE\b|\bdigital(?:ly)?\s+signed\b/i.test(String(text ?? ""));
+
 export function buildEditPrompt() {
   return [
     "Kamu penyunting dokumen yang sangat teliti. Terapkan INSTRUKSI pengguna pada DOKUMEN.",

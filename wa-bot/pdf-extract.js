@@ -121,6 +121,8 @@ function trimRun(run) {
   let b = run.length;
   while (a < b && !fits(run[a])) a++;
   while (b > a && !fits(run[b - 1])) b--;
+  // baris lanjutan (isi sel yang dibungkus ke baris berikutnya) tepat di bawah baris terakhir ikut dipertahankan
+  while (b < run.length && !isTabLine(run[b]) && !isRule(run[b]) && run[b].trim() !== "") b++;
   return run.slice(a, b);
 }
 
@@ -147,6 +149,12 @@ function proseToMarkdown(lines) {
     if (!t) {
       flush();
       out.push("");
+      continue;
+    }
+    // blok rata-kanan (tempat/tanggal, jabatan, nama penanda tangan): tiap baris berdiri sendiri, jangan digabung ke paragraf di atasnya
+    if (raw.length - raw.trimStart().length >= 40 && t.length < 60 && !isShout(t)) {
+      flush();
+      out.push(t, "");
       continue;
     }
     if (isShout(t)) {

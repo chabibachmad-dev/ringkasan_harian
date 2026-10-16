@@ -73,7 +73,7 @@ import { createGroupVoice, detectRequestedLang, detectTextOnlyRequest, langInstr
 import { formatForWhatsApp, detectPdfRequest, detectOfficeRequest, cleanAnswerForFile, titleForFile } from "./wa-format.js";
 import { buildDocx, buildXlsx, officeFileName, MIME_DOCX, MIME_XLSX } from "./office-doc.js";
 import { pdfBufferToMarkdown, PDF_MAX_BYTES } from "./pdf-extract.js";
-import { detectEditRequest, replaceInText, replaceInDocx, docxToMarkdown, numberDiff, buildEditPrompt, buildEditUserMessage, unwrapFence, AI_EDIT_MAX_CHARS } from "./doc-edit.js";
+import { detectEditRequest, replaceInText, replaceInDocx, docxToMarkdown, numberDiff, buildEditPrompt, buildEditUserMessage, unwrapFence, hasESignature, AI_EDIT_MAX_CHARS } from "./doc-edit.js";
 import { createPersonaVoice } from "./persona-voice.js";
 import { buildPdf, titleFromText, pdfFileName } from "./pdf-doc.js";
 import { MAIN_ACCOUNT, SECOND_ACCOUNT, acctFields, createAccountRouter, isPairedCreds, isStalePairing, pairingInstructions, personaPrompt, readSecondAccountConfig } from "./wa-accounts.js";
@@ -3234,6 +3234,7 @@ async function aiEditMarkdown(instruction, markdown) {
   return out;
 }
 
+const E_SIGN_WARN = "⚠️ Dokumen asli memuat tanda tangan elektronik. Hasil suntingan ini BUKAN dokumen bertanda tangan elektronik yang sah (tanda tangan, QR code, dan sertifikatnya tidak berlaku lagi); jangan dipakai sebagai pengganti dokumen asli.";
 const shortQ = (s, n = 40) => `"${String(s).length > n ? String(s).slice(0, n - 1) + "…" : s}"`;
 
 /**
@@ -3256,7 +3257,7 @@ async function editGroupDocument(sock, groupJid, { source, doc, req, instruction
     await say(`Filenya terlalu besar (maks ${Math.round(maxBytes / 1024 / 1024)} MB). Kirim versi yang lebih kecil atau pisahkan per bagian.`);
     return;
   }
-  const base = name.replace(/\.(pdf|docx)$/i, "").replace(/[_-]+/g, " ").replace(/\s+/g, " ").trim() || "Dokumen";
+  const base = name.replace(/(?:\.(?:pdf|docx))+$/i, "").replace(/[_-]+/g, " ").replace(/\s+/g, " ").trim() || "Dokumen";
   const fileBase = `${base.slice(0, 60)} revisi`;
   const kind = outFormat === "pdf" || outFormat === "docx" ? outFormat : isPdf ? "pdf" : "docx";
   const aiReady = GEMINI_API_KEYS.length > 0 || llmFallback.available();
@@ -3286,7 +3287,8 @@ async function editGroupDocument(sock, groupJid, { source, doc, req, instruction
         if (isDocx && kind === "docx") {
           const r = replaceInDocx(buffer, req.pairs);
           if (r.counts.some((c) => c > 0)) {
-            const caption = `Sudah diganti: ${countsText(req.pairs, r.counts)}. Format Word aslinya tetap utuh; file asli tidak diubah.`;
+            const sigWarn = hasESignature(docxToMarkdown(buffer)) ? ` ${E_SIGN_WARN}` : "";
+            const caption = `Sudah diganti: ${countsText(req.pairs, r.counts)}. Format Word aslinya tetap utuh; file asli tidak diubah.${sigWarn}`;
             const ok = await deliverGroupFile(sock, groupJid, "docx", `(${name} diedit langsung)`, { quoted: msg, waName: subject || null, fileTitle: base.slice(0, 70), caption, raw: true, prebuilt: { buf: r.buf, mimetype: MIME_DOCX, fileName: officeFileName(fileBase, "docx") } });
             if (!ok) await say("Maaf, berkas Word-nya gagal dibuat. Coba lagi sebentar lagi ya.");
             return;
@@ -3362,7 +3364,8 @@ async function editGroupDocument(sock, groupJid, { source, doc, req, instruction
       if (!summarize && edited.length < md.length * 0.5) notes.push("⚠️ Hasilnya jauh lebih pendek dari aslinya.");
       notes.unshift("Disunting oleh AI sesuai permintaanmu.");
     }
-    if (isPdf) notes.push("Tata letak PDF asli tidak ikut; ini berkas baru dari isinya.");
+    if (isPdf) notes.push("Tata letak PDF asli tidak ikut (logo, gambar, dan QR code juga tidak terbawa); ini berkas baru dari isinya.");
+    if (hasESignature(md)) notes.push(E_SIGN_WARN);
     notes.push("Mohon dicek ulang sebelum dipakai; file asli tidak diubah.");
 
     const heading = /^#\s+(.+)$/m.exec(outMd)?.[1]?.replace(/[*_`]/g, "").trim().slice(0, 70);

@@ -150,4 +150,37 @@ ok("PDF sungguhan 2 halaman (pdftotext): tabel 70 baris utuh, satu tabel, bisa d
 }
 ok("index.js: urutan penanganan benar, jatah harian sebelum kerja berat, konversi satu per satu, pesan jelas untuk PDF scan/bukan PDF");
 
+// --- surat resmi: sel yang dibungkus di baris terakhir tabel tidak hilang; blok tanda tangan rata-kanan tidak menyatu
+{
+  const page = [
+    "                                    SURAT KETERANGAN",
+    "",
+    "  Yang bertanda tangan di bawah ini,",
+    "",
+    "   Nama                               :   I Ketut Arimbawa",
+    "",
+    "   NIP                                :   196902241989121001",
+    "",
+    "   Jabatan                            :   Kepala Kantor Pelayanan Kekayaan Negara dan Lelang",
+    "                                          Denpasar",
+    "",
+    "  menyatakan dengan sungguh-sungguh bahwa:",
+    "",
+    "  Surat pernyataan ini dibuat dengan sebenarnya dan tanpa tekanan pihak manapun untuk dapat",
+    "  digunakan sebagaimana mestinya.",
+    "",
+    "                                                                     Denpasar, 23 Agustus 2026",
+    "                                                                     Kepala Kantor Pelayanan Kekayaan",
+    "                                                                     Ditandatangani secara elektronik",
+    "                                                                     I Ketut Arimbawa"
+  ].join("\n");
+  const r = layoutPagesToMarkdown([page]);
+  const md = typeof r === "string" ? r : r.markdown;
+  assert.ok(md.includes("| Jabatan | : | Kepala Kantor Pelayanan Kekayaan Negara dan Lelang Denpasar |"), md);
+  assert.ok(md.includes("untuk dapat digunakan sebagaimana mestinya."), "paragraf biasa tetap digabung");
+  for (const line of ["Denpasar, 23 Agustus 2026", "Kepala Kantor Pelayanan Kekayaan", "Ditandatangani secara elektronik", "I Ketut Arimbawa"]) assert.ok(md.split("\n").includes(line), `baris sendiri: ${line}\n${md}`);
+  assert.ok(!md.includes("mestinya. Denpasar"), "blok tanda tangan tidak menempel ke paragraf di atasnya");
+}
+ok("surat resmi: lanjutan sel di baris terakhir tabel ikut, blok tanda tangan rata-kanan berdiri sendiri");
+
 console.log(`\nSemua ${n} kelompok tes pembaca PDF lulus ✅`);
