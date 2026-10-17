@@ -152,16 +152,16 @@ const HELP = [
   "/dokumen <pertanyaan>  — tanya dari dokumen lokal di laptop, dijawab Ollama. \"/dokumen\" saja = daftar dokumen",
   "/pasar  — IHSG, emas dunia (Rp/gram), dan kurs USD/IDR (alias /emas, /ihsg); otomatis tiap pagi hari kerja; /pasar tes = uji sumber data",
   "/ingatkan <waktu> <teks>  — pengingat pribadi (contoh: /ingatkan besok 09:00 kirim SPJ);  /pengingat  — daftar / batal <nomor>;  /ibadah  — juz harian, hadits, ayat",
-  "/kesehatan  — periksa Ollama, disk, memori, WhatsApp, basis data, restart, dan cadangan sekarang (otomatis dipantau)",
+  "/kesehatan  — periksa Ollama, disk, memori, WhatsApp, basis data, dan cadangan sekarang",
   "/voice wag on|off|id|eng|kor|arb|jawa  — balasan grup WA berupa suara/teks + bahasa suara",
   "/wa2  — nomor WhatsApp kedua (status, kode, qr)",
   "/grup  — grup WA yang dijawab bot: lihat, semua, tambah, hapus",
-  "/gambar <deskripsi>  — buat gambar; /gambar grup on|off = izinkan di grup WA\n/env  — ubah kunci gambar (token Cloudflare, jatah) dari sini",
+  "/gambar <deskripsi>  — buat gambar; /gambar grup on|off = izinkan di grup WA\n/video <deskripsi>  — buat video bernarasi; /video grup on|off\n/env  — ubah kunci gambar (token Cloudflare, jatah) dari sini",
   "/kas  — laporan kas bulanan: konfirmasi angka, submit, simpan (/kas bantuan)",
   "/nodin  — konsep Nota Dinas LPJ (PDF + Word), otomatis tiap tanggal 1 (/nodin cek)",
-  "/urutan  — lihat/ubah urutan AI untuk balasan WhatsApp & grup (jalur santai & akurat; contoh: /urutan santai groq,gemini,openrouter,ollama;  /urutan reset)",
+  "/urutan  — lihat/ubah urutan AI balasan WhatsApp & grup (contoh: /urutan santai groq,gemini,ollama;  /urutan reset)",
   "/cadangan  — status cadangan otomatis (memori, pengingat, skill, sesi WhatsApp);  /cadangan sekarang  — buat sekarang",
-  "/lokal <pesan>  — ngobrol dengan Ollama LOKAL (alias /tanya): percakapan dan catatan pribadimu tidak keluar dari laptop;  /lokal baru  — lupakan percakapan",
+  "/lokal <pesan>  — ngobrol dengan Ollama LOKAL (alias /tanya), tidak keluar dari laptop;  /lokal baru  — lupakan percakapan",
   "/skill  — daftar skill (resep tugas buatanmu);  /skill <nama> <teks>  — jalankan, dijawab Ollama lokal;  /skill baru <nama> …  — buat skill dari sini;  /skill lihat|hapus <nama>",
   "/penyedia  — status tiap penyedia AI (Gemini, Groq, OpenRouter, Ollama): berhasil/gagal, key yang istirahat",
   "/ingat <teks>  — simpan catatan pribadi (hanya di laptop, hanya dibaca Ollama lokal);  /catatan  — daftar;  /catatan <kata>  — cari;  /lupa <nomor|semua>  — hapus",
@@ -185,6 +185,7 @@ const HELP = [
  *   health?: { report() -> Promise<string> }   papan kesehatan bot (health.js)
  *   env?: { handle(arg) -> Promise<{text, secret}> }   ubah kunci .env tertentu dari Telegram (env-edit.js, /env)
  *   metaAi?: { handle(arg) -> Promise<string> }   uji ngobrol dengan Meta AI (meta-ai.js, /metaai)
+ *   video?: { available(), describe(), parseCommand(arg), setGroup(bool), make(prompt, {seconds}) -> Promise<{video:{buffer,mime,seconds}}|{error}> }   pembuat video (video-gen.js, /video)
  *   image?: { available(), describe(), parseCommand(arg), setGroup(bool) -> Promise<{on,saved}>, make(prompt) -> Promise<{image:{buffer,mime}}|{error}> }   pembuat gambar (image-gen.js, /gambar)
  *   groupVoice?: { enabled(), set(bool) -> Promise<{on,saved,warning}>, describe() }   balasan suara di grup WhatsApp (group-voice.js, /voice wag)
  *   groups?: { handle(arg) -> Promise<string> }   daftar grup yang dijawab (/grup)
@@ -385,12 +386,28 @@ export function createTelegram({ config, deps = {}, fetchImpl = globalThis.fetch
     return apiForm("sendPhoto", form, { timeoutMs: 120_000 });
   }
 
+  /** Kirim video MP4 (tampil langsung & bisa diputar). */
+  async function sendVideo(chatId, file, caption = "") {
+    const form = new FormData();
+    form.append("chat_id", String(chatId));
+    form.append("video", new Blob([file.data], { type: file.mime || "video/mp4" }), file.name);
+    form.append("supports_streaming", "true");
+    form.append("width", "1280");
+    form.append("height", "720");
+    if (caption) {
+      form.append("caption", waToTelegramHtml(caption).slice(0, 1000));
+      form.append("parse_mode", "HTML");
+    }
+    return apiForm("sendVideo", form, { timeoutMs: 180_000 });
+  }
+
   /** Kirim beberapa berkas ke satu chat; keterangan menempel di berkas pertama. */
   async function sendFiles(chatId, files, caption = "") {
     let i = 0;
     for (const f of files) {
       try {
-        if (f.photo) await sendPhoto(chatId, f, i === 0 ? caption : "");
+        if (f.video) await sendVideo(chatId, f, i === 0 ? caption : "");
+        else if (f.photo) await sendPhoto(chatId, f, i === 0 ? caption : "");
         else await sendDocument(chatId, f, i === 0 ? caption : "");
       } catch (e) {
         // keterangan berformat ditolak (HTML)? kirim ulang tanpa keterangan berformat
@@ -825,6 +842,24 @@ Suara tiap bot (Ayyubi/Wongsobot): /suara daftar • /suara coba <NamaSuara> [ga
       const ext = /jpe?g/i.test(out.image.mime) ? "jpg" : /webp/i.test(out.image.mime) ? "webp" : "png";
       return void (await sendFiles(chatId, [{ data: out.image.buffer, name: `gambar.${ext}`, mime: out.image.mime || "image/png", photo: true }], ""));
     }
+    if (name === "video" || name === "vidio" || name === "vid") {
+      const vd = deps.video;
+      if (!vd) return void (await reply("Pembuat video tidak tersedia di versi bot ini."));
+      if (!vd.available()) return void (await reply("Pembuat video belum aktif: ia memakai pembuat gambar (isi CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN gratis di /env) dan ffmpeg (sudo apt install ffmpeg)."));
+      const c = vd.parseCommand(arg);
+      if (c.kind === "status") {
+        return void (await reply(`🎬 Pembuat video (gratis, dirakit ffmpeg)\n${vd.describe()}\n\nPakai: /video <deskripsi>  (contoh: /video 30 detik tentang siklus air)\nDi grup WA: ketik "bot, buatkan video ...".\nSaklar grup: /video grup on atau /video grup off`));
+      }
+      if (c.kind === "group") {
+        const r = await vd.setGroup(c.value);
+        return void (await reply(r.on ? "🎬 Video di grup WA: AKTIF. Anggota grup yang diizinkan bisa minta \"bot, buatkan video ...\" (dibatasi jatah harian)." : "🎬 Video di grup WA: MATI." + (r.saved ? "" : "\n⚠️ Gagal disimpan di database; berlaku sampai bot restart.")));
+      }
+      if (!c.prompt) return void (await reply("Mau dibuatkan video tentang apa? Contoh: /video kancil dan buaya  atau  /video 30 detik tentang siklus air"));
+      await reply("🎬 Sedang membuat video (naskah, gambar, suara, rakit) — biasanya 1–3 menit. Kukirim begitu selesai.");
+      const out = await withAction(chatId, "upload_video", () => vd.make(c.prompt, { seconds: c.seconds }));
+      if (out.error) return void (await reply(`⚠️ ${out.error}`));
+      return void (await sendFiles(chatId, [{ data: out.video.buffer, name: "video.mp4", mime: "video/mp4", video: true }], ""));
+    }
     if (name === "grup" || name === "group") {
       if (!deps.groups) return void (await reply("Pengaturan grup tidak tersedia di versi bot ini."));
       return void (await reply(await withAction(chatId, "typing", () => deps.groups.handle(arg))));
@@ -1091,7 +1126,7 @@ Suara tiap bot (Ayyubi/Wongsobot): /suara daftar • /suara coba <NamaSuara> [ga
   }
 
   const HANDLER_DEADLINE_MS = 10 * 60_000;
-  const FAST_COMMANDS = new Set(["dokumen", "dok", "doc", "status", "id", "help", "start", "ingat", "catatan", "lupa", "memori", "note", "penyedia", "provider", "skill", "skil", "lokal", "tanya", "pasar", "emas", "ihsg", "ingatkan", "remind", "pengingat", "reminder", "cadangan", "backup", "kesehatan", "sehat", "health", "urutan", "route", "rute", "nodin", "notadinas", "kas", "laporankas", "voice", "wa2", "nomor2", "grup", "group", "gambar", "image", "img", "metaai", "env"]);
+  const FAST_COMMANDS = new Set(["dokumen", "dok", "doc", "status", "id", "help", "start", "ingat", "catatan", "lupa", "memori", "note", "penyedia", "provider", "skill", "skil", "lokal", "tanya", "pasar", "emas", "ihsg", "ingatkan", "remind", "pengingat", "reminder", "cadangan", "backup", "kesehatan", "sehat", "health", "urutan", "route", "rute", "nodin", "notadinas", "kas", "laporankas", "voice", "wa2", "nomor2", "grup", "group", "gambar", "image", "img", "video", "vidio", "vid", "metaai", "env"]);
   function isFastUpdate(u) {
     const m = u?.message;
     if (!m) return false;
@@ -1213,6 +1248,7 @@ Suara tiap bot (Ayyubi/Wongsobot): /suara daftar • /suara coba <NamaSuara> [ga
           { command: "voice", description: "Balasan grup WhatsApp: suara (on) atau teks (off)" },
           { command: "grup", description: "Grup WhatsApp yang dijawab bot: lihat, tambah, hapus" },
           { command: "gambar", description: "Buat gambar dari deskripsi (Gemini); /gambar grup on|off" },
+          { command: "video", description: "Buat video bernarasi dari deskripsi (gratis); /video grup on|off" },
           { command: "wa2", description: "Nomor WhatsApp kedua: status dan kode tautan" },
           { command: "kas", description: "Laporan kas bulanan (Saldo Rekening & Register Kas)" },
           { command: "nodin", description: "Konsep Nota Dinas LPJ Bendahara (PDF + Word)" },

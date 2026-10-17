@@ -41,7 +41,13 @@ export const ENV_KEYS = {
   IMAGE_OWNER_DAILY: { secret: false, hint: "jatah gambar pemilik per hari (0 = tanpa batas)", validate: intIn(0, 10000) },
   IMAGE_GROUP_DAILY: { secret: false, hint: "jatah gambar semua grup per hari", validate: intIn(0, 10000) },
   IMAGE_PERSON_DAILY: { secret: false, hint: "jatah gambar per orang di grup per hari", validate: intIn(0, 10000) },
-  IMAGE_TIMEOUT_MS: { secret: false, hint: "batas tunggu satu gambar (ms)", validate: intIn(10000, 300000) }
+  IMAGE_TIMEOUT_MS: { secret: false, hint: "batas tunggu satu gambar (ms)", validate: intIn(10000, 300000) },
+  VIDEO_ENABLED: { secret: false, hint: "pembuat video: 1 = aktif, 0 = mati", validate: (v) => (/^[01]$/.test(v) ? null : "isi 1 (aktif) atau 0 (mati)") },
+  VIDEO_OWNER_DAILY: { secret: false, hint: "jatah video pemilik per hari (0 = tanpa batas)", validate: intIn(0, 1000) },
+  VIDEO_GROUP_DAILY: { secret: false, hint: "jatah video semua grup per hari", validate: intIn(0, 1000) },
+  VIDEO_PERSON_DAILY: { secret: false, hint: "jatah video per orang di grup per hari", validate: intIn(0, 1000) },
+  VIDEO_SCENES: { secret: false, hint: "jumlah adegan bawaan satu video (3-8; makin banyak makin lama & boros gambar)", validate: intIn(3, 8) },
+  VIDEO_MAX_SCENES: { secret: false, hint: "adegan maksimum bila diminta durasi panjang (3-8)", validate: intIn(3, 8) }
 };
 
 export const maskValue = (value, secret) => {

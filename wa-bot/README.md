@@ -1086,9 +1086,21 @@ Meta AI (kontak bawaan WhatsApp) tidak bisa ditambahkan ke grup dan tidak punya 
 
 Pesan dari/ke Meta AI tidak pernah diteruskan ke auto-reply (mencegah bot membalas Meta AI terus-menerus). Belum terhubung ke grup.
 
+## Pembuat video gratis (`/video`, "bot, buatkan video ...")
+
+Bot merakit sendiri video pendek bernarasi (20-60 detik) tanpa API video berbayar. Alurnya: (1) AI teks (Groq/OpenRouter, cadangan Gemini) menulis naskah 3-6 adegan berisi deskripsi gambar (Inggris) dan narasi (bahasa yang sama dengan permintaan); (2) tiap adegan digambar oleh pembuat gambar yang sama dengan `/gambar` (Cloudflare FLUX, gratis); (3) seluruh narasi dibacakan SEKALI oleh Gemini TTS dan durasi tiap adegan mengikuti panjang kalimatnya; (4) ffmpeg memberi gerak halus (zoom-in, zoom-out, geser) pada tiap gambar di atas latar blur 16:9, menambah subtitle dan fade, lalu menggabungkannya dengan suara menjadi MP4 H.264/AAC (1280x720) yang langsung bisa diputar di WhatsApp.
+
+- **Grup WA:** `bot, buatkan video kancil dan buaya` atau `bot, buatkan video 30 detik tentang siklus air` (durasi dibulatkan ke 3-6 adegan, ±6 detik per adegan). Bot membalas satu pesan "sedang dibuat" lalu mengirim videonya (1-3 menit). **Chat pemilik di WA:** `buatkan video ...` atau `/video ...`. **Telegram:** `/video <deskripsi>`, `/video` (status & jatah), `/video grup on|off`.
+- **Jatah (hari WITA):** pemilik 5, semua grup 3, per orang di grup 1 (`VIDEO_OWNER_DAILY`, `VIDEO_GROUP_DAILY`, `VIDEO_PERSON_DAILY`; 0 = tanpa batas; bisa diubah lewat `/env`). Satu video memakai ±5 gambar dari jatah gratis Cloudflare (±288 neuron dari 10.000/hari), jadi tiga video grup + lima video pemilik per hari masih jauh di bawah batas. Jatah dikembalikan bila videonya gagal dibuat.
+- **Satu per satu:** hanya satu video dirakit pada satu waktu (CPU laptop); permintaan berikutnya mengantre (maks `VIDEO_QUEUE`, bawaan 2), sisanya dijawab "sedang sibuk".
+- **Bila ada yang tidak tersedia:** AI naskah mati -> naskah cadangan (satu ide dari beberapa sudut kamera, subtitle ide itu saja); suara/TTS gagal atau kuotanya habis -> video tetap jadi, tanpa suara tetapi dengan subtitle; satu gambar gagal -> memakai gambar adegan sebelumnya; gambar adegan pertama gagal -> pesan alasan (dan pemilik diberi tahu bila kuota/kunci gambar bermasalah). Tanpa ffmpeg: pesan "belum bisa" dan pemilik diberi tahu (`sudo apt install ffmpeg`).
+- **Aman:** deskripsi memakai filter yang sama dengan gambar (konten dewasa & dokumen palsu ditolak); prompt naskah melarang tokoh nyata/merek dan teks di dalam gambar.
+- **Batasnya:** ini video "gambar bergerak bernarasi" (seperti slideshow sinematik), bukan video AI yang menggerakkan tokoh. Gambar antar-adegan dijaga mirip lewat gaya bersama dan deskripsi tokoh yang diulang, tetapi wajah/bentuk tokoh bisa tetap sedikit berbeda. Kalau nanti ingin klip AI sungguhan (berbayar, mis. Veo Lite ±US$0,05/detik), bisa ditambahkan sebagai mode terpisah.
+- **Pengaturan opsional (.env):** `VIDEO_ENABLED`, `VIDEO_SCENES`, `VIDEO_MAX_SCENES`, `VIDEO_NARRATION_CHARS`, `VIDEO_FONT`, `VIDEO_QUEUE`, `FFMPEG_PATH` (lihat `.env.example` bagian 26b). Font subtitle bawaan DejaVu Sans Bold (paket `fonts-dejavu-core`); tanpa font yang ditemukan, subtitle tetap dicoba lewat fontconfig dan bila gagal video dibuat tanpa subtitle.
+
 ## Mengubah pengaturan gambar dari Telegram (`/env`)
 
-Supaya token Cloudflare dan jatah gambar bisa diatur tanpa membuka laptop. Hanya pemilik, hanya lewat teks (bukan pesan suara), dan HANYA kunci pembuat gambar (`CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNTS`, `*_IMAGE_MODELS`, `IMAGE_*` termasuk `IMAGE_PROVIDERS`). Kunci lain (Supabase, Telegram, WhatsApp) tidak bisa diubah dari sini.
+Supaya token Cloudflare dan jatah gambar bisa diatur tanpa membuka laptop. Hanya pemilik, hanya lewat teks (bukan pesan suara), dan HANYA kunci pembuat gambar dan video (`CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNTS`, `*_IMAGE_MODELS`, `IMAGE_*` termasuk `IMAGE_PROVIDERS`, dan jatah video `VIDEO_ENABLED`, `VIDEO_OWNER_DAILY`, `VIDEO_GROUP_DAILY`, `VIDEO_PERSON_DAILY`, `VIDEO_SCENES`, `VIDEO_MAX_SCENES`). Kunci lain (Supabase, Telegram, WhatsApp) tidak bisa diubah dari sini.
 
 - `/env` : daftar kunci beserta nilainya (token disamarkan jadi ••••4 huruf terakhir).
 - `/env CLOUDFLARE_ACCOUNT_ID=idAkunmu` lalu `/env CLOUDFLARE_API_TOKEN=tokenmu` : mengisi `.env`; berlaku LANGSUNG tanpa restart.
