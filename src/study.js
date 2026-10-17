@@ -13,7 +13,7 @@ import { pointsFormula, studyCardFileName } from "./study-text.js";
 import { recognitionSupported, synthSupported, startListening, speakText, stopSpeaking, unlockSpeech, recorderSupported, startRecording, releaseMic, micHeld, idleAudio, playWav, speechToken, audioPlayable } from "./study-voice.js";
 import { renderLessonCard, renderRoomCard, shareOrSaveCard } from "./study-card.js";
 import { createMatChatSheet, newChat } from "./study-matchat.js";
-import { allowedClasses, allowedMaterialGrades, classesOf, computePoints, formatClock, gradeText, PRACTICE_QUESTIONS as PRACTICE_COUNT, timeLimitSeconds } from "../supabase/functions/_shared/study-core.ts";
+import { allowedClasses, allowedMaterialGrades, classesOf, classPercent, computePoints, formatClock, gradeText, lessonClasses, lessonGrades, PRACTICE_QUESTIONS as PRACTICE_COUNT, timeLimitSeconds } from "../supabase/functions/_shared/study-core.ts";
 
 const $ = (id) => document.getElementById(id);
 let ctx = { getLang: () => "id" };
@@ -613,7 +613,7 @@ function renderProfile(body) {
           if (s.status === "submitted") {
             return `
           <div class="study-row">
-            <div class="study-row-main"><div class="study-row-title">${esc(s.subject)}</div><div class="study-row-meta">${lvl} · ${fmtDate(s.submittedAt)}<br>${esc(L("study_score", { c: s.correctCount, n: s.numQuestions }))} · +${fmt(s.pointsAwarded)} ${esc(L("study_pts"))}${s.repeatPercent != null && s.repeatPercent < 100 ? ` · ${esc(L("study_row_repeat", { p: s.repeatPercent }))}` : ""}${s.pointsRaw > s.pointsAwarded ? ` (${esc(L("study_row_capped", { raw: fmt(s.pointsRaw) }))})` : ""}</div></div>
+            <div class="study-row-main"><div class="study-row-title">${esc(s.subject)}</div><div class="study-row-meta">${lvl} · ${fmtDate(s.submittedAt)}<br>${esc(L("study_score", { c: s.correctCount, n: s.numQuestions }))} · +${fmt(s.pointsAwarded)} ${esc(L("study_pts"))}${s.repeatPercent != null && s.repeatPercent < 100 ? ` · ${esc(L("study_row_repeat", { p: s.repeatPercent }))}` : ""}${s.classPercent != null && s.classPercent !== 100 ? ` · ${esc(L("study_row_class", { p: s.classPercent }))}` : ""}${s.pointsRaw > s.pointsAwarded ? ` (${esc(L("study_row_capped", { raw: fmt(s.pointsRaw) }))})` : ""}</div></div>
             <button type="button" class="secondary-btn" data-act="view-result" data-id="${esc(s.id)}">${esc(L("study_view_result"))}</button>
           </div>`;
           }
@@ -1200,7 +1200,7 @@ function openLessonForm(fixedPlayer) {
   const perQ = lessonSettings.perQuestionPoints ?? 10;
   const bonus = lessonSettings.perfectBonusPercent ?? 0;
   const spq = lessonSettings.secondsPerQuestion ?? 0;
-  const maxPoints = (level, count) => computePoints(perQ, count, count, lessonSettings.weights[level] ?? 100, bonus);
+  const maxPoints = (level, count, cls = 100) => Math.round((computePoints(perQ, count, count, lessonSettings.weights[level] ?? 100, bonus) * cls) / 100);
   fixedPlayer = fixedPlayer || loggedIn(players); // sudah masuk di perangkat ini: tanpa pilih pemain + PIN
   const fixed = !!fixedPlayer;
 
@@ -1233,19 +1233,13 @@ function openLessonForm(fixedPlayer) {
         label: L("study_material_grade"),
         type: "select",
         value: (fixedPlayer || players[0])?.grade,
-        options: (v) => {
-          const pl = playerById(fixed ? fixedPlayer.id : v.playerId);
-          return allowedMaterialGrades(pl?.grade || "Umum").map((g) => ({ value: g, label: g }));
-        },
+        options: () => lessonGrades().map((g) => ({ value: g, label: g })),
         onOptionsChange: (v) => playerById(fixed ? fixedPlayer.id : v.playerId)?.grade,
-        help: L("study_grade_help")
+        help: L("study_lesson_grade_help")
       },
       classField(
         (v) => v.materialGrade,
-        (v) => {
-          const pl = playerById(fixed ? fixedPlayer.id : v.playerId);
-          return allowedClasses(pl?.grade || "Umum", pl?.classLevel, v.materialGrade);
-        },
+        (v) => lessonClasses(v.materialGrade),
         (v) => {
           const pl = playerById(fixed ? fixedPlayer.id : v.playerId);
           return pl && pl.grade === v.materialGrade && pl.classLevel ? String(pl.classLevel) : undefined;
@@ -1270,8 +1264,11 @@ function openLessonForm(fixedPlayer) {
         value: "normal",
         options: ["easy", "normal", "hard"].map((lv) => ({ value: lv, label: levelLabel(lv, lessonSettings) })),
         help: (v) => {
-          const n = fmt(maxPoints(v.level || "normal", Number(v.count || 10)));
-          return bonus > 0 ? L("study_max_points_bonus", { n, b: bonus }) : L("study_max_points", { n });
+          const pl = playerById(fixed ? fixedPlayer.id : v.playerId);
+          const cls = classPercent(pl?.grade || "Umum", pl?.classLevel, v.materialGrade, classValue(v.materialGrade, v.materialClass ?? v.classLevel));
+          const n = fmt(maxPoints(v.level || "normal", Number(v.count || 10), cls));
+          const base = bonus > 0 ? L("study_max_points_bonus", { n, b: bonus }) : L("study_max_points", { n });
+          return cls === 100 ? base : `${base} ${L("study_class_note", { p: cls, dir: L(cls > 100 ? "study_class_up" : "study_class_down") })}`;
         }
       }
     ],
@@ -1341,7 +1338,7 @@ async function openPracticeForm(material) {
     window.alert(S.overviewError || L("study_loading"));
     return;
   }
-  const players = (ov.players || []).filter((p) => allowedMaterialGrades(p.grade).includes(material.grade));
+  const players = ov.players || []; // latihan dari materi boleh untuk semua pemain; poin mengikuti bobot kelas
   if (players.length === 0) {
     window.alert(L("study_practice_no_player", { grade: material.grade }));
     return;
@@ -1376,9 +1373,12 @@ async function openPracticeForm(material) {
         value: "normal",
         options: ["easy", "normal", "hard"].map((lv) => ({ value: lv, label: levelLabel(lv, settings) })),
         help: (v) => {
-          const pts = fmt(computePoints(perQ, n, n, settings.weights[v.level || "normal"] ?? 100, bonus));
+          const pl = fixed || playerById(v.playerId) || players[0];
+          const cls = classPercent(pl?.grade || "Umum", pl?.classLevel, material.grade, material.classLevel);
+          const pts = fmt(Math.round((computePoints(perQ, n, n, settings.weights[v.level || "normal"] ?? 100, bonus) * cls) / 100));
           const time = timeLimitSeconds(n, spq);
-          return `${bonus > 0 ? L("study_max_points_bonus", { n: pts, b: bonus }) : L("study_max_points", { n: pts })} ${time ? L("study_time_estimate", { m: Math.ceil(time / 60), s: spq }) : L("study_time_none")}`;
+          const classNote = cls === 100 ? "" : ` ${L("study_class_note", { p: cls, dir: L(cls > 100 ? "study_class_up" : "study_class_down") })}`;
+          return `${bonus > 0 ? L("study_max_points_bonus", { n: pts, b: bonus }) : L("study_max_points", { n: pts })}${classNote} ${time ? L("study_time_estimate", { m: Math.ceil(time / 60), s: spq }) : L("study_time_none")}`;
         }
       }
     ],

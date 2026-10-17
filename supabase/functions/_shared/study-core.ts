@@ -81,6 +81,47 @@ export function isLevelAllowed(
   return allowedClasses(playerGrade, playerClass, materialGrade).includes(materialClass as number);
 }
 
+// ---------------------------------------------------------------- bobot poin menurut kelas materi
+// Pelajaran (solo dan latihan dari materi) BOLEH memilih materi di kelas/tingkat mana pun. Poinnya mengikuti selisih tingkat:
+// materi lebih tinggi dari kelas pemain = lebih besar, lebih rendah = lebih kecil (10% per tingkat, batas 50%-200%).
+// Kompetisi (room) tetap memakai aturan lama di atas (tidak boleh lebih rendah) dan tidak memakai bobot ini.
+// SALINAN rumus ada di SQL: supabase/migrations/0040_study_class_points.sql (study_class_percent) -- ubah bersamaan.
+export const CLASS_STEP_PERCENT = 10;
+export const CLASS_PERCENT_MIN = 50;
+export const CLASS_PERCENT_MAX = 200;
+
+// Tingkat untuk bobot: TK=0, kelas 1-12 = nomor kelas, S1/S2/S3 = 13/14/15. null = tidak ikut hitungan (Umum, tak dikenal,
+// atau tingkat berkelas tetapi kelasnya kosong).
+function classRank(grade: string, cls?: number | null): number | null {
+  if (CLASS_RANGE[grade]) return typeof cls === "number" ? cls : null;
+  if (grade === "TK") return 0;
+  const i = SCHOOL_ORDER.indexOf(grade);
+  return i < 0 ? null : 12 + i - SCHOOL_ORDER.indexOf("S1") + 1;
+}
+
+export function classPercent(
+  playerGrade: string,
+  playerClass: number | null | undefined,
+  materialGrade: string,
+  materialClass: number | null | undefined
+): number {
+  const p = classRank(playerGrade, playerClass);
+  const m = classRank(materialGrade, materialClass);
+  if (p === null || m === null) return 100;
+  return Math.max(CLASS_PERCENT_MIN, Math.min(CLASS_PERCENT_MAX, 100 + CLASS_STEP_PERCENT * (m - p)));
+}
+
+// Tingkat, kelas, dan validasi untuk pelajaran solo: semua tingkat dan semua kelas boleh dipilih.
+export function lessonGrades(): string[] {
+  return [...SCHOOL_ORDER, "Umum"];
+}
+export function lessonClasses(materialGrade: string): number[] {
+  return classesOf(materialGrade);
+}
+export function isLessonLevelAllowed(materialGrade: string, materialClass: number | null | undefined): boolean {
+  return lessonGrades().includes(materialGrade) && validClass(materialGrade, materialClass ?? null);
+}
+
 // ---------------------------------------------------------------- input
 export function cleanLine(v: unknown, max: number): string {
   return String(v ?? "")

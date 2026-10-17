@@ -44,10 +44,13 @@ check(materialPdfFileName("", "", new Date("2026-10-12T05:00:00Z")) === "Materi_
   const L = (k, v = {}) => ({
     study_formula_new: "Poin = {perq} x {correct} benar x {weight}%",
     study_formula_bonus: "x {b}% (bonus)",
+    study_formula_class: "x {p}% (kelas)",
     study_pdf_formula: "Poin = {base} x {correct}/{total} x {weight}%"
   })[k].replace(/\{(\w+)\}/g, (_m, n) => v[n]);
   eq(pointsFormula({ perQuestionPoints: 10, correct: 8, total: 10, weightPercent: 100, bonusPercent: 0 }, L), "Poin = 10 x 8 benar x 100%", "rumus baru tanpa bonus");
   eq(pointsFormula({ perQuestionPoints: 10, correct: 10, total: 10, weightPercent: 120, bonusPercent: 10 }, L), "Poin = 10 x 10 benar x 120% x 110% (bonus)", "rumus baru dengan bonus sempurna");
+  eq(pointsFormula({ perQuestionPoints: 10, correct: 8, total: 10, weightPercent: 100, bonusPercent: 0, classPercent: 120 }, L), "Poin = 10 x 8 benar x 100% x 120% (kelas)", "rumus memuat bobot kelas bila bukan 100%");
+  eq(pointsFormula({ perQuestionPoints: 10, correct: 8, total: 10, weightPercent: 100, bonusPercent: 0, classPercent: 100 }, L), "Poin = 10 x 8 benar x 100%", "bobot kelas 100% tidak ditampilkan");
   eq(pointsFormula({ perQuestionPoints: null, basePoints: 100, correct: 8, total: 10, weightPercent: 100 }, L), "Poin = 100 x 8/10 x 100%", "pelajaran lama memakai rumus lama");
 }
 

@@ -207,6 +207,7 @@ export function pointsFormula(result, L) {
     let text = L("study_formula_new", { perq: r.perQuestionPoints, correct: r.correct, weight: r.weightPercent });
     if (r.bonusPercent > 0) text += ` ${L("study_formula_bonus", { b: 100 + r.bonusPercent })}`;
     if (r.repeatPercent > 0 && r.repeatPercent < 100) text += ` ${L("study_formula_repeat", { p: r.repeatPercent })}`;
+    if (typeof r.classPercent === "number" && r.classPercent > 0 && r.classPercent !== 100) text += ` ${L("study_formula_class", { p: r.classPercent })}`;
     return text;
   }
   return L("study_pdf_formula", { base: r.basePoints, correct: r.correct, total: r.total, weight: r.weightPercent });

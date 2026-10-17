@@ -36,6 +36,9 @@
 //   notif_count         { playerId, pin }                                    -> { unread }
 //   notif_seen          { playerId, pin, upTo? }                             -> { ok }   (tandai sudah dibaca sampai waktu upTo, bawaan sekarang)
 //                         Sebelum migrasi 0034 ketiganya menjawab { ok:true, unavailable:true } (daftar kosong).
+//   BOBOT KELAS (migrasi 0040): pelajaran solo/latihan boleh memilih tingkat & kelas mana pun; poin x classPercent/100 dengan
+//                         classPercent = 100 + 10 x (tingkat materi - tingkat pemain), dibatasi 50-200 (materi "Umum"/pemain tanpa kelas = 100).
+//                         Hasil & riwayat membawa classPercent (null = pelajaran lama). Kompetisi (room) tidak berubah: tetap tidak boleh lebih rendah, tanpa bobot kelas.
 //   settings_save       { parentPin?, perQuestionPoints, perfectBonusPercent, secondsPerQuestion, competitionWinBonus, dailyPointsCap?, repeatSubjectPercent?, weights:{easy,normal,hard}, subjects:[...] } -> { settings }   (dailyPointsCap 0-1000000, 0 = tanpa batas; repeatSubjectPercent 0-100, 100 = tanpa pengurangan; dihilangkan = tidak diubah)
 //   redeem_item_save    { parentPin?, id?, name, cost }                      -> { items }
 //   redeem_item_delete  { parentPin?, id }                                   -> { items }
@@ -105,6 +108,8 @@ import {
   classesOf,
   gradeLong,
   isLevelAllowed,
+  isLessonLevelAllowed,
+  lessonGrades,
   validClass,
   MATERIAL_DETAIL_MAX,
   buildExplainPrompt,
@@ -300,6 +305,7 @@ const sessionRow = (s: Row) => ({
   provider: s.provider,
   createdAt: s.created_at,
   submittedAt: s.submitted_at,
+  classPercent: s.class_percent ?? null, // persen poin karena kelas materi dibanding kelas pemain (100 = netral; null = pelajaran lama)
   repeatPercent: s.repeat_percent ?? null, // persen poin karena mata pelajaran sama sudah dikerjakan hari itu (null = pelajaran lama)
   pointsRaw: s.points_raw ?? null, // sebelum dipotong batas harian (null = tidak dipotong / pelajaran lama)
   bonusPercent: s.bonus_percent ?? 0,
@@ -337,6 +343,7 @@ async function loadResult(admin: Admin, session: Row, player: Row) {
     weightPercent: session.weight_percent,
     points: session.points_awarded ?? 0,
     repeatPercent: session.repeat_percent ?? 100,
+    classPercent: session.class_percent ?? 100,
     rawPoints: session.points_raw ?? session.points_awarded ?? 0, // sebelum dipotong batas harian
     capped: (session.points_raw ?? 0) > (session.points_awarded ?? 0),
     items
@@ -1007,13 +1014,14 @@ Deno.serve(async (req) => {
       const topic = material ? cleanLine(material.title, 100) : cleanLine(body.topic, 100);
       const materialGrade: unknown = material ? material.grade : body.materialGrade;
       if (!subject) return fail("Pilih atau ketik mata pelajaran.");
-      if (typeof materialGrade !== "string" || !isMaterialGradeAllowed(p.grade, materialGrade)) {
-        return fail("Tingkat materi tidak boleh lebih rendah dari grade pemain.");
+      // Pelajaran solo boleh memilih tingkat/kelas mana pun; poinnya mengikuti selisih kelas (bobot kelas, migrasi 0040).
+      if (typeof materialGrade !== "string" || !lessonGrades().includes(materialGrade)) {
+        return fail("Tingkat materi tidak dikenal.");
       }
       const materialClass = classOf(material ? material.class_level : body.materialClass);
       if (!material && classesOf(materialGrade).length > 0 && materialClass === null) return fail("Pilih kelasnya.");
-      if (!isLevelAllowed(p.grade, p.class_level, materialGrade, materialClass)) {
-        return fail("Kelas materi tidak boleh lebih rendah dari kelas pemain.");
+      if (!isLessonLevelAllowed(materialGrade, materialClass)) {
+        return fail("Kelas materi tidak cocok dengan tingkatnya.");
       }
       if (typeof body.level !== "string" || !LEVELS.includes(body.level)) return fail("Level tidak valid.");
       if (!material && !validCount(body.count)) return fail(`Jumlah soal harus 1-${MAX_QUESTIONS}.`);

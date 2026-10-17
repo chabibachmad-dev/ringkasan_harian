@@ -59,7 +59,14 @@ import {
   hashDeviceToken,
   MAX_DEVICE_TOKENS,
   PRACTICE_QUESTIONS,
-  PRACTICE_SOURCE_MAX
+  PRACTICE_SOURCE_MAX,
+  classPercent,
+  CLASS_STEP_PERCENT,
+  CLASS_PERCENT_MIN,
+  CLASS_PERCENT_MAX,
+  lessonGrades,
+  lessonClasses,
+  isLessonLevelAllowed
 } from "../supabase/functions/_shared/study-core.ts";
 
 let fails = 0;
@@ -424,6 +431,26 @@ check(formatClock(600) === "10:00" && formatClock(61) === "1:01" && formatClock(
   check(cleanChatReply("```markdown\nIni **jawaban**\n```") === "Ini **jawaban**" && cleanChatReply("Guru: Halo!") === "Halo!" && cleanChatReply("a") === "" && cleanChatReply("") === "", "chat materi: balasan dirapikan; terlalu pendek -> kosong");
   const long = cleanChatReply(`${"Kalimat panjang. ".repeat(500)}`);
   check(long.length <= MATERIAL_CHAT_REPLY_MAX && long.length > 2000, "chat materi: balasan terlalu panjang dipotong di batas kalimat");
+}
+
+// ---- bobot poin menurut kelas materi (10% per tingkat, batas 50%-200%)
+{
+  check(CLASS_STEP_PERCENT === 10 && CLASS_PERCENT_MIN === 50 && CLASS_PERCENT_MAX === 200, "bobot kelas: 10% per tingkat, batas 50%-200%");
+  check(classPercent("SD", 3, "SD", 3) === 100, "bobot kelas: sekelas = 100%");
+  check(classPercent("SD", 3, "SD", 5) === 120 && classPercent("SD", 3, "SD", 6) === 130, "bobot kelas: SD 3 mengerjakan SD 5 = 120%, SD 6 = 130%");
+  check(classPercent("SD", 3, "SD", 1) === 80 && classPercent("SD", 3, "SD", 2) === 90, "bobot kelas: SD 3 mengerjakan SD 1 = 80%, SD 2 = 90%");
+  check(classPercent("SD", 3, "SMP", 7) === 140 && classPercent("SD", 6, "SMP", 7) === 110, "bobot kelas: lintas tingkat memakai nomor kelas berlanjut (SD 3 -> SMP 7 = 140%)");
+  check(classPercent("SD", 3, "S3", null) === 200 && classPercent("SD", 6, "S3", null) === 190 && classPercent("SD", 3, "SMA", 12) === 190, "bobot kelas: batas atas 200%");
+  check(classPercent("SMA", 12, "SD", 1) === 50 && classPercent("S1", null, "TK", null) === 50, "bobot kelas: batas bawah 50%");
+  check(classPercent("SD", 3, "TK", null) === 70, "bobot kelas: TK = tingkat 0 (SD 3 -> TK = 70%)");
+  check(classPercent("S1", null, "S2", null) === 110 && classPercent("S2", null, "S1", null) === 90, "bobot kelas: S1/S2/S3 berurutan");
+  check(classPercent("SD", 3, "Umum", null) === 100 && classPercent("Umum", null, "SD", 5) === 100, "bobot kelas: Umum = netral");
+  check(classPercent("SD", null, "SD", 5) === 100 && classPercent("SD", 3, "SMP", null) === 100, "bobot kelas: kelas kosong pada tingkat berkelas = netral");
+  check(classPercent("Kuliah", null, "SD", 3) === 100, "bobot kelas: tingkat tak dikenal = netral");
+  check(eq(lessonGrades(), ["TK", "SD", "SMP", "SMA", "S1", "S2", "S3", "Umum"]) && eq(lessonClasses("SD"), [1, 2, 3, 4, 5, 6]) && eq(lessonClasses("Umum"), []), "pelajaran solo: semua tingkat & kelas boleh dipilih");
+  check(isLessonLevelAllowed("SD", 1) && isLessonLevelAllowed("SMA", 12) && isLessonLevelAllowed("Umum", null) && isLessonLevelAllowed("S1", null) && !isLessonLevelAllowed("SD", null) && !isLessonLevelAllowed("SD", 8) && !isLessonLevelAllowed("Umum", 3) && !isLessonLevelAllowed("Kuliah", null), "pelajaran solo: kelas wajib & harus cocok dengan tingkat");
+  // aturan lama (kompetisi) tidak berubah
+  check(!isLevelAllowed("SD", 5, "SD", 4) && isLevelAllowed("SD", 5, "SD", 5), "kompetisi: tetap tidak boleh lebih rendah");
 }
 
 if (fails) {
