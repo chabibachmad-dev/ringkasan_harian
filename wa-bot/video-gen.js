@@ -26,6 +26,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { cleanPrompt, promptProblem } from "./image-gen.js";
+import { buildPhotoVideo, detectPhotoVideoRequest, parsePhotoOptions } from "./photo-video.js";
 
 export const STATE_KEY = "wa_video_gen";
 export const QUOTA_KEY = "wa_video_quota";
@@ -58,6 +59,11 @@ export function readVideoConfig(env = process.env) {
     ownerDaily: num(env.VIDEO_OWNER_DAILY, 5),
     groupDaily: num(env.VIDEO_GROUP_DAILY, 3),
     personDaily: num(env.VIDEO_PERSON_DAILY, 1),
+    // Foto hidup (foto -> video dengan efek): tanpa AI/kuota gambar, hanya CPU laptop, jadi jatahnya lebih longgar.
+    photoOwnerDaily: num(env.VIDEO_PHOTO_OWNER_DAILY, 15),
+    photoGroupDaily: num(env.VIDEO_PHOTO_GROUP_DAILY, 8),
+    photoPersonDaily: num(env.VIDEO_PHOTO_PERSON_DAILY, 2),
+    photoMaxSeconds: Math.max(5, Math.min(30, num(env.VIDEO_PHOTO_MAX_SEC, 15))),
     narrationChars: Math.max(200, Math.min(1200, num(env.VIDEO_NARRATION_CHARS, 620))),
     queue: num(env.VIDEO_QUEUE, 2),
     ffmpeg: String(env.FFMPEG_PATH || "ffmpeg").trim(),
@@ -303,8 +309,13 @@ export const VIDEO_TEXT = {
   busy: "Pembuat video sedang sibuk dengan banyak permintaan. Coba lagi beberapa menit lagi ya.",
   fail: "Maaf, videonya gagal dirakit. Coba lagi sebentar lagi ya.",
   off: "Pembuat video sedang dimatikan.",
+  badphoto: "Fotonya tidak bisa dibaca. Coba kirim ulang fotonya (JPG/PNG), lalu minta lagi.",
+  nophoto: "Fotonya belum ada. Kirim foto dengan keterangan, mis. \"bot, jadikan video dengan salju turun\", atau balas (reply) foto yang mau dihidupkan dengan: bot, jadikan video.",
   empty: "Mau dibuatkan video tentang apa? Contoh: bot, buatkan video kancil dan buaya (atau tambah durasi: video 30 detik tentang siklus air)."
 };
+
+export const photoVideoSentNote = (prompt, v = {}) =>
+  `🎞️ [BOT mengirim VIDEO hasil FOTO HIDUP (foto yang dikirim penanya digerakkan + efek${v.effects?.length ? " " + v.effects.join(", ") : ""}), permintaannya: "${String(prompt ?? "").replace(/\s+/g, " ").replace(/"/g, "'").slice(0, 160)}"]`;
 
 export const videoSentNote = (prompt) =>
   `🎬 [BOT mengirim VIDEO buatan AI sesuai permintaan: "${String(prompt ?? "").replace(/\s+/g, " ").replace(/"/g, "'").slice(0, 200)}"]`;
@@ -315,7 +326,8 @@ export const videoSentNote = (prompt) =>
  */
 export function createVideoGen({ imageGen, speaker = null, writeScript = null, state = null, config = readVideoConfig({}), spawnImpl = spawn, log = console, now = () => Date.now(), tmpRoot = os.tmpdir() } = {}) {
   let groupsOn = true;
-  let quota = { day: hariWita(now()), owner: 0, group: 0, people: {} };
+  const freshQuota = (day) => ({ day, owner: 0, group: 0, people: {}, photo: { owner: 0, group: 0, people: {} } });
+  let quota = freshQuota(hariWita(now()));
   let running = 0;
   const waiters = [];
   let ffState = null; // "ok" | "missing"
@@ -324,13 +336,19 @@ export function createVideoGen({ imageGen, speaker = null, writeScript = null, s
 
   const available = () => config.enabled && Boolean(imageGen?.available?.());
   const groupEnabled = () => groupsOn && available();
+  // Foto hidup tidak butuh pembuat gambar/AI: cukup ffmpeg di laptop.
+  const photoAvailable = () => config.enabled;
+  const photoGroupEnabled = () => groupsOn && photoAvailable();
 
   async function load() {
     if (!state) return groupsOn;
     try {
       groupsOn = (await state.get(STATE_KEY)) !== "off";
       const q = await state.get(QUOTA_KEY);
-      if (q && typeof q === "object" && q.day === hariWita(now())) quota = { day: q.day, owner: q.owner | 0, group: q.group | 0, people: { ...(q.people || {}) } };
+      if (q && typeof q === "object" && q.day === hariWita(now())) {
+        const p = q.photo && typeof q.photo === "object" ? q.photo : {};
+        quota = { day: q.day, owner: q.owner | 0, group: q.group | 0, people: { ...(q.people || {}) }, photo: { owner: p.owner | 0, group: p.group | 0, people: { ...(p.people || {}) } } };
+      }
     } catch (e) {
       log.warn?.(`🎬 [Video] gagal membaca pengaturan tersimpan: ${e instanceof Error ? e.message : e}`);
     }
@@ -350,7 +368,7 @@ export function createVideoGen({ imageGen, speaker = null, writeScript = null, s
 
   function rollDay() {
     const d = hariWita(now());
-    if (quota.day !== d) quota = { day: d, owner: 0, group: 0, people: {} };
+    if (quota.day !== d) quota = freshQuota(d);
   }
   async function saveQuota() {
     try {
@@ -360,17 +378,22 @@ export function createVideoGen({ imageGen, speaker = null, writeScript = null, s
     }
   }
 
-  async function reserve(kind, who = "") {
+  /** pool "ai" = video dari ide (butuh gambar AI); pool "photo" = foto hidup (hanya CPU). */
+  async function reserve(kind, who = "", pool = "ai") {
     rollDay();
+    const photo = pool === "photo";
+    const q = photo ? quota.photo : quota;
+    const lim = photo ? { owner: config.photoOwnerDaily, group: config.photoGroupDaily, person: config.photoPersonDaily } : { owner: config.ownerDaily, group: config.groupDaily, person: config.personDaily };
+    const what = photo ? "foto hidup" : "video";
     if (kind === "owner") {
-      if (config.ownerDaily > 0 && quota.owner >= config.ownerDaily) return { ok: false, reason: `Jatah video pemilik hari ini (${config.ownerDaily}) sudah habis. Reset 00.00 WITA.` };
-      quota.owner += 1;
+      if (lim.owner > 0 && q.owner >= lim.owner) return { ok: false, reason: `Jatah ${what} pemilik hari ini (${lim.owner}) sudah habis. Reset 00.00 WITA.` };
+      q.owner += 1;
     } else {
-      if (config.groupDaily > 0 && quota.group >= config.groupDaily) return { ok: false, reason: `Jatah video untuk semua grup hari ini (${config.groupDaily}) sudah habis. Coba lagi besok ya.` };
+      if (lim.group > 0 && q.group >= lim.group) return { ok: false, reason: `Jatah ${what} untuk semua grup hari ini (${lim.group}) sudah habis. Coba lagi besok ya.` };
       const key = String(who || "?");
-      if (config.personDaily > 0 && (quota.people[key] || 0) >= config.personDaily) return { ok: false, reason: `Jatah videomu hari ini (${config.personDaily}) sudah habis. Coba lagi besok ya.` };
-      quota.group += 1;
-      quota.people[key] = (quota.people[key] || 0) + 1;
+      if (lim.person > 0 && (q.people[key] || 0) >= lim.person) return { ok: false, reason: `Jatah ${what}mu hari ini (${lim.person}) sudah habis. Coba lagi besok ya.` };
+      q.group += 1;
+      q.people[key] = (q.people[key] || 0) + 1;
     }
     await saveQuota();
     let released = false;
@@ -380,11 +403,12 @@ export function createVideoGen({ imageGen, speaker = null, writeScript = null, s
         if (released) return;
         released = true;
         rollDay();
-        if (kind === "owner") quota.owner = Math.max(0, quota.owner - 1);
+        const qq = photo ? quota.photo : quota;
+        if (kind === "owner") qq.owner = Math.max(0, qq.owner - 1);
         else {
-          quota.group = Math.max(0, quota.group - 1);
+          qq.group = Math.max(0, qq.group - 1);
           const key = String(who || "?");
-          quota.people[key] = Math.max(0, (quota.people[key] || 0) - 1);
+          qq.people[key] = Math.max(0, (qq.people[key] || 0) - 1);
         }
         await saveQuota();
       }
@@ -596,11 +620,50 @@ export function createVideoGen({ imageGen, speaker = null, writeScript = null, s
     }
   }
 
+  /**
+   * FOTO HIDUP: foto (Buffer) + kalimat permintaan ("dengan salju 10 detik tulisan 'Selamat Pagi'") -> video MP4.
+   * -> { video:{buffer,mime,seconds,width,height,effects,motion,grade,title} } atau { error, kind }. Tanpa AI/kuota gambar.
+   */
+  async function makeFromPhoto(photo, text = "", kind = "owner", who = "", opts = {}) {
+    if (!config.enabled) return { error: VIDEO_TEXT.off, kind: "off" };
+    if (!Buffer.isBuffer(photo) || photo.length < 100) return { error: VIDEO_TEXT.badphoto, kind: "badimage" };
+    const bad = promptProblem(String(text ?? ""));
+    if (bad) return { error: bad.replace("gambar", "video"), kind: "refused" };
+    if ((await checkFfmpeg()) !== "ok") return { error: VIDEO_TEXT.noffmpeg, kind: "noffmpeg" };
+    const options = parsePhotoOptions(text, { maxSeconds: config.photoMaxSeconds });
+    const slot = await reserve(kind, who, "photo");
+    if (!slot.ok) return { error: slot.reason, kind: "limit" };
+    const done = await acquire();
+    if (!done) {
+      await slot.release().catch(() => {});
+      return { error: VIDEO_TEXT.busy, kind: "busy" };
+    }
+    const t0 = now();
+    try {
+      const video = await buildPhotoVideo(photo, options, { ffmpeg: config.ffmpeg, spawnImpl, tmpRoot, font: pickFont(), log, stepTimeoutMs: config.stepTimeoutMs, onStage: opts.onStage || (() => {}) });
+      stats.ok += 1;
+      stats.lastOkAt = now();
+      stats.lastSeconds = Math.round((now() - t0) / 1000);
+      return { video };
+    } catch (e) {
+      stats.fail += 1;
+      stats.lastError = String(e?.message || e).slice(0, 160);
+      await slot.release().catch(() => {});
+      const k = e?.kind || "unavailable";
+      const text2 = k === "render" ? VIDEO_TEXT.fail : k === "badimage" ? VIDEO_TEXT.badphoto : e instanceof Error ? e.message : String(e);
+      log.warn?.(`🎞️ [FotoHidup] gagal (${k}): ${stats.lastError}`);
+      return { error: text2, kind: k, detail: e?.detail || (k === "render" ? stats.lastError : "") };
+    } finally {
+      done();
+    }
+  }
+
   function describe() {
     return [
       `Status: ${available() ? "aktif" : config.enabled ? "belum bisa (pembuat gambar belum aktif)" : "dimatikan (VIDEO_ENABLED=0)"}; grup WA: ${groupsOn ? "boleh" : "mati"}`,
       `Adegan: ${config.scenes} (maks ${config.maxScenes}); satu video ≈ ${config.scenes} gambar + 1 suara`,
       `Jatah harian: pemilik ${config.ownerDaily || "tanpa batas"}, semua grup ${config.groupDaily || "tanpa batas"}, per orang di grup ${config.personDaily || "tanpa batas"}`,
+      `Foto hidup (foto -> video + efek, tanpa AI): jatah pemilik ${config.photoOwnerDaily || "tanpa batas"}, semua grup ${config.photoGroupDaily || "tanpa batas"}, per orang ${config.photoPersonDaily || "tanpa batas"}; hari ini pemilik ${quota.photo.owner}, grup ${quota.photo.group}`,
       `Hari ini: pemilik ${quota.owner}, grup ${quota.group}; berhasil ${stats.ok}, gagal ${stats.fail}${stats.lastSeconds ? `, rakit terakhir ${stats.lastSeconds} dtk` : ""}${stats.lastError ? `\nGalat terakhir: ${stats.lastError}` : ""}`
     ].join("\n");
   }
@@ -618,5 +681,5 @@ export function createVideoGen({ imageGen, speaker = null, writeScript = null, s
     config = next;
   }
 
-  return { available, groupEnabled, load, setGroup, reserve, make, describe, parseCommand, reconfigure, detect: detectVideoRequest, checkFfmpeg, stats: () => ({ ...stats }) };
+  return { available, groupEnabled, photoAvailable, photoGroupEnabled, load, setGroup, reserve, make, makeFromPhoto, detectPhoto: detectPhotoVideoRequest, describe, parseCommand, reconfigure, detect: detectVideoRequest, checkFfmpeg, stats: () => ({ ...stats }) };
 }

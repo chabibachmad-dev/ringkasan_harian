@@ -46,6 +46,10 @@ export const ENV_KEYS = {
   VIDEO_OWNER_DAILY: { secret: false, hint: "jatah video pemilik per hari (0 = tanpa batas)", validate: intIn(0, 1000) },
   VIDEO_GROUP_DAILY: { secret: false, hint: "jatah video semua grup per hari", validate: intIn(0, 1000) },
   VIDEO_PERSON_DAILY: { secret: false, hint: "jatah video per orang di grup per hari", validate: intIn(0, 1000) },
+  VIDEO_PHOTO_OWNER_DAILY: { secret: false, hint: "jatah foto-hidup pemilik per hari (0 = tanpa batas)", validate: intIn(0, 1000) },
+  VIDEO_PHOTO_GROUP_DAILY: { secret: false, hint: "jatah foto-hidup semua grup per hari", validate: intIn(0, 1000) },
+  VIDEO_PHOTO_PERSON_DAILY: { secret: false, hint: "jatah foto-hidup per orang di grup per hari", validate: intIn(0, 1000) },
+  VIDEO_PHOTO_MAX_SEC: { secret: false, hint: "durasi maksimum foto-hidup (detik, 5-30)", validate: intIn(5, 30) },
   VIDEO_SCENES: { secret: false, hint: "jumlah adegan bawaan satu video (3-8; makin banyak makin lama & boros gambar)", validate: intIn(3, 8) },
   VIDEO_MAX_SCENES: { secret: false, hint: "adegan maksimum bila diminta durasi panjang (3-8)", validate: intIn(3, 8) }
 };

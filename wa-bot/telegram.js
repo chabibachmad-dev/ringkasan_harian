@@ -156,7 +156,7 @@ const HELP = [
   "/voice wag on|off|id|eng|kor|arb|jawa  — balasan grup WA berupa suara/teks + bahasa suara",
   "/wa2  — nomor WhatsApp kedua (status, kode, qr)",
   "/grup  — grup WA yang dijawab bot: lihat, semua, tambah, hapus",
-  "/gambar <deskripsi>  — buat gambar; /gambar grup on|off = izinkan di grup WA\n/video <deskripsi>  — buat video bernarasi; /video grup on|off\n/env  — ubah kunci gambar (token Cloudflare, jatah) dari sini",
+  "/gambar <deskripsi>  — buat gambar; /gambar grup on|off = izinkan di grup WA\n/video <deskripsi>  — video bernarasi; kirim FOTO + keterangan \"jadikan video salju\" = foto hidup\n/env  — ubah kunci gambar (token Cloudflare, jatah) dari sini",
   "/kas  — laporan kas bulanan: konfirmasi angka, submit, simpan (/kas bantuan)",
   "/nodin  — konsep Nota Dinas LPJ (PDF + Word), otomatis tiap tanggal 1 (/nodin cek)",
   "/urutan  — lihat/ubah urutan AI balasan WhatsApp & grup (contoh: /urutan santai groq,gemini,ollama;  /urutan reset)",
@@ -392,8 +392,8 @@ export function createTelegram({ config, deps = {}, fetchImpl = globalThis.fetch
     form.append("chat_id", String(chatId));
     form.append("video", new Blob([file.data], { type: file.mime || "video/mp4" }), file.name);
     form.append("supports_streaming", "true");
-    form.append("width", "1280");
-    form.append("height", "720");
+    form.append("width", String(file.width || 1280));
+    form.append("height", String(file.height || 720));
     if (caption) {
       form.append("caption", waToTelegramHtml(caption).slice(0, 1000));
       form.append("parse_mode", "HTML");
@@ -744,6 +744,21 @@ Suara tiap bot (Ayyubi/Wongsobot): /suara daftar • /suara coba <NamaSuara> [ga
       return void (await send(chatId, `⚠️ Berkas gagal diproses: ${String(e?.message || e).slice(0, 200)}`).catch(() => {}));
     }
     await send(chatId, "Bot membaca pesan teks dan pesan suara (tahan tombol mikrofon). Untuk menerapkan patch, kirim zip bernama patch*.zip (perlu OPS_ENABLED=true).").catch(() => {});
+  }
+
+  /** Foto Telegram -> video hidup (gerak kamera + efek). */
+  async function handleOwnerPhotoVideo(chatId, photo, text) {
+    if (deps.video?.photoAvailable && !deps.video.photoAvailable()) return void (await send(chatId, "Pembuat video sedang dimatikan."));
+    let buffer;
+    try {
+      buffer = await withAction(chatId, "upload_video", () => downloadFile(photo.file_id));
+    } catch (e) {
+      return void (await send(chatId, `⚠️ Fotonya gagal diunduh: ${String(e?.message || e).slice(0, 160)}`).catch(() => {}));
+    }
+    await send(chatId, "🎞️ Fotonya sedang dihidupkan (gerak kamera + efek) — biasanya setengah sampai dua menit. Kukirim begitu selesai.").catch(() => {});
+    const out = await withAction(chatId, "upload_video", () => deps.video.makeFromPhoto(buffer, text));
+    if (out.error) return void (await send(chatId, `⚠️ ${out.error}`).catch(() => {}));
+    await sendFiles(chatId, [{ data: out.video.buffer, name: "foto-hidup.mp4", mime: "video/mp4", video: true, width: out.video.width, height: out.video.height }], "");
   }
 
   async function handleOwnerVoice(chatId, voice) {
@@ -1108,6 +1123,18 @@ Suara tiap bot (Ayyubi/Wongsobot): /suara daftar • /suara coba <NamaSuara> [ga
     }
     if (m.voice || m.audio) return handleOwnerVoice(chatId, m.voice || m.audio);
     if (m.document && deps.ops?.handleDocument) return handleOwnerDocument(chatId, m.document);
+    // FOTO HIDUP: foto + keterangan ("/video salju", "jadikan video dengan hujan") atau membalas foto dengan perintah itu
+    if (deps.video?.makeFromPhoto) {
+      const own = Array.isArray(m.photo) && m.photo.length ? m.photo : null;
+      const replied = !own && Array.isArray(m.reply_to_message?.photo) && m.reply_to_message.photo.length ? m.reply_to_message.photo : null;
+      const caption = own ? String(m.caption ?? "") : typeof m.text === "string" ? m.text : "";
+      const anim = own || replied ? deps.video.detectPhoto?.(caption, { hasImage: true }) : null;
+      if (anim) return handleOwnerPhotoVideo(chatId, (own || replied).at(-1), anim.text);
+      if (!own && !replied && typeof m.text === "string") {
+        const need = deps.video.detectPhoto?.(m.text, { hasImage: false });
+        if (need?.needsImage) return void (await send(chatId, "Fotonya belum ada. Kirim foto dengan keterangan, mis. \"jadikan video dengan salju turun\", atau balas (reply) foto yang mau dihidupkan dengan: jadikan video.").catch(() => {}));
+      }
+    }
     if (typeof m.text !== "string") {
       await send(chatId, "Bot membaca pesan teks dan pesan suara (tahan tombol mikrofon).").catch(() => {});
       return;

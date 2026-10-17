@@ -720,7 +720,7 @@ ok("edit foto: perintah dikenali ketat, foto diperkecil (ffmpeg), multipart ke F
   const idx = fs.readFileSync(new URL("./index.js", import.meta.url), "utf8");
   const grp = idx.slice(idx.indexOf("async function handleGroupMessage"), idx.indexOf("async function deliverAutoReplyVoice"));
   assert.match(grp, /const photo = groupAudio \? null : content\.imageMessage/, "foto + keterangan dibaca");
-  assert.match(grp, /if \(photo && !editReq\) return;/, "foto dengan keterangan biasa tetap diabaikan");
+  assert.match(grp, /if \(photo && !editReq && !animReq\) return;/, "foto dengan keterangan biasa tetap diabaikan");
   assert.match(grp, /imageGen\.groupEnabled\(\) \? imageGen\.detectEdit\(text, \{ hasImage: Boolean\(photo \|\| quotedImage\) \}\)/, "edit hanya bila fitur gambar grup aktif");
   assert.ok(grp.indexOf("isAutoReplyEnabledForContact") < grp.indexOf("if (editReq && !docEdit) {"), "edit setelah cek izin kontak");
   assert.ok(grp.indexOf("if (editReq && !docEdit) {") < grp.indexOf("imageGen.detect(text)"), "edit dicek sebelum pembuatan gambar & AI");

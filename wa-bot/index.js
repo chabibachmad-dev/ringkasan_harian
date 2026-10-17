@@ -81,7 +81,8 @@ import { MAIN_ACCOUNT, SECOND_ACCOUNT, acctFields, createAccountRouter, isPaired
 import { AsyncLocalStorage } from "node:async_hooks";
 import { qrToPng } from "./qr-png.js";
 import { createGroupList } from "./group-list.js";
-import { createVideoGen, readVideoConfig, videoSentNote } from "./video-gen.js";
+import { createVideoGen, readVideoConfig, videoSentNote, photoVideoSentNote, VIDEO_TEXT } from "./video-gen.js";
+const VIDEO_NOPHOTO_TEXT = VIDEO_TEXT.nophoto;
 import { createImageGen, readImageConfig, imageSentNote, quotedImageNote, prepareEditInput, KIND_TEXT as IMAGE_KIND_TEXT } from "./image-gen.js";
 import { createEnvEditor } from "./env-edit.js";
 import { createMetaAi, readMetaAiConfig, parseMetaAiArg, unsafeTarget } from "./meta-ai.js";
@@ -330,7 +331,7 @@ KEMAMPUAN GAMBAR: kamu (bot ini) BISA membuat gambar sendiri lewat pembuat gamba
 // Bila pembuat video aktif untuk grup: AI percakapan harus tahu bot bisa membuat video (jangan bilang tidak bisa / menyarankan aplikasi lain).
 const VIDEO_PROMPT_NOTE = `
 
-KEMAMPUAN VIDEO: kamu (bot ini) BISA membuat video pendek bernarasi (gambar + suara + subtitle, 20-60 detik) sendiri. Cara memintanya: anggota grup menulis "bot, buatkan video <deskripsi>" (mis. "bot, buatkan video kancil dan buaya"; boleh tambah durasi: "bot, buatkan video 30 detik tentang siklus air"); videonya dikirim langsung ke grup beberapa menit kemudian dan jatahnya terbatas per hari. JANGAN mengatakan kamu tidak bisa membuat video dan jangan menyarankan aplikasi/layanan lain; kalau ada yang minta video tetapi kalimatnya belum memakai pola itu, ajari pola di atas dengan singkat. Baris riwayat berawalan "🎬" berarti BOT INI SENDIRI yang membuat dan mengirim video itu sesuai deskripsi permintaannya (kamu tidak bisa melihat isinya).`;
+KEMAMPUAN VIDEO: kamu (bot ini) BISA membuat video pendek bernarasi (gambar + suara + subtitle, 20-60 detik) sendiri. Cara memintanya: anggota grup menulis "bot, buatkan video <deskripsi>" (mis. "bot, buatkan video kancil dan buaya"; boleh tambah durasi: "bot, buatkan video 30 detik tentang siklus air"); videonya dikirim langsung ke grup beberapa menit kemudian dan jatahnya terbatas per hari. JANGAN mengatakan kamu tidak bisa membuat video dan jangan menyarankan aplikasi/layanan lain; kalau ada yang minta video tetapi kalimatnya belum memakai pola itu, ajari pola di atas dengan singkat. Foto juga bisa DIHIDUPKAN jadi video (gerak kamera + efek salju/hujan/debu/kunang-kunang/bintang/konfeti/kabut/sinar/daun/kelopak, nuansa warna, tulisan): anggota grup mengirim foto dengan keterangan "bot, jadikan video dengan salju turun" (boleh tambah durasi dan tulisan, mis. "bot, jadikan video 10 detik dengan konfeti, tulisan \"Selamat Ulang Tahun\"") atau membalas foto dengan "bot, jadikan video"; ini gratis dan lebih cepat daripada video buatan AI. Baris riwayat berawalan "🎬" atau "🎞️" berarti BOT INI SENDIRI yang membuat dan mengirim video itu sesuai deskripsi permintaannya (kamu tidak bisa melihat isinya).`;
 
 // Permintaan "jadikan PDF/Word/Excel": sistem yang membuat berkasnya dari jawabanmu -- AI cukup menulis isinya.
 const FILE_NOTE_COMMON = ` Mulai LANGSUNG dengan judul "# ..." tanpa sapaan (jangan "Halo <nama>"), jangan menyebut nama penanya, dan jangan menyinggung perintah bot lain (mis. pembuatan gambar) atau menawarkan hal lain di akhir. Tabel WAJIB memakai sintaks tabel markdown (baris "| kolom | kolom |" lalu baris "|---|---|"); JANGAN menggambar tabel dengan karakter ===, +---+ atau di dalam blok kode.`;
@@ -370,7 +371,7 @@ function withGroupNote(basePrompt, jid) {
   }
   let videoNote = "";
   try {
-    if (videoGen.groupEnabled() && !ctxFlags?.wantFile) videoNote = VIDEO_PROMPT_NOTE;
+    if ((videoGen.groupEnabled() || videoGen.photoGroupEnabled()) && !ctxFlags?.wantFile) videoNote = VIDEO_PROMPT_NOTE;
   } catch {
     /* pembuat video belum siap: tanpa catatan */
   }
@@ -2886,8 +2887,10 @@ async function handleGroupMessage(msg, sock) {
   const sender = msg.pushName || "Anggota grup";
   // Edit foto: foto di pesan ini, atau foto yang DIBALAS (termasuk gambar buatan bot sendiri).
   const quotedImage = !photo && ctx?.quotedMessage ? unwrapMessageContent(ctx.quotedMessage)?.imageMessage || null : null;
-  const editReq = imageGen.groupEnabled() ? imageGen.detectEdit(text, { hasImage: Boolean(photo || quotedImage) }) : null;
-  if (photo && !editReq) return; // foto dengan keterangan biasa: tetap diabaikan seperti sebelumnya
+  // Foto hidup ("bot, jadikan video dengan salju" + foto/balas foto) didahulukan: kata "jadikan" juga dikenali sebagai edit foto.
+  const animReq = videoGen.photoGroupEnabled() ? videoGen.detectPhoto(text, { hasImage: Boolean(photo || quotedImage) }) : null;
+  const editReq = !animReq && imageGen.groupEnabled() ? imageGen.detectEdit(text, { hasImage: Boolean(photo || quotedImage) }) : null;
+  if (photo && !editReq && !animReq) return; // foto dengan keterangan biasa: tetap diabaikan seperti sebelumnya
   let quotedText = ctx?.quotedMessage ? extractText({ message: unwrapMessageContent(ctx.quotedMessage) }) : null;
   // Mengutip GAMBAR buatan bot ini (tanpa keterangan): ambil deskripsi permintaannya dari catatan keluar, supaya AI tahu itu gambar apa.
   if (!quotedText && repliedToOwn && ctx?.stanzaId && unwrapMessageContent(ctx.quotedMessage || {})?.imageMessage) {
@@ -2966,6 +2969,19 @@ async function handleGroupMessage(msg, sock) {
         return;
       }
     }
+  }
+
+  // Permintaan FOTO HIDUP (foto -> video + efek): ditangani pembuat video, bukan AI percakapan.
+  if (animReq && !docEdit) {
+    if (animReq.needsImage) {
+      await replyGroupText(sock, groupJid, msg, subject, VIDEO_NOPHOTO_TEXT);
+      return;
+    }
+    const photoSource = photo
+      ? { key: msg.key, message: content }
+      : { key: { remoteJid: groupJid, id: ctx.stanzaId, participant: ctx.participant }, message: unwrapMessageContent(ctx.quotedMessage) };
+    await handleVideoRequestWa(sock, groupJid, { prompt: animReq.text }, { kind: "group", who: msg.key.participant || sender, quoted: msg, waName: subject || null, record: true, photoSource });
+    return;
   }
 
   // Permintaan EDIT foto ("bot, ubah jadi hitam putih" + foto/balas foto): ditangani pembuat gambar, bukan AI percakapan.
@@ -3489,25 +3505,33 @@ async function tellOwnerImageProblem(kind, text, detail = "") {
 }
 
 /** Unduh foto yang mau diedit & perkecil (ffmpeg). -> { prepared } atau { error, kind } siap tampil. */
+/** Unduh foto WhatsApp. -> { buffer } atau { error, kind } siap tampil. */
+async function downloadWaPhoto(sock, source, label = "Edit") {
+  const img = source?.message?.imageMessage;
+  if (!img) return { error: IMAGE_KIND_TEXT.badimage, kind: "badimage" };
+  if (Number(img.fileLength) > 12 * 1024 * 1024) return { error: "Fotonya terlalu besar (maks 12 MB). Kirim versi yang lebih kecil.", kind: "badimage" };
+  let buffer = null;
+  let lastErr = null;
+  for (let attempt = 0; attempt < 2 && !buffer; attempt++) {
+    try {
+      buffer = await downloadMediaMessage(source, "buffer", {}, { logger: pino({ level: "silent" }), reuploadRequest: sock.updateMediaMessage });
+    } catch (e) {
+      lastErr = e;
+      await new Promise((r) => setTimeout(r, 700));
+    }
+  }
+  if (!buffer) {
+    console.error(`🖼️ [${label}] gagal mengunduh foto: ${describeError(lastErr)}`);
+    return { error: "Fotonya gagal diunduh (mungkin sudah kedaluwarsa). Kirim ulang fotonya, lalu minta lagi.", kind: "badimage" };
+  }
+  return { buffer };
+}
+
 async function loadEditSource(sock, source) {
   try {
-    const img = source?.message?.imageMessage;
-    if (!img) return { error: IMAGE_KIND_TEXT.badimage, kind: "badimage" };
-    if (Number(img.fileLength) > 12 * 1024 * 1024) return { error: "Fotonya terlalu besar (maks 12 MB). Kirim versi yang lebih kecil.", kind: "badimage" };
-    let buffer = null;
-    let lastErr = null;
-    for (let attempt = 0; attempt < 2 && !buffer; attempt++) {
-      try {
-        buffer = await downloadMediaMessage(source, "buffer", {}, { logger: pino({ level: "silent" }), reuploadRequest: sock.updateMediaMessage });
-      } catch (e) {
-        lastErr = e;
-        await new Promise((r) => setTimeout(r, 700));
-      }
-    }
-    if (!buffer) {
-      console.error(`🖼️ [Edit] gagal mengunduh foto: ${describeError(lastErr)}`);
-      return { error: "Fotonya gagal diunduh (mungkin sudah kedaluwarsa). Kirim ulang fotonya, lalu minta lagi.", kind: "badimage" };
-    }
+    const dl = await downloadWaPhoto(sock, source, "Edit");
+    if (dl.error) return dl;
+    const buffer = dl.buffer;
     return { prepared: await prepareEditInput(buffer) };
   } catch (e) {
     const kind = e?.kind === "noffmpeg" ? "noffmpeg" : "badimage";
@@ -3584,7 +3608,7 @@ async function tellOwnerVideoProblem(kind, text, detail = "") {
  * Buat video lalu kirim ke chat WA. kind: "owner" | "group". Satu pesan pemberitahuan dikirim lebih dulu (perakitan butuh 1-3 menit);
  * gagal -> pesan alasan. group: hasil dicatat ke whatsapp_messages.
  */
-async function handleVideoRequestWa(sock, jid, req, { kind = "owner", who = "", quoted = null, waName = null, record = false } = {}) {
+async function handleVideoRequestWa(sock, jid, req, { kind = "owner", who = "", quoted = null, waName = null, record = false, photoSource = null } = {}) {
   const send = async (content) =>
     sock.sendMessage(jid, content, quoted ? { quoted } : undefined).catch((e) => {
       console.error(`🎬 Gagal kirim ke ${jid}:`, e instanceof Error ? e.message : String(e));
@@ -3603,7 +3627,7 @@ async function handleVideoRequestWa(sock, jid, req, { kind = "owner", who = "", 
     });
     if (error) console.error("Gagal catat balasan video:", error.message);
   };
-  if (!req.prompt) {
+  if (!photoSource && !req.prompt) {
     const sent = await send({ text: "Mau dibuatkan video tentang apa? Contoh: bot, buatkan video kancil dan buaya (atau tambah durasi: bot, buatkan video 30 detik tentang siklus air)." });
     await note("Mau dibuatkan video tentang apa?", sent);
     return;
@@ -3614,17 +3638,33 @@ async function handleVideoRequestWa(sock, jid, req, { kind = "owner", who = "", 
   const timer = setInterval(tick, 4500);
   let out;
   try {
-    out = await videoGen.make(req.prompt, kind, who, {
-      seconds: req.seconds || 0,
-      onStage: (stage) => {
-        if (announced || stage !== "images") return;
-        announced = true;
-        const mins = req.seconds > 45 ? "2–4 menit" : "1–3 menit";
-        send({ text: `🎬 Oke, videonya sedang dibuat (naskah → gambar → suara → rakit). Biasanya ${mins}; kukirim ke sini begitu selesai.` })
-          .then((s) => note("🎬 [BOT sedang membuat video permintaan ini]", s))
-          .catch(() => {});
-      }
-    });
+    if (photoSource) {
+      // FOTO HIDUP: foto -> video dengan gerak kamera + efek (tanpa AI, hanya ffmpeg)
+      const dl = await downloadWaPhoto(sock, photoSource, "FotoHidup");
+      out = dl.error
+        ? dl
+        : await videoGen.makeFromPhoto(dl.buffer, req.prompt || "", kind, who, {
+            onStage: (stage) => {
+              if (announced || stage !== "render") return;
+              announced = true;
+              send({ text: "🎞️ Oke, fotonya sedang dihidupkan (gerak kamera + efek). Biasanya setengah sampai dua menit; kukirim ke sini begitu selesai." })
+                .then((s) => note("🎞️ [BOT sedang menghidupkan foto permintaan ini]", s))
+                .catch(() => {});
+            }
+          });
+    } else {
+      out = await videoGen.make(req.prompt, kind, who, {
+        seconds: req.seconds || 0,
+        onStage: (stage) => {
+          if (announced || stage !== "images") return;
+          announced = true;
+          const mins = req.seconds > 45 ? "2–4 menit" : "1–3 menit";
+          send({ text: `🎬 Oke, videonya sedang dibuat (naskah → gambar → suara → rakit). Biasanya ${mins}; kukirim ke sini begitu selesai.` })
+            .then((s) => note("🎬 [BOT sedang membuat video permintaan ini]", s))
+            .catch(() => {});
+        }
+      });
+    }
   } finally {
     clearInterval(timer);
     sock.sendPresenceUpdate("paused", jid).catch(() => {});
@@ -3639,11 +3679,35 @@ async function handleVideoRequestWa(sock, jid, req, { kind = "owner", who = "", 
   const v = out.video;
   const sent = await send({ video: v.buffer, mimetype: v.mime || "video/mp4" });
   console.log(`🎬 Video dibuat (${v.seconds} dtk, ${v.scenes} adegan, ${Math.round(v.buffer.length / 1024)} KB${v.silent ? ", tanpa suara" : ""}) untuk ${jid}: ${String(req.prompt).slice(0, 60)}`);
-  await note(videoSentNote(req.prompt), sent);
+  await note(photoSource ? photoVideoSentNote(req.prompt, v) : videoSentNote(req.prompt), sent);
 }
 
 /** Pemilik meminta video di chat pribadi ("buatkan video ..." / "/video ..."). true = ditangani. */
 async function handleWaVideoCommand(sock, jid, msg, text) {
+  // Foto + keterangan (atau membalas foto) -> FOTO HIDUP
+  try {
+    const content = unwrapMessageContent(msg.message) || {};
+    const ctx = content.imageMessage?.contextInfo || content.extendedTextMessage?.contextInfo || null;
+    const own = content.imageMessage || null;
+    const quotedImg = !own && ctx?.quotedMessage ? unwrapMessageContent(ctx.quotedMessage)?.imageMessage || null : null;
+    const caption = own ? String(own.caption ?? "") : String(text ?? "").replace(/^\[gambar\]\s*/i, "");
+    if (own || quotedImg) {
+      const anim = videoGen.photoAvailable() ? videoGen.detectPhoto(caption, { hasImage: true }) : null;
+      if (anim) {
+        const photoSource = own ? { key: msg.key, message: content } : { key: { remoteJid: jid, id: ctx.stanzaId, participant: ctx.participant }, message: unwrapMessageContent(ctx.quotedMessage) };
+        await handleVideoRequestWa(sock, jid, { prompt: anim.text }, { kind: "owner", quoted: msg, photoSource });
+        return true;
+      }
+    } else if (videoGen.photoAvailable()) {
+      const anim = videoGen.detectPhoto(caption, { hasImage: false });
+      if (anim?.needsImage) {
+        await sock.sendMessage(jid, { text: "Fotonya belum ada. Kirim foto dengan keterangan, mis. \"jadikan video dengan salju turun\", atau balas (reply) foto yang mau dihidupkan dengan: jadikan video." }, { quoted: msg }).catch(() => {});
+        return true;
+      }
+    }
+  } catch (e) {
+    console.error("🎞️ [FotoHidup] gagal membaca foto:", e instanceof Error ? e.message : String(e));
+  }
   if (!videoGen.available()) return false;
   const req = videoGen.detect(text);
   if (!req) return false;
@@ -5054,6 +5118,13 @@ const telegram = createTelegram({
       setGroup: (v) => videoGen.setGroup(v),
       make: async (prompt, opts = {}) => {
         const out = await videoGen.make(prompt, "owner", "", opts);
+        if (out.error) await tellOwnerVideoProblem(out.kind, out.error, out.detail);
+        return out;
+      },
+      photoAvailable: () => videoGen.photoAvailable(),
+      detectPhoto: (text, opts) => videoGen.detectPhoto(text, opts),
+      makeFromPhoto: async (buffer, text) => {
+        const out = await videoGen.makeFromPhoto(buffer, text, "owner", "");
         if (out.error) await tellOwnerVideoProblem(out.kind, out.error, out.detail);
         return out;
       }
