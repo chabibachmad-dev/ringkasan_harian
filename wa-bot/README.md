@@ -1109,6 +1109,17 @@ Foto yang dikirim bisa dijadikan video pendek (4-15 detik) lengkap dengan gerak 
 - **Jatah (hari WITA), terpisah dari video buatan AI:** pemilik 15, semua grup 8, per orang 2 (`VIDEO_PHOTO_OWNER_DAILY`, `VIDEO_PHOTO_GROUP_DAILY`, `VIDEO_PHOTO_PERSON_DAILY`; 0 = tanpa batas; bisa diubah lewat `/env`). Memakai antrean yang sama dengan video AI (satu rakitan pada satu waktu) dan hanya butuh ffmpeg, jadi tetap jalan walau pembuat gambar Cloudflare mati.
 - **Batasnya:** fotonya tidak "dianimasikan" oleh AI (orang/objek di dalam foto tidak bergerak sendiri); yang bergerak adalah kamera dan efek di atas foto. Gerak sungguhan butuh model image-to-video berbayar atau GPU besar (lihat catatan Veo di atas). Foto maks 12 MB; dengan keterangan tulisan, font DejaVu Sans Bold dipakai bila ada (`VIDEO_FONT` untuk font lain).
 
+## Animasi karakter tanpa wajah (gratis, digambar kode)
+
+Selain video bergambar-diam bernarasi dan "foto hidup", bot bisa membuat **animasi kartun**: tokoh manusia 2D bergaya datar **tanpa mata/hidung/mulut** (sesuai gaya "tanpa wajah") yang benar-benar bergerak — berjalan, berlari, melambai, menunjuk, melompat, duduk, bertepuk tangan, bersorak, membungkuk, berdoa, berpikir, sedih, berbicara. Tiap frame dilukis di Node (penggambar beranti-alias sendiri), ditumpuk ffmpeg di atas latar, lalu diberi narasi suara + subtitle. Tanpa API video, tanpa GPU.
+
+- **Memintanya:** di grup `bot, buatkan animasi ayah dan anak ke taman` (boleh tambah durasi: "30 detik"); di Telegram `/video animasi <cerita>`; di chat WhatsApp pemilik cukup tulis "buatkan animasi <cerita>". Kata "kartun" juga dikenali pada `/video kartun ...`.
+- **Tokoh:** pria, wanita (boleh berhijab), anak (laki-laki/perempuan), kakek, nenek; boleh berpeci/bertopi; warna baju dan hijab mengikuti cerita. Maks. 3 tokoh per cerita, **hanya manusia** (bukan hewan).
+- **Latar:** gambar AI bila pembuat gambar aktif; bila tidak, latar buatan kode (pagi, siang, sore, malam, dalam rumah) — jadi animasi tetap jalan tanpa kuota gambar.
+- **Jatah & antrean:** memakai jatah video harian yang sama dengan video bergambar (`VIDEO_*_DAILY`) dan antrean perakitan yang sama (satu per satu).
+- **Batasnya:** gerak berupa boneka kartun sederhana (sendi kaku bergaya "flat"), bukan animasi sinematik seperti Meta AI/Veo; karakter tidak bisa diganti-ganti tampilannya di luar warna baju/hijab/peci.
+- Mesin gambarnya ada di `story-video.js`; perakitan dan naskah di `video-gen.js`.
+
 ## Mengubah pengaturan gambar dari Telegram (`/env`)
 
 Supaya token Cloudflare dan jatah gambar bisa diatur tanpa membuka laptop. Hanya pemilik, hanya lewat teks (bukan pesan suara), dan HANYA kunci pembuat gambar dan video (`CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNTS`, `*_IMAGE_MODELS`, `IMAGE_*` termasuk `IMAGE_PROVIDERS`, dan jatah video `VIDEO_ENABLED`, `VIDEO_OWNER_DAILY`, `VIDEO_GROUP_DAILY`, `VIDEO_PERSON_DAILY`, `VIDEO_SCENES`, `VIDEO_MAX_SCENES`). Kunci lain (Supabase, Telegram, WhatsApp) tidak bisa diubah dari sini.

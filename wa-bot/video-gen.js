@@ -27,6 +27,7 @@ import os from "node:os";
 import path from "node:path";
 import { cleanPrompt, promptProblem } from "./image-gen.js";
 import { buildPhotoVideo, detectPhotoVideoRequest, parsePhotoOptions } from "./photo-video.js";
+import { CAM_ZOOM, buildStoryPrompt, detectStoryMode, fallbackStory, makeCharacter, parseStoryScript, renderSceneClip, writeBackground } from "./story-video.js";
 
 export const STATE_KEY = "wa_video_gen";
 export const QUOTA_KEY = "wa_video_quota";
@@ -317,6 +318,9 @@ export const VIDEO_TEXT = {
 export const photoVideoSentNote = (prompt, v = {}) =>
   `🎞️ [BOT mengirim VIDEO hasil FOTO HIDUP (foto yang dikirim penanya digerakkan + efek${v.effects?.length ? " " + v.effects.join(", ") : ""}), permintaannya: "${String(prompt ?? "").replace(/\s+/g, " ").replace(/"/g, "'").slice(0, 160)}"]`;
 
+export const storySentNote = (prompt) =>
+  `🎭 [BOT mengirim ANIMASI karakter tanpa wajah buatan sendiri (tokoh bergerak + narasi + subtitle) sesuai permintaan: "${String(prompt ?? "").replace(/\s+/g, " ").replace(/"/g, "'").slice(0, 200)}"]`;
+
 export const videoSentNote = (prompt) =>
   `🎬 [BOT mengirim VIDEO buatan AI sesuai permintaan: "${String(prompt ?? "").replace(/\s+/g, " ").replace(/"/g, "'").slice(0, 200)}"]`;
 
@@ -339,6 +343,9 @@ export function createVideoGen({ imageGen, speaker = null, writeScript = null, s
   // Foto hidup tidak butuh pembuat gambar/AI: cukup ffmpeg di laptop.
   const photoAvailable = () => config.enabled;
   const photoGroupEnabled = () => groupsOn && photoAvailable();
+  // Animasi karakter: cukup ffmpeg (latar gambar AI bersifat opsional).
+  const storyAvailable = () => config.enabled;
+  const storyGroupEnabled = () => groupsOn && storyAvailable();
 
   async function load() {
     if (!state) return groupsOn;
@@ -575,6 +582,129 @@ export function createVideoGen({ imageGen, speaker = null, writeScript = null, s
     }
   }
 
+  async function makeStoryScript(idea, n) {
+    if (writeScript) {
+      try {
+        const sc = parseStoryScript(await writeScript(buildStoryPrompt(idea, n, config.narrationChars)), n, config.narrationChars);
+        if (sc) return sc;
+        log.warn?.("🎭 [Animasi] naskah AI tidak bisa dibaca, pakai cadangan.");
+      } catch (e) {
+        log.warn?.(`🎭 [Animasi] naskah AI gagal (${e instanceof Error ? e.message : e}), pakai cadangan.`);
+      }
+    }
+    return fallbackStory(idea, n);
+  }
+
+  /** Suara narasi sekali jalan -> { narrFile, narrSec } (narrFile null bila tanpa suara). */
+  async function makeVoice(dir, scenes, onStage) {
+    const narration = scenes.map((s) => s.narration).join(" ").replace(/\s+/g, " ").trim();
+    if (!narration || !speaker?.available?.()) return { narrFile: null, narrSec: 0 };
+    onStage("voice");
+    try {
+      const sp = await speaker.speak(narration);
+      if (sp?.ogg?.length) {
+        const narrFile = path.join(dir, "narasi.ogg");
+        fs.writeFileSync(narrFile, sp.ogg);
+        const narrSec = await audioSeconds(config.ffmpeg, narrFile, { spawnImpl });
+        if (narrSec > 1) return { narrFile, narrSec };
+      }
+    } catch (e) {
+      log.warn?.(`🎬 [Video] suara gagal, video dibuat tanpa suara: ${String(e?.message || e).slice(0, 120)}`);
+    }
+    return { narrFile: null, narrSec: 0 };
+  }
+
+  /** Gabung klip + suara -> { buffer, total }. Video >15 MB dikecilkan ke 854x480. */
+  async function joinClips(dir, clips, durs, narrFile) {
+    const list = path.join(dir, "list.txt");
+    fs.writeFileSync(list, clips.map((c) => `file '${c.replace(/\\/g, "/").replace(/'/g, "'\\''")}'`).join("\n"));
+    const total = durs.reduce((a, b) => a + b, 0);
+    const final = path.join(dir, "video.mp4");
+    const base = ["-hide_banner", "-loglevel", "error", "-y", "-f", "concat", "-safe", "0", "-i", list];
+    const args = narrFile
+      ? [...base, "-i", narrFile, "-filter_complex", `[1:a]adelay=${Math.round(LEAD_SEC * 1000)}:all=1,apad[a]`, "-map", "0:v", "-map", "[a]", "-t", total.toFixed(2), "-c:v", "copy", "-c:a", "aac", "-b:a", "96k", "-ar", "44100", "-movflags", "+faststart", final]
+      : [...base, "-c:v", "copy", "-an", "-movflags", "+faststart", final];
+    const rm = await runProc(config.ffmpeg, args, { timeoutMs: config.stepTimeoutMs, spawnImpl });
+    if (rm.code !== 0) throw Object.assign(new Error(`ffmpeg gabung: ${rm.stderr.slice(-200)}`), { kind: "render" });
+    let buffer = fs.readFileSync(final);
+    if (buffer.length > MAX_FILE_BYTES) {
+      const small = path.join(dir, "kecil.mp4");
+      const rs = await runProc(config.ffmpeg, ["-hide_banner", "-loglevel", "error", "-y", "-i", final, "-vf", "scale=854:480", "-c:v", "libx264", "-preset", "veryfast", "-crf", "34", "-c:a", "copy", "-movflags", "+faststart", small], { timeoutMs: config.stepTimeoutMs, spawnImpl });
+      if (rs.code === 0) buffer = fs.readFileSync(small);
+    }
+    if (buffer.length < 2000) throw Object.assign(new Error("Video hasil rakitan kosong."), { kind: "render" });
+    return { buffer, total };
+  }
+
+  /** ANIMASI KARAKTER: naskah (tokoh + aksi) -> latar (gambar AI atau buatan kode) -> suara -> frame digambar kode -> rakit. */
+  async function buildStory(idea, n, { onStage = () => {} } = {}) {
+    const dir = fs.mkdtempSync(path.join(tmpRoot, "ani-"));
+    try {
+      onStage("script");
+      const script = await makeStoryScript(idea, n);
+      const scenes = script.scenes;
+      const castMap = new Map(script.cast.map((c, i) => [String(c.id), makeCharacter(c, i)]));
+
+      // ---- latar tiap adegan: gambar AI bila ada (deskripsi sama dipakai ulang), kalau gagal latar buatan kode
+      onStage("images");
+      const cache = new Map();
+      let aiOff = !imageGen?.available?.();
+      const bgFiles = [];
+      for (let i = 0; i < scenes.length; i++) {
+        const desc = scenes[i].bg;
+        let img = null;
+        if (!aiOff && desc) {
+          const key = desc.toLowerCase();
+          if (cache.has(key)) img = cache.get(key);
+          else {
+            const prompt = `Flat 2D vector cartoon illustration, simple shapes, soft bright colors, wide landscape background. ${desc}. Empty scene with open ground in the lower third. No people, no characters, no animals, no text, no letters, no watermark.`.slice(0, 560);
+            try {
+              img = await imageGen.generate(prompt);
+            } catch (e) {
+              log.warn?.(`🎭 [Animasi] latar adegan ${i + 1} gagal, pakai latar buatan kode: ${String(e?.message || e).slice(0, 120)}`);
+              if (e?.kind === "quota" || e?.kind === "billing" || e?.kind === "auth") aiOff = true;
+            }
+            cache.set(key, img);
+          }
+        }
+        bgFiles.push(writeBackground(dir, `bg${i}`, img, scenes[i].setting, 100 + i));
+      }
+
+      const { narrFile, narrSec } = await makeVoice(dir, scenes, onStage);
+
+      // ---- gambar frame per adegan + rakit
+      onStage("render");
+      const durs = sceneDurations(scenes, narrFile ? narrSec : 0);
+      const font = pickFont();
+      const clips = [];
+      for (let i = 0; i < scenes.length; i++) {
+        const out = path.join(dir, `clip${i}.mp4`);
+        const sub = scenes[i].narration ? wrapSubtitle(scenes[i].narration, 52, 2) : "";
+        let textFile = null;
+        if (sub) {
+          textFile = path.join(dir, `sub${i}.txt`);
+          fs.writeFileSync(textFile, sub, "utf8");
+        }
+        const zoomIn = i % 2 === 0;
+        const r = await renderSceneClip({
+          scene: scenes[i], castMap, bgFile: bgFiles[i], out, dur: durs[i], textFile, font,
+          camFrom: zoomIn ? 1 : 1 + CAM_ZOOM, camTo: zoomIn ? 1 + CAM_ZOOM : 1,
+          ffmpeg: config.ffmpeg, spawnImpl, timeoutMs: config.stepTimeoutMs, log
+        });
+        if (r.code !== 0) throw Object.assign(new Error(`ffmpeg animasi adegan ${i + 1}: ${r.stderr.slice(-200)}`), { kind: "render" });
+        clips.push(out);
+      }
+      const { buffer, total } = await joinClips(dir, clips, durs, narrFile);
+      return { buffer, mime: "video/mp4", seconds: Math.round(total), scenes: scenes.length, silent: !narrFile, title: script.title, fallback: Boolean(script.fallback), mode: "karakter", cast: castMap.size };
+    } finally {
+      try {
+        fs.rmSync(dir, { recursive: true, force: true });
+      } catch {
+        /* sisa folder sementara tidak fatal */
+      }
+    }
+  }
+
   /**
    * Satu paket untuk pemanggil: cek -> jatah -> antre -> bangun.
    * -> { video:{buffer,mime,seconds,scenes,silent,title} } atau { error, kind }.
@@ -590,7 +720,9 @@ export function createVideoGen({ imageGen, speaker = null, writeScript = null, s
       const b2 = imageGen.problem(p);
       if (b2) return { error: b2.replace("gambar", "video"), kind: "refused" };
     }
-    if (!imageGen?.available?.()) return { error: VIDEO_TEXT.noimage, kind: "nokey" };
+    const story = opts.mode === "karakter";
+    // animasi karakter tidak wajib punya pembuat gambar (latar cadangan digambar kode); video gambar biasa wajib
+    if (!story && !imageGen?.available?.()) return { error: VIDEO_TEXT.noimage, kind: "nokey" };
     if ((await checkFfmpeg()) !== "ok") return { error: VIDEO_TEXT.noffmpeg, kind: "noffmpeg" };
     const slot = await reserve(kind, who);
     if (!slot.ok) return { error: slot.reason, kind: "limit" };
@@ -602,7 +734,7 @@ export function createVideoGen({ imageGen, speaker = null, writeScript = null, s
     const t0 = now();
     try {
       const n = sceneCount(opts.seconds || 0, config);
-      const video = await build(p.slice(0, config.promptMax), n, { onStage: opts.onStage || (() => {}) });
+      const video = await (story ? buildStory : build)(p.slice(0, config.promptMax), n, { onStage: opts.onStage || (() => {}) });
       stats.ok += 1;
       stats.lastOkAt = now();
       stats.lastSeconds = Math.round((now() - t0) / 1000);
@@ -663,6 +795,7 @@ export function createVideoGen({ imageGen, speaker = null, writeScript = null, s
       `Status: ${available() ? "aktif" : config.enabled ? "belum bisa (pembuat gambar belum aktif)" : "dimatikan (VIDEO_ENABLED=0)"}; grup WA: ${groupsOn ? "boleh" : "mati"}`,
       `Adegan: ${config.scenes} (maks ${config.maxScenes}); satu video ≈ ${config.scenes} gambar + 1 suara`,
       `Jatah harian: pemilik ${config.ownerDaily || "tanpa batas"}, semua grup ${config.groupDaily || "tanpa batas"}, per orang di grup ${config.personDaily || "tanpa batas"}`,
+      `Animasi karakter tanpa wajah (cerita bertokoh, digambar kode): ${imageGen?.available?.() ? "latar gambar AI" : "latar buatan kode (pembuat gambar belum aktif)"}; memakai jatah video yang sama`,
       `Foto hidup (foto -> video + efek, tanpa AI): jatah pemilik ${config.photoOwnerDaily || "tanpa batas"}, semua grup ${config.photoGroupDaily || "tanpa batas"}, per orang ${config.photoPersonDaily || "tanpa batas"}; hari ini pemilik ${quota.photo.owner}, grup ${quota.photo.group}`,
       `Hari ini: pemilik ${quota.owner}, grup ${quota.group}; berhasil ${stats.ok}, gagal ${stats.fail}${stats.lastSeconds ? `, rakit terakhir ${stats.lastSeconds} dtk` : ""}${stats.lastError ? `\nGalat terakhir: ${stats.lastError}` : ""}`
     ].join("\n");
@@ -674,12 +807,27 @@ export function createVideoGen({ imageGen, speaker = null, writeScript = null, s
     const m = /^(?:grup|group|wag)\s+(on|off|aktif|mati|nyala)$/i.exec(a);
     if (m) return { kind: "group", value: /^(?:on|aktif|nyala)$/i.test(m[1]) };
     const d = detectVideoRequest(`/video ${a}`);
-    return { kind: "prompt", prompt: d?.prompt ?? "", seconds: d?.seconds ?? 0 };
+    const res = { kind: "prompt", prompt: d?.prompt ?? "", seconds: d?.seconds ?? 0 };
+    // "/video animasi kancil dan buaya" / "/video kartun ..." -> animasi karakter
+    const lead = /^(?:animasi|animation|kartun|cartoon|karakter)\b[:,]?\s*(.*)$/is.exec(a);
+    if (lead) {
+      const d2 = detectVideoRequest(`/video ${lead[1]}`);
+      return { kind: "prompt", prompt: d2?.prompt ?? "", seconds: d2?.seconds ?? 0, mode: "karakter" };
+    }
+    if (detectStoryMode(a)) res.mode = "karakter";
+    return res;
   }
 
   function reconfigure(next) {
     config = next;
   }
 
-  return { available, groupEnabled, photoAvailable, photoGroupEnabled, load, setGroup, reserve, make, makeFromPhoto, detectPhoto: detectPhotoVideoRequest, describe, parseCommand, reconfigure, detect: detectVideoRequest, checkFfmpeg, stats: () => ({ ...stats }) };
+  /** Seperti detectVideoRequest, tetapi menandai mode "karakter" bila kalimatnya meminta animasi/kartun. */
+  function detect(text) {
+    const r = detectVideoRequest(text);
+    if (r && detectStoryMode(text)) return { ...r, mode: "karakter" };
+    return r;
+  }
+
+  return { available, groupEnabled, storyAvailable, storyGroupEnabled, photoAvailable, photoGroupEnabled, load, setGroup, reserve, make, makeFromPhoto, detectPhoto: detectPhotoVideoRequest, describe, parseCommand, reconfigure, detect, checkFfmpeg, stats: () => ({ ...stats }) };
 }

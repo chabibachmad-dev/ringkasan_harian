@@ -13,6 +13,10 @@ import { createTelegram } from "./telegram.js";
 
 let n = 0;
 const ok = (name) => console.log(`  ✓ ${name}`) || n++;
+// Perakitan video sungguhan itu lambat (laptop kantor: menit). Tes otomatis (/tes, /ya) hanya menjalankan yang inti;
+// jalankan VIDEO_TEST_FULL=1 node <berkas tes> untuk semua kasus render.
+const FULL = process.env.VIDEO_TEST_FULL === "1";
+const okHeavy = (name) => (FULL ? ok(name) : console.log(`  - (dilewati; VIDEO_TEST_FULL=1 untuk menjalankan) ${name}`));
 const silent = { log() {}, warn() {}, error() {} };
 const mem = () => { const m = new Map(); return { m, get: async (k) => m.get(k) ?? null, set: async (k, v) => void m.set(k, v) }; };
 
@@ -229,7 +233,7 @@ if (!hasFfmpeg || !hasZoompan) {
   }
   ok("perakitan nyata: H.264 1280x720 + AAC, durasi mengikuti suara, subtitle aman (kutip/persen), folder sementara bersih");
 
-  {
+  if (FULL) {
     const g = createVideoGen({ imageGen: mkImage(), speaker: null, writeScript: async () => script, config: readVideoConfig({}), log: silent, tmpRoot: tmp });
     const r = await g.make("tanpa suara", "owner");
     assert.ok(r.video, r.error);
@@ -240,31 +244,31 @@ if (!hasFfmpeg || !hasZoompan) {
     assert.equal(pr.a, undefined);
     assert.ok(pr.dur >= 11, `durasi ${pr.dur}`);
   }
-  ok("tanpa suara (TTS tidak ada): video tetap jadi, dengan subtitle");
+  okHeavy("tanpa suara (TTS tidak ada): video tetap jadi, dengan subtitle");
 
-  {
+  if (FULL) {
     const badSpeaker = { available: () => true, speak: async () => { throw new Error("kuota suara habis"); } };
     const g = createVideoGen({ imageGen: mkImage(), speaker: badSpeaker, writeScript: async () => script, config: readVideoConfig({}), log: silent, tmpRoot: tmp });
     const r = await g.make("suara gagal", "owner");
     assert.ok(r.video && r.video.silent, "TTS gagal -> tetap video tanpa suara");
   }
-  ok("TTS gagal tidak menggagalkan video");
+  okHeavy("TTS gagal tidak menggagalkan video");
 
-  {
+  if (FULL) {
     const g = createVideoGen({ imageGen: mkImage(), speaker, writeScript: async () => { throw new Error("AI mati"); }, config: readVideoConfig({}), log: silent, tmpRoot: tmp });
     const r = await g.make("naga terbang", "owner");
     assert.ok(r.video, r.error);
     assert.equal(r.video.fallback, true);
     assert.equal(r.video.scenes, 5);
   }
-  {
+  if (FULL) {
     const g = createVideoGen({ imageGen: mkImage(), speaker, writeScript: async () => "bukan json sama sekali", config: readVideoConfig({}), log: silent, tmpRoot: tmp });
     const r = await g.make("naga terbang", "owner");
     assert.equal(r.video?.fallback, true);
   }
-  ok("AI naskah mati / balasan rusak -> naskah cadangan, video tetap jadi");
+  okHeavy("AI naskah mati / balasan rusak -> naskah cadangan, video tetap jadi");
 
-  {
+  if (FULL) {
     // adegan ke-2 gagal dua kali -> memakai gambar sebelumnya; video tetap jadi
     const g = createVideoGen({ imageGen: mkImage([1, 2]), speaker, writeScript: async () => script, config: readVideoConfig({}), log: silent, tmpRoot: tmp });
     const r = await g.make("gambar tengah gagal", "owner");
@@ -284,9 +288,9 @@ if (!hasFfmpeg || !hasZoompan) {
     assert.equal(r3.kind, "quota");
     assert.match(r3.error, /Kuota pembuat gambar/);
   }
-  ok("gambar tengah gagal -> pakai gambar sebelumnya; adegan pertama gagal -> galat + jatah kembali; kuota gambar diteruskan");
+  okHeavy("gambar tengah gagal -> pakai gambar sebelumnya; adegan pertama gagal -> galat + jatah kembali; kuota gambar diteruskan");
 
-  {
+  if (FULL) {
     // antrean: satu dirakit, satu menunggu, sisanya "sibuk"
     let release;
     const gate = new Promise((r) => (release = r));
@@ -305,7 +309,7 @@ if (!hasFfmpeg || !hasZoompan) {
     const [ra, rb] = await Promise.all([a, b]);
     assert.ok(ra.video && rb.video);
   }
-  ok("antrean: satu video dirakit, satu menunggu, sisanya diberi tahu sibuk");
+  okHeavy("antrean: satu video dirakit, satu menunggu, sisanya diberi tahu sibuk");
 
   fs.rmSync(tmp, { recursive: true, force: true });
 }

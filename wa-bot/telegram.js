@@ -860,18 +860,19 @@ Suara tiap bot (Ayyubi/Wongsobot): /suara daftar • /suara coba <NamaSuara> [ga
     if (name === "video" || name === "vidio" || name === "vid") {
       const vd = deps.video;
       if (!vd) return void (await reply("Pembuat video tidak tersedia di versi bot ini."));
-      if (!vd.available()) return void (await reply("Pembuat video belum aktif: ia memakai pembuat gambar (isi CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN gratis di /env) dan ffmpeg (sudo apt install ffmpeg)."));
+      if (!vd.available() && !vd.storyAvailable?.()) return void (await reply("Pembuat video belum aktif: ia memakai pembuat gambar (isi CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN gratis di /env) dan ffmpeg (sudo apt install ffmpeg)."));
       const c = vd.parseCommand(arg);
       if (c.kind === "status") {
-        return void (await reply(`🎬 Pembuat video (gratis, dirakit ffmpeg)\n${vd.describe()}\n\nPakai: /video <deskripsi>  (contoh: /video 30 detik tentang siklus air)\nDi grup WA: ketik "bot, buatkan video ...".\nSaklar grup: /video grup on atau /video grup off`));
+        return void (await reply(`🎬 Pembuat video (gratis, dirakit ffmpeg)\n${vd.describe()}\n\nPakai: /video <deskripsi>  (contoh: /video 30 detik tentang siklus air)\nAnimasi tokoh tanpa wajah: /video animasi <cerita>  (contoh: /video animasi ayah dan anak ke taman)\nDi grup WA: ketik "bot, buatkan video ...".\nSaklar grup: /video grup on atau /video grup off`));
       }
       if (c.kind === "group") {
         const r = await vd.setGroup(c.value);
         return void (await reply(r.on ? "🎬 Video di grup WA: AKTIF. Anggota grup yang diizinkan bisa minta \"bot, buatkan video ...\" (dibatasi jatah harian)." : "🎬 Video di grup WA: MATI." + (r.saved ? "" : "\n⚠️ Gagal disimpan di database; berlaku sampai bot restart.")));
       }
       if (!c.prompt) return void (await reply("Mau dibuatkan video tentang apa? Contoh: /video kancil dan buaya  atau  /video 30 detik tentang siklus air"));
-      await reply("🎬 Sedang membuat video (naskah, gambar, suara, rakit) — biasanya 1–3 menit. Kukirim begitu selesai.");
-      const out = await withAction(chatId, "upload_video", () => vd.make(c.prompt, { seconds: c.seconds }));
+      if (c.mode !== "karakter" && !vd.available()) return void (await reply("Video gambar biasa butuh pembuat gambar (isi CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN di /env). Animasi karakter tetap bisa tanpa itu: /video animasi <cerita>"));
+      await reply(c.mode === "karakter" ? "🎭 Sedang membuat animasi (naskah, latar, suara, menggambar tokoh bergerak) — biasanya 2–5 menit. Kukirim begitu selesai." : "🎬 Sedang membuat video (naskah, gambar, suara, rakit) — biasanya 1–3 menit. Kukirim begitu selesai.");
+      const out = await withAction(chatId, "upload_video", () => vd.make(c.prompt, { seconds: c.seconds, mode: c.mode }));
       if (out.error) return void (await reply(`⚠️ ${out.error}`));
       return void (await sendFiles(chatId, [{ data: out.video.buffer, name: "video.mp4", mime: "video/mp4", video: true }], ""));
     }

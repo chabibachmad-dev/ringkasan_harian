@@ -81,7 +81,7 @@ import { MAIN_ACCOUNT, SECOND_ACCOUNT, acctFields, createAccountRouter, isPaired
 import { AsyncLocalStorage } from "node:async_hooks";
 import { qrToPng } from "./qr-png.js";
 import { createGroupList } from "./group-list.js";
-import { createVideoGen, readVideoConfig, videoSentNote, photoVideoSentNote, VIDEO_TEXT } from "./video-gen.js";
+import { createVideoGen, readVideoConfig, videoSentNote, photoVideoSentNote, storySentNote, VIDEO_TEXT } from "./video-gen.js";
 const VIDEO_NOPHOTO_TEXT = VIDEO_TEXT.nophoto;
 import { createImageGen, readImageConfig, imageSentNote, quotedImageNote, prepareEditInput, KIND_TEXT as IMAGE_KIND_TEXT } from "./image-gen.js";
 import { createEnvEditor } from "./env-edit.js";
@@ -331,7 +331,7 @@ KEMAMPUAN GAMBAR: kamu (bot ini) BISA membuat gambar sendiri lewat pembuat gamba
 // Bila pembuat video aktif untuk grup: AI percakapan harus tahu bot bisa membuat video (jangan bilang tidak bisa / menyarankan aplikasi lain).
 const VIDEO_PROMPT_NOTE = `
 
-KEMAMPUAN VIDEO: kamu (bot ini) BISA membuat video pendek bernarasi (gambar + suara + subtitle, 20-60 detik) sendiri. Cara memintanya: anggota grup menulis "bot, buatkan video <deskripsi>" (mis. "bot, buatkan video kancil dan buaya"; boleh tambah durasi: "bot, buatkan video 30 detik tentang siklus air"); videonya dikirim langsung ke grup beberapa menit kemudian dan jatahnya terbatas per hari. JANGAN mengatakan kamu tidak bisa membuat video dan jangan menyarankan aplikasi/layanan lain; kalau ada yang minta video tetapi kalimatnya belum memakai pola itu, ajari pola di atas dengan singkat. Foto juga bisa DIHIDUPKAN jadi video (gerak kamera + efek salju/hujan/debu/kunang-kunang/bintang/konfeti/kabut/sinar/daun/kelopak, nuansa warna, tulisan): anggota grup mengirim foto dengan keterangan "bot, jadikan video dengan salju turun" (boleh tambah durasi dan tulisan, mis. "bot, jadikan video 10 detik dengan konfeti, tulisan \"Selamat Ulang Tahun\"") atau membalas foto dengan "bot, jadikan video"; ini gratis dan lebih cepat daripada video buatan AI. Baris riwayat berawalan "🎬" atau "🎞️" berarti BOT INI SENDIRI yang membuat dan mengirim video itu sesuai deskripsi permintaannya (kamu tidak bisa melihat isinya).`;
+KEMAMPUAN VIDEO: kamu (bot ini) BISA membuat video pendek bernarasi (gambar + suara + subtitle, 20-60 detik) sendiri. Cara memintanya: anggota grup menulis "bot, buatkan video <deskripsi>" (mis. "bot, buatkan video kancil dan buaya"; boleh tambah durasi: "bot, buatkan video 30 detik tentang siklus air"); videonya dikirim langsung ke grup beberapa menit kemudian dan jatahnya terbatas per hari. JANGAN mengatakan kamu tidak bisa membuat video dan jangan menyarankan aplikasi/layanan lain; kalau ada yang minta video tetapi kalimatnya belum memakai pola itu, ajari pola di atas dengan singkat. Foto juga bisa DIHIDUPKAN jadi video (gerak kamera + efek salju/hujan/debu/kunang-kunang/bintang/konfeti/kabut/sinar/daun/kelopak, nuansa warna, tulisan): anggota grup mengirim foto dengan keterangan "bot, jadikan video dengan salju turun" (boleh tambah durasi dan tulisan, mis. "bot, jadikan video 10 detik dengan konfeti, tulisan \"Selamat Ulang Tahun\"") atau membalas foto dengan "bot, jadikan video"; ini gratis dan lebih cepat daripada video buatan AI. Selain itu bot bisa membuat ANIMASI KARTUN dengan tokoh manusia tanpa wajah yang bergerak (berjalan, melambai, menunjuk, melompat, duduk, bertepuk tangan, berdoa, dll.) dengan narasi suara dan subtitle: anggota grup menulis "bot, buatkan animasi <cerita>" (mis. "bot, buatkan animasi ayah dan anak ke taman"); tokohnya hanya manusia (pria, wanita, anak, kakek, nenek; boleh berhijab/berpeci), bukan hewan. Baris riwayat berawalan "🎭", "🎬" atau "🎞️" berarti BOT INI SENDIRI yang membuat dan mengirim video itu sesuai deskripsi permintaannya (kamu tidak bisa melihat isinya).`;
 
 // Permintaan "jadikan PDF/Word/Excel": sistem yang membuat berkasnya dari jawabanmu -- AI cukup menulis isinya.
 const FILE_NOTE_COMMON = ` Mulai LANGSUNG dengan judul "# ..." tanpa sapaan (jangan "Halo <nama>"), jangan menyebut nama penanya, dan jangan menyinggung perintah bot lain (mis. pembuatan gambar) atau menawarkan hal lain di akhir. Tabel WAJIB memakai sintaks tabel markdown (baris "| kolom | kolom |" lalu baris "|---|---|"); JANGAN menggambar tabel dengan karakter ===, +---+ atau di dalam blok kode.`;
@@ -3048,9 +3048,10 @@ async function handleGroupMessage(msg, sock) {
   }
 
   // Permintaan membuat video ("bot, buatkan video ..."): dirakit pembuat video (gambar + suara + ffmpeg), bukan AI percakapan.
-  if (videoGen.groupEnabled()) {
+  if (videoGen.groupEnabled() || videoGen.storyGroupEnabled()) {
     const videoReq = videoGen.detect(text);
-    if (videoReq) {
+    // video gambar biasa butuh pembuat gambar; animasi karakter cukup ffmpeg (latar cadangan digambar kode)
+    if (videoReq && (videoGen.groupEnabled() || videoReq.mode === "karakter")) {
       await handleVideoRequestWa(sock, groupJid, videoReq, { kind: "group", who: msg.key.participant || sender, quoted: msg, waName: subject || null, record: true });
       return;
     }
@@ -3653,14 +3654,19 @@ async function handleVideoRequestWa(sock, jid, req, { kind = "owner", who = "", 
             }
           });
     } else {
+      const story = req.mode === "karakter";
       out = await videoGen.make(req.prompt, kind, who, {
         seconds: req.seconds || 0,
+        mode: story ? "karakter" : undefined,
         onStage: (stage) => {
           if (announced || stage !== "images") return;
           announced = true;
-          const mins = req.seconds > 45 ? "2–4 menit" : "1–3 menit";
-          send({ text: `🎬 Oke, videonya sedang dibuat (naskah → gambar → suara → rakit). Biasanya ${mins}; kukirim ke sini begitu selesai.` })
-            .then((s) => note("🎬 [BOT sedang membuat video permintaan ini]", s))
+          const mins = req.seconds > 45 ? "3–6 menit" : "2–4 menit";
+          const text = story
+            ? `🎭 Oke, animasinya sedang dibuat (naskah → latar → suara → menggambar tokoh bergerak). Biasanya ${mins}; kukirim ke sini begitu selesai.`
+            : `🎬 Oke, videonya sedang dibuat (naskah → gambar → suara → rakit). Biasanya ${req.seconds > 45 ? "2–4 menit" : "1–3 menit"}; kukirim ke sini begitu selesai.`;
+          send({ text })
+            .then((s) => note(story ? "🎭 [BOT sedang membuat animasi permintaan ini]" : "🎬 [BOT sedang membuat video permintaan ini]", s))
             .catch(() => {});
         }
       });
@@ -3679,7 +3685,7 @@ async function handleVideoRequestWa(sock, jid, req, { kind = "owner", who = "", 
   const v = out.video;
   const sent = await send({ video: v.buffer, mimetype: v.mime || "video/mp4" });
   console.log(`🎬 Video dibuat (${v.seconds} dtk, ${v.scenes} adegan, ${Math.round(v.buffer.length / 1024)} KB${v.silent ? ", tanpa suara" : ""}) untuk ${jid}: ${String(req.prompt).slice(0, 60)}`);
-  await note(photoSource ? photoVideoSentNote(req.prompt, v) : videoSentNote(req.prompt), sent);
+  await note(photoSource ? photoVideoSentNote(req.prompt, v) : req.mode === "karakter" ? storySentNote(req.prompt) : videoSentNote(req.prompt), sent);
 }
 
 /** Pemilik meminta video di chat pribadi ("buatkan video ..." / "/video ..."). true = ditangani. */
@@ -3708,9 +3714,9 @@ async function handleWaVideoCommand(sock, jid, msg, text) {
   } catch (e) {
     console.error("🎞️ [FotoHidup] gagal membaca foto:", e instanceof Error ? e.message : String(e));
   }
-  if (!videoGen.available()) return false;
   const req = videoGen.detect(text);
   if (!req) return false;
+  if (!videoGen.available() && req.mode !== "karakter") return false;
   await handleVideoRequestWa(sock, jid, req, { kind: "owner", quoted: msg });
   return true;
 }
@@ -4603,7 +4609,7 @@ const videoGen = createVideoGen({
 });
 videoGen
   .load()
-  .then(() => console.log(`🎬 Pembuat video: ${videoGen.available() ? "aktif (gratis: gambar + suara + ffmpeg)" : "mati (butuh pembuat gambar aktif; VIDEO_ENABLED=0 mematikan)"} (ubah: /video grup on|off di Telegram)`))
+  .then(() => console.log(`🎬 Pembuat video: ${videoGen.available() ? "aktif (gratis: gambar + suara + ffmpeg)" : "video gambar mati (butuh pembuat gambar aktif; VIDEO_ENABLED=0 mematikan)"}; animasi karakter tanpa wajah: ${videoGen.storyAvailable() ? "aktif" : "mati"} (ubah: /video grup on|off di Telegram)`))
   .catch(() => {});
 
 // /env di Telegram: ubah kunci pembuat gambar (token Cloudflare, jatah harian, dll.) tanpa membuka laptop. Lihat env-edit.js.
@@ -5128,6 +5134,7 @@ const telegram = createTelegram({
     },
     video: {
       available: () => videoGen.available(),
+      storyAvailable: () => videoGen.storyAvailable(),
       describe: () => videoGen.describe(),
       parseCommand: (arg) => videoGen.parseCommand(arg),
       setGroup: (v) => videoGen.setGroup(v),

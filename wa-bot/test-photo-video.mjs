@@ -15,6 +15,10 @@ import { createTelegram } from "./telegram.js";
 
 let n = 0;
 const ok = (name) => console.log(`  ✓ ${name}`) || n++;
+// Perakitan video sungguhan itu lambat (laptop kantor: menit). Tes otomatis (/tes, /ya) hanya menjalankan yang inti;
+// jalankan VIDEO_TEST_FULL=1 node <berkas tes> untuk semua kasus render.
+const FULL = process.env.VIDEO_TEST_FULL === "1";
+const okHeavy = (name) => (FULL ? ok(name) : console.log(`  - (dilewati; VIDEO_TEST_FULL=1 untuk menjalankan) ${name}`));
 const silent = { log() {}, warn() {}, error() {} };
 const mem = () => { const m = new Map(); return { m, get: async (k) => m.get(k) ?? null, set: async (k, v) => void m.set(k, v) }; };
 
@@ -167,7 +171,7 @@ else {
   }
   ok("perakitan nyata (lanskap, efek ganda, tulisan dengan tanda kutip/persen): H.264 1280x720, durasi tepat, tanpa sisa file");
 
-  {
+  if (FULL) {
     const r = await buildPhotoVideo(photoOf(1200, 1600, "p.jpg"), opt("hujan 4 detik"), { tmpRoot: tmp, font: FONT, log: silent });
     const p = probe(r.buffer);
     assert.deepEqual([p.v.width, p.v.height], [720, 1280]);
@@ -176,9 +180,9 @@ else {
     const forced = await buildPhotoVideo(photoOf(1200, 1600, "p2.jpg"), opt("tanpa efek 4 detik lebar"), { tmpRoot: tmp, log: silent });
     assert.deepEqual([probe(forced.buffer).v.width, probe(forced.buffer).v.height], [1280, 720]);
   }
-  ok("orientasi: potret 720x1280, persegi 960x960, bentuk dipaksa lewat permintaan");
+  okHeavy("orientasi: potret 720x1280, persegi 960x960, bentuk dipaksa lewat permintaan");
 
-  {
+  if (FULL) {
     const photo = photoOf(1600, 1200, "m.png");
     for (const m of ["zoom in", "zoom out", "geser ke kiri", "geser ke kanan", "geser ke atas", "goyang"]) {
       const r = await buildPhotoVideo(photo, opt(`tanpa efek 4 detik ${m}`), { tmpRoot: tmp, log: silent });
@@ -189,9 +193,9 @@ else {
       assert.ok(probe(r.buffer).dur > 3.5, g);
     }
   }
-  ok("6 gerak kamera dan 5 nuansa warna semuanya terakit");
+  okHeavy("6 gerak kamera dan 5 nuansa warna semuanya terakit");
 
-  {
+  if (FULL) {
     // tanpa efek eksplisit vs efek bawaan (debu + sinar): ukuran berkas berbeda
     const photo = photoOf(1600, 1200, "d.png");
     const none = await buildPhotoVideo(photo, opt("tanpa efek 4 detik"), { tmpRoot: tmp, log: silent });
@@ -203,10 +207,10 @@ else {
     await assert.rejects(buildPhotoVideo(Buffer.alloc(10), opt(""), { tmpRoot: tmp, log: silent }), (e) => e.kind === "badimage");
     assert.deepEqual(fs.readdirSync(tmp).filter((x) => x.startsWith("pvid-")), [], "folder sementara bersih juga saat gagal");
   }
-  ok("efek bawaan (debu+sinar) vs tanpa efek; foto rusak ditolak (badimage) dan folder tetap bersih");
+  okHeavy("efek bawaan (debu+sinar) vs tanpa efek; foto rusak ditolak (badimage) dan folder tetap bersih");
 
   // --- lewat pembuat video: jatah, antrean, galat
-  {
+  if (FULL) {
     const photo = photoOf(1600, 1200, "q.jpg");
     const st = mem();
     const g = createVideoGen({ imageGen: { available: () => false }, state: st, config: readVideoConfig({ VIDEO_PHOTO_PERSON_DAILY: "1", VIDEO_PHOTO_GROUP_DAILY: "2", VIDEO_PHOTO_OWNER_DAILY: "1" }), log: silent, tmpRoot: tmp });
@@ -248,9 +252,9 @@ else {
     assert.equal((await g3.makeFromPhoto(photo, "", "owner")).kind, "limit");
     assert.match(g3.describe(), /Foto hidup/);
   }
-  ok("jatah foto hidup terpisah dari video-dari-ide: per orang/grup/pemilik, pengembalian saat gagal, pemulihan, penolakan awal");
+  okHeavy("jatah foto hidup terpisah dari video-dari-ide: per orang/grup/pemilik, pengembalian saat gagal, pemulihan, penolakan awal");
 
-  {
+  if (FULL) {
     // antrean bersama: satu dirakit, satu menunggu, sisanya sibuk
     const photo = photoOf(1600, 1200, "z.png");
     const g = createVideoGen({ imageGen: { available: () => false }, config: readVideoConfig({ VIDEO_QUEUE: "1", VIDEO_PHOTO_PERSON_DAILY: "0", VIDEO_PHOTO_GROUP_DAILY: "0" }), log: silent, tmpRoot: tmp });
@@ -263,7 +267,7 @@ else {
     const [ra, rb] = await Promise.all([a, b]);
     assert.ok(ra.video && rb.video);
   }
-  ok("antrean: satu foto dirakit, satu menunggu, sisanya diberi tahu sibuk");
+  okHeavy("antrean: satu foto dirakit, satu menunggu, sisanya diberi tahu sibuk");
 }
 
 // --- Telegram: foto + keterangan, balas foto

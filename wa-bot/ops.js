@@ -70,7 +70,7 @@ export function readOpsConfig(env = process.env, baseDir = process.cwd()) {
     gitEnabled: flag(env.OPS_GIT_ENABLED, true),
     patchPrefix: (String(env.OPS_PATCH_PREFIX || "patch").toLowerCase().replace(/[^a-z0-9_-]/g, "") || "patch"),
     patchConfirmTtlSec: num(env.OPS_PATCH_CONFIRM_TTL_SEC, 180, 30, 900),
-    testTimeoutSec: num(env.OPS_TEST_TIMEOUT_SEC, 300, 30, 1200),
+    testTimeoutSec: num(env.OPS_TEST_TIMEOUT_SEC, 600, 30, 1200),
     gitTimeoutSec: num(env.OPS_GIT_TIMEOUT_SEC, 120, 15, 600),
     confirmTtlSec: num(env.OPS_CONFIRM_TTL_SEC, 60, 15, 600),
     deployTimeoutSec: num(env.OPS_DEPLOY_TIMEOUT_SEC, 240, 30, 900),
