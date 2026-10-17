@@ -109,10 +109,10 @@ function durationText(ms) {
 // ------------------------------------------------------------ penguraian perintah
 /** Kenali /ingatkan dan /pengingat (alias /remind, /reminder). null bila bukan perintah. */
 export function parseReminderCommand(text) {
-  const m = /^\s*\/(ingatkan|remind|pengingat|reminder)(?:@\w+)?(?:[\s:,-]+([\s\S]*))?$/i.exec(String(text ?? ""));
+  const m = /^\s*\/(ingatkan|remind|pengingat|reminder|ibadah)(?:@\w+)?(?:[\s:,-]+([\s\S]*))?$/i.exec(String(text ?? ""));
   if (!m) return null;
   const word = m[1].toLowerCase();
-  return { name: word === "ingatkan" || word === "remind" ? "ingatkan" : "pengingat", arg: (m[2] ?? "").trim() };
+  return { name: word === "ibadah" ? "ibadah" : word === "ingatkan" || word === "remind" ? "ingatkan" : "pengingat", arg: (m[2] ?? "").trim() };
 }
 
 function clockFrom(s) {
@@ -312,7 +312,7 @@ export async function openReminderStore({ file, maxActive = 100, log = console, 
 /**
  * deps: store, send(text) -> Promise (lempar bila gagal terkirim), now() -> ms, timeZone, tzLabel, log, retryMs
  */
-export function createReminders({ store, send, now = () => Date.now(), timeZone = "Asia/Jakarta", tzLabel = "WIB", log = console, retryMs = 2 * 60_000 } = {}) {
+export function createReminders({ store, send, now = () => Date.now(), timeZone = "Asia/Jakarta", tzLabel = "WIB", log = console, retryMs = 2 * 60_000, ibadah = null } = {}) {
   let running = false;
   const retryAt = new Map(); // id -> ms: jangan coba kirim ulang sebelum ini (kirim gagal)
 
@@ -331,6 +331,8 @@ export function createReminders({ store, send, now = () => Date.now(), timeZone 
     ].join("\n");
 
   function add(arg) {
+    const special = ibadah?.intercept(arg); // "tiap hari ... baca al quran ... juz 2" = pengingat ibadah (ibadah.js)
+    if (special) return special;
     if (!store) return "Fitur pengingat belum aktif di bot ini (butuh Node 22+).";
     if (!String(arg ?? "").trim()) return usage();
     const p = parseReminder(arg, { now: now(), timeZone });
@@ -370,6 +372,7 @@ export function createReminders({ store, send, now = () => Date.now(), timeZone 
 
   /** Satu pintu untuk Telegram/WhatsApp: { name: "ingatkan"|"pengingat", arg } -> teks balasan. */
   function handle({ name, arg }) {
+    if (name === "ibadah") return ibadah ? ibadah.handle(arg) : "Fitur pengingat ibadah belum aktif di bot ini.";
     if (name === "ingatkan") return add(arg);
     const m = /^(?:batal|hapus|cancel|lupa)\b\s*([\s\S]*)$/i.exec(String(arg ?? "").trim());
     if (m) return cancel(m[1]);

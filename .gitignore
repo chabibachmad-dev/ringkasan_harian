@@ -24,6 +24,7 @@ wa-bot/pengingat.sqlite*
 
 # Jadwal kantor di grup (agenda.js: isi jadwal & nama grup) -- hanya di laptop, jangan ke GitHub
 wa-bot/agenda.sqlite*
+wa-bot/ibadah.sqlite*
 
 # Riwayat waktu menyala bot (penjaga kesehatan) -- hanya di laptop
 wa-bot/.health-starts.json

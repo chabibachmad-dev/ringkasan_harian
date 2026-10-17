@@ -102,6 +102,7 @@ import { createLocalChat, parseLocalChatCommand } from "./local-chat.js";
 import { createMarketBrief, createMarketData, parseMarketCommand, readMarketBriefConfig } from "./market-brief.js";
 import { handleMemoryCommand, openOwnerMemory, parseMemoryCommand } from "./owner-memory.js";
 import { createReminders, openReminderStore, parseReminderCommand } from "./reminders.js";
+import { buildExplainPrompt, createIbadah, openIbadahStore } from "./ibadah.js";
 import { createAgenda, openAgendaStore } from "./agenda.js";
 import { createBackup, parseBackupCommand, readBackupConfig } from "./backup.js";
 import { backupCheck, createHealth, createRestartTracker, databaseCheck, diskCheck, memoryCheck, ollamaCheck, parseHealthCommand, readHealthConfig, whatsappCheck } from "./health.js";
@@ -4466,11 +4467,35 @@ if (!["0", "false", "off", "tidak", "no"].includes(String(process.env.REMINDERS_
     console.warn(`⏰ Pengingat tidak aktif: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
-const reminders = createReminders({ store: reminderStore, send: sendToOwner, timeZone: WA_TIMEZONE, tzLabel: WA_TIMEZONE_LABEL });
+// Pengingat ibadah (ibadah.js): juz harian, hadits, ayat. Teks Arab/arti/tafsir dari berkas data (ibadah-data/); AI hanya untuk penjelasan hadits.
+const IBADAH_FILE = process.env.IBADAH_FILE?.trim() || fileURLToPath(new URL("./ibadah.sqlite", import.meta.url));
+let ibadahStore = null;
+if (!["0", "false", "off", "tidak", "no"].includes(String(process.env.IBADAH_ENABLED ?? "true").trim().toLowerCase())) {
+  try {
+    ibadahStore = await openIbadahStore({ file: IBADAH_FILE });
+  } catch (err) {
+    console.warn(`🕌 Pengingat ibadah tidak aktif: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+async function aiExplainHadith(h) {
+  if (GEMINI_API_KEYS.length === 0) throw new Error("kunci AI belum terpasang");
+  const data = await geminiGenerateWithRotation("Kamu menjelaskan hadits dengan ringkas, hati-hati, dan jujur. Jangan mengarang rujukan.", [{ role: "user", parts: [{ text: buildExplainPrompt(h) }] }], { useSearch: false });
+  const out = extractGeminiText(data)?.trim();
+  if (!out) throw new Error("AI mengembalikan hasil kosong");
+  const tokensUsed = data?.usageMetadata?.totalTokenCount ?? 0;
+  if (tokensUsed > 0) await recordTokenUsage(tokensUsed, estimateCostUsd(GEMINI_MODEL, tokensUsed * 0.5, tokensUsed * 0.5));
+  return out;
+}
+const ibadah = createIbadah({ store: ibadahStore, send: sendToOwner, explain: aiExplainHadith, timeZone: WA_TIMEZONE, tzLabel: WA_TIMEZONE_LABEL });
+const reminders = createReminders({ store: reminderStore, send: sendToOwner, timeZone: WA_TIMEZONE, tzLabel: WA_TIMEZONE_LABEL, ibadah });
 setInterval(() => {
   reminders.check().catch(() => {});
 }, 30_000);
+setInterval(() => {
+  ibadah.check().catch(() => {});
+}, 30_000);
 console.log(`⏰ Pengingat: ${reminders.describe()}`);
+console.log(`🕌 Pengingat ibadah: ${ibadah.describe()}`);
 
 // Agenda/jadwal kantor di grup (agenda.js): SQLite lokal, rekap pagi + pengingat sebelum acara, dikirim dari nomor yang mencatatnya.
 const AGENDA_FILE = process.env.AGENDA_FILE?.trim() || fileURLToPath(new URL("./agenda.sqlite", import.meta.url));
@@ -4515,6 +4540,7 @@ const backup = createBackup({
   sources: [
     { name: "catatan", kind: "sqlite", path: OWNER_MEMORY_FILE },
     { name: "pengingat", kind: "sqlite", path: REMINDERS_FILE },
+    ...(ibadahStore ? [{ name: "pengingat ibadah", kind: "sqlite", path: IBADAH_FILE }] : []),
     ...(agendaStore ? [{ name: "agenda grup", kind: "sqlite", path: AGENDA_FILE }] : []),
     { name: "skill", kind: "dir", path: fileURLToPath(new URL("./skills", import.meta.url)) },
     { name: "sesi WhatsApp", kind: "auth", path: path.resolve("auth_session") }, // sama dengan useMultiFileAuthState("auth_session")

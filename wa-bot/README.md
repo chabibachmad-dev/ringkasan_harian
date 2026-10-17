@@ -768,6 +768,27 @@ Pengingat yang dikirim ke WhatsApp **dan** Telegram pemilik pada waktunya. Disim
 - **Batas:** 100 pengingat aktif, 200 huruf per pengingat, paling jauh sekitar 400 hari ke depan. Teks yang tampak seperti rahasia (key, kata sandi, PIN, nomor kartu) ditolak karena pengingat dikirim lewat WhatsApp/Telegram.
 - Hanya pemilik (Telegram: id pemilik; WhatsApp: nomor pemilik, bukan grup). Pengaturan: bagian 18 `.env.example`.
 
+## Pengingat ibadah (`/ibadah`): juz harian, hadits, ayat
+
+Dikirim ke WhatsApp **dan** Telegram pemilik. Pengaturan di SQLite lokal (`wa-bot/ibadah.sqlite`, tidak ikut Git, ikut dicadangkan). Sebelum dinyalakan bot tidak mengirim apa pun.
+
+```
+/ingatkan setiap hari jam 7 pagi 12 siang dan jam 6 sore untuk membaca al quran, hari ini juz 2
+/ibadah mulai juz 2          nyalakan semua (Al-Qur'an, hadits, ayat)
+/ibadah juz 5                hari ini juz 5, besok juz 6, dst
+/ibadah jam quran 07:00 12:00 18:00     /ibadah jam hadits 05:30     /ibadah jam ayat 06:00
+/ibadah quran mati|aktif     /ibadah hadits mati|aktif     /ibadah ayat mati|aktif
+/ibadah                      status      |   /ibadah mati   matikan semua   |   /ibadah tes   kirim contoh sekarang
+```
+
+- **Al-Qur'an:** beberapa kali sehari (bawaan 07:00, 12:00, 18:00), pesannya "Baca Al-Qur'an hari ini: juz N". Juz **dihitung dari tanggal** (naik 1 tiap hari, setelah juz 30 kembali ke juz 1), jadi tidak meleset walau bot mati beberapa hari.
+- **Hadits harian** (bawaan 05:30): satu hadits dari **Arbain Nawawi** (42 hadits, berurutan lalu berputar): teks Arab, arti, dan takhrij dari data, plus **penjelasan ringkas yang disusun AI** (diberi label dan diminta dicek ke kitab syarah; disimpan sehingga AI hanya dipanggil sekali per hadits). Bila AI tidak tersedia, hadits tetap terkirim tanpa penjelasan. Catatan: Arbain memuat hadits shahih dan sebagian hasan; derajatnya terbaca di baris takhrij.
+- **Ayat harian** (bawaan 06:00): satu ayat dengan Arab, arti, dan **tafsir ringkas Kemenag**. Urutannya acak tetap sehingga seluruh ayat terbaca (sekitar 6.150 hari) sebelum ada yang berulang; 83 ayat yang tafsirnya sangat panjang dilewati.
+- **Teks Arab, arti, dan tafsir tidak pernah ditulis AI.** Semuanya dari berkas di `wa-bot/ibadah-data/` (Kemenag RI lewat paket npm `quran-kemenag`; hadits lewat paket `arbain-id`, keduanya berlisensi ISC) dan bisa dipakai tanpa internet.
+- **Bot mati saat waktunya:** begitu menyala, pengingat yang baru terlewat dikirim dengan keterangan "terlambat" (Al-Qur'an sampai 4 jam, hadits/ayat sampai 6 jam); yang sudah jauh terlewat dilewati agar tidak masuk siang bolong. Kirim gagal dicoba lagi tiap 2 menit; tidak pernah terkirim ganda.
+- Pengingat biasa seperti `/ingatkan tiap hari 21:00 kunci pintu` tidak terpengaruh: hanya kalimat yang memuat "tiap/setiap hari", "al quran", dan "juz N" yang dianggap pengingat ibadah.
+- Mematikan fitur sepenuhnya: `IBADAH_ENABLED=false` (`.env.example`).
+
 ## Cadangan otomatis (`/cadangan`)
 
 Tiap hari (bawaan 02:30) bot menyalin data yang **hanya ada di laptop** ke folder bertanggal, lalu menghapus yang lebih lama dari 7 cadangan terakhir.

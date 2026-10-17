@@ -151,7 +151,7 @@ const HELP = [
   "/peraturan  — pantau peraturan terbaru (\"/peraturan semua\" = tampilkan semua hasil)",
   "/dokumen <pertanyaan>  — tanya dari dokumen lokal di laptop, dijawab Ollama. \"/dokumen\" saja = daftar dokumen",
   "/pasar  — IHSG, emas dunia (Rp/gram), dan kurs USD/IDR (alias /emas, /ihsg); otomatis tiap pagi hari kerja; /pasar tes = uji sumber data",
-  "/ingatkan <waktu> <teks>  — pengingat pribadi (contoh: /ingatkan besok 09:00 kirim SPJ; /ingatkan tiap tanggal 25 jam 08:00 laporan);  /pengingat  — daftar / batal <nomor>",
+  "/ingatkan <waktu> <teks>  — pengingat pribadi (contoh: /ingatkan besok 09:00 kirim SPJ);  /pengingat  — daftar / batal <nomor>;  /ibadah  — juz harian, hadits, ayat",
   "/kesehatan  — periksa Ollama, disk, memori, WhatsApp, basis data, restart, dan cadangan sekarang (otomatis dipantau)",
   "/voice wag on|off|id|eng|kor|arb|jawa  — balasan grup WA berupa suara/teks + bahasa suara",
   "/wa2  — nomor WhatsApp kedua (status, kode, qr)",
@@ -914,10 +914,10 @@ Suara tiap bot (Ayyubi/Wongsobot): /suara daftar • /suara coba <NamaSuara> [ga
         return void (await reply(`⚠️ Catatan gagal diproses: ${String(e?.message || e).slice(0, 200)}`));
       }
     }
-    if (name === "ingatkan" || name === "remind" || name === "pengingat" || name === "reminder") {
+    if (name === "ingatkan" || name === "remind" || name === "pengingat" || name === "reminder" || name === "ibadah") {
       if (!deps.reminders) return void (await reply("Fitur pengingat belum aktif di bot ini."));
       try {
-        const remName = name === "ingatkan" || name === "remind" ? "ingatkan" : "pengingat";
+        const remName = name === "ibadah" ? "ibadah" : name === "ingatkan" || name === "remind" ? "ingatkan" : "pengingat";
         return void (await reply(deps.reminders.handle({ name: remName, arg })));
       } catch (e) {
         return void (await reply(`⚠️ Pengingat gagal diproses: ${String(e?.message || e).slice(0, 200)}`));
@@ -1208,6 +1208,7 @@ Suara tiap bot (Ayyubi/Wongsobot): /suara daftar • /suara coba <NamaSuara> [ga
           { command: "peraturan", description: "Pantau peraturan terbaru" },
           { command: "dokumen", description: "Tanya dari dokumen lokal di laptop (dijawab Ollama)" },
           { command: "ingatkan", description: "Pengingat pribadi: /ingatkan besok 09:00 kirim SPJ; /pengingat" },
+          { command: "ibadah", description: "Pengingat ibadah: juz harian, hadits, ayat (/ibadah mulai juz 2)" },
           { command: "kesehatan", description: "Periksa kesehatan bot: Ollama, disk, memori, WhatsApp, cadangan" },
           { command: "voice", description: "Balasan grup WhatsApp: suara (on) atau teks (off)" },
           { command: "grup", description: "Grup WhatsApp yang dijawab bot: lihat, tambah, hapus" },
