@@ -1,7 +1,7 @@
 // Tes uji Meta AI (meta-ai.js). Jalankan: node test-meta-ai.mjs
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import { unsafeTarget, isMetaAiJid, describeMessage, hasBotMetadata, createMetaAi, parseMetaAiArg, readMetaAiConfig, DEFAULT_META_AI_JIDS, DEFAULT_TEST_PROMPT } from "./meta-ai.js";
+import { unsafeTarget, isMetaAiJid, describeMessage, hasBotMetadata, createMetaAi, parseMetaAiArg, readMetaAiConfig, DEFAULT_META_AI_JIDS, DEFAULT_TEST_PROMPT, DEFAULT_VIDEO_PROMPT } from "./meta-ai.js";
 import { createTelegram } from "./telegram.js";
 
 let n = 0;
@@ -23,10 +23,16 @@ assert.deepEqual(readMetaAiConfig({ META_AI_JIDS: "1@bot, rusak ,2@s.whatsapp.ne
 ok("pengenalan alamat Meta AI + konfigurasi .env");
 
 // --- isi pesan
-assert.deepEqual(describeMessage({ message: { conversation: "halo" } }), { type: "conversation", text: "halo", image: false });
+assert.deepEqual(describeMessage({ message: { conversation: "halo" } }), { type: "conversation", text: "halo", image: false, video: false });
 assert.equal(describeMessage({ message: { messageContextInfo: {}, imageMessage: { caption: "kucing" } } }).image, true);
 assert.equal(describeMessage({ message: { messageContextInfo: {}, imageMessage: { caption: "kucing" } } }).text, "kucing");
 assert.equal(describeMessage({}).type, "kosong");
+assert.equal(describeMessage({ message: { videoMessage: { caption: "kucing" } } }).video, true);
+assert.equal(describeMessage({ message: { videoMessage: {} } }).image, false);
+assert.equal(describeMessage({ message: { ephemeralMessage: { message: { videoMessage: {} } } } }).video, true, "pembungkus pesan sementara dibuka");
+assert.equal(describeMessage({ message: { viewOnceMessageV2: { message: { imageMessage: {} } } } }).image, true, "pembungkus sekali-lihat dibuka");
+assert.equal(describeMessage({ message: { documentMessage: { mimetype: "video/mp4" } } }).video, true, "video yang dikirim sebagai dokumen");
+assert.equal(describeMessage({ message: { documentMessage: { mimetype: "application/pdf" } } }).video, false);
 assert.equal(hasBotMetadata({ message: { messageContextInfo: { botMetadata: {} } } }), true);
 assert.equal(hasBotMetadata({ message: { conversation: "x" } }), false);
 ok("ringkasan isi pesan & penanda metadata bot");
@@ -120,8 +126,49 @@ ok("uji: galat kirim dilaporkan; pesan kontak lain selama uji tercatat dengan no
 }
 ok("mode cari: alamat dari pesan keluar HP tertangkap; tidak bisa dijalankan ganda");
 
+{ // minta VIDEO: teks "sedang membuat" dulu, video datang belakangan -> tidak boleh berhenti sebelum video ada
+  const c = clock(); const sent = [];
+  let meta; let target = null;
+  const script = new Map([[3000, (jid) => meta.observe({ key: { remoteJid: jid }, message: { conversation: "Sedang membuat videomu…" } })], [95000, (jid) => meta.observe({ key: { remoteJid: jid }, message: { videoMessage: { caption: "ini videonya" } } })]]);
+  meta = createMetaAi({ now: c.now, sleep: async (ms) => { c.sleep(ms); for (const [t, fn] of [...script]) if (c.at() >= t && target) { script.delete(t); fn(target); } }, log: silent });
+  const r = await meta.run({ send: async (jid, text) => { sent.push(text); target = jid; }, prompt: DEFAULT_VIDEO_PROMPT, wantVideo: true, waitMs: 240000, quietMs: 20000 });
+  assert.deepEqual(sent, [DEFAULT_VIDEO_PROMPT]);
+  assert.equal(r.videos.length, 1);
+  assert.equal(r.images.length, 0);
+  assert.match(r.text, /🎬 1 video diterima/);
+  assert.match(r.text, /Meta AI membalas dengan VIDEO/);
+  assert.ok(c.at() < 130000, "berhenti tak lama setelah video datang, tidak menunggu sampai batas");
+  // tanpa wantVideo, jeda sepi 12 dtk memutus penantian (perilaku lama tetap)
+  const c2 = clock(); let m2; let t2 = null; const script2 = new Map([[3000, (j) => m2.observe({ key: { remoteJid: j }, message: { conversation: "oke" } })], [60000, (j) => m2.observe({ key: { remoteJid: j }, message: { videoMessage: {} } })]]);
+  m2 = createMetaAi({ now: c2.now, sleep: async (ms) => { c2.sleep(ms); for (const [t, fn] of [...script2]) if (c2.at() >= t && t2) { script2.delete(t); fn(t2); } }, log: silent });
+  const r2 = await m2.run({ send: async (j) => void (t2 = j) });
+  assert.equal(r2.videos.length, 0, "tanpa wantVideo tidak menunggu video");
+}
+ok("uji video: menunggu sampai video datang, video terekam, kesimpulan 'VIDEO'");
+
+{ // minta video tetapi hanya gambar / hanya teks
+  const mk = (payload) => {
+    const c = clock(); let meta; let tgt = null; let done = false;
+    meta = createMetaAi({ now: c.now, sleep: async (ms) => { await c.sleep(ms); if (tgt && !done && c.at() > 2000) { done = true; meta.observe({ key: { remoteJid: tgt }, message: payload }); } }, log: silent });
+    return meta.run({ send: async (j) => void (tgt = j), wantVideo: true, waitMs: 60000, quietMs: 10000 });
+  };
+  const img = await mk({ imageMessage: {} });
+  assert.equal(img.videos.length, 0);
+  assert.match(img.text, /membalas dengan gambar, bukan video/);
+  const txt = await mk({ conversation: "Videonya: https://meta.ai/xyz" });
+  assert.match(txt.text, /belum ada video/);
+  assert.match(txt.text, /tidak mengirim video lewat jalur ini/);
+  assert.deepEqual(txt.videos, []);
+}
+ok("uji video: balasan hanya gambar / hanya teks dilaporkan jujur");
+
 // --- argumen
 assert.deepEqual(parseMetaAiArg(""), { kind: "help" });
+assert.deepEqual(parseMetaAiArg("video"), { kind: "video", jid: null, force: false, prompt: DEFAULT_VIDEO_PROMPT });
+assert.deepEqual(parseMetaAiArg("video singa menari"), { kind: "video", jid: null, force: false, prompt: "buatkan video singa menari" });
+assert.deepEqual(parseMetaAiArg("video buatkan video naga terbang"), { kind: "video", jid: null, force: false, prompt: "buatkan video naga terbang" });
+assert.deepEqual(parseMetaAiArg("vidio 867051314767696@bot ikan berenang"), { kind: "video", jid: "867051314767696@bot", force: false, prompt: "buatkan video ikan berenang" });
+assert.deepEqual(parseMetaAiArg("video 6285604512090@s.whatsapp.net yakin"), { kind: "video", jid: "6285604512090@s.whatsapp.net", force: true, prompt: DEFAULT_VIDEO_PROMPT });
 assert.deepEqual(parseMetaAiArg("tes"), { kind: "tes", jid: null, force: false, prompt: DEFAULT_TEST_PROMPT });
 assert.deepEqual(parseMetaAiArg("tes 867051314767696@bot buatkan gambar rumah"), { kind: "tes", jid: "867051314767696@bot", force: false, prompt: "buatkan gambar rumah" });
 assert.deepEqual(parseMetaAiArg("uji 13135550002"), { kind: "tes", jid: "13135550002@s.whatsapp.net", force: false, prompt: DEFAULT_TEST_PROMPT });
@@ -170,7 +217,11 @@ ok("Telegram: /metaai diteruskan ke penguji, tanpa fitur -> pesan jelas");
   assert.match(idx, /send: \(jid, text\) => sock\.sendMessage\(jid, \{ text \}\)/, "uji mengirim lewat nomor utama (currentSock)");
   assert.ok(!/metaAi\.run\([^)]*groupJid/.test(idx), "belum terhubung ke grup");
   const hdl = idx.slice(idx.indexOf("metaAi: {\n      handle"));
-  assert.ok(hdl.indexOf("unsafeTarget(") > 0 && hdl.indexOf("unsafeTarget(") < hdl.indexOf("metaAi.run({ send"), "pengaman alamat sebelum pengiriman");
+  assert.match(hdl, /cmd\.kind === "tes" \|\| cmd\.kind === "video"/, "pengaman alamat juga untuk uji video");
+  assert.match(hdl, /wantVideo: true/);
+  assert.match(hdl, /video: true \}\], "Video dari Meta AI"/, "video diteruskan sebagai video asli, bukan dokumen");
+  assert.match(idx, /if \(f\.video\) await sock\.sendMessage\(jid, \{ video: f\.data/, "WhatsApp pemilik menerima video sungguhan");
+  assert.ok(hdl.indexOf("unsafeTarget(") > 0 && hdl.indexOf("unsafeTarget(") < hdl.search(/metaAi\.run\(\{\s+send:/), "pengaman alamat sebelum pengiriman");
 }
 ok("index.js: pesan Meta AI dihentikan sebelum jalur apa pun; uji lewat nomor utama; belum ke grup");
 

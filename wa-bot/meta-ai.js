@@ -4,6 +4,7 @@
 // Meta AI tidak punya API; Baileys hanya punya pengetahuan sebagian tentang alamatnya (nomor 1313555xxxx / akhiran @bot).
 // Karena itu ini baru UJI DIAGNOSTIK dari Telegram (pemilik saja), tidak terhubung ke grup:
 //   /metaai tes [alamat] [pesan]   kirim SATU pesan ke Meta AI (bawaan "buatkan gambar kucing lucu"), tunggu balasan, laporkan
+//   /metaai video [alamat] [pesan] minta VIDEO (bawaan "buatkan video kucing berlari di taman"), tunggu sampai ±3 menit, kirim videonya ke pemilik
 //   /metaai cari                   dengarkan ±90 detik tanpa mengirim apa pun; ketik pesan ke Meta AI dari HP-mu sendiri
 //                                  supaya bot menangkap alamat aslinya (pesan keluar dari HP terlihat oleh bot)
 //
@@ -15,6 +16,7 @@
 
 export const DEFAULT_META_AI_JIDS = ["13135550002@s.whatsapp.net"];
 export const DEFAULT_TEST_PROMPT = "buatkan gambar kucing lucu";
+export const DEFAULT_VIDEO_PROMPT = "buatkan video kucing berlari di taman";
 const BOT_NUMBER_RE = /^1313555\d{4}$|^131655500\d{2}$/;
 
 const userPart = (jid) => String(jid || "").split("@")[0].split(":")[0];
@@ -37,13 +39,24 @@ export function isMetaAiJid(jid, known = []) {
   return known.some((k) => userPart(k) === u);
 }
 
-/** Ringkas satu pesan: { type, text, image } (image = true bila gambar). */
+/** Buka pembungkus pesan (sementara / sekali lihat / dokumen+keterangan) supaya jenis aslinya terbaca. */
+function unwrap(message) {
+  let m = message || {};
+  for (let i = 0; i < 4; i++) {
+    const inner = m.ephemeralMessage?.message || m.viewOnceMessage?.message || m.viewOnceMessageV2?.message || m.viewOnceMessageV2Extension?.message || m.documentWithCaptionMessage?.message || m.editedMessage?.message;
+    if (!inner) break;
+    m = inner;
+  }
+  return m;
+}
+
+/** Ringkas satu pesan: { type, text, image, video } (image/video = true bila gambar/video). */
 export function describeMessage(msg) {
-  const m = msg?.message || {};
-  const skip = new Set(["messageContextInfo", "senderKeyDistributionMessage", "messageContextInfo"]);
+  const m = unwrap(msg?.message);
+  const skip = new Set(["messageContextInfo", "senderKeyDistributionMessage"]);
   const type = Object.keys(m).find((k) => !skip.has(k)) || "kosong";
   const text = m.conversation || m.extendedTextMessage?.text || m.imageMessage?.caption || m.videoMessage?.caption || "";
-  return { type, text: String(text).replace(/\s+/g, " ").slice(0, 300), image: type === "imageMessage" };
+  return { type, text: String(text).replace(/\s+/g, " ").slice(0, 300), image: type === "imageMessage", video: type === "videoMessage" || (type === "documentMessage" && /^video\//i.test(m.documentMessage?.mimetype || "")) };
 }
 
 /** Pesan membawa metadata bot (balasan Meta AI ditandai begitu walau alamatnya tidak dikenali). */
@@ -93,12 +106,13 @@ export function createMetaAi({ config = readMetaAiConfig({}), now = () => Date.n
    * Jalankan uji. send(jid, text) mengirim pesan; null = hanya mendengarkan.
    * -> { text (laporan siap tampil), images: [msg], found: boolean }
    */
-  async function run({ send = null, jids = null, prompt = DEFAULT_TEST_PROMPT, waitMs = 45_000, quietMs = 12_000, listenMs = 90_000 } = {}) {
-    if (busy) return { text: "⏳ Uji Meta AI sebelumnya masih berjalan. Tunggu selesai dulu.", images: [], found: false };
+  async function run({ send = null, jids = null, prompt = DEFAULT_TEST_PROMPT, waitMs = 45_000, quietMs = 12_000, listenMs = 90_000, wantVideo = false } = {}) {
+    if (busy) return { text: "⏳ Uji Meta AI sebelumnya masih berjalan. Tunggu selesai dulu.", images: [], videos: [], found: false };
     busy = true;
     const targets = jids?.length ? jids : config.jids;
     const lines = [];
     const images = [];
+    const videos = [];
     let found = false;
     try {
       if (!send) {
@@ -116,9 +130,12 @@ export function createMetaAi({ config = readMetaAiConfig({}), now = () => Date.n
           }
           lines.push("", "Coba: /metaai tes <alamat di atas>   atau isi META_AI_JIDS di .env.");
         }
-        for (const e of session.events) if (e.image) images.push(e.raw);
+        for (const e of session.events) {
+          if (e.image) images.push(e.raw);
+          if (e.video) videos.push(e.raw);
+        }
         found = jidsSeen.length > 0;
-        return { text: lines.join("\n"), images, found };
+        return { text: lines.join("\n"), images, videos, found };
       }
 
       for (const jid of targets) {
@@ -133,7 +150,10 @@ export function createMetaAi({ config = readMetaAiConfig({}), now = () => Date.n
         }
         while (now() - startedAt < waitMs) {
           await sleep(1000);
-          if (session.events.length && now() - session.lastAt >= quietMs) break;
+          if (session.events.length && now() - session.lastAt >= quietMs) {
+            // minta video: balasan teks "sedang membuat…" datang lebih dulu, jadi jangan berhenti sebelum videonya ada
+            if (!wantVideo || session.events.some((e) => e.video)) break;
+          }
         }
         const ev = session.events;
         if (ev.length === 0) {
@@ -145,19 +165,27 @@ export function createMetaAi({ config = readMetaAiConfig({}), now = () => Date.n
         found = true;
         lines.push(`   ✓ ${ev.length} balasan dari ${ev[0].jid}:`);
         ev.slice(0, 6).forEach((e, i) => lines.push(`     ${i + 1}. ${e.type}${e.text ? `: "${e.text.slice(0, 120)}"` : ""}`));
-        for (const e of ev) if (e.image) images.push(e.raw);
+        for (const e of ev) {
+          if (e.image) images.push(e.raw);
+          if (e.video) videos.push(e.raw);
+        }
         if (images.length) lines.push(`   🖼️ ${images.length} gambar diterima — dikirim ke chat ini.`);
-        else lines.push("   (belum ada gambar: kemungkinan Meta AI hanya menjawab teks, atau gambar butuh waktu lebih lama)");
+        if (videos.length) lines.push(`   🎬 ${videos.length} video diterima — dikirim ke chat ini.`);
+        if (!images.length && !videos.length) lines.push(`   (belum ada ${wantVideo ? "video" : "gambar"}: kemungkinan Meta AI hanya menjawab teks, atau hasilnya butuh waktu lebih lama)`);
         break;
       }
       if (!found) {
         lines.push("", "Kesimpulan: belum ada balasan. Coba /metaai cari (ketik ke Meta AI dari HP) untuk menemukan alamat aslinya, atau Meta AI memang tidak mau menerima pesan dari klien tak resmi.");
+      } else if (wantVideo) {
+        if (videos.length) lines.push("", "Kesimpulan: jalurnya BISA: Meta AI membalas dengan VIDEO. Penerusan ke grup dapat dibuat.");
+        else if (images.length) lines.push("", "Kesimpulan: Meta AI membalas dengan gambar, bukan video (video mungkin belum tersedia di WhatsApp-mu / hanya di aplikasi Meta AI).");
+        else lines.push("", "Kesimpulan: Meta AI membalas, tetapi tidak mengirim video lewat jalur ini. Lihat jenis balasan di atas; bila hanya teks berisi tautan, videonya ada di aplikasi/situs Meta AI, bukan di WhatsApp.");
       } else if (!images.length) {
         lines.push("", "Kesimpulan: Meta AI membalas, tetapi belum terbukti bisa mengirim gambar lewat jalur ini.");
       } else {
         lines.push("", "Kesimpulan: jalurnya BISA: Meta AI membalas dengan gambar. Penerusan ke grup dapat dibuat.");
       }
-      return { text: lines.join("\n"), images, found };
+      return { text: lines.join("\n"), images, videos, found };
     } finally {
       session = null;
       busy = false;
@@ -180,14 +208,15 @@ export function unsafeTarget(jid, { force = false, known = [] } = {}) {
   );
 }
 
-/** Argumen /metaai -> { kind: "help"|"tes"|"cari", jid?, prompt? } */
+/** Argumen /metaai -> { kind: "help"|"tes"|"video"|"cari", jid?, force?, prompt? } */
 export function parseMetaAiArg(arg) {
   const a = String(arg ?? "").trim();
   if (!a) return { kind: "help" };
   const [first, ...rest] = a.split(/\s+/);
   const w = first.toLowerCase();
   if (["cari", "pantau", "temukan", "listen"].includes(w)) return { kind: "cari" };
-  if (["tes", "test", "uji", "coba"].includes(w)) {
+  const isVideo = ["video", "vidio", "vid"].includes(w);
+  if (isVideo || ["tes", "test", "uji", "coba"].includes(w)) {
     let jid = null;
     const words = [...rest];
     if (words[0] && /^[\w.:-]+@[\w.]+$/.test(words[0])) jid = words.shift();
@@ -197,7 +226,13 @@ export function parseMetaAiArg(arg) {
       force = true;
       words.shift();
     }
-    return { kind: "tes", jid, force, prompt: words.join(" ").trim() || DEFAULT_TEST_PROMPT };
+    let prompt = words.join(" ").trim();
+    if (isVideo) {
+      if (!prompt) prompt = DEFAULT_VIDEO_PROMPT;
+      else if (!/\b(?:video|vidio|animasi)\b/i.test(prompt)) prompt = `buatkan video ${prompt}`;
+      return { kind: "video", jid, force, prompt };
+    }
+    return { kind: "tes", jid, force, prompt: prompt || DEFAULT_TEST_PROMPT };
   }
   return { kind: "help" };
 }

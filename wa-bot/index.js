@@ -4784,11 +4784,12 @@ async function sendFilesToOwner(files, caption = "") {
   if (delivered === 0) throw waError || new Error("WhatsApp belum tersambung / WA_OWNER_NUMBER kosong (dan Telegram tidak aktif)");
 }
 
-/** Dokumen ke satu chat WhatsApp; keterangan menempel di berkas pertama. */
+/** Berkas ke satu chat WhatsApp (dokumen; video asli bila f.video); keterangan menempel di berkas pertama. */
 async function sendWaDocuments(sock, jid, files, caption = "") {
   let i = 0;
   for (const f of files) {
-    await sock.sendMessage(jid, { document: f.data, mimetype: f.mime || "application/octet-stream", fileName: f.name, ...(i === 0 && caption ? { caption } : {}) });
+    if (f.video) await sock.sendMessage(jid, { video: f.data, mimetype: f.mime || "video/mp4", ...(i === 0 && caption ? { caption } : {}) });
+    else await sock.sendMessage(jid, { document: f.data, mimetype: f.mime || "application/octet-stream", fileName: f.name, ...(i === 0 && caption ? { caption } : {}) });
     i += 1;
   }
 }
@@ -5074,12 +5075,13 @@ const telegram = createTelegram({
             "🤖 Uji Meta AI (percobaan, nomor utama saja)\n" +
             "/metaai tes — kirim SATU pesan \"buatkan gambar kucing lucu\" ke Meta AI dan laporkan balasannya (gambar ikut dikirim ke sini)\n" +
             "/metaai tes <alamat> [pesan] — pakai alamat/pesan lain\n" +
+            "/metaai video [pesan] — minta VIDEO (bawaan \"buatkan video kucing berlari di taman\"), tunggu sampai ±3 menit; video yang diterima dikirim ke sini\n" +
             "/metaai cari — dengarkan 90 detik; ketik pesan ke Meta AI dari HP-mu supaya bot menangkap alamat aslinya\n\n" +
             "Belum terhubung ke grup: ini hanya untuk memastikan jalurnya bisa."
           );
         }
         if (!currentSock) return "WhatsApp nomor utama belum tersambung, coba lagi sebentar lagi.";
-        if (cmd.kind === "tes") {
+        if (cmd.kind === "tes" || cmd.kind === "video") {
           const warn = unsafeTarget(cmd.jid, { force: cmd.force, known: metaAi.known() });
           if (warn) return warn;
         }
@@ -5087,8 +5089,21 @@ const telegram = createTelegram({
         const r =
           cmd.kind === "cari"
             ? await metaAi.run({})
-            : await metaAi.run({ send: (jid, text) => sock.sendMessage(jid, { text }), jids: cmd.jid ? [cmd.jid] : null, prompt: cmd.prompt });
+            : await metaAi.run({
+                send: (jid, text) => sock.sendMessage(jid, { text }),
+                jids: cmd.jid ? [cmd.jid] : null,
+                prompt: cmd.prompt,
+                ...(cmd.kind === "video" ? { wantVideo: true, waitMs: 240_000, quietMs: 20_000 } : {})
+              });
         let extra = "";
+        for (const raw of (r.videos || []).slice(0, 2)) {
+          try {
+            const buf = await downloadMediaMessage(raw, "buffer", {}, { logger: pino({ level: "silent" }), reuploadRequest: sock.updateMediaMessage });
+            await sendFilesToOwner([{ data: buf, name: "meta-ai.mp4", mime: "video/mp4", video: true }], "Video dari Meta AI");
+          } catch (e) {
+            extra += `\n⚠️ Gagal mengunduh/mengirim video: ${e instanceof Error ? e.message : e}`;
+          }
+        }
         for (const raw of r.images.slice(0, 3)) {
           try {
             const buf = await downloadMediaMessage(raw, "buffer", {}, { logger: pino({ level: "silent" }), reuploadRequest: sock.updateMediaMessage });

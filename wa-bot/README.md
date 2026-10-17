@@ -1082,6 +1082,7 @@ Meta AI (kontak bawaan WhatsApp) tidak bisa ditambahkan ke grup dan tidak punya 
 
 - `/metaai tes` : mengirim SATU pesan "buatkan gambar kucing lucu" ke Meta AI, menunggu balasan (maks. 45 dtk), lalu melaporkan jenis balasannya. Bila ada gambar, gambarnya dikirim ke chat pemilik.
 - `/metaai tes <alamat> [pesan]` : memakai alamat/pesan lain.
+- `/metaai video [pesan]` : meminta VIDEO (bawaan "buatkan video kucing berlari di taman"; kata "buatkan video" ditambahkan otomatis bila belum ada). Bot menunggu sampai ±4 menit (balasan teks "sedang membuat" tidak menghentikan penantian), lalu mengirim video yang diterima ke Telegram dan chat WhatsApp pemilik sebagai video sungguhan. Laporan akhir menyebut jujur bila Meta AI hanya membalas teks/gambar (video Meta AI mungkin hanya ada di aplikasi/situs Meta AI, bukan di WhatsApp).
 - `/metaai cari` : mendengarkan 90 dtk tanpa mengirim apa pun. Ketik pesan ke Meta AI dari HP-mu sendiri selama itu; bot menangkap alamat aslinya dari pesan keluar HP.
 
 Pesan dari/ke Meta AI tidak pernah diteruskan ke auto-reply (mencegah bot membalas Meta AI terus-menerus). Belum terhubung ke grup.
