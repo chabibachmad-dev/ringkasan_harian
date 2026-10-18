@@ -241,7 +241,7 @@ else {
     assert.ok((await g2.makeFromPhoto(photo, "tanpa efek 4 detik", "owner")).video, "jatah kembali setelah gagal");
     // penolakan awal
     assert.equal((await g2.makeFromPhoto(Buffer.alloc(5), "", "owner")).kind, "badimage");
-    assert.equal((await g2.makeFromPhoto(photo, "foto bugil", "owner")).kind, "refused");
+    assert.equal((await g2.makeFromPhoto(photo, "ktp palsu", "owner")).kind, "refused");
     const off = createVideoGen({ imageGen: { available: () => true }, config: readVideoConfig({ VIDEO_ENABLED: "0" }), log: silent, tmpRoot: tmp });
     assert.equal((await off.makeFromPhoto(photo, "", "owner")).kind, "off");
     const noff = createVideoGen({ imageGen: { available: () => true }, config: readVideoConfig({ FFMPEG_PATH: "/tidak/ada/ffmpeg" }), log: silent, tmpRoot: tmp });

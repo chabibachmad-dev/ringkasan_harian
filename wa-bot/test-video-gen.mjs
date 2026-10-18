@@ -158,7 +158,7 @@ ok("jatah harian per orang/grup/pemilik, pengembalian, penyimpanan, saklar grup,
   const base = { available: () => true, problem: () => null, generate: async () => ({ buffer: Buffer.alloc(10), mime: "image/png" }) };
   const g = createVideoGen({ imageGen: base, config: readVideoConfig({}), log: silent });
   assert.equal((await g.make("", "owner")).kind, "empty");
-  assert.equal((await g.make("video telanjang", "owner")).kind, "refused");
+  assert.equal((await g.make("video ktp palsu", "owner")).kind, "refused");
   const off = createVideoGen({ imageGen: base, config: readVideoConfig({ VIDEO_ENABLED: "0" }), log: silent });
   assert.equal(off.available(), false);
   assert.equal((await off.make("kucing", "owner")).kind, "off");

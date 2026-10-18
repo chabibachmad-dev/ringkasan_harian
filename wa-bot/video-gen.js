@@ -147,7 +147,7 @@ export function buildScriptPrompt(idea, n, maxChars) {
       `Rules:\n` +
       `- Exactly ${n} scenes that tell a clear story from start to end (hook, development, ending).\n` +
       `- "style": ONE English phrase for the shared visual style of ALL images (e.g. "soft watercolor children's book illustration, warm colors").\n` +
-      `- "visual": English description of ONE still image for that scene (subject, action, setting, camera). Repeat the full look of recurring characters in EVERY scene so they stay consistent (species, colors, clothes). NO text, letters, logos or captions inside the image. No real people, celebrities or brands.\n` +
+      `- "visual": English description of ONE still image for that scene (subject, action, setting, camera). Repeat the full look of recurring characters in EVERY scene so they stay consistent (species, colors, clothes). NO text, letters, logos or captions inside the image.\n` +
       `- "narration": what the narrator says during the scene, in the SAME language as the user's idea (Indonesian if unclear), natural spoken sentence(s), max ${perScene} characters, no emoji, no scene numbers.\n` +
       `- "title": max 6 words, same language as the narration.\n` +
       `- Keep it family-friendly.`,

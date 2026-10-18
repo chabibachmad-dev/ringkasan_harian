@@ -72,7 +72,7 @@ export function buildMorphPrompt(desc, n) {
       `- Stage 1 is a SUBTLE first change; the last stage is the fully completed transformation; the stages in between progress evenly.\n` +
       `- Each instruction is self-contained (never "continue" or "more"), starts with an imperative verb, max 220 characters.\n` +
       `- Change ONLY what the user's description asks. Keep the people, their faces, pose, clothes, composition and camera exactly as in the original photo.\n` +
-      `- No text, letters, logos or captions in the image. Family-friendly.`,
+      `- No text, letters, logos or captions in the image.`,
     user: `Transformation: ${desc}\nStages: ${n}`
   };
 }

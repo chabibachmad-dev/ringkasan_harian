@@ -44,14 +44,15 @@ for (const t of [
 ok("kalimat biasa / pertanyaan tentang gambar tidak dianggap permintaan");
 
 // --- filter
-assert.ok(promptProblem("gambar wanita telanjang"));
-assert.ok(promptProblem("foto bugil artis"));
+// isi gambar (termasuk dewasa) bukan urusan filter bot: diserahkan ke penyedia
+assert.equal(promptProblem("gambar wanita telanjang"), null);
+assert.equal(promptProblem("foto bugil artis"), null);
 assert.ok(promptProblem("buat kwitansi palsu 5 juta"));
 assert.ok(promptProblem("stempel instansi palsu"));
 assert.ok(promptProblem("ktp palsu"));
 assert.equal(promptProblem("kucing lucu bermain di taman"), null);
 assert.equal(promptProblem("kuitansi pembelian ATK yang rapi sebagai ilustrasi infografis"), null);
-ok("filter: konten dewasa & dokumen/bukti palsu ditolak, permintaan wajar lolos");
+ok("filter bot: hanya dokumen/bukti palsu ditolak; isi gambar lain diserahkan ke penyedia");
 
 // --- membaca respons
 {
@@ -74,7 +75,7 @@ const cfg = (over = {}) => ({ ...readImageConfig({ GEMINI_API_KEYS: "k1,k2" }), 
 // --- konfigurasi
 {
   const c = readImageConfig({});
-  assert.deepEqual([c.keys.length, c.models, c.ownerDaily, c.groupDaily, c.personDaily], [0, DEFAULT_IMAGE_MODELS, 30, 10, 3]);
+  assert.deepEqual([c.keys.length, c.models, c.ownerDaily, c.groupDaily, c.personDaily], [0, DEFAULT_IMAGE_MODELS, 0, 0, 0]);
   const d = readImageConfig({ GEMINI_API_KEYS: "a, b", GEMINI_IMAGE_MODELS: "m1,m2", IMAGE_GROUP_DAILY: "0", IMAGE_PERSON_DAILY: "5", IMAGE_TIMEOUT_MS: "1" });
   assert.deepEqual([d.keys, d.models, d.groupDaily, d.personDaily, d.timeoutMs], [["a", "b"], ["m1", "m2"], 0, 5, 10000]);
 }
@@ -197,7 +198,8 @@ ok("jatah harian: per orang, semua grup, pemilik, pengembalian, reset hari WITA,
   const ok200 = async () => res(200, { steps: [{ type: "model_output", content: [{ type: "image", data: b64, mime_type: "image/png" }] }] });
   const g = createImageGen({ config: cfg({ personDaily: 1 }), fetchImpl: ok200, log: silent });
   assert.equal((await g.make("")).kind, "empty");
-  assert.equal((await g.make("gambar bugil")).kind, "refused");
+  assert.equal((await g.make("kwitansi palsu")).kind, "refused");
+  assert.ok((await g.make("gambar bugil")).image, "isi gambar diserahkan ke penyedia (bot tidak menyaring)");
   const a = await g.make("kucing lucu", "group", "u1");
   assert.ok(a.image.buffer.length > 400);
   const b = await g.make("kucing lucu", "group", "u1");
@@ -366,8 +368,10 @@ ok("penyedia: otomatis hanya Cloudflare bila terisi; IMAGE_PROVIDERS memaksa; ta
   assert.equal(m.cloudflare[0].imagesLeft, Math.floor(10000 / 57.6));
   assert.equal(m.today.day, "2026-10-16");
   // describe memuat jatah buatan bot + pemantauan
-  assert.match(g.describe(), /Jatah hari ini \(batas buatan bot\)/);
+  assert.match(g.describe(), /Batas gambar: diserahkan ke Cloudflare \(tanpa jatah buatan bot\)/);
   assert.match(g.describe(), /Cloudflare …1111/);
+  // bila pemilik memasang batas sendiri, barisnya kembali memuat jatah buatan bot
+  assert.match(createImageGen({ config: readImageConfig({ GEMINI_API_KEYS: "k", IMAGE_PERSON_DAILY: "5" }), log: silent }).describe(), /Jatah hari ini \(batas buatan bot\)[^\n]*per orang: 5/);
   // mati: petunjuk
   assert.match(createImageGen({ config: readImageConfig({}), log: silent }).monitorText(), /mati \(isi CLOUDFLARE/);
   // DB galat tidak mengganggu pemantauan
@@ -533,7 +537,7 @@ ok("cadangan OpenRouter: dipakai saat Gemini habis/tanpa kunci, 402 = billing, d
   const tg = createTelegram({ config: tcfg, deps, fetchImpl: fakeFetch, log: silent });
   const say = async (text, id) => { await tg.handleUpdate({ update_id: id, message: { chat: { id: 111, type: "private" }, text } }); return calls.filter((c) => c.method === "sendMessage").at(-1)?.body.text; };
   let t = await say("/gambar", 1);
-  assert.ok(/Pembuat gambar/.test(t) && /grup: AKTIF/.test(t) && /Jatah hari ini/.test(t));
+  assert.ok(/Pembuat gambar/.test(t) && /grup: AKTIF/.test(t) && /Batas gambar: diserahkan ke Cloudflare/.test(t));
   t = await say("/gambar grup off", 2);
   assert.ok(/MATI/.test(t) && !ig.groupEnabled() && st.m.get(STATE_KEY) === "off");
   t = await say("/gambar grup on", 3);
@@ -544,7 +548,7 @@ ok("cadangan OpenRouter: dipakai saat Gemini habis/tanpa kunci, 402 = billing, d
   assert.ok(photo && photo.form, "dikirim sebagai foto");
   assert.ok(photo.fd.get("photo").size > 400);
   assert.equal(calls.slice(before).filter((c) => c.method === "sendChatAction").length > 0, true, "indikator 'mengirim foto'");
-  t = await say("/gambar gambar bugil", 5);
+  t = await say("/gambar ktp palsu", 5);
   assert.match(t, /tidak bisa saya buat/);
   const tg2 = createTelegram({ config: tcfg, deps: { chat: async () => "x" }, fetchImpl: fakeFetch, log: silent });
   await tg2.handleUpdate({ update_id: 9, message: { chat: { id: 111, type: "private" }, text: "/gambar kucing" } });
@@ -610,6 +614,9 @@ ok("AI percakapan: tahu bisa membuat gambar, catatan riwayat jelas, kutipan gamb
   // tanpa foto, kalimat umum berkata kerja edit TIDAK memicu petunjuk
   assert.equal(E("hapus file lama", false), null);
   assert.ok(editPromptProblem("buka baju orang di foto"));
+  assert.ok(editPromptProblem("Remove her clothes completely"));
+  assert.ok(editPromptProblem("Make it naked"));
+  assert.equal(editPromptProblem("lepas topi dan kacamata"), null);
   assert.ok(editPromptProblem("ganti dengan bikini"));
   assert.ok(editPromptProblem("tanpa busana"));
   assert.equal(editPromptProblem("ubah jadi hitam putih"), null);
@@ -697,7 +704,9 @@ ok("AI percakapan: tahu bisa membuat gambar, catatan riwayat jelas, kutipan gamb
   const bo = await bin.makeEdit("ubah jadi kartun", prepared);
   assert.ok(bo.image && bo.image.mime === "image/png");
   assert.equal((await g.makeEdit("buka baju", prepared)).kind, "refused");
-  assert.equal((await g.makeEdit("gambar telanjang", prepared)).kind, "refused");
+  assert.equal((await g.makeEdit("buat ktp palsu", prepared)).kind, "refused");
+  assert.equal((await g.makeEdit("gambar telanjang", prepared)).kind, "refused", "edit foto orang sungguhan: versi telanjang ditolak");
+  assert.equal((await g.makeEdit("remove her clothes", prepared)).kind, "refused");
   assert.equal((await g.makeEdit("", prepared)).kind, "empty");
   const noCf = createImageGen({ config: cfg(), fetchImpl: okFetch, log: silent });
   assert.equal(noCf.canEdit(), false);
@@ -709,7 +718,7 @@ ok("AI percakapan: tahu bisa membuat gambar, catatan riwayat jelas, kutipan gamb
   const mon = g.monitor();
   const total = mon.cloudflare.reduce((acc, a) => ({ ok: acc.ok + a.ok, edits: acc.edits + a.edits, used: acc.used + a.usedNeurons }), { ok: 0, edits: 0, used: 0 });
   assert.deepEqual(total, { ok: 0, edits: 1, used: 0 });
-  assert.match(g.monitorText(), /1 edit foto/);
+  assert.match(g.monitorText(), /1 edit foto/); // dua akun Cloudflare, masing-masing 1
   assert.equal(readImageConfig({ CLOUDFLARE_EDIT_MODELS: "@cf/x/y" }).cfEditModels[0], "@cf/x/y");
   assert.ok(readImageConfig({}).cfEditModels[0].endsWith("flux-2-klein-9b"));
 }

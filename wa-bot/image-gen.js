@@ -6,8 +6,9 @@
 //   - chat WA pemilik : "buatkan gambar ..." atau "/gambar ..." (chat-ke-diri-sendiri atau chat dengan nomor bot)
 //   - Telegram        : /gambar <deskripsi>
 //
-// Batas harian (hemat kuota, dihitung per hari WITA, tersimpan di bot_state "wa_image_quota"):
-//   IMAGE_OWNER_DAILY=30   pemilik       IMAGE_GROUP_DAILY=10   seluruh grup       IMAGE_PERSON_DAILY=3   per orang di grup
+// Batas harian buatan bot (OPSIONAL, bawaan 0 = tanpa batas; dihitung per hari WITA, tersimpan di bot_state "wa_image_quota"):
+//   IMAGE_OWNER_DAILY   pemilik       IMAGE_GROUP_DAILY   seluruh grup       IMAGE_PERSON_DAILY   per orang di grup
+//   Berlaku untuk membuat DAN mengedit gambar. Tanpa batas buatan, satu-satunya batas adalah jatah gratis Cloudflare.
 //
 // .env (semua opsional):
 //   GEMINI_IMAGE_MODELS=...  model gambar dicoba berurutan (kosong = bawaan di bawah)
@@ -74,9 +75,11 @@ export function readImageConfig(env = process.env) {
     orKeys: splitList(env.OPENROUTER_API_KEYS || env.OPENROUTER_API_KEY),
     orModels: splitList(env.OPENROUTER_IMAGE_MODELS).length ? splitList(env.OPENROUTER_IMAGE_MODELS) : DEFAULT_OR_IMAGE_MODELS,
     timeoutMs: Math.max(10_000, num(env.IMAGE_TIMEOUT_MS, 90_000)),
-    ownerDaily: num(env.IMAGE_OWNER_DAILY, 30),
-    groupDaily: num(env.IMAGE_GROUP_DAILY, 10),
-    personDaily: num(env.IMAGE_PERSON_DAILY, 3),
+    // Bawaan 0 = TANPA batas buatan bot: membuat & mengedit gambar hanya dibatasi jatah gratis Cloudflare sendiri
+    // (akun yang jatahnya habis diistirahatkan, pengguna dapat pesan "kuota habis"). Isi angka bila ingin batas tambahan.
+    ownerDaily: num(env.IMAGE_OWNER_DAILY, 0),
+    groupDaily: num(env.IMAGE_GROUP_DAILY, 0),
+    personDaily: num(env.IMAGE_PERSON_DAILY, 0),
     promptMax: 600
   };
 }
@@ -156,8 +159,11 @@ export function detectEditRequest(text, { hasImage = false } = {}) {
   return null;
 }
 
+// Pagar khusus EDIT foto (orang sungguhan yang tidak ikut meminta): tanpa persetujuan orang di foto, bot tidak membuatkan versi
+// telanjang/dilucuti/seksual dari fotonya. Untuk gambar dari teks tidak ada penyaringan kata (diserahkan ke penyedia).
 const EDIT_BLOCK_RES = [
-  /\b(?:buka|lepas|copot|tanggalkan|hilangkan|undress|remove)\s+(?:semua\s+)?(?:baju|pakaian|bajunya|pakaiannya|clothes?|clothing|kerudung|jilbab|hijab)\b/i,
+  /\b(?:telanjang|bugil|topless|nude|naked|unclothed|undress\w*|porno\w*|bokep|erotis|erotic|nsfw|hentai)\b/i,
+  /\b(?:buka|lepas|copot|tanggalkan|hilangkan|undress|remove|take\s+off|strip)\s+(?:\w+\s+){0,3}(?:baju|pakaian|bajunya|pakaiannya|clothes|clothing|kerudung|jilbab|hijab)\b/i,
   /\b(?:tanpa|without)\s+(?:busana|baju|pakaian|clothes|clothing)\b/i,
   /\b(?:bikini|lingerie|pakaian dalam|underwear|swimsuit|baju renang)\b/i
 ];
@@ -239,8 +245,10 @@ export function prepareEditInput(buffer, { spawnImpl = spawn, timeoutMs = 20_000
 }
 
 // ---------------------------------------------------------------- filter deskripsi
+// Isi gambar yang boleh dibuat/diedit DISERAHKAN ke penyedia (Cloudflare/Gemini/OpenRouter): bot tidak menyimpan daftar kata terlarang
+// untuk isi gambar; bila penyedia menolak, pengguna menerima pesan "ditolak oleh filter keamanan" (kind "blocked").
+// Satu-satunya pagar buatan bot: dokumen/bukti palsu (pemalsuan), dan untuk EDIT foto orang sungguhan lihat EDIT_BLOCK_RES.
 const BLOCK_RES = [
-  /\b(?:telanjang|bugil|porno\w*|bokep|seks(?:ual|i)?|erotis|nsfw|nude|naked|hentai|erotic|genital\w*|payudara|vagina|penis)\b/i,
   /\b(?:palsu|pemalsuan|memalsukan|fake|forge[ds]?|forgery|tiruan)\b.{0,40}\b(?:ktp|ijazah|sertifikat|paspor|passport|kwitansi|struk|nota|surat|dokumen|stempel|cap|materai|meterai|tanda tangan|rekening|bukti transfer|sk)\b/i,
   /\b(?:ktp|ijazah|sertifikat|paspor|passport|kwitansi|struk|nota|stempel|materai|meterai|bukti transfer)\b.{0,40}\b(?:palsu|fake|tiruan|bohongan)\b/i
 ];
@@ -248,7 +256,7 @@ const BLOCK_RES = [
 /** -> alasan penolakan (teks siap tampil) atau null bila aman. */
 export function promptProblem(prompt) {
   const p = String(prompt ?? "");
-  if (BLOCK_RES.some((re) => re.test(p))) return "Maaf, permintaan gambar seperti itu tidak bisa saya buat (konten dewasa atau dokumen/bukti palsu).";
+  if (BLOCK_RES.some((re) => re.test(p))) return "Maaf, permintaan gambar seperti itu tidak bisa saya buat (dokumen/bukti palsu).";
   return null;
 }
 
@@ -795,7 +803,9 @@ export function createImageGen({ state = null, config = readImageConfig({}), fet
       `grup: ${groupsOn ? "AKTIF" : "mati"} • penyedia: ${m.providers.length ? m.providers.join(" > ") : "belum ada"}` +
       `${hasCf() && on("cloudflare") ? ` • GRATIS: Cloudflare ${config.cfModels[0].split("/").pop()}${cfList().length > 1 ? ` (${cfList().length} akun)` : ""}` : ""}` +
       `${on("gemini") && config.keys.length ? ` • Gemini ${config.models[0]}` : ""}${on("openrouter") && config.orKeys?.length ? ` • OpenRouter ${config.orModels[0]}` : ""}\n` +
-      `Jatah hari ini (batas buatan bot) — pemilik: ${sisa(config.ownerDaily, quota.owner)}, semua grup: ${sisa(config.groupDaily, quota.group)} (per orang: ${config.personDaily || "tanpa batas"})\n` +
+      (config.ownerDaily > 0 || config.groupDaily > 0 || config.personDaily > 0
+        ? `Jatah hari ini (batas buatan bot) — pemilik: ${sisa(config.ownerDaily, quota.owner)}, semua grup: ${sisa(config.groupDaily, quota.group)} (per orang: ${config.personDaily || "tanpa batas"})\n`
+        : `Batas gambar: diserahkan ke Cloudflare (tanpa jatah buatan bot); hari ini ${quota.owner} gambar pemilik, ${quota.group} gambar grup\n`) +
       monitorText()
     );
   }
