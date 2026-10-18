@@ -36,6 +36,7 @@ import {
   ICON_X_SMALL,
   ICON_PULSE,
   ICON_PRAYER,
+  ICON_OFFICE,
   ICON_BOOK,
   ICON_LOCATE,
   ICON_STUDY
@@ -48,6 +49,7 @@ import {
   hideFeatureScreens
 } from "./features.js";
 import { initStudy, showStudyScreen, hideStudyScreen, rerenderStudy } from "./study.js";
+import { initOffice, showOfficeScreen, hideOfficeScreen } from "./office.js";
 import { registerServiceWorker } from "./push.js";
 import {
   getStoredChatCode,
@@ -215,6 +217,8 @@ const els = {
   settingsLogoutBtn: document.getElementById("settings-logout-btn"),
   settingsLogoutIcon: document.getElementById("settings-logout-icon"),
   menuAboutBtn: document.getElementById("menu-about"),
+  menuOfficeBtn: document.getElementById("menu-office"),
+  menuOfficeIcon: document.getElementById("menu-office-icon"),
   menuPrayerBtn: document.getElementById("menu-prayer"),
   menuPrayerIcon: document.getElementById("menu-prayer-icon"),
   menuStudyBtn: document.getElementById("menu-study"),
@@ -1468,6 +1472,10 @@ function handleRoute() {
     stopWaPolling();
     hideAllScreens();
     showStudyScreen();
+  } else if (location.hash === "#office") {
+    stopWaPolling();
+    hideAllScreens();
+    showOfficeScreen();
   } else if (location.hash === "#prayer") {
     stopWaPolling();
     hideAllScreens();
@@ -1547,6 +1555,7 @@ function hideAllScreens() {
   els.screenWaList.hidden = true;
   els.screenWaDetail.hidden = true;
   hideStudyScreen();
+  hideOfficeScreen();
   hideFeatureScreens();
 }
 
@@ -3306,6 +3315,7 @@ function wireEvents() {
   els.settingsLogoutIcon.innerHTML = ICON_LOGOUT;
   els.menuAboutIcon.innerHTML = ICON_INFO;
   els.menuPrayerIcon.innerHTML = ICON_PRAYER;
+  els.menuOfficeIcon.innerHTML = ICON_OFFICE;
   els.menuQuranIcon.innerHTML = ICON_BOOK;
   els.menuStudyIcon.innerHTML = ICON_STUDY;
   document.getElementById("study-settings-icon").innerHTML = ICON_SETTINGS;
@@ -3682,6 +3692,11 @@ function wireEvents() {
     }
   });
 
+  els.menuOfficeBtn.addEventListener("click", () => {
+    closeSettingsDialog();
+    location.hash = "office";
+  });
+
   els.menuPrayerBtn.addEventListener("click", () => {
     closeSettingsDialog();
     location.hash = "prayer";
@@ -3871,6 +3886,7 @@ async function main() {
   wireEvents();
   initFeatures({ getLang: () => state.lang, getCode: () => state.chatCode });
   initStudy({ getLang: () => state.lang });
+  initOffice();
   fixStickyHeaderOnIOSKeyboard();
   await registerServiceWorker();
   await initChat();

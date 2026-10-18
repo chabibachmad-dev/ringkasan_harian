@@ -56,6 +56,10 @@
               <span id="menu-whatsapp-icon" class="menu-thumb"></span>
               <span class="menu-caption" data-i18n="menu_s_whatsapp">WhatsApp</span>
             </button>
+            <button type="button" id="menu-office" class="menu-item">
+              <span id="menu-office-icon" class="menu-thumb"></span>
+              <span class="menu-caption" data-i18n="menu_s_office">Kantor AI</span>
+            </button>
             <button type="button" id="menu-prayer" class="menu-item">
               <span id="menu-prayer-icon" class="menu-thumb"></span>
               <span class="menu-caption" data-i18n="menu_s_prayer">Shalat</span>
@@ -358,6 +362,18 @@
           </div>
         </header>
         <main class="content" id="study-body"></main>
+      </section>
+
+      <!-- Layar Kantor: karyawan AI (bot & agen) digambar sebagai tokoh piksel yang bekerja (lihat src/office.js). -->
+      <section id="screen-office" class="screen" hidden>
+        <header class="topbar detail-topbar">
+          <div class="detail-topbar-row">
+            <button id="office-back-btn" class="icon-btn" title="Kembali" aria-label="Kembali">←</button>
+            <h1 class="detail-title">Kantor AI</h1>
+            <button id="office-pause-btn" class="secondary-btn office-pause" type="button">Jeda</button>
+          </div>
+        </header>
+        <main class="content" id="office-body"></main>
       </section>
 
       <!-- Popup kode akses -->
