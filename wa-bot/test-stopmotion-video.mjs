@@ -287,7 +287,7 @@ ok("Telegram /stopmotion: mulai, foto berurutan (termasuk berkas gambar) dengan 
   const tg = fs.readFileSync(new URL("./telegram.js", import.meta.url), "utf8");
   assert.match(tg, /vd\.make\(c\.prompt, \{ seconds: c\.seconds, mode: c\.mode, \.\.\.\(c\.style \? \{ style: c\.style \} : \{\}\) \}\)/);
   assert.match(tg, /if \(isStopPhoto\(m\)\) return true;/, "foto sesi diproses langsung agar urutan terjaga");
-  assert.match(tg, /"stopmotion", "stop_motion", "edit", "ubah"\]\);/, "perintah dijalankan langsung (FAST_COMMANDS)");
+  assert.match(tg, /"stopmotion", "stop_motion", "edit", "ubah"/, "perintah dijalankan langsung (FAST_COMMANDS)");
   assert.ok(tg.indexOf("if (isStopPhoto(m)) {") < tg.indexOf("deps.video?.makeFromPhoto"), "sesi stop motion dicek sebelum foto hidup/morf");
   const env = fs.readFileSync(new URL("./env-edit.js", import.meta.url), "utf8");
   assert.match(env, /VIDEO_STOP_MAX_PHOTOS/);

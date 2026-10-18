@@ -1,0 +1,16 @@
+Taruh lagu musik latar video di folder ini (mp3, m4a, aac, wav, ogg, opus, flac).
+
+Boleh memakai subfolder sebagai kategori, mis.:
+  musik/dj/lagu-jedag-jedug-1.mp3
+  musik/tenang/piano-pagi.mp3
+
+Cara minta di video (Telegram / WhatsApp):
+  jadikan video dengan salju pakai musik dj
+  morf siang jadi malam, pakai musik tenang
+  /stopmotion jadi 10 fps pakai musik jedag jedug
+Tanpa kata kunci ("pakai musik") = lagu acak. "tanpa musik" = tanpa musik.
+Kata kunci dicocokkan dengan nama berkas dan nama subfolder, jadi beri nama yang jelas.
+Folder kosong = bot memakai ketukan buatan ffmpeg.
+
+Cek isi folder dari Telegram: /musik
+Pakailah musik bebas royalti (mis. Pixabay Music, YouTube Audio Library).

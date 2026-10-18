@@ -56,7 +56,9 @@ export const ENV_KEYS = {
   VIDEO_MORPH_STEPS: { secret: false, hint: "jumlah tahap edit bawaan satu morf (2-8)", validate: intIn(2, 8) },
   VIDEO_MORPH_SECONDS: { secret: false, hint: "durasi bawaan morf (detik, 4-14)", validate: intIn(4, 14) },
   VIDEO_STOP_MAX_PHOTOS: { secret: false, hint: "foto maksimum per sesi /stopmotion (6-120)", validate: intIn(6, 120) },
-  VIDEO_STOP_MAX_FPS: { secret: false, hint: "gambar per detik maksimum stop motion (4-24)", validate: intIn(4, 24) }
+  VIDEO_STOP_MAX_FPS: { secret: false, hint: "gambar per detik maksimum stop motion (4-24)", validate: intIn(4, 24) },
+  VIDEO_MUSIC_VOLUME: { secret: false, hint: "volume musik latar video (10-100, bawaan 60)", validate: intIn(10, 100) },
+  VIDEO_MUSIC_DEFAULT: { secret: false, hint: "1 = semua video otomatis diberi musik dari folder musik/ (bila ada lagunya); 0 = hanya bila diminta" , validate: intIn(0, 1) }
 };
 
 export const maskValue = (value, secret) => {

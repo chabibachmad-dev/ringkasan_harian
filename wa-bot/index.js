@@ -3699,7 +3699,7 @@ async function handleVideoRequestWa(sock, jid, req, { kind = "owner", who = "", 
     return;
   }
   const v = out.video;
-  const sent = await send({ video: v.buffer, mimetype: v.mime || "video/mp4" });
+  const sent = await send({ video: v.buffer, mimetype: v.mime || "video/mp4", ...(v.music ? { caption: `🎵 ${v.music}` } : {}) });
   console.log(`🎬 Video dibuat (${v.seconds} dtk, ${v.scenes} adegan, ${Math.round(v.buffer.length / 1024)} KB${v.silent ? ", tanpa suara" : ""}) untuk ${jid}: ${String(req.prompt).slice(0, 60)}`);
   await note(photoSource && req.morph ? morphSentNote(req.prompt) : photoSource ? photoVideoSentNote(req.prompt, v) : req.mode === "karakter" ? storySentNote(req.prompt) : videoSentNote(req.prompt), sent);
 }
@@ -5195,6 +5195,7 @@ const telegram = createTelegram({
         return out;
       },
       stopLimits: () => videoGen.stopLimits(),
+      musicInfo: () => videoGen.musicInfo(),
       makeStopMotion: async (buffers, text, opts = {}) => {
         const out = await videoGen.makeStopMotion(buffers, text, "owner", "", opts);
         if (out.error) await tellOwnerVideoProblem(out.kind, out.error, out.detail);

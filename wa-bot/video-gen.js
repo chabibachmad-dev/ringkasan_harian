@@ -25,6 +25,8 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { createMusic } from "./video-music.js";
 import { cleanPrompt, editPromptProblem, promptProblem } from "./image-gen.js";
 import { buildMorphPrompt, buildMorphVideo, detectMorphRequest, parseMorphOptions, parseMorphPlan } from "./morph-video.js";
 import { MAX_STOP_FPS, MIN_STOP_PHOTOS, buildStopMotion, parseStopMotionOptions } from "./stopmotion-video.js";
@@ -82,6 +84,10 @@ export function readVideoConfig(env = process.env) {
     // Stop motion dari foto (hanya CPU; memakai jatah "foto hidup" pemilik)
     stopMaxPhotos: Math.max(6, Math.min(120, num(env.VIDEO_STOP_MAX_PHOTOS, 60))),
     stopMaxFps: Math.max(4, Math.min(MAX_STOP_FPS, num(env.VIDEO_STOP_MAX_FPS, 15))),
+    // Musik latar (video-music.js): folder berkas milik pemilik; kosong -> ketukan buatan ffmpeg bila diminta
+    musicDir: path.resolve(String(env.VIDEO_MUSIC_DIR || "").trim() || fileURLToPath(new URL("./musik", import.meta.url))),
+    musicVolume: Math.max(0.1, Math.min(1, (Number(env.VIDEO_MUSIC_VOLUME) || 60) / 100)),
+    musicDefault: /^(1|on|true|ya)$/i.test(String(env.VIDEO_MUSIC_DEFAULT ?? "0").trim()),
     promptMax: 400
   };
 }
@@ -358,6 +364,28 @@ export function createVideoGen({ imageGen, speaker = null, writeScript = null, e
   let ffState = null; // "ok" | "missing"
   let ffAt = 0;
   const stats = { ok: 0, fail: 0, lastOkAt: 0, lastError: "", lastSeconds: 0 };
+  const music = createMusic({ dir: config.musicDir, ffmpeg: config.ffmpeg, volume: config.musicVolume, spawnImpl, tmpRoot, log });
+
+  /** Pisahkan frasa musik dari teks permintaan. -> { text, req } ; req null = tanpa musik. VIDEO_MUSIC_DEFAULT=1 + ada lagu -> musik acak. */
+  function splitMusic(text) {
+    const m = music.parse(text);
+    let req = m.on ? { on: true, query: m.query } : null;
+    if (!req && !m.off && config.musicDefault && music.count() > 0) req = { on: true, query: "", implicit: true };
+    return { text: m.text, req };
+  }
+
+  /** Tempel musik ke video jadi. Gagal -> video tetap dikirim tanpa musik (musicError). */
+  async function applyMusic(video, req) {
+    if (!req?.on || !video?.buffer) return video;
+    try {
+      const m = await music.add(video.buffer, req);
+      if (m.buffer.length > MAX_FILE_BYTES && video.buffer.length <= MAX_FILE_BYTES) return { ...video, musicError: "ukuran melebihi batas WhatsApp" };
+      return { ...video, buffer: m.buffer, mime: "video/mp4", music: m.label, musicSource: m.source, musicMatched: m.matched };
+    } catch (e) {
+      log.warn?.(`🎵 [Musik] gagal, video dikirim tanpa musik: ${e instanceof Error ? e.message : e}`);
+      return { ...video, musicError: String(e instanceof Error ? e.message : e).slice(0, 120) };
+    }
+  }
 
   const available = () => config.enabled && Boolean(imageGen?.available?.());
   const groupEnabled = () => groupsOn && available();
@@ -752,7 +780,8 @@ export function createVideoGen({ imageGen, speaker = null, writeScript = null, e
    */
   async function make(prompt, kind = "owner", who = "", opts = {}) {
     if (!config.enabled) return { error: VIDEO_TEXT.off, kind: "off" };
-    const p = cleanPrompt(prompt);
+    const sm = splitMusic(prompt);
+    const p = cleanPrompt(sm.text);
     if (!p) return { error: VIDEO_TEXT.empty, kind: "empty" };
     const bad = promptProblem(p);
     if (bad) return { error: bad.replace("gambar", "video"), kind: "refused" };
@@ -774,7 +803,7 @@ export function createVideoGen({ imageGen, speaker = null, writeScript = null, e
     const t0 = now();
     try {
       const n = sceneCount(opts.seconds || 0, config);
-      const video = await (story ? buildStory : build)(p.slice(0, config.promptMax), n, { onStage: opts.onStage || (() => {}), style: story ? opts.style || "" : "" });
+      const video = await applyMusic(await (story ? buildStory : build)(p.slice(0, config.promptMax), n, { onStage: opts.onStage || (() => {}), style: story ? opts.style || "" : "" }), sm.req);
       stats.ok += 1;
       stats.lastOkAt = now();
       stats.lastSeconds = Math.round((now() - t0) / 1000);
@@ -799,6 +828,8 @@ export function createVideoGen({ imageGen, speaker = null, writeScript = null, e
   async function makeFromPhoto(photo, text = "", kind = "owner", who = "", opts = {}) {
     if (!config.enabled) return { error: VIDEO_TEXT.off, kind: "off" };
     if (!Buffer.isBuffer(photo) || photo.length < 100) return { error: VIDEO_TEXT.badphoto, kind: "badimage" };
+    const sm = splitMusic(text);
+    text = sm.text;
     const bad = promptProblem(String(text ?? ""));
     if (bad) return { error: bad.replace("gambar", "video"), kind: "refused" };
     if ((await checkFfmpeg()) !== "ok") return { error: VIDEO_TEXT.noffmpeg, kind: "noffmpeg" };
@@ -812,7 +843,7 @@ export function createVideoGen({ imageGen, speaker = null, writeScript = null, e
     }
     const t0 = now();
     try {
-      const video = await buildPhotoVideo(photo, options, { ffmpeg: config.ffmpeg, spawnImpl, tmpRoot, font: pickFont(), log, stepTimeoutMs: config.stepTimeoutMs, onStage: opts.onStage || (() => {}) });
+      const video = await applyMusic(await buildPhotoVideo(photo, options, { ffmpeg: config.ffmpeg, spawnImpl, tmpRoot, font: pickFont(), log, stepTimeoutMs: config.stepTimeoutMs, onStage: opts.onStage || (() => {}) }), sm.req);
       stats.ok += 1;
       stats.lastOkAt = now();
       stats.lastSeconds = Math.round((now() - t0) / 1000);
@@ -838,6 +869,8 @@ export function createVideoGen({ imageGen, speaker = null, writeScript = null, e
     if (!config.enabled) return { error: VIDEO_TEXT.off, kind: "off" };
     if (!Buffer.isBuffer(photo) || photo.length < 100) return { error: VIDEO_TEXT.badphoto, kind: "badimage" };
     if (!morphAvailable()) return { error: VIDEO_TEXT.nomorph, kind: "noedit" };
+    const sm = splitMusic(text);
+    text = sm.text;
     const options = parseMorphOptions(text, { defaultSteps: config.morphSteps, maxSteps: config.morphMaxSteps, maxSeconds: config.morphMaxSeconds, defaultSeconds: config.morphSeconds });
     if (!options.prompt) return { error: VIDEO_TEXT.morphempty, kind: "empty" };
     const bad = promptProblem(options.prompt) || editPromptProblem(options.prompt);
@@ -869,7 +902,7 @@ export function createVideoGen({ imageGen, speaker = null, writeScript = null, e
       stats.ok += 1;
       stats.lastOkAt = now();
       stats.lastSeconds = Math.round((now() - t0) / 1000);
-      return { video: { ...video, steps: plan.steps, fallback: plan.fallback, prompt: options.prompt } };
+      return { video: { ...(await applyMusic(video, sm.req)), steps: plan.steps, fallback: plan.fallback, prompt: options.prompt } };
     } catch (e) {
       stats.fail += 1;
       stats.lastError = String(e?.message || e).slice(0, 160);
@@ -892,6 +925,8 @@ export function createVideoGen({ imageGen, speaker = null, writeScript = null, e
     const list = (Array.isArray(photos) ? photos : []).filter((b) => Buffer.isBuffer(b) && b.length >= 100);
     if (list.length < MIN_STOP_PHOTOS) return { error: VIDEO_TEXT.stoptoofew, kind: "toofew" };
     if (list.length > config.stopMaxPhotos) return { error: `Maksimal ${config.stopMaxPhotos} foto per stop motion (kamu mengirim ${list.length}).`, kind: "toomany" };
+    const sm = splitMusic(text);
+    text = sm.text;
     const options = parseStopMotionOptions(text, { maxFps: config.stopMaxFps });
     const bad = options.title ? promptProblem(options.title) : null;
     if (bad) return { error: bad.replace("gambar", "video"), kind: "refused" };
@@ -909,7 +944,7 @@ export function createVideoGen({ imageGen, speaker = null, writeScript = null, e
       stats.ok += 1;
       stats.lastOkAt = now();
       stats.lastSeconds = Math.round((now() - t0) / 1000);
-      return { video: { ...video, title: options.title } };
+      return { video: { ...(await applyMusic(video, sm.req)), title: options.title } };
     } catch (e) {
       stats.fail += 1;
       stats.lastError = String(e?.message || e).slice(0, 160);
@@ -932,6 +967,7 @@ export function createVideoGen({ imageGen, speaker = null, writeScript = null, e
       `Foto hidup (foto -> video + efek, tanpa AI): jatah pemilik ${config.photoOwnerDaily || "tanpa batas"}, semua grup ${config.photoGroupDaily || "tanpa batas"}, per orang ${config.photoPersonDaily || "tanpa batas"}; hari ini pemilik ${quota.photo.owner}, grup ${quota.photo.group}`,
       `Morf foto (percobaan, pemilik saja; foto + deskripsi -> ${config.morphSteps} edit AI -> video): ${morphAvailable() ? "aktif" : "belum aktif (butuh Cloudflare untuk edit foto)"}; jatah ${config.morphOwnerDaily || "tanpa batas"}/hari, hari ini ${quota.morph.owner}`,
       `Stop motion (foto berurutan -> video, sesi /stopmotion di Telegram, pemilik; memakai jatah foto hidup): maks ${config.stopMaxPhotos} foto, ${config.stopMaxFps} gambar/dtk`,
+      `Musik latar (tambahkan "pakai musik [dj/tenang/...]" di perintah video): ${music.count() ? `${music.count()} lagu di ${config.musicDir}` : "folder kosong -> ketukan buatan ffmpeg"}${config.musicDefault ? "; otomatis di semua video" : ""}`,
       `Hari ini: pemilik ${quota.owner}, grup ${quota.group}; berhasil ${stats.ok}, gagal ${stats.fail}${stats.lastSeconds ? `, rakit terakhir ${stats.lastSeconds} dtk` : ""}${stats.lastError ? `\nGalat terakhir: ${stats.lastError}` : ""}`
     ].join("\n");
   }
@@ -976,5 +1012,5 @@ export function createVideoGen({ imageGen, speaker = null, writeScript = null, e
     return r;
   }
 
-  return { available, groupEnabled, storyAvailable, storyGroupEnabled, morphAvailable, detectMorph: detectMorphRequest, makeMorph, makeStopMotion, stopLimits: () => ({ maxPhotos: config.stopMaxPhotos, maxFps: config.stopMaxFps }), photoAvailable, photoGroupEnabled, load, setGroup, reserve, make, makeFromPhoto, detectPhoto: detectPhotoVideoRequest, describe, parseCommand, reconfigure, detect, checkFfmpeg, stats: () => ({ ...stats }) };
+  return { available, groupEnabled, storyAvailable, storyGroupEnabled, morphAvailable, detectMorph: detectMorphRequest, makeMorph, makeStopMotion, stopLimits: () => ({ maxPhotos: config.stopMaxPhotos, maxFps: config.stopMaxFps }), musicInfo: () => music.info(), musicCount: () => music.count(), photoAvailable, photoGroupEnabled, load, setGroup, reserve, make, makeFromPhoto, detectPhoto: detectPhotoVideoRequest, describe, parseCommand, reconfigure, detect, checkFfmpeg, stats: () => ({ ...stats }) };
 }

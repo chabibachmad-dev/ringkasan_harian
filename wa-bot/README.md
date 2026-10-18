@@ -1066,6 +1066,19 @@ Ayyubi (nomor utama) dan bot nomor kedua (mis. Wongsobot) bisa punya **suara dan
 - `/voice` (tanpa argumen) juga menampilkan suara tiap bot. Setiap contoh memakai kuota suara Gemini yang sama dengan balasan biasa.
 - Setelah patch: `/restart` (tanpa `/rilis`, tanpa `npm install`).
 
+## Musik latar video (`/musik`, "pakai musik dj")
+
+Video buatan bot (foto hidup, morf, stop motion, animasi/cerita) bisa diberi **musik latar**. Musiknya dari **berkas milikmu** di folder `wa-bot/musik/` (ubah dengan `VIDEO_MUSIC_DIR`). Boleh memakai subfolder sebagai kategori: `musik/dj/lagu1.mp3`, `musik/tenang/piano.mp3`. Format: mp3, m4a, aac, wav, ogg, opus, flac.
+
+- **Minta:** tambahkan frasa di perintah video, mis. `jadikan video dengan salju pakai musik dj`, `morf siang jadi malam, pakai musik tenang`, `/stopmotion jadi 10 fps pakai musik jedag jedug`, `/video animasi kancil dan buaya dengan musik ceria`. Tanpa kata kunci (`pakai musik`) = lagu acak.
+- **Kata kunci:** dicocokkan dengan nama berkas dan nama subfolder. `jedag jedug`, `edm`, `dugem`, `remix`, `koplo` dianggap "dj"; `tenang`, `santai`, `lofi`, `piano` satu rumpun; juga `sedih`, `ceria`, `dramatis`. Bila tidak ada yang cocok, dipilih lagu acak (bot memberi tahu di keterangan).
+- **Folder kosong:** bot memakai musik buatan ffmpeg (tanpa berkas, bebas hak cipta): ketukan "jedag-jedug" untuk dj, nada lembut untuk tenang.
+- **Mematikan:** `tanpa musik`. `VIDEO_MUSIC_DEFAULT=1` membuat semua video otomatis diberi musik (hanya bila folder ada isinya).
+- **Animasi bernarasi:** musik dikecilkan otomatis saat narasi berbicara. Volume umum: `VIDEO_MUSIC_VOLUME` (10-100, bawaan 60).
+- Musik dipotong sepanjang video, ada fade masuk dan keluar. Bila gagal ditempel, video tetap dikirim tanpa musik. `/musik` di Telegram menampilkan folder dan daftar lagu.
+- Hak cipta lagunya tanggung jawabmu; pakai musik bebas royalti (mis. Pixabay Music, YouTube Audio Library) bila video akan dibagikan luas.
+- Setelah patch: `/restart` (tanpa `npm install`).
+
 ## Pembuat gambar (`/gambar`, "buatkan gambar ...")
 
 Bot bisa membuat gambar dari deskripsi memakai Gemini ("Nano Banana"), dengan `GEMINI_API_KEYS` yang sama. Tidak ada kunci baru.

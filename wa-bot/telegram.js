@@ -213,6 +213,9 @@ export function createTelegram({ config, deps = {}, fetchImpl = globalThis.fetch
   const voiceModes = new Map(); // chatId -> "auto" | "on" | "off" (balasan suara untuk obrolan biasa)
   const tutorSessions = new Map(); // chatId -> { topic, turns:[{role,body}], userTurns, lastAt }
 
+  /** Keterangan musik latar pada video jadi ("" bila tidak ada). */
+  const musicCaption = (v) => (v?.music ? `🎵 ${v.music}${v.musicSource === "buatan" ? " (musik buatan bot)" : ""}${v.musicMatched === false ? " — tidak ada lagu yang cocok dengan permintaan, dipilih acak" : ""}` : v?.musicError ? `⚠️ Musik gagal ditempel (${v.musicError}); video dikirim tanpa musik.` : "");
+
   // ---- STOP MOTION: sesi kumpul foto berurutan (/stopmotion ... /stopmotion jadi) ----
   const STOP_IDLE_MS = 30 * 60_000;
   const stopSessions = new Map(); // chatId -> { photos:[{fileId}], preset, last, busy, ackTimer, fullTold }
@@ -302,7 +305,7 @@ export function createTelegram({ config, deps = {}, fetchImpl = globalThis.fetch
         if (out.error) return void (await reply(`⚠️ ${out.error}\nFoto di sesi tetap tersimpan; /stopmotion jadi untuk mencoba lagi atau /stopmotion batal.`));
         const v = out.video;
         stopSessions.delete(chatId);
-        await sendFiles(chatId, [{ data: v.buffer, name: "stopmotion.mp4", mime: "video/mp4", video: true, width: v.width, height: v.height }], `🧱 ${v.photos} foto · ${v.fps} gambar/dtk · ${Math.round(v.seconds * 10) / 10} dtk${v.skipped || failed ? ` · ${(v.skipped || 0) + failed} foto dilewati` : ""}`);
+        await sendFiles(chatId, [{ data: v.buffer, name: "stopmotion.mp4", mime: "video/mp4", video: true, width: v.width, height: v.height }], `🧱 ${v.photos} foto · ${v.fps} gambar/dtk · ${Math.round(v.seconds * 10) / 10} dtk${v.skipped || failed ? ` · ${(v.skipped || 0) + failed} foto dilewati` : ""}${musicCaption(v) ? `\n${musicCaption(v)}` : ""}`);
       } finally {
         cur.busy = false;
         cur.last = Date.now();
@@ -886,7 +889,7 @@ Suara khusus satu grup: /suara grup wanita <nama grup> • /suara grup (daftar) 
     await send(chatId, "🎞️ Fotonya sedang dihidupkan (gerak kamera + efek) — biasanya setengah sampai dua menit. Kukirim begitu selesai.").catch(() => {});
     const out = await withAction(chatId, "upload_video", () => deps.video.makeFromPhoto(buffer, text));
     if (out.error) return void (await send(chatId, `⚠️ ${out.error}`).catch(() => {}));
-    await sendFiles(chatId, [{ data: out.video.buffer, name: "foto-hidup.mp4", mime: "video/mp4", video: true, width: out.video.width, height: out.video.height }], "");
+    await sendFiles(chatId, [{ data: out.video.buffer, name: "foto-hidup.mp4", mime: "video/mp4", video: true, width: out.video.width, height: out.video.height }], musicCaption(out.video));
   }
 
   /** Foto Telegram -> morf (diedit AI bertahap lalu disambung). Percobaan, pemilik saja. */
@@ -911,7 +914,7 @@ Suara khusus satu grup: /suara grup wanita <nama grup> • /suara grup (daftar) 
     );
     if (out.error) return void (await send(chatId, `⚠️ ${out.error}`).catch(() => {}));
     const v = out.video;
-    await sendFiles(chatId, [{ data: v.buffer, name: "morf.mp4", mime: "video/mp4", video: true, width: v.width, height: v.height }], `🧬 ${v.frames} gambar kunci${v.fallback ? " (rencana cadangan, AI teks tidak menjawab)" : ""}${v.smooth ? ", interpolasi gerak" : ""}`);
+    await sendFiles(chatId, [{ data: v.buffer, name: "morf.mp4", mime: "video/mp4", video: true, width: v.width, height: v.height }], `🧬 ${v.frames} gambar kunci${v.fallback ? " (rencana cadangan, AI teks tidak menjawab)" : ""}${v.smooth ? ", interpolasi gerak" : ""}${musicCaption(v) ? `\n${musicCaption(v)}` : ""}`);
   }
 
   /** Foto Telegram + instruksi ("ubah jadi hitam putih", "/edit tambah salju") -> foto hasil edit (Cloudflare FLUX, gratis). */
@@ -1028,6 +1031,7 @@ Suara khusus satu grup: /suara grup wanita <nama grup> • /suara grup (daftar) 
       return void (await sendFiles(chatId, [{ data: out.image.buffer, name: `gambar.${ext}`, mime: out.image.mime || "image/png", photo: true }], ""));
     }
     if (name === "stopmotion" || name === "stop_motion") return handleStopMotion(chatId, arg, reply);
+    if (name === "musik" || name === "music") return reply(deps.video?.musicInfo ? deps.video.musicInfo() : "Musik latar tidak tersedia di versi bot ini.");
     if (name === "video" || name === "vidio" || name === "vid") {
       const vd = deps.video;
       if (!vd) return void (await reply("Pembuat video tidak tersedia di versi bot ini."));
@@ -1046,7 +1050,7 @@ Suara khusus satu grup: /suara grup wanita <nama grup> • /suara grup (daftar) 
       await reply(c.mode === "karakter" ? `🎭 Sedang membuat animasi${c.style === "stopmotion" ? " bergaya stop motion (potongan kertas)" : ""} (naskah, latar, suara, menggambar tokoh bergerak) — biasanya 2–5 menit. Kukirim begitu selesai.` : "🎬 Sedang membuat video (naskah, gambar, suara, rakit) — biasanya 1–3 menit. Kukirim begitu selesai.");
       const out = await withAction(chatId, "upload_video", () => vd.make(c.prompt, { seconds: c.seconds, mode: c.mode, ...(c.style ? { style: c.style } : {}) }));
       if (out.error) return void (await reply(`⚠️ ${out.error}`));
-      return void (await sendFiles(chatId, [{ data: out.video.buffer, name: "video.mp4", mime: "video/mp4", video: true }], ""));
+      return void (await sendFiles(chatId, [{ data: out.video.buffer, name: "video.mp4", mime: "video/mp4", video: true }], musicCaption(out.video)));
     }
     if (name === "grup" || name === "group") {
       if (!deps.groups) return void (await reply("Pengaturan grup tidak tersedia di versi bot ini."));
@@ -1348,7 +1352,7 @@ Suara khusus satu grup: /suara grup wanita <nama grup> • /suara grup (daftar) 
   }
 
   const HANDLER_DEADLINE_MS = 10 * 60_000;
-  const FAST_COMMANDS = new Set(["dokumen", "dok", "doc", "status", "id", "help", "start", "ingat", "catatan", "lupa", "memori", "note", "penyedia", "provider", "skill", "skil", "lokal", "tanya", "pasar", "emas", "ihsg", "ingatkan", "remind", "pengingat", "reminder", "cadangan", "backup", "kesehatan", "sehat", "health", "urutan", "route", "rute", "nodin", "notadinas", "kas", "laporankas", "voice", "wa2", "nomor2", "grup", "group", "gambar", "image", "img", "video", "vidio", "vid", "metaai", "env", "stopmotion", "stop_motion", "edit", "ubah"]);
+  const FAST_COMMANDS = new Set(["dokumen", "dok", "doc", "status", "id", "help", "start", "ingat", "catatan", "lupa", "memori", "note", "penyedia", "provider", "skill", "skil", "lokal", "tanya", "pasar", "emas", "ihsg", "ingatkan", "remind", "pengingat", "reminder", "cadangan", "backup", "kesehatan", "sehat", "health", "urutan", "route", "rute", "nodin", "notadinas", "kas", "laporankas", "voice", "wa2", "nomor2", "grup", "group", "gambar", "image", "img", "video", "vidio", "vid", "metaai", "env", "stopmotion", "stop_motion", "edit", "ubah", "musik", "music"]);
   function isFastUpdate(u) {
     const m = u?.message;
     if (!m) return false;
@@ -1473,6 +1477,7 @@ Suara khusus satu grup: /suara grup wanita <nama grup> • /suara grup (daftar) 
           { command: "gambar", description: "Buat gambar dari deskripsi (Gemini); /gambar grup on|off" },
           { command: "video", description: "Buat video bernarasi dari deskripsi (gratis); /video grup on|off" },
           { command: "stopmotion", description: "Foto-foto berurutan jadi video stop motion" },
+          { command: "musik", description: "Musik latar video: daftar lagu & cara minta" },
           { command: "wa2", description: "Nomor WhatsApp kedua: status dan kode tautan" },
           { command: "kas", description: "Laporan kas bulanan (Saldo Rekening & Register Kas)" },
           { command: "nodin", description: "Konsep Nota Dinas LPJ Bendahara (PDF + Word)" },
