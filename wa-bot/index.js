@@ -2980,7 +2980,7 @@ async function handleGroupMessage(msg, sock) {
     const photoSource = photo
       ? { key: msg.key, message: content }
       : { key: { remoteJid: groupJid, id: ctx.stanzaId, participant: ctx.participant }, message: unwrapMessageContent(ctx.quotedMessage) };
-    await handleVideoRequestWa(sock, groupJid, { prompt: animReq.text }, { kind: "group", who: msg.key.participant || sender, quoted: msg, waName: subject || null, record: true, photoSource });
+    await handleVideoRequestWa(sock, groupJid, { prompt: animReq.text }, { kind: isOwnerSender(msg, false) ? "owner" : "group", who: msg.key.participant || sender, quoted: msg, waName: subject || null, record: true, photoSource });
     return;
   }
 
@@ -3052,7 +3052,7 @@ async function handleGroupMessage(msg, sock) {
     const videoReq = videoGen.detect(text);
     // video gambar biasa butuh pembuat gambar; animasi karakter cukup ffmpeg (latar cadangan digambar kode)
     if (videoReq && (videoGen.groupEnabled() || videoReq.mode === "karakter")) {
-      await handleVideoRequestWa(sock, groupJid, videoReq, { kind: "group", who: msg.key.participant || sender, quoted: msg, waName: subject || null, record: true });
+      await handleVideoRequestWa(sock, groupJid, videoReq, { kind: isOwnerSender(msg, false) ? "owner" : "group", who: msg.key.participant || sender, quoted: msg, waName: subject || null, record: true });
       return;
     }
   }

@@ -14,7 +14,7 @@
 //   - Telegram        : /video <deskripsi>
 //
 // Batas harian (hari WITA, tersimpan di bot_state "wa_video_quota"); satu video = beberapa gambar, jadi jatahnya kecil:
-//   VIDEO_OWNER_DAILY=5   pemilik     VIDEO_GROUP_DAILY=3   seluruh grup     VIDEO_PERSON_DAILY=1   per orang di grup
+//   VIDEO_OWNER_DAILY=0   pemilik (0 = tanpa batas)    VIDEO_GROUP_DAILY=3   seluruh grup     VIDEO_PERSON_DAILY=1   per orang di grup
 // .env (semua opsional):
 //   VIDEO_ENABLED=1 (0 = mati)   VIDEO_SCENES=5 (bawaan) VIDEO_MAX_SCENES=6   VIDEO_FONT=/path/font.ttf
 //   VIDEO_NARRATION_CHARS=620 (batas total huruf yang dibacakan)   FFMPEG_PATH=ffmpeg
@@ -59,11 +59,11 @@ export function readVideoConfig(env = process.env) {
     enabled: !/^(0|off|false|mati|no)$/i.test(String(env.VIDEO_ENABLED ?? "1").trim()),
     scenes: Math.max(3, Math.min(maxScenes, num(env.VIDEO_SCENES, 5))),
     maxScenes,
-    ownerDaily: num(env.VIDEO_OWNER_DAILY, 5),
+    ownerDaily: num(env.VIDEO_OWNER_DAILY, 0),
     groupDaily: num(env.VIDEO_GROUP_DAILY, 3),
     personDaily: num(env.VIDEO_PERSON_DAILY, 1),
     // Foto hidup (foto -> video dengan efek): tanpa AI/kuota gambar, hanya CPU laptop, jadi jatahnya lebih longgar.
-    photoOwnerDaily: num(env.VIDEO_PHOTO_OWNER_DAILY, 15),
+    photoOwnerDaily: num(env.VIDEO_PHOTO_OWNER_DAILY, 0),
     photoGroupDaily: num(env.VIDEO_PHOTO_GROUP_DAILY, 8),
     photoPersonDaily: num(env.VIDEO_PHOTO_PERSON_DAILY, 2),
     photoMaxSeconds: Math.max(5, Math.min(30, num(env.VIDEO_PHOTO_MAX_SEC, 15))),

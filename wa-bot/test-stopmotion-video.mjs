@@ -112,6 +112,8 @@ ok("buildStopMotion: durasi & ukuran benar, foto rusak dilewati, bolak-balik, ju
   const state = mem();
   const vg = createVideoGen({ imageGen: { available: () => false }, config: { ...readVideoConfig({}), photoOwnerDaily: 2, stopMaxPhotos: 6 }, state, log: silent, tmpRoot: tmp });
   assert.equal(readVideoConfig({}).stopMaxPhotos, 60);
+  assert.equal(readVideoConfig({}).ownerDaily, 0, "pemilik tanpa batas bawaan");
+  assert.equal(readVideoConfig({}).photoOwnerDaily, 0);
   assert.equal(readVideoConfig({ VIDEO_STOP_MAX_PHOTOS: "5000" }).stopMaxPhotos, 120);
   assert.equal(readVideoConfig({ VIDEO_STOP_MAX_FPS: "99" }).stopMaxFps, MAX_STOP_FPS);
   assert.deepEqual(vg.stopLimits(), { maxPhotos: 6, maxFps: 15 });
@@ -280,6 +282,7 @@ ok("Telegram /stopmotion: mulai, foto berurutan (termasuk berkas gambar) dengan 
   const idx = fs.readFileSync(new URL("./index.js", import.meta.url), "utf8");
   assert.match(idx, /makeStopMotion: async \(buffers, text, opts = \{\}\) =>[\s\S]{0,200}videoGen\.makeStopMotion\(buffers, text, "owner", ""/);
   assert.match(idx, /stopLimits: \(\) => videoGen\.stopLimits\(\)/);
+  assert.equal((idx.match(/kind: isOwnerSender\(msg, false\) \? "owner" : "group"/g) || []).length, 2, "pemilik di grup WA memakai jatah pemilik (video & foto hidup)");
   assert.match(idx, /style: story \? req\.style \|\| "" : ""/);
   const tg = fs.readFileSync(new URL("./telegram.js", import.meta.url), "utf8");
   assert.match(tg, /vd\.make\(c\.prompt, \{ seconds: c\.seconds, mode: c\.mode, \.\.\.\(c\.style \? \{ style: c\.style \} : \{\}\) \}\)/);
