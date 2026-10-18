@@ -1,3 +1,6 @@
 # Dibuat untuk memudahkan `supabase link` & `supabase functions deploy`.
 # Project ref diambil dari URL project: https://alkpmwowhlyffdwfvyeu.supabase.co
 project_id = "alkpmwowhlyffdwfvyeu"
+
+[functions.office]
+verify_jwt = false

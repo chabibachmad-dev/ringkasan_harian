@@ -4492,8 +4492,9 @@ button.study-trow:active {
 
 .office-sim-note {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 8px;
+  gap: 6px 8px;
   font-size: 0.75rem;
   color: var(--text-muted);
 }
@@ -4507,9 +4508,58 @@ button.study-trow:active {
   animation: office-blink 1.6s steps(2, jump-none) infinite;
 }
 
+.office-sim-note[data-mode="live"] .office-sim-dot {
+  background: #3bb26b;
+  animation: none;
+}
+
+.office-sim-note[data-mode="connecting"] .office-sim-dot {
+  background: #7a8aa0;
+}
+
+.office-sim-note[data-mode="error"] .office-sim-dot,
+.office-sim-note[data-mode="needcode"] .office-sim-dot {
+  background: #d9534f;
+}
+
+.office-note-text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.office-note-btn {
+  flex: none;
+  padding: 3px 10px;
+  font-size: 0.72rem;
+  border: 1px solid var(--border, rgba(128, 128, 128, 0.4));
+  border-radius: 999px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.office-note-btn:hover {
+  background: rgba(128, 128, 128, 0.15);
+}
+
 @keyframes office-blink {
   50% {
     opacity: 0.25;
+  }
+}
+
+/* Adegan tetap di atas (di bawah header) saat bagian di bawahnya digulir. */
+.office-stick {
+  position: sticky;
+  top: var(--office-top, 72px);
+  z-index: 6;
+  padding-bottom: 8px;
+  background: var(--bg);
+}
+
+@media (max-height: 520px) {
+  .office-stick {
+    position: static;
   }
 }
 

@@ -15,7 +15,7 @@ const auditFile = path.join(tmp, "audit.log");
 // ---- konfigurasi
 {
   const d = readOpsConfig({}, "/x/proyek/wa-bot");
-  check(d.enabled === false && d.pm2Name === "wa-bot" && d.projectDir === "/x/proyek" && d.functions.join() === "chat,study" && d.confirmTtlSec === 60, "config: mati bawaan, folder proyek = induk wa-bot");
+  check(d.enabled === false && d.pm2Name === "wa-bot" && d.projectDir === "/x/proyek" && d.functions.join() === "chat,study,office" && d.confirmTtlSec === 60, "config: mati bawaan, folder proyek = induk wa-bot");
   const c = readOpsConfig({ OPS_ENABLED: "true", OPS_FUNCTIONS: "chat, study;rm, ok_1", OPS_TELEGRAM_IDS: "111, abc, 222", OPS_CONFIRM_TTL_SEC: "5", OPS_PM2_NAME: "bot2" }, "/x/wa-bot");
   check(c.enabled && c.functions.join() === "chat,ok_1" && c.allowIds.join() === "111,222" && c.confirmTtlSec === 15 && c.pm2Name === "bot2", "config: nama fungsi tak valid dibuang, id non-angka dibuang, TTL dibatasi");
 }

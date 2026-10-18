@@ -55,7 +55,7 @@ export function readOpsConfig(env = process.env, baseDir = process.cwd()) {
     enabled: flag(env.OPS_ENABLED, false),
     projectDir: env.OPS_PROJECT_DIR ? path.resolve(env.OPS_PROJECT_DIR) : path.resolve(baseDir, ".."),
     pm2Name: String(env.OPS_PM2_NAME || "wa-bot").trim(),
-    functions: String(env.OPS_FUNCTIONS || "chat,study")
+    functions: String(env.OPS_FUNCTIONS || "chat,study,office")
       .split(",")
       .map((s) => s.trim())
       .filter((s) => /^[a-z0-9_-]{1,40}$/i.test(s)),

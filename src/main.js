@@ -49,7 +49,7 @@ import {
   hideFeatureScreens
 } from "./features.js";
 import { initStudy, showStudyScreen, hideStudyScreen, rerenderStudy } from "./study.js";
-import { initOffice, showOfficeScreen, hideOfficeScreen } from "./office.js";
+import { initOffice, showOfficeScreen, hideOfficeScreen, officeCodeChanged } from "./office.js";
 import { registerServiceWorker } from "./push.js";
 import {
   getStoredChatCode,
@@ -3121,6 +3121,8 @@ function wireEvents() {
       state.waThreadSignature = null;
       await loadWaThread(state.waCurrentJid);
     }
+    // Layar Kantor AI: sambungkan lagi ke data asli dengan kode yang baru.
+    if (location.hash === "#office") officeCodeChanged();
   });
 
   els.chatForm.addEventListener("submit", async (e) => {
@@ -3886,7 +3888,7 @@ async function main() {
   wireEvents();
   initFeatures({ getLang: () => state.lang, getCode: () => state.chatCode });
   initStudy({ getLang: () => state.lang });
-  initOffice();
+  initOffice({ getCode: () => state.chatCode, askCode: () => openChatCodeDialog() });
   fixStickyHeaderOnIOSKeyboard();
   await registerServiceWorker();
   await initChat();

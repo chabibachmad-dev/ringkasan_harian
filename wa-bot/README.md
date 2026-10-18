@@ -1066,6 +1066,15 @@ Ayyubi (nomor utama) dan bot nomor kedua (mis. Wongsobot) bisa punya **suara dan
 - `/voice` (tanpa argumen) juga menampilkan suara tiap bot. Setiap contoh memakai kuota suara Gemini yang sama dengan balasan biasa.
 - Setelah patch: `/restart` (tanpa `/rilis`, tanpa `npm install`).
 
+## Kantor AI: pemancar kejadian ke halaman Kantor di aplikasi
+
+Bot memancarkan **ringkasan kegiatan** ke tabel `office_events` (dan denyut "masih hidup" tiap 30 detik ke `office_presence`) supaya halaman **Kantor** di aplikasi menampilkan kerja Ayyubi, Wongsobot, dan Studio Gambar/Video/Suara secara langsung: menyusun balasan, membuat gambar/video/suara, serah-terima antar studio, galat (kuota habis dll.). Butuh migrasi `0041_office.sql`; sebelum itu bot hanya mencetak satu peringatan dan tetap berjalan normal.
+
+- Yang dikirim hanya label, mis. "Pesan baru di grup Keluarga Besar", "Menggambar adegan", "Kuota AI habis". **Isi pesan tidak pernah dikirim**; nomor telepon/surel/tautan disamarkan; chat pribadi hanya tertulis "chat pribadi"; nama grup dipotong 28 huruf.
+- Matikan: `OFFICE_FEED=0` di `.env` lalu `/restart`. Bila penulisan gagal 3 kali beruntun, pemancar istirahat 5 menit.
+- Kode: `office-feed.js` (antrean, batch, denyut, pembantu `task(who)`), dipasang di `index.js` (`generateAutoReply`, balasan suara grup, `handleImageRequestWa`, `handleVideoRequestWa`). Tes: `node test-office.mjs`.
+- `/deploy office` tersedia (daftar putih `OPS_FUNCTIONS` bawaan kini `chat,study,office`; bila `.env`-mu memakai nilai sendiri, tambahkan `office`).
+
 ## Musik latar video (`/musik`, "pakai musik dj")
 
 Video buatan bot (foto hidup, morf, stop motion, animasi/cerita) bisa diberi **musik latar**. Musiknya dari **berkas milikmu** di folder `wa-bot/musik/` (ubah dengan `VIDEO_MUSIC_DIR`). Boleh memakai subfolder sebagai kategori: `musik/dj/lagu1.mp3`, `musik/tenang/piano.mp3`. Format: mp3, m4a, aac, wav, ogg, opus, flac.

@@ -4,13 +4,15 @@
 // bisa berjalan menyerahkan hasil kerja ke karyawan lain. Di bawah kantor ada ringkasan, kartu karyawan,
 // dan umpan kejadian langsung.
 //
-// Sumber data: untuk sementara SIMULASI (office-sim.js). Umpan nyata nanti cukup memanggil pushOfficeEvent()
-// dengan bentuk kejadian yang sama (lihat komentar di office-sim.js).
+// Sumber data: DATA ASLI (office-live.js, memanggil Edge Function `office`) atau SIMULASI contoh (office-sim.js);
+// keduanya memanggil pushOfficeEvent() dengan bentuk kejadian yang sama (lihat komentar di office-sim.js).
+// Mode awal = data asli; tombol di bawah adegan beralih ke "Contoh" (pilihan diingat di peramban).
 // Adegan digambar di <canvas> 320x200 piksel logis yang diperbesar tanpa penghalusan; teks (gelembung, label)
 // berupa elemen HTML di atasnya supaya tajam dan bisa dibaca pembaca layar.
 // ================================================================
 
 import { createOfficeSim } from "./office-sim.js";
+import { createOfficeLive } from "./office-live.js";
 
 const W = 320;
 const H = 200;
@@ -57,7 +59,30 @@ let timer = null;
 let lastFrame = 0;
 let frame = 0;
 let sim = null;
-let source = "sim";
+let live = null;
+let mode = loadMode(); // "live" | "sim"
+let liveStatus = "connecting";
+let liveMsg = "";
+let hooks = { getCode: () => "", askCode: () => {} };
+let presenceSeen = false;
+const STALE_WORK_MS = 120_000;
+const STALE_ERROR_MS = 90_000;
+const SILENT_AGE_MS = 20_000; // kejadian lebih tua dari ini langsung diterapkan tanpa animasi
+
+function loadMode() {
+  try {
+    return localStorage.getItem("office_mode") === "sim" ? "sim" : "live";
+  } catch {
+    return "live";
+  }
+}
+function saveMode(m) {
+  try {
+    localStorage.setItem("office_mode", m);
+  } catch {
+    /* penyimpanan tidak tersedia */
+  }
+}
 const staff = new Map();
 const feed = [];
 const fx = [];
@@ -79,7 +104,8 @@ function makeStaff() {
       err: 0,
       walk: null, // { pts:[{x,y}], i, x, y, item, wait }
       shake: 0,
-      blinkAt: 0
+      blinkAt: 0,
+      lastAt: 0
     });
   }
 }
@@ -574,10 +600,12 @@ function stepWalks(dtSec) {
 }
 
 // ---------------------------------------------------------------- kejadian
-export function pushOfficeEvent(e) {
+export function pushOfficeEvent(e, opts = {}) {
   const s = staff.get(e.who);
   if (!s) return;
-  const now = Date.now();
+  const silent = Boolean(opts.silent); // dari riwayat: terapkan keadaan tanpa jalan-jalan, bubble, dan kembang api
+  const now = Number.isFinite(opts.at) ? opts.at : Date.now();
+  s.lastAt = now;
   const text = String(e.text || "").slice(0, 120);
   let newText = false;
   switch (e.kind) {
@@ -616,17 +644,19 @@ export function pushOfficeEvent(e) {
     case "wait":
       s.state = "wait";
       s.task = text;
-      if (e.approval) approvals.push({ ...e.approval, who: e.who, at: now });
+      if (e.approval && mode === "sim") approvals.push({ ...e.approval, who: e.who, at: now });
       break;
     case "done":
       s.state = "idle";
       s.task = text || "Selesai";
-      s.progress = 100;
+      s.progress = silent ? 0 : 100;
       s.done += 1;
-      burst(s.x, s.y - 26, ["#ffd84d", "#8be9a0", "#7fd1ff", "#ffffff"], 14);
-      setTimeout(() => {
-        if (s.state === "idle") s.progress = 0;
-      }, 1800);
+      if (!silent) {
+        burst(s.x, s.y - 26, ["#ffd84d", "#8be9a0", "#7fd1ff", "#ffffff"], 14);
+        setTimeout(() => {
+          if (s.state === "idle") s.progress = 0;
+        }, 1800);
+      }
       break;
     case "error":
       s.state = "error";
@@ -635,12 +665,12 @@ export function pushOfficeEvent(e) {
       break;
     case "handoff":
       s.task = text || s.task;
-      startWalk(e.who, e.to, e.item);
+      if (!silent) startWalk(e.who, e.to, e.item);
       break;
     default:
       return;
   }
-  if (e.kind !== "online" && e.kind !== "offline" && e.kind !== "progress" && text) {
+  if (!silent && e.kind !== "online" && e.kind !== "offline" && e.kind !== "progress" && text) {
     s.bubble = text;
     s.bubbleUntil = now + (e.kind === "wait" ? 60_000 : e.kind === "say" ? 3500 : 2800);
   }
@@ -648,13 +678,14 @@ export function pushOfficeEvent(e) {
     s.bubble = "";
     s.bubbleUntil = 0;
   }
-  if (e.kind === "wait" || e.kind === "error") s.bubbleUntil = now + (e.kind === "wait" ? 60_000 : 5000);
-  if (e.kind === "done" || e.kind === "online") approvals = approvals.filter((a) => a.who !== e.who);
+  if (!silent && (e.kind === "wait" || e.kind === "error")) s.bubbleUntil = now + (e.kind === "wait" ? 60_000 : 5000);
+  // Mode contoh: izin datang lewat kejadian "wait". Mode asli: daftar izin dari server (applyApprovals) yang menentukan.
+  if (mode === "sim" && (e.kind === "done" || e.kind === "online")) approvals = approvals.filter((a) => a.who !== e.who);
   if (e.kind !== "progress" || newText) {
     feed.unshift({ at: now, who: e.who, kind: e.kind, text: text || STATE_LABEL[s.state] || "" });
     if (feed.length > 80) feed.length = 80;
   }
-  if (activeScreen) {
+  if (activeScreen && !opts.batch) {
     renderFeed();
     renderRoster();
     renderApprovals();
@@ -670,13 +701,19 @@ function buildDom() {
   rootEl = document.getElementById("office-body");
   rootEl.innerHTML = `
     <div class="office-wrap">
-      <div class="office-sim-note" id="office-sim-note"><span class="office-sim-dot"></span><span>Mode simulasi: kejadiannya contoh, belum tersambung ke bot.</span></div>
+      <div class="office-sim-note" id="office-sim-note" data-mode="live">
+        <span class="office-sim-dot"></span><span class="office-note-text" id="office-note-text"></span>
+        <button type="button" class="office-note-btn" id="office-note-action" hidden></button>
+        <button type="button" class="office-note-btn" id="office-mode-btn"></button>
+      </div>
+      <div class="office-stick">
       <div class="office-scene" id="office-scene">
         <canvas id="office-canvas" width="${W}" height="${H}" aria-label="Kantor dengan karyawan AI" role="img"></canvas>
         <div class="office-zone" style="left:${(12 / W) * 100}%;top:${(54 / H) * 100}%">WhatsApp</div>
         <div class="office-zone" style="left:${(180 / W) * 100}%;top:${(54 / H) * 100}%">Laptop kantor</div>
         <div class="office-zone" style="left:${(12 / W) * 100}%;top:${(126 / H) * 100}%">Studio media</div>
         <div id="office-overlay"></div>
+      </div>
       </div>
       <div class="office-summary" id="office-summary"></div>
       <div id="office-approvals"></div>
@@ -692,8 +729,17 @@ function buildDom() {
     approvals: document.getElementById("office-approvals"),
     roster: document.getElementById("office-roster"),
     feed: document.getElementById("office-feed"),
-    filter: document.getElementById("office-filter")
+    filter: document.getElementById("office-filter"),
+    note: document.getElementById("office-sim-note"),
+    noteText: document.getElementById("office-note-text"),
+    noteAction: document.getElementById("office-note-action"),
+    modeBtn: document.getElementById("office-mode-btn")
   };
+  els.modeBtn.addEventListener("click", () => setMode(mode === "live" ? "sim" : "live"));
+  els.noteAction.addEventListener("click", () => {
+    if (liveStatus === "needcode") hooks.askCode();
+    else startSource();
+  });
   canvas = document.getElementById("office-canvas");
   ctx = canvas.getContext("2d");
   ctx.imageSmoothingEnabled = false;
@@ -724,11 +770,21 @@ function buildDom() {
     if (!b) return;
     const id = b.dataset.id;
     const ok = b.dataset.act === "ok";
-    sim?.decide(id, ok);
     const a = approvals.find((x) => x.id === id);
     approvals = approvals.filter((x) => x.id !== id);
-    if (a) {
-      feed.unshift({ at: Date.now(), who: a.who, kind: ok ? "done" : "error", text: ok ? `Pemilik mengizinkan: ${a.detail}` : `Pemilik menolak: ${a.detail}` });
+    if (mode === "live") {
+      // server mencatat kejadian "Kamu mengizinkan/menolak ..." sendiri; muncul di umpan pada polling berikutnya
+      live?.decide(id, ok).then((r) => {
+        if (r === "error") {
+          liveMsg = "Jawaban izin gagal terkirim, coba lagi.";
+          renderNote();
+        }
+      });
+    } else {
+      sim?.decide(id, ok);
+      if (a) {
+        feed.unshift({ at: Date.now(), who: a.who, kind: ok ? "done" : "error", text: ok ? `Pemilik mengizinkan: ${a.detail}` : `Pemilik menolak: ${a.detail}` });
+      }
     }
     renderApprovals();
     renderFeed();
@@ -851,11 +907,196 @@ function loop(ts) {
   stepWalks(dt);
   drawScene(frame);
   updateOverlay();
-  if (frame % 10 === 0) renderRoster();
+  if (frame % 10 === 0) {
+    settleStale();
+    renderRoster();
+  }
+}
+
+// ---------------------------------------------------------------- sumber data: asli vs contoh
+function resetState() {
+  makeStaff();
+  feed.length = 0;
+  fx.length = 0;
+  approvals = [];
+  presenceSeen = false;
+  rosterHtml = "";
+}
+
+function renderAll() {
+  renderSummary();
+  renderRoster();
+  renderFeed();
+  renderApprovals();
+}
+
+function liveEvents(list, { replay }) {
+  const t = Date.now();
+  for (const ev of list) {
+    const silent = replay || t - ev.at > SILENT_AGE_MS;
+    pushOfficeEvent({ who: ev.who, kind: ev.kind, text: ev.text, progress: ev.progress ?? undefined, to: ev.to ?? undefined, item: ev.item ?? undefined }, { silent, at: ev.at, batch: true });
+  }
+  settleStale();
+  if (activeScreen) renderAll();
+}
+
+function applyPresence(list) {
+  const by = new Map(list.map((p) => [p.who, p]));
+  const t = Date.now();
+  for (const s of staff.values()) {
+    const p = by.get(s.id);
+    if (p?.online) {
+      if (s.state === "offline") {
+        s.state = "idle";
+        s.task = p.detail || "Masuk kerja";
+        s.progress = 0;
+        if (presenceSeen) feed.unshift({ at: t, who: s.id, kind: "online", text: "Masuk kerja" });
+      }
+    } else if (s.state !== "offline") {
+      s.state = "offline";
+      s.task = p ? "Tidak aktif" : "Belum aktif";
+      s.progress = 0;
+      s.walk = null;
+      s.bubble = "";
+      if (presenceSeen) feed.unshift({ at: t, who: s.id, kind: "offline", text: "Tidak aktif" });
+    }
+  }
+  presenceSeen = true;
+  if (feed.length > 80) feed.length = 80;
+  if (activeScreen) renderAll();
+}
+
+function applyApprovals(list) {
+  if (mode !== "live") return;
+  approvals = list.map((a) => ({ id: a.id, who: a.who, detail: a.detail, at: a.at }));
+  for (const s of staff.values()) {
+    if (s.state === "wait" && !approvals.some((a) => a.who === s.id)) {
+      s.state = "idle";
+      s.task = "Siaga";
+      s.bubble = "";
+    }
+    if (s.state !== "wait" && s.state !== "offline" && approvals.some((a) => a.who === s.id) && !s.walk) {
+      s.state = "wait";
+      s.task = "Menunggu izinmu";
+    }
+  }
+  if (activeScreen) {
+    renderApprovals();
+    renderSummary();
+    renderRoster();
+  }
+}
+
+/** Kerja/berpikir yang sudah lama tanpa kabar dianggap selesai (bot mati di tengah jalan); galat lama dilupakan. */
+function settleStale() {
+  if (mode !== "live") return;
+  const t = Date.now();
+  let changed = false;
+  for (const s of staff.values()) {
+    if (s.walk || !s.lastAt) continue;
+    const age = t - s.lastAt;
+    if ((s.state === "work" || s.state === "think") && age > STALE_WORK_MS) {
+      s.state = "idle";
+      s.task = "Siaga";
+      s.progress = 0;
+      changed = true;
+    } else if (s.state === "error" && age > STALE_ERROR_MS) {
+      s.state = "idle";
+      s.task = "Siaga";
+      changed = true;
+    }
+  }
+  if (changed && activeScreen) {
+    renderSummary();
+    renderRoster();
+  }
+}
+
+function renderNote() {
+  if (!els.note) return;
+  const sim_ = mode === "sim";
+  els.note.dataset.mode = sim_ ? "sim" : liveStatus;
+  let text = "";
+  let action = "";
+  if (sim_) {
+    text = "Mode contoh: kejadiannya hanya simulasi, bukan dari bot sungguhan.";
+  } else if (liveStatus === "needcode") {
+    text = liveMsg || "Masukkan kode akses untuk melihat data asli.";
+    action = "Masukkan kode";
+  } else if (liveStatus === "error") {
+    text = `Belum bisa terhubung (${String(liveMsg || "periksa jaringan").replace(/[.\s]+$/, "")}). Mencoba lagi…`;
+    action = "Coba lagi";
+  } else if (liveStatus === "connecting") {
+    text = "Menyambung ke bot…";
+  } else {
+    text = liveMsg || "Data asli dari bot, diperbarui otomatis.";
+  }
+  els.noteText.textContent = text;
+  els.noteAction.hidden = !action;
+  els.noteAction.textContent = action;
+  els.modeBtn.textContent = sim_ ? "Data asli" : "Contoh";
+  els.modeBtn.title = sim_ ? "Kembali ke data asli dari bot" : "Lihat simulasi contoh";
+  const pb = document.getElementById("office-pause-btn");
+  if (pb) pb.hidden = !sim_;
+}
+
+function ensureLive() {
+  if (live) return live;
+  live = createOfficeLive({
+    url: import.meta.env.VITE_SUPABASE_URL,
+    anonKey: import.meta.env.VITE_SUPABASE_ANON_KEY,
+    getCode: () => hooks.getCode(),
+    onEvents: liveEvents,
+    onPresence: applyPresence,
+    onApprovals: applyApprovals,
+    onStatus: (st, msg) => {
+      liveStatus = st;
+      liveMsg = st === "live" ? "" : msg || "";
+      renderNote();
+    }
+  });
+  return live;
+}
+
+/** Mulai sumber data sesuai mode (selalu dari keadaan bersih). */
+function startSource() {
+  live?.stop();
+  if (sim) {
+    sim.stop();
+    sim = null;
+  }
+  resetState();
+  if (activeScreen) renderAll();
+  if (mode === "sim") {
+    sim = createOfficeSim({ emit: pushOfficeEvent });
+    sim.start();
+    const pb = document.getElementById("office-pause-btn");
+    if (pb) pb.textContent = "Jeda";
+  } else {
+    liveStatus = "connecting";
+    liveMsg = "";
+    renderNote();
+    ensureLive().start();
+  }
+  renderNote();
+}
+
+function setMode(m) {
+  if (m === mode) return;
+  mode = m;
+  saveMode(m);
+  startSource();
+}
+
+/** Dipanggil main.js setelah kode akses dimasukkan/diganti: coba sambung lagi bila halaman Kantor terbuka. */
+export function officeCodeChanged() {
+  if (activeScreen && mode === "live") startSource();
 }
 
 // ---------------------------------------------------------------- publik
-export function initOffice() {
+/** hooks: { getCode: () => string, askCode: () => void } (kode akses obrolan dipakai bersama fitur lain). */
+export function initOffice(h = {}) {
+  hooks = { ...hooks, ...h };
   makeStaff();
   const screen = document.getElementById("screen-office");
   if (!screen) return;
@@ -875,25 +1116,27 @@ export function initOffice() {
   });
 }
 
+/** Adegan menempel di bawah header saat daftar di bawahnya digulir: ukur tinggi header yang menempel di atas. */
+function syncStickyTop() {
+  const bar = document.querySelector("#screen-office .topbar");
+  if (!bar || !rootEl) return;
+  const h = Math.round(bar.getBoundingClientRect().height);
+  if (h > 0) rootEl.style.setProperty("--office-top", `${h}px`);
+}
+
 export function showOfficeScreen() {
   const screen = document.getElementById("screen-office");
   if (!screen) return;
   screen.hidden = false;
   window.scrollTo(0, 0);
-  if (!built) buildDom();
-  activeScreen = true;
-  renderSummary();
-  renderRoster();
-  renderFeed();
-  renderApprovals();
-  if (!sim && source === "sim") {
-    sim = createOfficeSim({ emit: pushOfficeEvent });
-    sim.start();
-  } else if (sim) {
-    sim.resume();
-    const pb = document.getElementById("office-pause-btn");
-    if (pb) pb.textContent = "Jeda";
+  if (!built) {
+    buildDom();
+    window.addEventListener("resize", syncStickyTop);
   }
+  syncStickyTop();
+  activeScreen = true;
+  startSource();
+  renderAll();
   lastFrame = 0;
   cancelAnimationFrame(timer);
   timer = requestAnimationFrame(loop);
@@ -905,10 +1148,12 @@ export function hideOfficeScreen() {
   activeScreen = false;
   cancelAnimationFrame(timer);
   timer = null;
-  sim?.pause();
+  live?.stop();
+  sim?.stop();
+  sim = null;
 }
 
 /** Untuk uji: kendali sim dan keadaan dari luar. */
 export function __officeDebug() {
-  return { staff, feed, sim, get approvals() { return approvals; } };
+  return { staff, feed, sim, live, get mode() { return mode; }, get approvals() { return approvals; }, settleStale, applyPresence, applyApprovals, liveEvents };
 }

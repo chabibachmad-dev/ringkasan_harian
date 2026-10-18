@@ -79,6 +79,7 @@ import { buildPdf, titleFromText, pdfFileName } from "./pdf-doc.js";
 import { overlayReplacePdf } from "./pdf-overlay.js";
 import { MAIN_ACCOUNT, SECOND_ACCOUNT, acctFields, createAccountRouter, isPairedCreds, isStalePairing, pairingInstructions, personaPrompt, readSecondAccountConfig } from "./wa-accounts.js";
 import { AsyncLocalStorage } from "node:async_hooks";
+import { createOfficeFeed, readOfficeConfig, chatLabel, reasonText, aiReason, officeVideoStages } from "./office-feed.js";
 import { qrToPng } from "./qr-png.js";
 import { createGroupList } from "./group-list.js";
 import { createVideoGen, readVideoConfig, videoSentNote, photoVideoSentNote, storySentNote, morphSentNote, VIDEO_TEXT } from "./video-gen.js";
@@ -246,6 +247,25 @@ const wa2Config = readSecondAccountConfig(process.env);
 const waAccountContext = new AsyncLocalStorage(); // akun yang sedang memproses suatu pesan (supaya riwayat ditandai benar)
 const currentAccountId = () => waAccountContext.getStore()?.account || MAIN_ACCOUNT;
 const accountRouter = createAccountRouter({ supabase });
+// Kantor AI (halaman "Kantor" di aplikasi): ringkasan kegiatan bot dipancarkan ke Supabase. Isi pesan TIDAK pernah dikirim. Lihat office-feed.js.
+// Pemancar mulai di akhir berkas (presence membaca imageGen/videoGen/speaker yang dibuat belakangan).
+const office = createOfficeFeed({
+  supabase,
+  ...readOfficeConfig(process.env),
+  presence: () => {
+    const list = [];
+    if (waOpen) {
+      list.push({ who: "ayyubi", detail: "WhatsApp utama" });
+      if (videoGen.available() || videoGen.storyAvailable()) list.push({ who: "video", detail: "Studio video" });
+      if (imageGen.available()) list.push({ who: "gambar", detail: "Studio gambar" });
+      if (speaker.available()) list.push({ who: "suara", detail: "Studio suara" });
+    }
+    if (WA2_ACCOUNT_DEF?.open) list.push({ who: "wongsobot", detail: WA2_ACCOUNT_DEF.label || "Nomor kedua" });
+    return list;
+  }
+});
+/** Karyawan AI yang sedang bekerja menurut akun WA yang memproses pesan. */
+const officeWho = () => (currentAccountId() === SECOND_ACCOUNT ? "wongsobot" : "ayyubi");
 const MAIN_ACCOUNT_DEF = { id: MAIN_ACCOUNT, label: "Nomor utama", authDir: "auth_session", secondary: false, sock: null, open: false, pairing: false };
 const WA2_ACCOUNT_DEF = wa2Config.enabled ? { id: wa2Config.id, label: wa2Config.label, authDir: wa2Config.authDir, secondary: true, sock: null, open: false, pairing: false } : null;
 // Zona waktu buat "tengah malam"/jam ringkasan harian & label jam di pesan.
@@ -1343,8 +1363,17 @@ async function callGeminiWithRetry(systemText, contents, withTools, maxAttempts,
 // sesuai WA_AI_ENGINE. Ini satu-satunya tempat percabangannya, biar gampang
 // nambah mesin lain nanti kalau perlu.
 async function generateAutoReply(jid) {
-  if (WA_AI_ENGINE === "ollama") return generateAutoReplyWithOllama(jid);
-  return generateAutoReplyWithGemini(jid);
+  const t = office.task(officeWho());
+  t.think(`Pesan baru di ${chatLabel(jid, waAccountContext.getStore()?.groupSubject || "")}`);
+  t.work("Menyusun balasan", 40);
+  try {
+    const r = WA_AI_ENGINE === "ollama" ? await generateAutoReplyWithOllama(jid) : await generateAutoReplyWithGemini(jid);
+    t.done("Balasan siap");
+    return r;
+  } catch (err) {
+    t.fail(aiReason(err));
+    throw err;
+  }
 }
 
 // Satu "panggilan Gemini" lengkap dgn rotasi API key -- dipakai auto-reply
@@ -3570,6 +3599,11 @@ async function handleImageRequestWa(sock, jid, req, { kind = "owner", who = "", 
   const tick = () => sock.sendPresenceUpdate("composing", jid).catch(() => {});
   tick();
   const timer = setInterval(tick, 4500);
+  const boss = office.task(officeWho());
+  const studio = office.task("gambar");
+  boss.think(`${edit ? "Permintaan edit foto" : "Permintaan gambar"} di ${chatLabel(jid, waName || "")}`);
+  boss.handoff("gambar", "pesan", "Menyerahkan permintaan ke studio gambar");
+  studio.work(edit ? "Mengedit foto" : "Menggambar", 40);
   let out;
   try {
     if (edit) {
@@ -3584,13 +3618,19 @@ async function handleImageRequestWa(sock, jid, req, { kind = "owner", who = "", 
   }
   if (out.error) {
     console.log(`🖼️ [${kind}] ${jid}: ${out.kind} — ${out.error.slice(0, 80)}`);
+    studio.fail(reasonText(out.kind));
+    boss.fail("Gambar tidak jadi");
     await tellOwnerImageProblem(out.kind, out.error, out.detail);
     const sent = await send({ text: out.error });
     await note(out.error, sent);
     return;
   }
+  studio.handoff(officeWho(), "gambar", "Gambar jadi");
+  studio.done("Gambar diserahkan");
+  boss.work("Mengirim gambar", 85);
   const { buffer, mime, model } = out.image;
   const sent = await send({ image: buffer, mimetype: mime || "image/png" });
+  boss.done("Gambar terkirim");
   console.log(`🖼️ Gambar dibuat (${model}, ${Math.round(buffer.length / 1024)} KB) untuk ${jid}: ${String(req.prompt).slice(0, 60)}`);
   await note(imageSentNote(req.prompt, { edit: Boolean(edit) }), sent);
 }
@@ -3638,6 +3678,8 @@ async function handleVideoRequestWa(sock, jid, req, { kind = "owner", who = "", 
   const tick = () => sock.sendPresenceUpdate("composing", jid).catch(() => {});
   tick();
   const timer = setInterval(tick, 4500);
+  const boss = office.task(officeWho());
+  const ov = officeVideoStages(office, boss, chatLabel(jid, waName || ""), { photo: Boolean(photoSource) && !req.morph, morph: Boolean(photoSource && req.morph) });
   let out;
   try {
     if (photoSource && req.morph) {
@@ -3647,6 +3689,7 @@ async function handleVideoRequestWa(sock, jid, req, { kind = "owner", who = "", 
         ? dl
         : await videoGen.makeMorph(dl.buffer, req.prompt || "", kind, who, {
             onStage: (stage, i, n) => {
+              ov.stage(stage, i, n);
               if (announced || stage !== "edit") return;
               announced = true;
               send({ text: `🧬 Oke, fotonya diubah bertahap (${n} edit AI lalu disambung jadi video). Biasanya 3–8 menit; kukirim ke sini begitu selesai.` })
@@ -3661,6 +3704,7 @@ async function handleVideoRequestWa(sock, jid, req, { kind = "owner", who = "", 
         ? dl
         : await videoGen.makeFromPhoto(dl.buffer, req.prompt || "", kind, who, {
             onStage: (stage) => {
+              ov.stage(stage);
               if (announced || stage !== "render") return;
               announced = true;
               send({ text: "🎞️ Oke, fotonya sedang dihidupkan (gerak kamera + efek). Biasanya setengah sampai dua menit; kukirim ke sini begitu selesai." })
@@ -3675,6 +3719,7 @@ async function handleVideoRequestWa(sock, jid, req, { kind = "owner", who = "", 
         mode: story ? "karakter" : undefined,
         style: story ? req.style || "" : "",
         onStage: (stage) => {
+          ov.stage(stage);
           if (announced || stage !== "images") return;
           announced = true;
           const mins = req.seconds > 45 ? "3–6 menit" : "2–4 menit";
@@ -3693,13 +3738,19 @@ async function handleVideoRequestWa(sock, jid, req, { kind = "owner", who = "", 
   }
   if (out.error) {
     console.log(`🎬 [${kind}] ${jid}: ${out.kind} — ${out.error.slice(0, 80)}`);
+    ov.video.fail(reasonText(out.kind));
+    boss.fail("Video tidak jadi");
     await tellOwnerVideoProblem(out.kind, out.error, out.detail);
     const sent = await send({ text: out.error });
     await note(out.error, sent);
     return;
   }
   const v = out.video;
+  ov.video.handoff(officeWho(), "video", "Video jadi");
+  ov.video.done("Video diserahkan");
+  boss.work("Mengirim video", 85);
   const sent = await send({ video: v.buffer, mimetype: v.mime || "video/mp4", ...(v.music ? { caption: `🎵 ${v.music}` } : {}) });
+  boss.done("Video terkirim");
   console.log(`🎬 Video dibuat (${v.seconds} dtk, ${v.scenes} adegan, ${Math.round(v.buffer.length / 1024)} KB${v.silent ? ", tanpa suara" : ""}) untuk ${jid}: ${String(req.prompt).slice(0, 60)}`);
   await note(photoSource && req.morph ? morphSentNote(req.prompt) : photoSource ? photoVideoSentNote(req.prompt, v) : req.mode === "karakter" ? storySentNote(req.prompt) : videoSentNote(req.prompt), sent);
 }
@@ -4577,7 +4628,23 @@ personaVoice.load().catch(() => {});
 const groupVoice = createGroupVoice({
   state: botStateStore,
   // suara & gaya mengikuti bot yang sedang menjawab (nomor utama = Ayyubi, nomor kedua = mis. Wongsobot)
-  speak: speaker.available() ? (text) => speaker.speak(text, personaVoice.get(currentAccountId(), waAccountContext.getStore()?.groupSubject || "")) : null,
+  speak: speaker.available()
+    ? async (text) => {
+        const boss = office.task(officeWho());
+        const mic = office.task("suara");
+        boss.handoff("suara", "pesan", "Minta dibacakan jadi voice note");
+        mic.work("Membuat suara", 60);
+        try {
+          const v = await speaker.speak(text, personaVoice.get(currentAccountId(), waAccountContext.getStore()?.groupSubject || ""));
+          mic.handoff(officeWho(), "suara", "Voice note jadi");
+          mic.done("Voice note diserahkan");
+          return v;
+        } catch (e) {
+          mic.fail("Gagal membuat suara");
+          throw e;
+        }
+      }
+    : null,
   check: checkVoiceOutput,
   notify: (text) => sendToOwner(text),
   config: readGroupVoiceConfig(process.env, ttsConfig.maxChars)
@@ -5257,6 +5324,8 @@ connect().catch((err) => {
   console.error("Gagal mulai koneksi WhatsApp:", err);
   process.exit(1);
 });
+office.start();
+if (office.enabled) console.log("🏢 Kantor AI: kejadian kerja dipancarkan ke aplikasi (halaman Kantor). Matikan: OFFICE_FEED=0 di .env.");
 if (WA2_ACCOUNT_DEF) {
   console.log(`📱 Nomor kedua: AKTIF (${WA2_ACCOUNT_DEF.label}, sesi ${WA2_ACCOUNT_DEF.authDir}/, grup: ${wa2Config.groupNames.length + wa2Config.groupJids.length > 0 ? "diizinkan sebagian" : "tidak menjawab di grup"}, ringkasan harian: ${wa2Config.inSummary ? "ikut" : "tidak ikut"})`);
   connect(WA2_ACCOUNT_DEF).catch((err) => {
