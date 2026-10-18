@@ -1054,9 +1054,13 @@ Ayyubi (nomor utama) dan bot nomor kedua (mis. Wongsobot) bisa punya **suara dan
 | `/suara pakai wongsobot Charon bapak-bapak tenang dan berwibawa` | simpan untuk Wongsobot |
 | `/suara ayyubi` / `/suara wongsobot` | lihat pengaturan satu bot |
 | `/suara reset ayyubi` | kembali ke suara bawaan (Sulafat) |
+| `/suara grup wanita Keluarga Besar` | grup yang namanya mengandung "Keluarga Besar" memakai suara wanita (Sulafat); grup lain tetap suara bot |
+| `/suara grup Kore Alumni SMA \| ceria` | pilih suara tertentu + gaya untuk satu grup |
+| `/suara grup` / `/suara grup hapus Keluarga Besar` | lihat daftar aturan / hapus aturan |
 
 - **Suara** = nama salah satu suara siap pakai Gemini TTS. **Gaya** = kalimat bebas yang mengarahkan cara bicara (nada, kira-kira usia, tempo), maks 240 huruf. Tanda kutip, kurung siku, dan baris baru dibuang otomatis.
 - Gemini **tidak punya suara anak-anak**; "anak laki-laki ceria" hanya mengarahkan gaya pada suara pria yang dipilih, hasilnya bisa terdengar seperti pemuda yang ceria. Dokumentasi Google tidak menjanjikan umur tertentu, jadi dengarkan dulu dengan `/suara coba` sebelum menyimpan.
+- **Suara per grup:** mis. Ayyubi bersuara pria di semua grup, tapi wanita di satu grup. Atur suara umum Ayyubi ke suara pria (`/suara pakai ayyubi Charon`), lalu `/suara grup wanita <nama grup>`. `wanita`/`cewek` = Sulafat, `pria`/`cowok` = Charon, atau tulis nama suara apa pun. Nama grup dicocokkan sebagian dan tidak peka huruf besar/emoji (cukup sebagian nama, minimal 3 huruf/angka); bila beberapa aturan cocok, nama yang paling panjang menang. Berlaku untuk bot mana pun (Ayyubi/Wongsobot) yang menjawab di grup itu.
 - Bawaan awal dari `.env` (opsional): `WA_VOICE`, `WA_VOICE_STYLE` (Ayyubi), `WA2_VOICE`, `WA2_VOICE_STYLE` (nomor kedua). Pengaturan dari Telegram menang atas `.env`.
 - Berlaku untuk **balasan suara grup WhatsApp**. Balasan suara di Telegram, tutor `/speak`, dan tutor WhatsApp tetap memakai suara bawaan (`TELEGRAM_TTS_VOICE`).
 - `/voice` (tanpa argumen) juga menampilkan suara tiap bot. Setiap contoh memakai kuota suara Gemini yang sama dengan balasan biasa.

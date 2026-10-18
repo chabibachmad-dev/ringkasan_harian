@@ -101,14 +101,101 @@ ok("tersimpan di bot_state, dimuat ulang saat restart, reset bertahan, simpanan 
 }
 ok("database mati / data simpanan rusak tidak membuat bot gagal");
 
+// --- suara khusus per grup
+{
+  const st = mem();
+  const pv = createPersonaVoice({ state: st, env: {}, secondName: "Wongsobot", log: silent });
+  await pv.load();
+  await pv.set("main", "Charon", "");
+  assert.deepEqual(pv.parse("grup"), { kind: "glist" });
+  assert.deepEqual(pv.parse("grup wanita Keluarga Besar"), { kind: "gset", label: "Keluarga Besar", voice: "Sulafat", style: "" });
+  assert.deepEqual(pv.parse("grup cewek Alumni SMA | ceria"), { kind: "gset", label: "Alumni SMA", voice: "Sulafat", style: "ceria" });
+  assert.equal(pv.parse("grup Kore Arisan RT 05").voice, "Kore");
+  assert.deepEqual(pv.parse("grup hapus Keluarga Besar"), { kind: "gdel", label: "Keluarga Besar" });
+  assert.equal(pv.parse("grup wanita").kind, "error", "tanpa nama grup");
+  assert.equal(pv.parse("grup wanita ab").kind, "error", "nama terlalu pendek");
+  assert.equal(pv.parse("grup ngawur Keluarga").kind, "error", "suara tidak dikenal");
+  const r = await pv.setGroup("Keluarga Besar", "Sulafat");
+  assert.equal(r.saved, true);
+  assert.equal(pv.get("main", "Keluarga Besar 2024 🏡").voice, "Sulafat", "cocok sebagian nama, abaikan emoji/huruf besar");
+  assert.equal(pv.get("main", "Grup Kantor").voice, "Charon", "grup lain memakai suara bot (cowok)");
+  assert.equal(pv.get("main").voice, "Charon", "tanpa nama grup = suara bot");
+  assert.equal(pv.get("main", "").voice, "Charon");
+  // nama paling panjang menang
+  await pv.setGroup("Keluarga", "Puck");
+  assert.equal(pv.get("main", "Keluarga Besar").voice, "Sulafat");
+  assert.equal(pv.get("main", "Keluarga Kecil").voice, "Puck");
+  // berlaku untuk akun mana pun yang menjawab di grup itu
+  assert.equal(pv.get("wa2", "Keluarga Besar").voice, "Sulafat");
+  // ganti suara grup yang sama = timpa, tidak dobel
+  const r2 = await pv.setGroup("keluarga besar", "Kore", "lembut");
+  assert.equal(r2.replaced, true);
+  assert.deepEqual(pv.get("main", "Keluarga Besar"), { voice: "Kore", style: "lembut" });
+  assert.equal(pv.describeGroups().split("\n").length, 2);
+  // muat ulang setelah restart
+  const pv2 = createPersonaVoice({ state: st, env: {}, secondName: "Wongsobot", log: silent });
+  await pv2.load();
+  assert.deepEqual(pv2.get("main", "Keluarga Besar"), { voice: "Kore", style: "lembut" });
+  // hapus
+  assert.equal((await pv2.removeGroup("Keluarga Besar")).removed, true);
+  assert.equal((await pv2.removeGroup("Keluarga Besar")).removed, false);
+  assert.equal(pv2.get("main", "Keluarga Besar").voice, "Puck", "jatuh ke aturan lain yang masih cocok (Keluarga)");
+  await assert.rejects(() => pv2.setGroup("xx", "Kore"), /terlalu pendek/);
+  await assert.rejects(() => pv2.setGroup("Nama Bagus", "Ngawur"), /tidak dikenal/);
+  // data simpanan rusak tidak membuat gagal
+  const junk = mem();
+  junk.m.set("persona_voice_groups", "{rusak");
+  const pv3 = createPersonaVoice({ state: junk, env: {}, secondName: "W", log: silent });
+  await pv3.load();
+  assert.equal(pv3.get("main", "Apa Saja").voice, null);
+}
+ok("suara per grup: perintah, cocok nama sebagian (terpanjang menang), simpan/muat, hapus, data rusak");
+
+// --- Telegram: /suara grup
+{
+  const { createTelegram } = await import("./telegram.js");
+  const pv = createPersonaVoice({ state: mem(), env: {}, secondName: "", log: silent });
+  await pv.load();
+  const calls = [];
+  const fakeFetch = async (url, init) => {
+    const method = String(url).split("/").pop();
+    const form = init?.body instanceof FormData;
+    const body = init?.body && !form ? JSON.parse(init.body) : {};
+    calls.push({ method, body });
+    return { status: 200, json: async () => ({ ok: true, result: { message_id: 1 } }) };
+  };
+  const spoken = [];
+  const deps = { chat: async () => "x", personaVoice: pv, speak: async (t, o) => (spoken.push(o), { ogg: Buffer.from("x") }) };
+  const tg = createTelegram({ config: { token: "T", enabled: true, ownerIds: ["111"], mirror: true, historyLimit: 4, pollTimeoutSec: 1, speakText: true }, deps, fetchImpl: fakeFetch, log: silent });
+  let id = 0;
+  const say = async (text) => {
+    const before = calls.length;
+    await tg.handleUpdate({ update_id: ++id, message: { chat: { id: 111, type: "private" }, text } });
+    return calls.slice(before).filter((c) => c.method === "sendMessage").map((c) => c.body.text).join("\n");
+  };
+  assert.match(await say("/suara grup"), /belum ada/);
+  const t1 = await say("/suara grup wanita Keluarga Besar");
+  assert.match(t1, /Keluarga Besar/);
+  assert.match(t1, /Sulafat/);
+  assert.equal(pv.get("main", "Keluarga Besar 2024").voice, "Sulafat");
+  assert.ok(spoken.some((o) => o?.voice === "Sulafat"), "contoh suara dibuat");
+  assert.match(await say("/suara grup"), /Keluarga Besar/);
+  assert.match(await say("/suara grup wanita ab"), /minimal/);
+  assert.match(await say("/suara grup hapus Keluarga Besar"), /dihapus/);
+  assert.equal(pv.get("main", "Keluarga Besar").voice, null);
+  assert.match(await say("/suara grup hapus Tidak Ada"), /Tidak ada aturan/);
+}
+ok("Telegram: /suara grup (tambah, daftar, hapus, salah ketik)");
+
 // --- index.js: sambungan
 {
   const src = fs.readFileSync(new URL("./index.js", import.meta.url), "utf8");
   assert.match(src, /createPersonaVoice\(\{ state: botStateStore/);
-  assert.match(src, /speaker\.speak\(text, personaVoice\.get\(currentAccountId\(\)\)\)/, "suara grup mengikuti bot (akun) yang sedang menjawab");
+  assert.match(src, /speaker\.speak\(text, personaVoice\.get\(currentAccountId\(\), waAccountContext\.getStore\(\)\?\.groupSubject \|\| ""\)\)/, "suara grup mengikuti bot (akun) yang sedang menjawab + aturan per grup");
   assert.match(src, /personaVoice,\n\s+voiceCheck: checkVoiceOutput/, "Telegram diberi akses pengaturan suara");
   assert.ok(src.indexOf("const personaVoice = createPersonaVoice") < src.indexOf("const groupVoice = createGroupVoice"), "dibuat sebelum dipakai");
   assert.match(src, /speak: speaker\.available\(\) \? \(text, opts\) => speaker\.speak\(text, opts\) : null,\n\s+personaVoice/, "Telegram meneruskan suara & gaya contoh");
+  assert.match(src, /flags\.groupSubject = subject \|\| ""/, "nama grup dicatat untuk pemilihan suara");
   // tutor dan Telegram biasa tetap suara bawaan
   assert.ok(src.includes("speak: speaker.available() ? (text) => speaker.speak(text) : null,\n  voiceCheck: checkVoiceOutput,\n  hasTranscriber"), "tutor WA tidak berubah");
 }

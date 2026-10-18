@@ -610,6 +610,21 @@ export function createTelegram({ config, deps = {}, fetchImpl = globalThis.fetch
       const r = await pv.reset(cmd.who);
       return void (await send(chatId, `🔊 Suara ${pv.label(cmd.who)} dikembalikan ke bawaan${r.saved ? "." : " (gagal disimpan: berlaku sampai bot restart)."}`));
     }
+    if (cmd.kind === "glist") return void (await send(chatId, `🔊 Suara khusus grup\n${pv.describeGroups()}\n\nTambah: /suara grup wanita <nama grup>  •  Hapus: /suara grup hapus <nama grup>\nGrup yang tidak terdaftar memakai suara bot (/suara ayyubi).`));
+    if (cmd.kind === "gdel") {
+      const r = await pv.removeGroup(cmd.label);
+      return void (await send(chatId, r.removed ? `🔊 Aturan suara grup "${cmd.label}" dihapus; grup itu kembali memakai suara bot.${r.saved ? "" : " (gagal disimpan: berlaku sampai bot restart)."}` : `Tidak ada aturan suara untuk grup "${cmd.label}". Lihat daftar: /suara grup`));
+    }
+    if (cmd.kind === "gset") {
+      let r;
+      try {
+        r = await pv.setGroup(cmd.label, cmd.voice, cmd.style);
+      } catch (e) {
+        return void (await send(chatId, `⚠️ ${e instanceof Error ? e.message : String(e)}`));
+      }
+      await send(chatId, `🔊 Grup yang namanya mengandung "${cmd.label}" sekarang memakai suara ${cmd.voice}${cmd.style ? ` — gaya: ${cmd.style}` : ""}.${r.saved ? " Langsung berlaku (tanpa restart); grup lain tetap memakai suara bot." : "\n⚠️ Gagal disimpan; berlaku sampai bot restart."}`);
+      return void (await sendVoiceSample(chatId, { voice: cmd.voice, style: cmd.style }));
+    }
     if (cmd.kind === "set") {
       const r = await pv.set(cmd.who, cmd.voice, cmd.style);
       await send(chatId, `🔊 Suara ${pv.label(cmd.who)} sekarang: ${cmd.voice}${cmd.style ? ` — gaya: ${cmd.style}` : ""}.${r.saved ? " Langsung berlaku di grup WhatsApp (tanpa restart)." : "\n⚠️ Gagal disimpan; berlaku sampai bot restart."}`);
@@ -631,7 +646,8 @@ export function createTelegram({ config, deps = {}, fetchImpl = globalThis.fetch
 
 Ubah: /suara auto • /suara on • /suara off
 
-Suara tiap bot (Ayyubi/Wongsobot): /suara daftar • /suara coba <NamaSuara> [gaya] • /suara pakai <bot> <NamaSuara> [gaya]`));
+Suara tiap bot (Ayyubi/Wongsobot): /suara daftar • /suara coba <NamaSuara> [gaya] • /suara pakai <bot> <NamaSuara> [gaya]
+Suara khusus satu grup: /suara grup wanita <nama grup> • /suara grup (daftar) • /suara grup hapus <nama grup>`));
     }
     voiceModes.set(chatId, mode);
     try {

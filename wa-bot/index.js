@@ -3072,6 +3072,7 @@ async function handleGroupMessage(msg, sock) {
     if (flags) {
       flags.wantFile = fileReq ? fileReq.format : "";
       flags.textOnly = textOnly && !fileReq;
+      flags.groupSubject = subject || ""; // untuk suara khusus per grup (/suara grup ...)
     }
   }
   // Bahasa jawaban (hanya relevan bila balasan grup berupa suara): permintaan di pesan ini > pengaturan /voice wag > otomatis.
@@ -4576,7 +4577,7 @@ personaVoice.load().catch(() => {});
 const groupVoice = createGroupVoice({
   state: botStateStore,
   // suara & gaya mengikuti bot yang sedang menjawab (nomor utama = Ayyubi, nomor kedua = mis. Wongsobot)
-  speak: speaker.available() ? (text) => speaker.speak(text, personaVoice.get(currentAccountId())) : null,
+  speak: speaker.available() ? (text) => speaker.speak(text, personaVoice.get(currentAccountId(), waAccountContext.getStore()?.groupSubject || "")) : null,
   check: checkVoiceOutput,
   notify: (text) => sendToOwner(text),
   config: readGroupVoiceConfig(process.env, ttsConfig.maxChars)
