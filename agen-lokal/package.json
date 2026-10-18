@@ -1,0 +1,12 @@
+{
+  "name": "agen-lokal",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Agent AI lokal gratis (Ollama) yang dikendalikan lewat bot Telegram, untuk Linux (server Ubuntu) dan Windows",
+  "type": "module",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "node test/agent.test.mjs"
+  }
+}

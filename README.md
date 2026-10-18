@@ -328,6 +328,10 @@ Halaman bergaya piksel: Ayyubi (WA utama), Wongsobot (WA kedua), **Agen Lokal (s
 - **Cara pasang**: (1) jalankan migrasi `0041_office.sql` (tabel `office_events`, `office_presence`, `office_approvals`, RLS aktif tanpa kebijakan; hanya fungsi dan bot ber-service-role yang bisa mengaksesnya); (2) deploy fungsi: `npx supabase functions deploy office --no-verify-jwt` (config.toml sudah memuat `verify_jwt = false`); (3) restart wa-bot (pemancarnya aktif otomatis, matikan dengan `OFFICE_FEED=0`); (4) push frontend. Tidak ada rahasia tambahan: fungsi hanya membaca dan memakai `CHAT_ACCESS_CODE`.
 - Kode: `src/office.js` (adegan & panel), `src/office-live.js` (klien data asli), `src/office-sim.js` (simulasi), `supabase/functions/office/` + `_shared/office-core.ts`, `wa-bot/office-feed.js`. Tes: `wa-bot/test-office.mjs` (menjaga `office-feed.js` selaras dengan `office-core.ts`).
 
+## Agen Lokal (server Linux yang bisa diperintah lewat Telegram)
+
+Folder `agen-lokal/`: agent AI berbasis Ollama yang jalan di laptop Linux yang sama dengan bot, dikendalikan lewat bot Telegram sendiri dengan tombol persetujuan ✅/❌ untuk setiap perubahan. Pemasangan lengkap (pm2, akses jarak jauh SSH lewat Tailscale, mencegah laptop tidur): `agen-lokal/PANDUAN-LINUX.md`. Tes: `cd agen-lokal && node test/agent.test.mjs`.
+
 ## Menu "PDF → MD"
 
 Mengubah PDF peraturan menjadi Markdown terstruktur (BAB/Pasal/ayat/tabel) yang disimpan di laptop dan bisa ditanyakan ke Ollama.
