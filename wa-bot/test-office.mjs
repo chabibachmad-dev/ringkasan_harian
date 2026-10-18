@@ -1,7 +1,7 @@
 // Tes Kantor AI: logika murni (office-core.ts), pemancar bot (office-feed.js), dan keselarasan keduanya. Jalankan: node test-office.mjs
 import assert from "node:assert/strict";
 import * as core from "../supabase/functions/_shared/office-core.ts";
-import { redact, toRow, chatLabel, reasonText, aiReason, officeVideoStages, createOfficeFeed, readOfficeConfig, WHO, KINDS, ITEMS } from "./office-feed.js";
+import { redact, toRow, chatLabel, reasonText, aiReason, ollamaReason, ollamaJobLabel, officeVideoStages, createOfficeFeed, readOfficeConfig, WHO, KINDS, ITEMS } from "./office-feed.js";
 
 let n = 0;
 const ok = (name) => console.log(`  ✓ ${name}`) || n++;
@@ -93,6 +93,15 @@ assert.equal(aiReason(new Error("Request timed out")), "AI terlalu lama menjawab
 assert.equal(aiReason(new Error("rahasia: kunci sk-123")), "Gagal menyusun balasan");
 ok("alasan galat singkat (tanpa membocorkan pesan galat mentah)");
 
+assert.equal(ollamaReason(new Error("connect ECONNREFUSED 127.0.0.1:11434")), "Ollama tidak aktif");
+assert.equal(ollamaReason(new Error("Ollama timeout setelah 90000 ms")), "Model lokal terlalu lama");
+assert.equal(ollamaReason(new Error("rahasia /home/budi/x")), "Model lokal gagal");
+assert.equal(ollamaJobLabel("wa-reply"), "Menyusun balasan WhatsApp");
+assert.equal(ollamaJobLabel("owner-lokal"), "Mengobrol dengan pemilik");
+assert.equal(ollamaJobLabel("tak-dikenal"), "Menjawab dengan model lokal");
+assert.equal(ollamaJobLabel(undefined), "Menjawab dengan model lokal");
+ok("pekerjaan & galat Ollama -> label Agen Lokal (tanpa membocorkan galat mentah)");
+
 // --- feed
 function fakeSb(opts = {}) {
   const calls = { events: [], presence: [] };
@@ -156,6 +165,14 @@ function fakeSb(opts = {}) {
   assert.equal(sb.calls.presence.length, 1);
   assert.deepEqual(sb.calls.presence[0].rows.map((r) => r.who), ["ayyubi", "video"]);
   assert.equal(sb.calls.presence[0].o.onConflict, "who");
+  // presence boleh async (mis. memeriksa Ollama); yang tidak menjawab tidak ditulis
+  const sb2 = fakeSb();
+  const feed2 = createOfficeFeed({ supabase: sb2, logger: silent, presence: async () => [{ who: "agen", detail: "Ollama (qwen2.5:3b)" }] });
+  await feed2.heartbeat();
+  assert.deepEqual(sb2.calls.presence[0].rows.map((r) => [r.who, r.detail]), [["agen", "Ollama (qwen2.5:3b)"]]);
+  const sb3 = fakeSb();
+  await createOfficeFeed({ supabase: sb3, logger: silent, presence: async () => [] }).heartbeat();
+  assert.equal(sb3.calls.presence.length, 0);
   ok("heartbeat: upsert denyut hanya untuk karyawan sah");
 }
 {

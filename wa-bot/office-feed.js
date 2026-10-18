@@ -61,6 +61,27 @@ const REASONS = {
 /** Alasan galat singkat & aman (tanpa isi pesan galat mentah) dari jenis galat studio. */
 export const reasonText = (kind) => REASONS[kind] || "Gagal dikerjakan";
 
+/** Alasan galat singkat & aman dari galat model lokal (Ollama). */
+export function ollamaReason(err) {
+  const m = String(err?.message || err || "");
+  if (/ECONNREFUSED|ENOTFOUND|fetch failed|connect/i.test(m)) return "Ollama tidak aktif";
+  if (/timeout|timed out|abort|terlalu lama/i.test(m)) return "Model lokal terlalu lama";
+  if (/memory|ram|alloc/i.test(m)) return "Memori tidak cukup";
+  return "Model lokal gagal";
+}
+
+/** Nama pekerjaan di antrean Ollama -> kalimat untuk umpan Kantor. */
+export const OLLAMA_JOB_LABEL = {
+  "wa-reply": "Menyusun balasan WhatsApp",
+  "daily-summary": "Meringkas percakapan harian",
+  "simab-parse": "Membaca perintah SiMAB",
+  "reg-monitor": "Memeriksa peraturan baru",
+  "owner-docs": "Menjawab dari dokumen pemilik",
+  "owner-skill": "Menjalankan keterampilan",
+  "owner-lokal": "Mengobrol dengan pemilik"
+};
+export const ollamaJobLabel = (label) => OLLAMA_JOB_LABEL[label] || "Menjawab dengan model lokal";
+
 /** Alasan galat singkat dari galat AI teks. */
 export function aiReason(err) {
   const m = String(err?.message || err || "");
@@ -85,7 +106,7 @@ export function chatLabel(jid, subject = "") {
  * @param {boolean} [o.enabled]   false = semua perintah tidak melakukan apa-apa
  * @param {number} [o.flushMs]
  * @param {number} [o.heartbeatMs]
- * @param {() => Array<{who:string, detail?:string}>} [o.presence]  daftar karyawan yang saat ini "masuk kerja"
+ * @param {() => Array|Promise<Array>} [o.presence]  daftar {who, detail?} karyawan yang saat ini "masuk kerja" (boleh async)
  */
 export function createOfficeFeed({ supabase, enabled = true, flushMs = 1500, heartbeatMs = 30_000, presence = () => [], logger = console, now = () => Date.now() } = {}) {
   const queue = [];
@@ -167,7 +188,7 @@ export function createOfficeFeed({ supabase, enabled = true, flushMs = 1500, hea
     if (!enabled || now() < pauseUntil) return;
     let list = [];
     try {
-      list = presence() || [];
+      list = (await presence()) || []; // boleh sinkron atau async (mis. memeriksa Ollama)
     } catch {
       return;
     }

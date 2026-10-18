@@ -22,7 +22,7 @@ const FRAME_MS = 100;
 const STAFF_DEF = [
   { id: "ayyubi", name: "Ayyubi", role: "Admin WhatsApp utama", x: 56, y: 90, mon: 1, look: { skin: "#e8b98a", hair: "#1c1c1c", hat: "peci", shirt: "#2f8f83", trim: "#ffffff" } },
   { id: "wongsobot", name: "Wongsobot", role: "Admin WhatsApp kedua", x: 120, y: 90, mon: 1, look: { skin: "#d9a577", hair: "#c9c9c9", stache: true, shirt: "#8a5a2b", trim: "#e2b85c" } },
-  { id: "agen", name: "Agen Lokal", role: "Asisten laptop Windows", x: 230, y: 90, mon: 1, look: { robot: true, shirt: "#5b7fa6", head: "#9bb9da", trim: "#dff3ff" } },
+  { id: "agen", name: "Agen Lokal", role: "Server Linux (Ollama)", x: 230, y: 90, mon: 1, look: { robot: true, shirt: "#5b7fa6", head: "#9bb9da", trim: "#dff3ff" } },
   { id: "video", name: "Studio Video", role: "Perakit video & stop motion", x: 56, y: 160, mon: 1, look: { skin: "#f0c9a0", hair: "#7a3b1d", hat: "beret", shirt: "#c84b4b", trim: "#ffd9d9" } },
   { id: "gambar", name: "Studio Gambar", role: "Pelukis gambar & edit foto", x: 160, y: 160, mon: 0, look: { skin: "#e9bf94", hair: "#e0782a", hat: "none", shirt: "#e0a02a", trim: "#fff2c2" } },
   { id: "suara", name: "Studio Suara", role: "Penyuara & musik latar", x: 264, y: 160, mon: 0, look: { skin: "#dfae86", hair: "#3b2a6a", hat: "headset", shirt: "#7d57c2", trim: "#e5d6ff" } }
@@ -710,7 +710,7 @@ function buildDom() {
       <div class="office-scene" id="office-scene">
         <canvas id="office-canvas" width="${W}" height="${H}" aria-label="Kantor dengan karyawan AI" role="img"></canvas>
         <div class="office-zone" style="left:${(12 / W) * 100}%;top:${(54 / H) * 100}%">WhatsApp</div>
-        <div class="office-zone" style="left:${(180 / W) * 100}%;top:${(54 / H) * 100}%">Laptop kantor</div>
+        <div class="office-zone" style="left:${(180 / W) * 100}%;top:${(54 / H) * 100}%">Server Linux</div>
         <div class="office-zone" style="left:${(12 / W) * 100}%;top:${(126 / H) * 100}%">Studio media</div>
         <div id="office-overlay"></div>
       </div>

@@ -1,24 +1,20 @@
-// Edge Function untuk halaman "Kantor AI" di aplikasi: umpan kejadian langsung karyawan AI (bot WhatsApp, studio media, Agen Lokal).
+// Edge Function untuk halaman "Kantor AI" di aplikasi: umpan kejadian langsung karyawan AI (Ayyubi, Wongsobot, Agen Lokal = server Linux
+// dengan Ollama, dan studio gambar/video/suara). Semuanya berasal dari bot wa-bot, yang menulis langsung ke tabel
+// office_events/office_presence dengan service role; fungsi ini hanya MEMBACA untuk aplikasi.
 //
-// Dua jenis pemanggil:
-//   1) Aplikasi (kode akses = CHAT_ACCESS_CODE, sama dengan fitur lain):
-//        { code, action: "poll", since?: number }
-//          -> { ok, events: [{id, at, who, kind, text, progress, to, item}], presence: [{who, online, ageSec, detail}],
-//               approvals: [{id, who, detail, at}], last, replay }
-//             Tanpa `since` = pertama kali: 40 kejadian terakhir (replay: true) supaya aplikasi bisa menyusun keadaan sekarang.
-//        { code, action: "decide", id, ok: true|false }  -> { ok, status }   (jawab izin dari aplikasi)
-//   2) Agen Lokal di Windows (kunci OFFICE_PUSH_KEY, Supabase secret; TANPA kode akses, hanya bisa menulis kejadian):
-//        { key, action: "push", events: [...], beat?: { who, detail? } }      -> { ok, saved }
-//        { key, action: "approval_status", id }                              -> { ok, status }
-//        { key, action: "approval_resolve", id, status: "approved"|"denied"|"expired" } -> { ok, status }
-//   Bot wa-bot (service role) menulis langsung ke tabel office_events/office_presence, tanpa fungsi ini.
+// Pemanggil: aplikasi, dengan kode akses (= CHAT_ACCESS_CODE, sama dengan fitur lain):
+//   { code, action: "poll", since?: number }
+//     -> { ok, events: [{id, at, who, kind, text, progress, to, item}], presence: [{who, online, ageSec, detail}],
+//          approvals: [{id, who, detail, at}], last, replay }
+//        Tanpa `since` = pertama kali: 40 kejadian terakhir (replay: true) supaya aplikasi bisa menyusun keadaan sekarang.
+//   { code, action: "decide", id, ok: true|false }  -> { ok, status }   (jawab permintaan izin yang menunggu, bila ada)
 //
-// Fungsi ini dideploy tanpa verifikasi JWT (lihat supabase/config.toml) supaya Agen Lokal tidak perlu anon key;
-// pengamannya kode akses / OFFICE_PUSH_KEY. Isi kejadian dibersihkan (redact) dan hanya ringkasan satu baris.
+// Dideploy tanpa verifikasi JWT (lihat supabase/config.toml); pengamannya kode akses. Isi kejadian sudah dibersihkan (redact) oleh bot
+// dan hanya ringkasan satu baris.
 
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { corsHeaders } from "../_shared/cors.ts";
-import { APPROVAL_LIFETIME_MS, KEEP_DAYS, MAX_PUSH_EVENTS, cleanEvent, cutoffIso, livePending, presenceView, redact } from "../_shared/office-core.ts";
+import { KEEP_DAYS, cutoffIso, livePending, presenceView, redact } from "../_shared/office-core.ts";
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { ...corsHeaders, "Content-Type": "application/json" } });
@@ -46,59 +42,6 @@ Deno.serve(async (req) => {
   const action = String(body.action ?? "");
   const nowMs = Date.now();
 
-  // ---------------------------------------------------------------- pemanggil agen (kunci tulis)
-  if (action === "push" || action === "approval_status" || action === "approval_resolve") {
-    const expected = Deno.env.get("OFFICE_PUSH_KEY");
-    if (!expected) return json({ ok: false, error: "OFFICE_PUSH_KEY belum di-set sebagai Supabase secret." }, 500);
-    if (typeof body.key !== "string" || !safeEqual(body.key, expected)) return json({ ok: false, error: "Kunci salah." }, 401);
-
-    if (action === "push") {
-      const list = Array.isArray(body.events) ? body.events.slice(0, MAX_PUSH_EVENTS) : [];
-      const rows = [];
-      const approvals = [];
-      for (const e of list) {
-        const c = cleanEvent(e);
-        // Pemanggil agen hanya boleh menulis atas nama agen lokal (bukan menyamar sebagai bot lain).
-        if (!c || c.row.who !== "agen") continue;
-        rows.push(c.row);
-        if (c.approval) approvals.push({ id: c.approval.id, who: "agen", detail: c.approval.detail });
-      }
-      if (approvals.length) {
-        const { error } = await admin.from("office_approvals").upsert(approvals, { onConflict: "id", ignoreDuplicates: true });
-        if (error) return json({ ok: false, error: error.message }, 500);
-      }
-      if (rows.length) {
-        const { error } = await admin.from("office_events").insert(rows);
-        if (error) return json({ ok: false, error: error.message }, 500);
-      }
-      const beat = body.beat as Record<string, unknown> | undefined;
-      if (rows.length || (beat && beat.who === "agen")) {
-        await admin.from("office_presence").upsert({ who: "agen", seen_at: new Date(nowMs).toISOString(), detail: redact(beat?.detail ?? "", 80) });
-      }
-      // bersih-bersih sesekali
-      if (Math.random() < 0.02) {
-        await admin.from("office_events").delete().lt("created_at", cutoffIso(nowMs, KEEP_DAYS));
-        await admin.from("office_approvals").delete().lt("created_at", cutoffIso(nowMs, KEEP_DAYS));
-      }
-      return json({ ok: true, saved: rows.length });
-    }
-
-    const id = String(body.id ?? "");
-    if (!/^[A-Za-z0-9_-]{4,40}$/.test(id)) return json({ ok: false, error: "id tidak valid." }, 400);
-    if (action === "approval_status") {
-      const { data, error } = await admin.from("office_approvals").select("status, created_at").eq("id", id).maybeSingle();
-      if (error) return json({ ok: false, error: error.message }, 500);
-      if (!data) return json({ ok: true, status: "unknown" });
-      const expired = data.status === "pending" && nowMs - Date.parse(data.created_at) > APPROVAL_LIFETIME_MS;
-      return json({ ok: true, status: expired ? "expired" : data.status });
-    }
-    const status = String(body.status ?? "");
-    if (!["approved", "denied", "expired"].includes(status)) return json({ ok: false, error: "status tidak valid." }, 400);
-    const { error } = await admin.from("office_approvals").update({ status, decided_at: new Date(nowMs).toISOString(), decided_by: "agen" }).eq("id", id).eq("status", "pending");
-    if (error) return json({ ok: false, error: error.message }, 500);
-    return json({ ok: true, status });
-  }
-
   // ---------------------------------------------------------------- pemanggil aplikasi (kode akses)
   const expectedCode = Deno.env.get("CHAT_ACCESS_CODE");
   if (!expectedCode) return json({ ok: false, error: "CHAT_ACCESS_CODE belum di-set sebagai Supabase secret." }, 500);
@@ -114,6 +57,11 @@ Deno.serve(async (req) => {
     const events = rows.map((r) => ({ id: r.id, at: r.created_at, who: r.who, kind: r.kind, text: r.text, progress: r.progress, to: r.to_who, item: r.item }));
     const last = events.length ? Number(events[events.length - 1].id) : since ?? 0;
 
+    // bersih-bersih sesekali (kejadian disimpan KEEP_DAYS hari)
+    if (Math.random() < 0.02) {
+      await admin.from("office_events").delete().lt("created_at", cutoffIso(nowMs, KEEP_DAYS));
+      await admin.from("office_approvals").delete().lt("created_at", cutoffIso(nowMs, KEEP_DAYS));
+    }
     const { data: pres } = await admin.from("office_presence").select("who, seen_at, detail");
     const { data: aps } = await admin.from("office_approvals").select("id, who, detail, status, created_at").eq("status", "pending");
     return json({

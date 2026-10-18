@@ -79,7 +79,7 @@ import { buildPdf, titleFromText, pdfFileName } from "./pdf-doc.js";
 import { overlayReplacePdf } from "./pdf-overlay.js";
 import { MAIN_ACCOUNT, SECOND_ACCOUNT, acctFields, createAccountRouter, isPairedCreds, isStalePairing, pairingInstructions, personaPrompt, readSecondAccountConfig } from "./wa-accounts.js";
 import { AsyncLocalStorage } from "node:async_hooks";
-import { createOfficeFeed, readOfficeConfig, chatLabel, reasonText, aiReason, officeVideoStages } from "./office-feed.js";
+import { createOfficeFeed, readOfficeConfig, chatLabel, reasonText, aiReason, ollamaReason, ollamaJobLabel, officeVideoStages } from "./office-feed.js";
 import { qrToPng } from "./qr-png.js";
 import { createGroupList } from "./group-list.js";
 import { createVideoGen, readVideoConfig, videoSentNote, photoVideoSentNote, storySentNote, morphSentNote, VIDEO_TEXT } from "./video-gen.js";
@@ -252,8 +252,15 @@ const accountRouter = createAccountRouter({ supabase });
 const office = createOfficeFeed({
   supabase,
   ...readOfficeConfig(process.env),
-  presence: () => {
+  presence: async () => {
     const list = [];
+    // "Agen Lokal" = server Linux dengan Ollama: dianggap masuk kerja bila Ollama menjawab.
+    try {
+      const r = await fetch(`${OLLAMA_BASE_URL}/api/tags`, { signal: AbortSignal.timeout(2500) });
+      if (r.ok) list.push({ who: "agen", detail: `Ollama (${OLLAMA_MODEL})` });
+    } catch {
+      /* Ollama mati: Agen Lokal tampak tidur */
+    }
     if (waOpen) {
       list.push({ who: "ayyubi", detail: "WhatsApp utama" });
       if (videoGen.available() || videoGen.storyAvailable()) list.push({ who: "video", detail: "Studio video" });
@@ -902,7 +909,24 @@ function currentDateLine() {
 // tidak menunggu lama; lihat sendAutoReply.
 const ollamaQueue = createPriorityQueue({ agingMs: Number(process.env.OLLAMA_QUEUE_AGING_MS) || 120000 });
 function enqueueOllamaCall(fn, opts) {
-  return ollamaQueue.enqueue(fn, opts);
+  // Kantor AI: setiap pekerjaan model lokal terlihat sebagai kerja "Agen Lokal" (server Linux + Ollama).
+  const agen = office.task("agen");
+  const boss = opts?.label === "wa-reply" ? office.task(officeWho()) : null;
+  const what = ollamaJobLabel(opts?.label);
+  if (ollamaQueue.pending > 0) agen.think(`${what} (antre ${ollamaQueue.pending})`);
+  boss?.handoff("agen", "pesan", "Menyerahkan ke model lokal (Ollama)");
+  return ollamaQueue.enqueue(async () => {
+    agen.work(what, 35);
+    try {
+      const out = await fn();
+      agen.done("Selesai");
+      if (boss) agen.handoff(officeWho(), "pesan", "Jawaban jadi");
+      return out;
+    } catch (err) {
+      agen.fail(ollamaReason(err));
+      throw err;
+    }
+  }, opts);
 }
 
 // Cadangan: model yang terakhir dipakai. Kalau panggilan berikutnya memakai

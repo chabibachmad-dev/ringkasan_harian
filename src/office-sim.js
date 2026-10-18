@@ -175,58 +175,62 @@ export function createOfficeSim({ emit, onDecisionNeeded = null } = {}) {
       }
     },
 
-    async agenCariBerkas() {
+    // Agen Lokal = server Linux dengan model Ollama; bekerja bila bot memakainya (balasan cadangan, ringkasan, dokumen pemilik).
+    async agenJawab() {
+      if (!take("agen", "wongsobot")) return;
+      try {
+        ev("wongsobot", "think", "Grup Arisan RT 05: kuota AI awan habis");
+        await sleep(1500);
+        ev("wongsobot", "handoff", "Menyerahkan ke model lokal (Ollama)", { to: "agen", item: "pesan" });
+        await sleep(3600);
+        await steps("agen", "Menyusun balasan WhatsApp", 3, 1500);
+        ev("agen", "handoff", "Jawaban jadi", { to: "wongsobot", item: "pesan" });
+        await sleep(3600);
+        ev("agen", "done", "Selesai");
+        ev("wongsobot", "done", "Balasan terkirim ke grup");
+        await sleep(1000);
+      } finally {
+        free("agen", "wongsobot");
+      }
+    },
+
+    async agenRingkas() {
       if (!take("agen")) return;
       try {
-        ev("agen", "think", "Tugas baru: cari berkas RAB 2026");
+        ev("agen", "think", "Meringkas percakapan harian (antre 1)");
         await sleep(1800);
-        await steps("agen", "Mencari di folder Dokumen", 3, 1200);
-        ev("agen", "say", "Ketemu 3 berkas");
-        await sleep(1500);
-        ev("agen", "work", "Membaca RAB-2026.xlsx", { progress: 70 });
-        await sleep(2200);
-        ev("agen", "done", "Ringkasan dikirim ke Telegram");
+        await steps("agen", "Meringkas percakapan harian", 4, 1800);
+        ev("agen", "done", "Selesai");
         await sleep(1200);
       } finally {
         free("agen");
       }
     },
 
-    async agenIzin() {
+    async agenDokumen() {
       if (!take("agen")) return;
       try {
-        ev("agen", "think", "Merapikan folder Unduhan");
-        await sleep(1800);
-        const id = `izin-${++seq}`;
-        const detail = pick(["Pindahkan 12 berkas ke Unduhan\\Arsip", "Hapus 4 berkas sementara di Temp", "Jalankan: dir C:\\Laporan /s"]);
-        const decision = new Promise((resolve) => pending.set(id, resolve));
-        ev("agen", "wait", "Menunggu izinmu", { approval: { id, detail } });
-        onDecisionNeeded?.({ id, detail });
-        const ok = await Promise.race([decision, sleep(30_000).then(() => null)]);
-        pending.delete(id);
-        if (ok === true) {
-          ev("agen", "work", "Menjalankan tugas yang diizinkan", { progress: 50 });
-          await sleep(2200);
-          ev("agen", "done", "Selesai sesuai izin");
-        } else {
-          ev("agen", "say", ok === false ? "Ditolak pemilik, tidak dilakukan" : "Izin tak dijawab, dibatalkan");
-          await sleep(1600);
-          ev("agen", "done", "Tugas dibatalkan dengan aman");
-        }
+        ev("agen", "work", "Menjawab dari dokumen pemilik", { progress: 30 });
+        await sleep(2600);
+        ev("agen", "progress", "Menjawab dari dokumen pemilik", { progress: 75 });
+        await sleep(2200);
+        ev("agen", "done", "Selesai");
         await sleep(1000);
       } finally {
         free("agen");
       }
     },
 
-    async agenCariWeb() {
+    async agenGagal() {
       if (!take("agen")) return;
       try {
-        ev("agen", "work", "Mencari di internet: harga emas hari ini", { progress: 30 });
+        ev("agen", "work", "Memeriksa peraturan baru", { progress: 40 });
         await sleep(2400);
-        ev("agen", "progress", "Membaca 3 halaman hasil", { progress: 75 });
-        await sleep(2000);
-        ev("agen", "done", "Jawaban dikirim ke Telegram");
+        ev("agen", "error", "Model lokal terlalu lama");
+        await sleep(3200);
+        ev("agen", "say", "Dicoba lagi nanti");
+        await sleep(1500);
+        ev("agen", "done", "Selesai");
         await sleep(1000);
       } finally {
         free("agen");
@@ -243,9 +247,10 @@ export function createOfficeSim({ emit, onDecisionNeeded = null } = {}) {
     [SC.wongsoKerja, 2]
   ];
   const GROUP_B = [
-    [SC.agenCariBerkas, 3],
-    [SC.agenIzin, 2],
-    [SC.agenCariWeb, 2]
+    [SC.agenJawab, 3],
+    [SC.agenRingkas, 2],
+    [SC.agenDokumen, 2],
+    [SC.agenGagal, 1]
   ];
   const weighted = (list) => {
     const total = list.reduce((n, x) => n + x[1], 0);
@@ -274,7 +279,7 @@ export function createOfficeSim({ emit, onDecisionNeeded = null } = {}) {
     stopped = false;
     // keadaan awal: semua masuk kerja, Wongsobot masih tidur
     ev("ayyubi", "online", "Masuk kerja");
-    ev("agen", "online", "Laptop kantor menyala");
+    ev("agen", "online", "Ollama siaga");
     ev("video", "online", "Studio video buka");
     ev("gambar", "online", "Studio gambar buka");
     ev("suara", "online", "Studio suara buka");

@@ -1,9 +1,9 @@
 -- ================================================================
--- 0041: Kantor AI -- umpan kejadian langsung para "karyawan" (bot WhatsApp, studio media, agen lokal Windows)
+-- 0041: Kantor AI -- umpan kejadian langsung para "karyawan" (bot WhatsApp, studio media, Agen Lokal = server Linux dengan Ollama)
 --
--- Penulis : bot wa-bot (service role, langsung ke tabel) dan Agen Lokal di Windows (lewat Edge Function `office`, kunci OFFICE_PUSH_KEY).
+-- Penulis : bot wa-bot (service role, langsung ke tabel).
 -- Pembaca : aplikasi, HANYA lewat Edge Function `office` (kode akses). Semua tabel dikunci total dari anon key (RLS aktif, tanpa policy).
--- Isinya ringkasan satu baris ("Menyusun balasan", "Membaca berkas"), BUKAN isi pesan atau dokumen. Dibersihkan otomatis (3 hari).
+-- Isinya ringkasan satu baris ("Menyusun balasan", "Menggambar adegan"), BUKAN isi pesan atau dokumen. Dibersihkan otomatis (3 hari).
 --
 -- Aman dijalankan berulang. Jalankan di Supabase Dashboard > SQL Editor > Run, atau /migrasi di Telegram.
 -- ================================================================
