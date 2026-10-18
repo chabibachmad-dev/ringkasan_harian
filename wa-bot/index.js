@@ -81,7 +81,7 @@ import { MAIN_ACCOUNT, SECOND_ACCOUNT, acctFields, createAccountRouter, isPaired
 import { AsyncLocalStorage } from "node:async_hooks";
 import { qrToPng } from "./qr-png.js";
 import { createGroupList } from "./group-list.js";
-import { createVideoGen, readVideoConfig, videoSentNote, photoVideoSentNote, storySentNote, VIDEO_TEXT } from "./video-gen.js";
+import { createVideoGen, readVideoConfig, videoSentNote, photoVideoSentNote, storySentNote, morphSentNote, VIDEO_TEXT } from "./video-gen.js";
 const VIDEO_NOPHOTO_TEXT = VIDEO_TEXT.nophoto;
 import { createImageGen, readImageConfig, imageSentNote, quotedImageNote, prepareEditInput, KIND_TEXT as IMAGE_KIND_TEXT } from "./image-gen.js";
 import { createEnvEditor } from "./env-edit.js";
@@ -3639,7 +3639,21 @@ async function handleVideoRequestWa(sock, jid, req, { kind = "owner", who = "", 
   const timer = setInterval(tick, 4500);
   let out;
   try {
-    if (photoSource) {
+    if (photoSource && req.morph) {
+      // MORF FOTO (percobaan, pemilik): foto diedit AI bertahap lalu disambung jadi video
+      const dl = await downloadWaPhoto(sock, photoSource, "Morf");
+      out = dl.error
+        ? dl
+        : await videoGen.makeMorph(dl.buffer, req.prompt || "", kind, who, {
+            onStage: (stage, i, n) => {
+              if (announced || stage !== "edit") return;
+              announced = true;
+              send({ text: `🧬 Oke, fotonya diubah bertahap (${n} edit AI lalu disambung jadi video). Biasanya 3–8 menit; kukirim ke sini begitu selesai.` })
+                .then((s) => note("🧬 [BOT sedang membuat morf foto permintaan ini]", s))
+                .catch(() => {});
+            }
+          });
+    } else if (photoSource) {
       // FOTO HIDUP: foto -> video dengan gerak kamera + efek (tanpa AI, hanya ffmpeg)
       const dl = await downloadWaPhoto(sock, photoSource, "FotoHidup");
       out = dl.error
@@ -3685,7 +3699,7 @@ async function handleVideoRequestWa(sock, jid, req, { kind = "owner", who = "", 
   const v = out.video;
   const sent = await send({ video: v.buffer, mimetype: v.mime || "video/mp4" });
   console.log(`🎬 Video dibuat (${v.seconds} dtk, ${v.scenes} adegan, ${Math.round(v.buffer.length / 1024)} KB${v.silent ? ", tanpa suara" : ""}) untuk ${jid}: ${String(req.prompt).slice(0, 60)}`);
-  await note(photoSource ? photoVideoSentNote(req.prompt, v) : req.mode === "karakter" ? storySentNote(req.prompt) : videoSentNote(req.prompt), sent);
+  await note(photoSource && req.morph ? morphSentNote(req.prompt) : photoSource ? photoVideoSentNote(req.prompt, v) : req.mode === "karakter" ? storySentNote(req.prompt) : videoSentNote(req.prompt), sent);
 }
 
 /** Pemilik meminta video di chat pribadi ("buatkan video ..." / "/video ..."). true = ditangani. */
@@ -3698,12 +3712,21 @@ async function handleWaVideoCommand(sock, jid, msg, text) {
     const quotedImg = !own && ctx?.quotedMessage ? unwrapMessageContent(ctx.quotedMessage)?.imageMessage || null : null;
     const caption = own ? String(own.caption ?? "") : String(text ?? "").replace(/^\[gambar\]\s*/i, "");
     if (own || quotedImg) {
+      const morph = videoGen.detectMorph(caption, { hasImage: true });
+      if (morph) {
+        const photoSource = own ? { key: msg.key, message: content } : { key: { remoteJid: jid, id: ctx.stanzaId, participant: ctx.participant }, message: unwrapMessageContent(ctx.quotedMessage) };
+        await handleVideoRequestWa(sock, jid, { prompt: morph.text, morph: true }, { kind: "owner", quoted: msg, photoSource });
+        return true;
+      }
       const anim = videoGen.photoAvailable() ? videoGen.detectPhoto(caption, { hasImage: true }) : null;
       if (anim) {
         const photoSource = own ? { key: msg.key, message: content } : { key: { remoteJid: jid, id: ctx.stanzaId, participant: ctx.participant }, message: unwrapMessageContent(ctx.quotedMessage) };
         await handleVideoRequestWa(sock, jid, { prompt: anim.text }, { kind: "owner", quoted: msg, photoSource });
         return true;
       }
+    } else if (videoGen.detectMorph(caption, { hasImage: false })) {
+      await sock.sendMessage(jid, { text: "Fotonya belum ada. Kirim foto dengan keterangan, mis. \"morf siang jadi malam bersalju\", atau balas (reply) foto yang mau diubah dengan: morf siang jadi malam." }, { quoted: msg }).catch(() => {});
+      return true;
     } else if (videoGen.photoAvailable()) {
       const anim = videoGen.detectPhoto(caption, { hasImage: false });
       if (anim?.needsImage) {
@@ -4604,6 +4627,8 @@ const videoGen = createVideoGen({
   imageGen,
   speaker,
   writeScript: generateVideoScript,
+  // Morf foto: satu edit foto AI (Cloudflare) dari foto asli -> Buffer gambar hasil
+  editImage: async (instruction, buffer) => (await imageGen.editImage(instruction, await prepareEditInput(buffer))).buffer,
   state: botStateStore,
   config: readVideoConfig(process.env)
 });
@@ -5144,6 +5169,13 @@ const telegram = createTelegram({
         return out;
       },
       photoAvailable: () => videoGen.photoAvailable(),
+      morphAvailable: () => videoGen.morphAvailable(),
+      detectMorph: (text, opts) => videoGen.detectMorph(text, opts),
+      makeMorph: async (buffer, text, opts = {}) => {
+        const out = await videoGen.makeMorph(buffer, text, "owner", "", opts);
+        if (out.error) await tellOwnerVideoProblem(out.kind, out.error, out.detail);
+        return out;
+      },
       detectPhoto: (text, opts) => videoGen.detectPhoto(text, opts),
       makeFromPhoto: async (buffer, text) => {
         const out = await videoGen.makeFromPhoto(buffer, text, "owner", "");

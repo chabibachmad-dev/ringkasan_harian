@@ -1109,6 +1109,15 @@ Foto yang dikirim bisa dijadikan video pendek (4-15 detik) lengkap dengan gerak 
 - **Jatah (hari WITA), terpisah dari video buatan AI:** pemilik 15, semua grup 8, per orang 2 (`VIDEO_PHOTO_OWNER_DAILY`, `VIDEO_PHOTO_GROUP_DAILY`, `VIDEO_PHOTO_PERSON_DAILY`; 0 = tanpa batas; bisa diubah lewat `/env`). Memakai antrean yang sama dengan video AI (satu rakitan pada satu waktu) dan hanya butuh ffmpeg, jadi tetap jalan walau pembuat gambar Cloudflare mati.
 - **Batasnya:** fotonya tidak "dianimasikan" oleh AI (orang/objek di dalam foto tidak bergerak sendiri); yang bergerak adalah kamera dan efek di atas foto. Gerak sungguhan butuh model image-to-video berbayar atau GPU besar (lihat catatan Veo di atas). Foto maks 12 MB; dengan keterangan tulisan, font DejaVu Sans Bold dipakai bila ada (`VIDEO_FONT` untuk font lain).
 
+## Morf foto (percobaan, pemilik saja)
+
+Foto + deskripsi perubahan -> video yang berubah bertahap. Contoh di Telegram: kirim FOTO dengan keterangan `/video morf siang jadi malam bersalju` (boleh tambah `8 detik`, `5 tahap`, `halus`), atau balas foto dengan perintah itu. Di chat pribadi WhatsApp pemilik: kirim foto dengan keterangan `morf siang jadi malam bersalju`.
+
+- **Cara kerja:** AI teks menyusun N tahap perubahan (dari tipis sampai selesai) -> tiap tahap diedit dari FOTO ASLI oleh pembuat edit foto (Cloudflare, gratis; wajah dan komposisi tidak saling menumpuk penyimpangan) -> ffmpeg menyambung foto asli + hasil edit jadi video 25 fps. Bawaan: 5 edit, 8 detik, lebur halus (cepat). Kata `halus` memakai interpolasi gerak (minterpolate): lebih lambat (±1-3 menit di laptop kantor) dan bisa melengkung bila antar-gambar sangat berbeda.
+- **Jatah:** `VIDEO_MORPH_OWNER_DAILY` (bawaan 4 video/hari, tiap video = `VIDEO_MORPH_STEPS` edit foto), terpisah dari video lain. Dikembalikan bila gagal. Memakai antrean perakitan yang sama (satu per satu).
+- **Cocok untuk:** perubahan suasana/gaya/benda (siang -> malam, musim, salju, warna, gaya lukisan). **Tidak cocok** untuk gerak tubuh yang tepat; editor gambar AI tidak mengerti "gerakkan lengan sedikit". Wajah pada foto orang bisa sedikit berubah antar-tahap; aturan penolakan edit foto (mis. melepas pakaian) tetap berlaku untuk setiap tahap.
+- Belum untuk grup. Mesinnya ada di `morph-video.js`; kuota dan perintah di `video-gen.js`.
+
 ## Animasi karakter tanpa wajah (gratis, digambar kode)
 
 Selain video bergambar-diam bernarasi dan "foto hidup", bot bisa membuat **animasi kartun**: tokoh manusia 2D bergaya datar **tanpa mata/hidung/mulut** (sesuai gaya "tanpa wajah") yang benar-benar bergerak — berjalan, berlari, melambai, menunjuk, melompat, duduk, bertepuk tangan, bersorak, membungkuk, berdoa, berpikir, sedih, berbicara. Tiap frame dilukis di Node (penggambar beranti-alias sendiri), ditumpuk ffmpeg di atas latar, lalu diberi narasi suara + subtitle. Tanpa API video, tanpa GPU.

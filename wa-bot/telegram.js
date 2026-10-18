@@ -761,6 +761,31 @@ Suara tiap bot (Ayyubi/Wongsobot): /suara daftar • /suara coba <NamaSuara> [ga
     await sendFiles(chatId, [{ data: out.video.buffer, name: "foto-hidup.mp4", mime: "video/mp4", video: true, width: out.video.width, height: out.video.height }], "");
   }
 
+  /** Foto Telegram -> morf (diedit AI bertahap lalu disambung). Percobaan, pemilik saja. */
+  async function handleOwnerPhotoMorph(chatId, photo, text) {
+    if (!deps.video.makeMorph) return void (await send(chatId, "Morf foto tidak tersedia di versi bot ini."));
+    if (deps.video.morphAvailable && !deps.video.morphAvailable()) return void (await send(chatId, "Morf foto butuh pembuat edit foto: isi CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN (gratis) lewat /env, dan jangan mematikan Cloudflare di IMAGE_PROVIDERS."));
+    let buffer;
+    try {
+      buffer = await withAction(chatId, "upload_video", () => downloadFile(photo.file_id));
+    } catch (e) {
+      return void (await send(chatId, `⚠️ Fotonya gagal diunduh: ${String(e?.message || e).slice(0, 160)}`).catch(() => {}));
+    }
+    let told = false;
+    const out = await withAction(chatId, "upload_video", () =>
+      deps.video.makeMorph(buffer, text, {
+        onStage: (stage, i, n) => {
+          if (told || stage !== "edit") return;
+          told = true;
+          send(chatId, `🧬 Fotonya diubah bertahap (${n} edit AI lalu disambung jadi video) — biasanya 3–8 menit. Kukirim begitu selesai.`).catch(() => {});
+        }
+      })
+    );
+    if (out.error) return void (await send(chatId, `⚠️ ${out.error}`).catch(() => {}));
+    const v = out.video;
+    await sendFiles(chatId, [{ data: v.buffer, name: "morf.mp4", mime: "video/mp4", video: true, width: v.width, height: v.height }], `🧬 ${v.frames} gambar kunci${v.fallback ? " (rencana cadangan, AI teks tidak menjawab)" : ""}${v.smooth ? ", interpolasi gerak" : ""}`);
+  }
+
   async function handleOwnerVoice(chatId, voice) {
     if (!deps.transcribe) return void (await send(chatId, "Pesan suara belum aktif: isi GROQ_API_KEYS (atau GEMINI_API_KEYS) di .env bot lalu restart."));
     if (Number(voice.duration) > config.voiceMaxSeconds) return void (await send(chatId, `Pesan suaranya terlalu panjang (${voice.duration} dtk). Maksimal ${config.voiceMaxSeconds} detik; pecah jadi beberapa pesan.`));
@@ -863,8 +888,9 @@ Suara tiap bot (Ayyubi/Wongsobot): /suara daftar • /suara coba <NamaSuara> [ga
       if (!vd.available() && !vd.storyAvailable?.()) return void (await reply("Pembuat video belum aktif: ia memakai pembuat gambar (isi CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN gratis di /env) dan ffmpeg (sudo apt install ffmpeg)."));
       const c = vd.parseCommand(arg);
       if (c.kind === "status") {
-        return void (await reply(`🎬 Pembuat video (gratis, dirakit ffmpeg)\n${vd.describe()}\n\nPakai: /video <deskripsi>  (contoh: /video 30 detik tentang siklus air)\nAnimasi tokoh tanpa wajah: /video animasi <cerita>  (contoh: /video animasi ayah dan anak ke taman)\nDi grup WA: ketik "bot, buatkan video ...".\nSaklar grup: /video grup on atau /video grup off`));
+        return void (await reply(`🎬 Pembuat video (gratis, dirakit ffmpeg)\n${vd.describe()}\n\nPakai: /video <deskripsi>  (contoh: /video 30 detik tentang siklus air)\nAnimasi tokoh tanpa wajah: /video animasi <cerita>  (contoh: /video animasi ayah dan anak ke taman)\nMorf foto (percobaan): kirim foto + keterangan "/video morf siang jadi malam bersalju"\nDi grup WA: ketik "bot, buatkan video ...".\nSaklar grup: /video grup on atau /video grup off`));
       }
+      if (c.kind === "morph") return void (await reply("🧬 Morf foto butuh FOTO: kirim foto dengan keterangan \"/video morf siang jadi malam bersalju\" (boleh tambah: 8 detik, 5 tahap, halus), atau balas (reply) foto yang mau diubah dengan perintah itu."));
       if (c.kind === "group") {
         const r = await vd.setGroup(c.value);
         return void (await reply(r.on ? "🎬 Video di grup WA: AKTIF. Anggota grup yang diizinkan bisa minta \"bot, buatkan video ...\" (dibatasi jatah harian)." : "🎬 Video di grup WA: MATI." + (r.saved ? "" : "\n⚠️ Gagal disimpan di database; berlaku sampai bot restart.")));
@@ -1129,6 +1155,8 @@ Suara tiap bot (Ayyubi/Wongsobot): /suara daftar • /suara coba <NamaSuara> [ga
       const own = Array.isArray(m.photo) && m.photo.length ? m.photo : null;
       const replied = !own && Array.isArray(m.reply_to_message?.photo) && m.reply_to_message.photo.length ? m.reply_to_message.photo : null;
       const caption = own ? String(m.caption ?? "") : typeof m.text === "string" ? m.text : "";
+      const morph = own || replied ? deps.video.detectMorph?.(caption, { hasImage: true }) : null;
+      if (morph) return handleOwnerPhotoMorph(chatId, (own || replied).at(-1), morph.text);
       const anim = own || replied ? deps.video.detectPhoto?.(caption, { hasImage: true }) : null;
       if (anim) return handleOwnerPhotoVideo(chatId, (own || replied).at(-1), anim.text);
       if (!own && !replied && typeof m.text === "string") {

@@ -25,7 +25,8 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { cleanPrompt, promptProblem } from "./image-gen.js";
+import { cleanPrompt, editPromptProblem, promptProblem } from "./image-gen.js";
+import { buildMorphPrompt, buildMorphVideo, detectMorphRequest, parseMorphOptions, parseMorphPlan } from "./morph-video.js";
 import { buildPhotoVideo, detectPhotoVideoRequest, parsePhotoOptions } from "./photo-video.js";
 import { CAM_ZOOM, buildStoryPrompt, detectStoryMode, fallbackStory, makeCharacter, parseStoryScript, renderSceneClip, writeBackground } from "./story-video.js";
 
@@ -70,6 +71,13 @@ export function readVideoConfig(env = process.env) {
     ffmpeg: String(env.FFMPEG_PATH || "ffmpeg").trim(),
     font: String(env.VIDEO_FONT || "").trim(),
     stepTimeoutMs: Math.max(30_000, num(env.VIDEO_STEP_TIMEOUT_MS, 240_000)),
+    // Morf foto (prototipe, hanya pemilik): tiap video = N edit foto AI (jatah Cloudflare) + ffmpeg.
+    morphOwnerDaily: num(env.VIDEO_MORPH_OWNER_DAILY, 4),
+    morphSteps: Math.max(2, Math.min(8, num(env.VIDEO_MORPH_STEPS, 5))),
+    morphMaxSteps: Math.max(2, Math.min(8, num(env.VIDEO_MORPH_MAX_STEPS, 8))),
+    morphSeconds: Math.max(4, Math.min(14, num(env.VIDEO_MORPH_SECONDS, 8))),
+    morphMaxSeconds: Math.max(4, Math.min(20, num(env.VIDEO_MORPH_MAX_SEC, 14))),
+    morphChain: /^(1|on|true|ya)$/i.test(String(env.VIDEO_MORPH_CHAIN ?? "0").trim()),
     promptMax: 400
   };
 }
@@ -305,6 +313,8 @@ function hariWita(ms) {
 }
 
 export const VIDEO_TEXT = {
+  nomorph: "Morf foto butuh pembuat edit foto: isi CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN (gratis) lewat /env, dan jangan mematikan Cloudflare di IMAGE_PROVIDERS.",
+  morphempty: "Mau diubah jadi apa? Contoh: morf siang jadi malam bersalju (boleh tambah: 8 detik, 5 tahap, halus).",
   noimage: "Video butuh pembuat gambar, dan itu belum aktif: isi CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN (gratis) atau GEMINI_API_KEYS di .env bot.",
   noffmpeg: "Video belum bisa dibuat: ffmpeg belum terpasang di laptop bot (sudo apt install ffmpeg). Pemilik sudah diberi tahu.",
   busy: "Pembuat video sedang sibuk dengan banyak permintaan. Coba lagi beberapa menit lagi ya.",
@@ -318,6 +328,9 @@ export const VIDEO_TEXT = {
 export const photoVideoSentNote = (prompt, v = {}) =>
   `🎞️ [BOT mengirim VIDEO hasil FOTO HIDUP (foto yang dikirim penanya digerakkan + efek${v.effects?.length ? " " + v.effects.join(", ") : ""}), permintaannya: "${String(prompt ?? "").replace(/\s+/g, " ").replace(/"/g, "'").slice(0, 160)}"]`;
 
+export const morphSentNote = (prompt) =>
+  `🧬 [BOT mengirim VIDEO hasil MORF FOTO (foto yang dikirim pemilik diedit AI bertahap lalu disambung), perubahannya: "${String(prompt ?? "").replace(/\s+/g, " ").replace(/"/g, "'").slice(0, 160)}"]`;
+
 export const storySentNote = (prompt) =>
   `🎭 [BOT mengirim ANIMASI karakter tanpa wajah buatan sendiri (tokoh bergerak + narasi + subtitle) sesuai permintaan: "${String(prompt ?? "").replace(/\s+/g, " ").replace(/"/g, "'").slice(0, 200)}"]`;
 
@@ -328,9 +341,9 @@ export const videoSentNote = (prompt) =>
  * deps: { imageGen:{available,generate,problem}, speaker?:{available,speak}, writeScript?:({system,user})=>Promise<string>,
  *         state?, config, spawnImpl?, log?, now?, tmpRoot? }
  */
-export function createVideoGen({ imageGen, speaker = null, writeScript = null, state = null, config = readVideoConfig({}), spawnImpl = spawn, log = console, now = () => Date.now(), tmpRoot = os.tmpdir() } = {}) {
+export function createVideoGen({ imageGen, speaker = null, writeScript = null, editImage = null, state = null, config = readVideoConfig({}), spawnImpl = spawn, log = console, now = () => Date.now(), tmpRoot = os.tmpdir() } = {}) {
   let groupsOn = true;
-  const freshQuota = (day) => ({ day, owner: 0, group: 0, people: {}, photo: { owner: 0, group: 0, people: {} } });
+  const freshQuota = (day) => ({ day, owner: 0, group: 0, people: {}, photo: { owner: 0, group: 0, people: {} }, morph: { owner: 0 } });
   let quota = freshQuota(hariWita(now()));
   let running = 0;
   const waiters = [];
@@ -346,6 +359,8 @@ export function createVideoGen({ imageGen, speaker = null, writeScript = null, s
   // Animasi karakter: cukup ffmpeg (latar gambar AI bersifat opsional).
   const storyAvailable = () => config.enabled;
   const storyGroupEnabled = () => groupsOn && storyAvailable();
+  // Morf foto: butuh pembuat edit foto (Cloudflare) + ffmpeg. Prototipe: hanya pemilik.
+  const morphAvailable = () => config.enabled && typeof editImage === "function" && (imageGen?.canEdit ? Boolean(imageGen.canEdit()) : true);
 
   async function load() {
     if (!state) return groupsOn;
@@ -354,7 +369,7 @@ export function createVideoGen({ imageGen, speaker = null, writeScript = null, s
       const q = await state.get(QUOTA_KEY);
       if (q && typeof q === "object" && q.day === hariWita(now())) {
         const p = q.photo && typeof q.photo === "object" ? q.photo : {};
-        quota = { day: q.day, owner: q.owner | 0, group: q.group | 0, people: { ...(q.people || {}) }, photo: { owner: p.owner | 0, group: p.group | 0, people: { ...(p.people || {}) } } };
+        quota = { day: q.day, owner: q.owner | 0, group: q.group | 0, people: { ...(q.people || {}) }, photo: { owner: p.owner | 0, group: p.group | 0, people: { ...(p.people || {}) } }, morph: { owner: (q.morph && q.morph.owner) | 0 } };
       }
     } catch (e) {
       log.warn?.(`🎬 [Video] gagal membaca pengaturan tersimpan: ${e instanceof Error ? e.message : e}`);
@@ -388,6 +403,23 @@ export function createVideoGen({ imageGen, speaker = null, writeScript = null, s
   /** pool "ai" = video dari ide (butuh gambar AI); pool "photo" = foto hidup (hanya CPU). */
   async function reserve(kind, who = "", pool = "ai") {
     rollDay();
+    if (pool === "morph") {
+      if (kind !== "owner") return { ok: false, reason: "Morf foto masih percobaan: baru bisa dipakai pemilik (lewat Telegram atau chat pribadi WhatsApp)." };
+      if (config.morphOwnerDaily > 0 && quota.morph.owner >= config.morphOwnerDaily) return { ok: false, reason: `Jatah morf foto hari ini (${config.morphOwnerDaily}) sudah habis. Reset 00.00 WITA.` };
+      quota.morph.owner += 1;
+      await saveQuota();
+      let done = false;
+      return {
+        ok: true,
+        release: async () => {
+          if (done) return;
+          done = true;
+          rollDay();
+          quota.morph.owner = Math.max(0, quota.morph.owner - 1);
+          await saveQuota();
+        }
+      };
+    }
     const photo = pool === "photo";
     const q = photo ? quota.photo : quota;
     const lim = photo ? { owner: config.photoOwnerDaily, group: config.photoGroupDaily, person: config.photoPersonDaily } : { owner: config.ownerDaily, group: config.groupDaily, person: config.personDaily };
@@ -790,6 +822,59 @@ export function createVideoGen({ imageGen, speaker = null, writeScript = null, s
     }
   }
 
+  /**
+   * MORF FOTO (prototipe, pemilik): foto + "siang jadi malam bersalju 8 detik 5 tahap [halus]" -> video yang berubah.
+   * -> { video:{buffer,mime,seconds,width,height,frames,planned,smooth,steps,fallback} } atau { error, kind }.
+   */
+  async function makeMorph(photo, text = "", kind = "owner", who = "", opts = {}) {
+    if (!config.enabled) return { error: VIDEO_TEXT.off, kind: "off" };
+    if (!Buffer.isBuffer(photo) || photo.length < 100) return { error: VIDEO_TEXT.badphoto, kind: "badimage" };
+    if (!morphAvailable()) return { error: VIDEO_TEXT.nomorph, kind: "noedit" };
+    const options = parseMorphOptions(text, { defaultSteps: config.morphSteps, maxSteps: config.morphMaxSteps, maxSeconds: config.morphMaxSeconds, defaultSeconds: config.morphSeconds });
+    if (!options.prompt) return { error: VIDEO_TEXT.morphempty, kind: "empty" };
+    const bad = promptProblem(options.prompt) || editPromptProblem(options.prompt);
+    if (bad) return { error: bad.replace("gambar", "video"), kind: "refused" };
+    if ((await checkFfmpeg()) !== "ok") return { error: VIDEO_TEXT.noffmpeg, kind: "noffmpeg" };
+    const slot = await reserve(kind, who, "morph");
+    if (!slot.ok) return { error: slot.reason, kind: "limit" };
+    const done = await acquire();
+    if (!done) {
+      await slot.release().catch(() => {});
+      return { error: VIDEO_TEXT.busy, kind: "busy" };
+    }
+    const t0 = now();
+    try {
+      const n = options.steps;
+      let plan = { steps: parseMorphPlan("", n, options.prompt).steps, fallback: true };
+      if (writeScript) {
+        try {
+          const p = buildMorphPrompt(options.prompt, n);
+          plan = parseMorphPlan(await writeScript(p), n, options.prompt);
+        } catch (e) {
+          log.warn?.(`🧬 [Morf] rencana AI gagal, pakai cadangan: ${e instanceof Error ? e.message : e}`);
+        }
+      }
+      // tiap instruksi ikut disaring seperti edit foto biasa (mis. tidak boleh melepas pakaian)
+      const worst = plan.steps.map((st) => editPromptProblem(st) || promptProblem(st)).find(Boolean);
+      if (worst) throw Object.assign(new Error(worst), { kind: "refused" });
+      const video = await buildMorphVideo(photo, plan.steps, options, { editImage, ffmpeg: config.ffmpeg, spawnImpl, tmpRoot, log, stepTimeoutMs: config.stepTimeoutMs, onStage: opts.onStage || (() => {}), chain: config.morphChain });
+      stats.ok += 1;
+      stats.lastOkAt = now();
+      stats.lastSeconds = Math.round((now() - t0) / 1000);
+      return { video: { ...video, steps: plan.steps, fallback: plan.fallback, prompt: options.prompt } };
+    } catch (e) {
+      stats.fail += 1;
+      stats.lastError = String(e?.message || e).slice(0, 160);
+      await slot.release().catch(() => {});
+      const k = e?.kind || "unavailable";
+      const text2 = k === "render" ? VIDEO_TEXT.fail : k === "badimage" ? VIDEO_TEXT.badphoto : e instanceof Error ? e.message : String(e);
+      log.warn?.(`🧬 [Morf] gagal (${k}): ${stats.lastError}`);
+      return { error: text2, kind: k, detail: e?.detail || (k === "render" ? stats.lastError : "") };
+    } finally {
+      done();
+    }
+  }
+
   function describe() {
     return [
       `Status: ${available() ? "aktif" : config.enabled ? "belum bisa (pembuat gambar belum aktif)" : "dimatikan (VIDEO_ENABLED=0)"}; grup WA: ${groupsOn ? "boleh" : "mati"}`,
@@ -797,6 +882,7 @@ export function createVideoGen({ imageGen, speaker = null, writeScript = null, s
       `Jatah harian: pemilik ${config.ownerDaily || "tanpa batas"}, semua grup ${config.groupDaily || "tanpa batas"}, per orang di grup ${config.personDaily || "tanpa batas"}`,
       `Animasi karakter tanpa wajah (cerita bertokoh, digambar kode): ${imageGen?.available?.() ? "latar gambar AI" : "latar buatan kode (pembuat gambar belum aktif)"}; memakai jatah video yang sama`,
       `Foto hidup (foto -> video + efek, tanpa AI): jatah pemilik ${config.photoOwnerDaily || "tanpa batas"}, semua grup ${config.photoGroupDaily || "tanpa batas"}, per orang ${config.photoPersonDaily || "tanpa batas"}; hari ini pemilik ${quota.photo.owner}, grup ${quota.photo.group}`,
+      `Morf foto (percobaan, pemilik saja; foto + deskripsi -> ${config.morphSteps} edit AI -> video): ${morphAvailable() ? "aktif" : "belum aktif (butuh Cloudflare untuk edit foto)"}; jatah ${config.morphOwnerDaily || "tanpa batas"}/hari, hari ini ${quota.morph.owner}`,
       `Hari ini: pemilik ${quota.owner}, grup ${quota.group}; berhasil ${stats.ok}, gagal ${stats.fail}${stats.lastSeconds ? `, rakit terakhir ${stats.lastSeconds} dtk` : ""}${stats.lastError ? `\nGalat terakhir: ${stats.lastError}` : ""}`
     ].join("\n");
   }
@@ -806,6 +892,8 @@ export function createVideoGen({ imageGen, speaker = null, writeScript = null, s
     if (!a || /^(?:status|info)$/i.test(a)) return { kind: "status" };
     const m = /^(?:grup|group|wag)\s+(on|off|aktif|mati|nyala)$/i.exec(a);
     if (m) return { kind: "group", value: /^(?:on|aktif|nyala)$/i.test(m[1]) };
+    const mo = detectMorphRequest(`/video ${a}`, { hasImage: false });
+    if (mo) return { kind: "morph", text: mo.text };
     const d = detectVideoRequest(`/video ${a}`);
     const res = { kind: "prompt", prompt: d?.prompt ?? "", seconds: d?.seconds ?? 0 };
     // "/video animasi kancil dan buaya" / "/video kartun ..." -> animasi karakter
@@ -829,5 +917,5 @@ export function createVideoGen({ imageGen, speaker = null, writeScript = null, s
     return r;
   }
 
-  return { available, groupEnabled, storyAvailable, storyGroupEnabled, photoAvailable, photoGroupEnabled, load, setGroup, reserve, make, makeFromPhoto, detectPhoto: detectPhotoVideoRequest, describe, parseCommand, reconfigure, detect, checkFfmpeg, stats: () => ({ ...stats }) };
+  return { available, groupEnabled, storyAvailable, storyGroupEnabled, morphAvailable, detectMorph: detectMorphRequest, makeMorph, photoAvailable, photoGroupEnabled, load, setGroup, reserve, make, makeFromPhoto, detectPhoto: detectPhotoVideoRequest, describe, parseCommand, reconfigure, detect, checkFfmpeg, stats: () => ({ ...stats }) };
 }

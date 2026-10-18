@@ -51,7 +51,10 @@ export const ENV_KEYS = {
   VIDEO_PHOTO_PERSON_DAILY: { secret: false, hint: "jatah foto-hidup per orang di grup per hari", validate: intIn(0, 1000) },
   VIDEO_PHOTO_MAX_SEC: { secret: false, hint: "durasi maksimum foto-hidup (detik, 5-30)", validate: intIn(5, 30) },
   VIDEO_SCENES: { secret: false, hint: "jumlah adegan bawaan satu video (3-8; makin banyak makin lama & boros gambar)", validate: intIn(3, 8) },
-  VIDEO_MAX_SCENES: { secret: false, hint: "adegan maksimum bila diminta durasi panjang (3-8)", validate: intIn(3, 8) }
+  VIDEO_MAX_SCENES: { secret: false, hint: "adegan maksimum bila diminta durasi panjang (3-8)", validate: intIn(3, 8) },
+  VIDEO_MORPH_OWNER_DAILY: { secret: false, hint: "jatah morf foto pemilik per hari (tiap morf = beberapa edit foto AI; 0 = tanpa batas)", validate: intIn(0, 100) },
+  VIDEO_MORPH_STEPS: { secret: false, hint: "jumlah tahap edit bawaan satu morf (2-8)", validate: intIn(2, 8) },
+  VIDEO_MORPH_SECONDS: { secret: false, hint: "durasi bawaan morf (detik, 4-14)", validate: intIn(4, 14) }
 };
 
 export const maskValue = (value, secret) => {
