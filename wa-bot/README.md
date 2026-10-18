@@ -1127,7 +1127,19 @@ Selain video bergambar-diam bernarasi dan "foto hidup", bot bisa membuat **anima
 - **Latar:** gambar AI bila pembuat gambar aktif; bila tidak, latar buatan kode (pagi, siang, sore, malam, dalam rumah) — jadi animasi tetap jalan tanpa kuota gambar.
 - **Jatah & antrean:** memakai jatah video harian yang sama dengan video bergambar (`VIDEO_*_DAILY`) dan antrean perakitan yang sama (satu per satu).
 - **Batasnya:** gerak berupa boneka kartun sederhana (sendi kaku bergaya "flat"), bukan animasi sinematik seperti Meta AI/Veo; karakter tidak bisa diganti-ganti tampilannya di luar warna baju/hijab/peci.
+- **Gaya stop motion (potongan kertas):** tambahkan kata `stop motion` / `stopmotion` / `potongan kertas` / `paper cutout`, mis. `bot, buatkan animasi stop motion ayah dan anak ke taman` atau `/video animasi stop motion ...`. Gerakannya dibekukan ±8 gambar per detik dengan sedikit goyang acak, tokoh diberi tepi putih seperti potongan kertas + bayangan, dan ditambah butiran film. Narasi dan jatah tetap sama.
 - Mesin gambarnya ada di `story-video.js`; perakitan dan naskah di `video-gen.js`.
+
+## Stop motion dari foto-fotomu (Telegram, pemilik)
+
+Foto-foto yang kamu jepret berurutan (mis. menggeser mainan sedikit demi sedikit) disambung jadi video 6-15 gambar per detik. **Tanpa AI**, hanya ffmpeg; memakai jatah "foto hidup" pemilik dan antrean rakit yang sama.
+
+1. `/stopmotion` memulai sesi. Boleh langsung menulis opsi: `/stopmotion 10 fps bolak-balik`.
+2. Kirim foto-fotonya **berurutan** (satu per satu atau beberapa sekaligus; boleh dikirim sebagai "file" agar tidak terkompres). Telegram mengirim album sebagai pesan terpisah, jadi urutannya terjaga. Maks `VIDEO_STOP_MAX_PHOTOS` (bawaan 60).
+3. `/stopmotion jadi` merakit videonya. Opsi bisa ditulis di sini juga: `10 fps` (2-`VIDEO_STOP_MAX_FPS`, bawaan 8, batas 15), `bolak-balik` (maju lalu mundur), `tulisan "Judul"`, `potret` / `persegi` / `lanskap`, `tanpa deflicker`.
+4. Lainnya: `/stopmotion hapus` (foto terakhir), `/stopmotion batal`, `/stopmotion status`. Sesi yang menganggur 30 menit dibuang otomatis.
+
+Cara kerja: foto pertama menentukan ukuran (foto lain disamakan dan dipotong tipis bila bentuknya beda; foto yang tidak terbaca dilewati), kedipan cahaya antar-foto diredam (ffmpeg `deflicker`), gambar terakhir ditahan 1,2 detik, ada fade. Hasil dikirim ke Telegram (bukan WhatsApp). Tips: kamera diam, cahaya tetap (matikan auto-eksposur bila bisa), geser objek sedikit demi sedikit. Mesinnya di `stopmotion-video.js`.
 
 ## Mengubah pengaturan gambar dari Telegram (`/env`)
 

@@ -27,8 +27,9 @@ import os from "node:os";
 import path from "node:path";
 import { cleanPrompt, editPromptProblem, promptProblem } from "./image-gen.js";
 import { buildMorphPrompt, buildMorphVideo, detectMorphRequest, parseMorphOptions, parseMorphPlan } from "./morph-video.js";
+import { MAX_STOP_FPS, MIN_STOP_PHOTOS, buildStopMotion, parseStopMotionOptions } from "./stopmotion-video.js";
 import { buildPhotoVideo, detectPhotoVideoRequest, parsePhotoOptions } from "./photo-video.js";
-import { CAM_ZOOM, buildStoryPrompt, detectStoryMode, fallbackStory, makeCharacter, parseStoryScript, renderSceneClip, writeBackground } from "./story-video.js";
+import { CAM_ZOOM, buildStoryPrompt, detectStoryMode, detectStoryStyle, stripStoryStyle, fallbackStory, makeCharacter, parseStoryScript, renderSceneClip, writeBackground } from "./story-video.js";
 
 export const STATE_KEY = "wa_video_gen";
 export const QUOTA_KEY = "wa_video_quota";
@@ -78,6 +79,9 @@ export function readVideoConfig(env = process.env) {
     morphSeconds: Math.max(4, Math.min(14, num(env.VIDEO_MORPH_SECONDS, 8))),
     morphMaxSeconds: Math.max(4, Math.min(20, num(env.VIDEO_MORPH_MAX_SEC, 14))),
     morphChain: /^(1|on|true|ya)$/i.test(String(env.VIDEO_MORPH_CHAIN ?? "0").trim()),
+    // Stop motion dari foto (hanya CPU; memakai jatah "foto hidup" pemilik)
+    stopMaxPhotos: Math.max(6, Math.min(120, num(env.VIDEO_STOP_MAX_PHOTOS, 60))),
+    stopMaxFps: Math.max(4, Math.min(MAX_STOP_FPS, num(env.VIDEO_STOP_MAX_FPS, 15))),
     promptMax: 400
   };
 }
@@ -313,6 +317,7 @@ function hariWita(ms) {
 }
 
 export const VIDEO_TEXT = {
+  stoptoofew: `Stop motion butuh minimal ${MIN_STOP_PHOTOS} foto berurutan. Kirim fotonya satu per satu (atau beberapa sekaligus), lalu /stopmotion jadi.`,
   nomorph: "Morf foto butuh pembuat edit foto: isi CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN (gratis) lewat /env, dan jangan mematikan Cloudflare di IMAGE_PROVIDERS.",
   morphempty: "Mau diubah jadi apa? Contoh: morf siang jadi malam bersalju (boleh tambah: 8 detik, 5 tahap, halus).",
   noimage: "Video butuh pembuat gambar, dan itu belum aktif: isi CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN (gratis) atau GEMINI_API_KEYS di .env bot.",
@@ -330,6 +335,9 @@ export const photoVideoSentNote = (prompt, v = {}) =>
 
 export const morphSentNote = (prompt) =>
   `🧬 [BOT mengirim VIDEO hasil MORF FOTO (foto yang dikirim pemilik diedit AI bertahap lalu disambung), perubahannya: "${String(prompt ?? "").replace(/\s+/g, " ").replace(/"/g, "'").slice(0, 160)}"]`;
+
+export const stopMotionSentNote = (v = {}) =>
+  `🧱 [BOT mengirim VIDEO STOP MOTION dari ${v.photos || "beberapa"} foto berurutan kiriman pemilik (${v.fps || "?"} gambar per detik${v.title ? `, judul "${String(v.title).replace(/"/g, "'").slice(0, 60)}"` : ""})]`;
 
 export const storySentNote = (prompt) =>
   `🎭 [BOT mengirim ANIMASI karakter tanpa wajah buatan sendiri (tokoh bergerak + narasi + subtitle) sesuai permintaan: "${String(prompt ?? "").replace(/\s+/g, " ").replace(/"/g, "'").slice(0, 200)}"]`;
@@ -669,7 +677,7 @@ export function createVideoGen({ imageGen, speaker = null, writeScript = null, e
   }
 
   /** ANIMASI KARAKTER: naskah (tokoh + aksi) -> latar (gambar AI atau buatan kode) -> suara -> frame digambar kode -> rakit. */
-  async function buildStory(idea, n, { onStage = () => {} } = {}) {
+  async function buildStory(idea, n, { onStage = () => {}, style = "" } = {}) {
     const dir = fs.mkdtempSync(path.join(tmpRoot, "ani-"));
     try {
       onStage("script");
@@ -720,14 +728,14 @@ export function createVideoGen({ imageGen, speaker = null, writeScript = null, e
         const zoomIn = i % 2 === 0;
         const r = await renderSceneClip({
           scene: scenes[i], castMap, bgFile: bgFiles[i], out, dur: durs[i], textFile, font,
-          camFrom: zoomIn ? 1 : 1 + CAM_ZOOM, camTo: zoomIn ? 1 + CAM_ZOOM : 1,
+          camFrom: zoomIn ? 1 : 1 + CAM_ZOOM, camTo: zoomIn ? 1 + CAM_ZOOM : 1, style,
           ffmpeg: config.ffmpeg, spawnImpl, timeoutMs: config.stepTimeoutMs, log
         });
         if (r.code !== 0) throw Object.assign(new Error(`ffmpeg animasi adegan ${i + 1}: ${r.stderr.slice(-200)}`), { kind: "render" });
         clips.push(out);
       }
       const { buffer, total } = await joinClips(dir, clips, durs, narrFile);
-      return { buffer, mime: "video/mp4", seconds: Math.round(total), scenes: scenes.length, silent: !narrFile, title: script.title, fallback: Boolean(script.fallback), mode: "karakter", cast: castMap.size };
+      return { buffer, mime: "video/mp4", seconds: Math.round(total), scenes: scenes.length, silent: !narrFile, title: script.title, fallback: Boolean(script.fallback), mode: "karakter", style, cast: castMap.size };
     } finally {
       try {
         fs.rmSync(dir, { recursive: true, force: true });
@@ -766,7 +774,7 @@ export function createVideoGen({ imageGen, speaker = null, writeScript = null, e
     const t0 = now();
     try {
       const n = sceneCount(opts.seconds || 0, config);
-      const video = await (story ? buildStory : build)(p.slice(0, config.promptMax), n, { onStage: opts.onStage || (() => {}) });
+      const video = await (story ? buildStory : build)(p.slice(0, config.promptMax), n, { onStage: opts.onStage || (() => {}), style: story ? opts.style || "" : "" });
       stats.ok += 1;
       stats.lastOkAt = now();
       stats.lastSeconds = Math.round((now() - t0) / 1000);
@@ -875,6 +883,46 @@ export function createVideoGen({ imageGen, speaker = null, writeScript = null, e
     }
   }
 
+  /**
+   * STOP MOTION: foto-foto berurutan (array Buffer) + "10 fps bolak-balik tulisan 'Judul'" -> video MP4 (pemilik; jatah foto hidup).
+   * -> { video:{buffer,mime,seconds,width,height,frames,photos,skipped,fps,title} } atau { error, kind }.
+   */
+  async function makeStopMotion(photos, text = "", kind = "owner", who = "", opts = {}) {
+    if (!config.enabled) return { error: VIDEO_TEXT.off, kind: "off" };
+    const list = (Array.isArray(photos) ? photos : []).filter((b) => Buffer.isBuffer(b) && b.length >= 100);
+    if (list.length < MIN_STOP_PHOTOS) return { error: VIDEO_TEXT.stoptoofew, kind: "toofew" };
+    if (list.length > config.stopMaxPhotos) return { error: `Maksimal ${config.stopMaxPhotos} foto per stop motion (kamu mengirim ${list.length}).`, kind: "toomany" };
+    const options = parseStopMotionOptions(text, { maxFps: config.stopMaxFps });
+    const bad = options.title ? promptProblem(options.title) : null;
+    if (bad) return { error: bad.replace("gambar", "video"), kind: "refused" };
+    if ((await checkFfmpeg()) !== "ok") return { error: VIDEO_TEXT.noffmpeg, kind: "noffmpeg" };
+    const slot = await reserve(kind, who, "photo");
+    if (!slot.ok) return { error: slot.reason, kind: "limit" };
+    const done = await acquire();
+    if (!done) {
+      await slot.release().catch(() => {});
+      return { error: VIDEO_TEXT.busy, kind: "busy" };
+    }
+    const t0 = now();
+    try {
+      const video = await buildStopMotion(list, options, { ffmpeg: config.ffmpeg, spawnImpl, tmpRoot, font: pickFont(), log, stepTimeoutMs: config.stepTimeoutMs, onStage: opts.onStage || (() => {}) });
+      stats.ok += 1;
+      stats.lastOkAt = now();
+      stats.lastSeconds = Math.round((now() - t0) / 1000);
+      return { video: { ...video, title: options.title } };
+    } catch (e) {
+      stats.fail += 1;
+      stats.lastError = String(e?.message || e).slice(0, 160);
+      await slot.release().catch(() => {});
+      const k = e?.kind || "unavailable";
+      const text2 = k === "render" ? VIDEO_TEXT.fail : k === "toofew" ? VIDEO_TEXT.stoptoofew : e instanceof Error ? e.message : String(e);
+      log.warn?.(`🧱 [StopMotion] gagal (${k}): ${stats.lastError}`);
+      return { error: text2, kind: k, detail: e?.detail || (k === "render" ? stats.lastError : "") };
+    } finally {
+      done();
+    }
+  }
+
   function describe() {
     return [
       `Status: ${available() ? "aktif" : config.enabled ? "belum bisa (pembuat gambar belum aktif)" : "dimatikan (VIDEO_ENABLED=0)"}; grup WA: ${groupsOn ? "boleh" : "mati"}`,
@@ -883,6 +931,7 @@ export function createVideoGen({ imageGen, speaker = null, writeScript = null, e
       `Animasi karakter tanpa wajah (cerita bertokoh, digambar kode): ${imageGen?.available?.() ? "latar gambar AI" : "latar buatan kode (pembuat gambar belum aktif)"}; memakai jatah video yang sama`,
       `Foto hidup (foto -> video + efek, tanpa AI): jatah pemilik ${config.photoOwnerDaily || "tanpa batas"}, semua grup ${config.photoGroupDaily || "tanpa batas"}, per orang ${config.photoPersonDaily || "tanpa batas"}; hari ini pemilik ${quota.photo.owner}, grup ${quota.photo.group}`,
       `Morf foto (percobaan, pemilik saja; foto + deskripsi -> ${config.morphSteps} edit AI -> video): ${morphAvailable() ? "aktif" : "belum aktif (butuh Cloudflare untuk edit foto)"}; jatah ${config.morphOwnerDaily || "tanpa batas"}/hari, hari ini ${quota.morph.owner}`,
+      `Stop motion (foto berurutan -> video, sesi /stopmotion di Telegram, pemilik; memakai jatah foto hidup): maks ${config.stopMaxPhotos} foto, ${config.stopMaxFps} gambar/dtk`,
       `Hari ini: pemilik ${quota.owner}, grup ${quota.group}; berhasil ${stats.ok}, gagal ${stats.fail}${stats.lastSeconds ? `, rakit terakhir ${stats.lastSeconds} dtk` : ""}${stats.lastError ? `\nGalat terakhir: ${stats.lastError}` : ""}`
     ].join("\n");
   }
@@ -898,11 +947,18 @@ export function createVideoGen({ imageGen, speaker = null, writeScript = null, e
     const res = { kind: "prompt", prompt: d?.prompt ?? "", seconds: d?.seconds ?? 0 };
     // "/video animasi kancil dan buaya" / "/video kartun ..." -> animasi karakter
     const lead = /^(?:animasi|animation|kartun|cartoon|karakter)\b[:,]?\s*(.*)$/is.exec(a);
+    const style = detectStoryStyle(a); // "stopmotion" = gaya potongan kertas, ±8 gambar/dtk
     if (lead) {
-      const d2 = detectVideoRequest(`/video ${lead[1]}`);
-      return { kind: "prompt", prompt: d2?.prompt ?? "", seconds: d2?.seconds ?? 0, mode: "karakter" };
+      const d2 = detectVideoRequest(`/video ${style ? stripStoryStyle(lead[1]) : lead[1]}`);
+      return { kind: "prompt", prompt: d2?.prompt ?? "", seconds: d2?.seconds ?? 0, mode: "karakter", ...(style ? { style } : {}) };
     }
-    if (detectStoryMode(a)) res.mode = "karakter";
+    if (detectStoryMode(a)) {
+      res.mode = "karakter";
+      if (style) {
+        res.style = style;
+        res.prompt = stripStoryStyle(res.prompt);
+      }
+    }
     return res;
   }
 
@@ -913,9 +969,12 @@ export function createVideoGen({ imageGen, speaker = null, writeScript = null, e
   /** Seperti detectVideoRequest, tetapi menandai mode "karakter" bila kalimatnya meminta animasi/kartun. */
   function detect(text) {
     const r = detectVideoRequest(text);
-    if (r && detectStoryMode(text)) return { ...r, mode: "karakter" };
+    if (r && detectStoryMode(text)) {
+      const style = detectStoryStyle(text);
+      return { ...r, mode: "karakter", ...(style ? { style, prompt: stripStoryStyle(r.prompt) } : {}) };
+    }
     return r;
   }
 
-  return { available, groupEnabled, storyAvailable, storyGroupEnabled, morphAvailable, detectMorph: detectMorphRequest, makeMorph, photoAvailable, photoGroupEnabled, load, setGroup, reserve, make, makeFromPhoto, detectPhoto: detectPhotoVideoRequest, describe, parseCommand, reconfigure, detect, checkFfmpeg, stats: () => ({ ...stats }) };
+  return { available, groupEnabled, storyAvailable, storyGroupEnabled, morphAvailable, detectMorph: detectMorphRequest, makeMorph, makeStopMotion, stopLimits: () => ({ maxPhotos: config.stopMaxPhotos, maxFps: config.stopMaxFps }), photoAvailable, photoGroupEnabled, load, setGroup, reserve, make, makeFromPhoto, detectPhoto: detectPhotoVideoRequest, describe, parseCommand, reconfigure, detect, checkFfmpeg, stats: () => ({ ...stats }) };
 }

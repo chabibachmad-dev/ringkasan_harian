@@ -54,7 +54,9 @@ export const ENV_KEYS = {
   VIDEO_MAX_SCENES: { secret: false, hint: "adegan maksimum bila diminta durasi panjang (3-8)", validate: intIn(3, 8) },
   VIDEO_MORPH_OWNER_DAILY: { secret: false, hint: "jatah morf foto pemilik per hari (tiap morf = beberapa edit foto AI; 0 = tanpa batas)", validate: intIn(0, 100) },
   VIDEO_MORPH_STEPS: { secret: false, hint: "jumlah tahap edit bawaan satu morf (2-8)", validate: intIn(2, 8) },
-  VIDEO_MORPH_SECONDS: { secret: false, hint: "durasi bawaan morf (detik, 4-14)", validate: intIn(4, 14) }
+  VIDEO_MORPH_SECONDS: { secret: false, hint: "durasi bawaan morf (detik, 4-14)", validate: intIn(4, 14) },
+  VIDEO_STOP_MAX_PHOTOS: { secret: false, hint: "foto maksimum per sesi /stopmotion (6-120)", validate: intIn(6, 120) },
+  VIDEO_STOP_MAX_FPS: { secret: false, hint: "gambar per detik maksimum stop motion (4-24)", validate: intIn(4, 24) }
 };
 
 export const maskValue = (value, secret) => {

@@ -212,6 +212,118 @@ export function createTelegram({ config, deps = {}, fetchImpl = globalThis.fetch
   const lastKeyboard = new Map(); // chatId -> message_id pesan yang masih membawa tombol
   const voiceModes = new Map(); // chatId -> "auto" | "on" | "off" (balasan suara untuk obrolan biasa)
   const tutorSessions = new Map(); // chatId -> { topic, turns:[{role,body}], userTurns, lastAt }
+
+  // ---- STOP MOTION: sesi kumpul foto berurutan (/stopmotion ... /stopmotion jadi) ----
+  const STOP_IDLE_MS = 30 * 60_000;
+  const stopSessions = new Map(); // chatId -> { photos:[{fileId}], preset, last, busy, ackTimer, fullTold }
+  const stopLimits = () => ({ maxPhotos: 60, maxFps: 15, ...(deps.video?.stopLimits?.() || {}) });
+  function stopSession(chatId) {
+    const s = stopSessions.get(chatId);
+    if (!s) return null;
+    if (!s.busy && Date.now() - s.last > STOP_IDLE_MS) {
+      clearTimeout(s.ackTimer);
+      stopSessions.delete(chatId);
+      return null;
+    }
+    return s;
+  }
+  const stopIntro = () => {
+    const lim = stopLimits();
+    return `🧱 Sesi stop motion dimulai. Kirim foto-fotonya BERURUTAN (satu per satu atau beberapa sekaligus; boleh dikirim sebagai "file" supaya tidak dikompres). Minimal 3, maksimal ${lim.maxPhotos}.\n\nTips: HP/kamera diam (tripod atau disandarkan), cahaya sama, geser bendanya sedikit demi sedikit tiap jepretan.\n\nKalau sudah: /stopmotion jadi\nOpsi (boleh ditulis di sana): 10 fps, bolak-balik, tulisan "Judul", potret / persegi, tanpa deflicker\nHapus foto terakhir: /stopmotion hapus · Batal: /stopmotion batal · Cek: /stopmotion status`;
+  };
+  const stopStatusText = (s) => `🧱 Sesi stop motion: ${s.photos.length} foto terkumpul${s.preset ? ` · opsi: ${s.preset}` : ""}. ${s.photos.length < 3 ? `Butuh minimal 3 foto.` : "Kirim lagi atau /stopmotion jadi."}`;
+  /** Dipanggil SINKRON (tanpa await) supaya urutan foto = urutan kiriman. */
+  function addStopPhoto(chatId, fileId) {
+    const s = stopSession(chatId);
+    if (!s) return false;
+    const lim = stopLimits();
+    s.last = Date.now();
+    if (s.photos.length >= lim.maxPhotos) {
+      if (!s.fullTold) {
+        s.fullTold = true;
+        send(chatId, `🧱 Sudah ${lim.maxPhotos} foto (batas). Foto berikutnya diabaikan — kirim /stopmotion jadi.`).catch(() => {});
+      }
+      return true;
+    }
+    s.photos.push({ fileId });
+    clearTimeout(s.ackTimer);
+    s.ackTimer = setTimeout(() => {
+      send(chatId, `📸 ${s.photos.length} foto masuk. ${s.photos.length < 3 ? "Butuh minimal 3." : "Lanjut kirim, atau /stopmotion jadi."}`).catch(() => {});
+    }, Number(deps.video?.stopAckMs ?? 1200));
+    s.ackTimer.unref?.();
+    return true;
+  }
+  const isStopImageDoc = (m) => Boolean(m?.document && /^image\/(?:jpe?g|png|webp)/i.test(String(m.document.mime_type || "")));
+  const isStopPhoto = (m) => Boolean(m && stopSession(String(m.chat?.id)) && ((Array.isArray(m.photo) && m.photo.length) || isStopImageDoc(m)));
+
+  async function handleStopMotion(chatId, arg, reply) {
+    const vd = deps.video;
+    if (!vd?.makeStopMotion) return void (await reply("Stop motion tidak tersedia di versi bot ini."));
+    const a = String(arg ?? "").trim();
+    const m = /^(\S+)\s*([\s\S]*)$/.exec(a);
+    const word = m ? m[1].toLowerCase() : "";
+    const rest = m ? m[2].trim() : "";
+    const cur = stopSession(chatId);
+    if (/^(?:batal|cancel|buang|reset|keluar)$/.test(word)) {
+      if (!cur) return void (await reply("Tidak ada sesi stop motion yang berjalan."));
+      if (cur.busy) return void (await reply("🧱 Videonya sedang dirakit, tunggu sebentar ya."));
+      clearTimeout(cur.ackTimer);
+      stopSessions.delete(chatId);
+      return void (await reply(`🧱 Sesi stop motion dibatalkan (${cur.photos.length} foto dibuang).`));
+    }
+    if (/^(?:hapus|undo|mundur)$/.test(word)) {
+      if (!cur || !cur.photos.length) return void (await reply("Belum ada foto di sesi stop motion."));
+      cur.photos.pop();
+      cur.last = Date.now();
+      cur.fullTold = false;
+      return void (await reply(`🧱 Foto terakhir dihapus. ${stopStatusText(cur)}`));
+    }
+    if (/^(?:status|info|cek)$/.test(word)) return void (await reply(cur ? stopStatusText(cur) : "Belum ada sesi stop motion. Mulai dengan /stopmotion."));
+    if (/^(?:jadi|selesai|buat|render|proses|done|bikin)$/.test(word)) {
+      if (!cur) return void (await reply("Belum ada sesi stop motion. Mulai dengan /stopmotion, kirim fotonya, lalu /stopmotion jadi."));
+      if (cur.busy) return void (await reply("🧱 Videonya sedang dirakit, tunggu sebentar ya."));
+      if (cur.photos.length < 3) return void (await reply(`🧱 Baru ${cur.photos.length} foto; butuh minimal 3. Kirim lagi fotonya.`));
+      clearTimeout(cur.ackTimer);
+      cur.busy = true;
+      try {
+        await reply(`🧱 ${cur.photos.length} foto diterima, sedang dirakit jadi video — biasanya setengah sampai dua menit. Kukirim begitu selesai.`);
+        const buffers = [];
+        let failed = 0;
+        for (const p of cur.photos) {
+          try {
+            buffers.push(await withAction(chatId, "upload_video", () => downloadFile(p.fileId)));
+          } catch (e) {
+            failed += 1;
+            log.warn?.(`🧱 [StopMotion] foto gagal diunduh: ${e?.message || e}`);
+          }
+        }
+        if (buffers.length < 3) return void (await reply(`⚠️ Foto yang berhasil diunduh hanya ${buffers.length}. Sesi tetap tersimpan; coba /stopmotion jadi lagi.`));
+        const out = await withAction(chatId, "upload_video", () => vd.makeStopMotion(buffers, `${rest} ${cur.preset || ""}`.trim()));
+        if (out.error) return void (await reply(`⚠️ ${out.error}\nFoto di sesi tetap tersimpan; /stopmotion jadi untuk mencoba lagi atau /stopmotion batal.`));
+        const v = out.video;
+        stopSessions.delete(chatId);
+        await sendFiles(chatId, [{ data: v.buffer, name: "stopmotion.mp4", mime: "video/mp4", video: true, width: v.width, height: v.height }], `🧱 ${v.photos} foto · ${v.fps} gambar/dtk · ${Math.round(v.seconds * 10) / 10} dtk${v.skipped || failed ? ` · ${(v.skipped || 0) + failed} foto dilewati` : ""}`);
+      } finally {
+        cur.busy = false;
+        cur.last = Date.now();
+      }
+      return;
+    }
+    // "/stopmotion", "/stopmotion mulai", atau opsi saja ("/stopmotion 10 fps bolak-balik")
+    const fresh = /^(?:mulai|baru|start)$/.test(word);
+    const preset = fresh ? rest : a;
+    if (cur && !fresh) {
+      if (preset) cur.preset = preset;
+      cur.last = Date.now();
+      return void (await reply(stopStatusText(cur)));
+    }
+    if (cur) {
+      if (cur.busy) return void (await reply("🧱 Videonya sedang dirakit, tunggu sebentar ya."));
+      clearTimeout(cur.ackTimer);
+    }
+    stopSessions.set(chatId, { photos: [], preset, last: Date.now(), busy: false, ackTimer: null, fullTold: false });
+    await reply(stopIntro());
+  }
   const voiceNoteAt = new Map(); // jenis catatan -> kapan terakhir dikirim (supaya tidak berisik)
   let running = false;
   let stopped = false;
@@ -882,6 +994,7 @@ Suara tiap bot (Ayyubi/Wongsobot): /suara daftar • /suara coba <NamaSuara> [ga
       const ext = /jpe?g/i.test(out.image.mime) ? "jpg" : /webp/i.test(out.image.mime) ? "webp" : "png";
       return void (await sendFiles(chatId, [{ data: out.image.buffer, name: `gambar.${ext}`, mime: out.image.mime || "image/png", photo: true }], ""));
     }
+    if (name === "stopmotion" || name === "stop_motion") return handleStopMotion(chatId, arg, reply);
     if (name === "video" || name === "vidio" || name === "vid") {
       const vd = deps.video;
       if (!vd) return void (await reply("Pembuat video tidak tersedia di versi bot ini."));
@@ -897,8 +1010,8 @@ Suara tiap bot (Ayyubi/Wongsobot): /suara daftar • /suara coba <NamaSuara> [ga
       }
       if (!c.prompt) return void (await reply("Mau dibuatkan video tentang apa? Contoh: /video kancil dan buaya  atau  /video 30 detik tentang siklus air"));
       if (c.mode !== "karakter" && !vd.available()) return void (await reply("Video gambar biasa butuh pembuat gambar (isi CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN di /env). Animasi karakter tetap bisa tanpa itu: /video animasi <cerita>"));
-      await reply(c.mode === "karakter" ? "🎭 Sedang membuat animasi (naskah, latar, suara, menggambar tokoh bergerak) — biasanya 2–5 menit. Kukirim begitu selesai." : "🎬 Sedang membuat video (naskah, gambar, suara, rakit) — biasanya 1–3 menit. Kukirim begitu selesai.");
-      const out = await withAction(chatId, "upload_video", () => vd.make(c.prompt, { seconds: c.seconds, mode: c.mode }));
+      await reply(c.mode === "karakter" ? `🎭 Sedang membuat animasi${c.style === "stopmotion" ? " bergaya stop motion (potongan kertas)" : ""} (naskah, latar, suara, menggambar tokoh bergerak) — biasanya 2–5 menit. Kukirim begitu selesai.` : "🎬 Sedang membuat video (naskah, gambar, suara, rakit) — biasanya 1–3 menit. Kukirim begitu selesai.");
+      const out = await withAction(chatId, "upload_video", () => vd.make(c.prompt, { seconds: c.seconds, mode: c.mode, ...(c.style ? { style: c.style } : {}) }));
       if (out.error) return void (await reply(`⚠️ ${out.error}`));
       return void (await sendFiles(chatId, [{ data: out.video.buffer, name: "video.mp4", mime: "video/mp4", video: true }], ""));
     }
@@ -1148,6 +1261,12 @@ Suara tiap bot (Ayyubi/Wongsobot): /suara daftar • /suara coba <NamaSuara> [ga
       }
       return;
     }
+    // sesi /stopmotion aktif: foto (atau berkas gambar) = bingkai berikutnya. Sinkron supaya urutannya terjaga.
+    if (isStopPhoto(m)) {
+      const fileId = Array.isArray(m.photo) && m.photo.length ? m.photo.at(-1).file_id : m.document.file_id;
+      addStopPhoto(chatId, fileId);
+      return;
+    }
     if (m.voice || m.audio) return handleOwnerVoice(chatId, m.voice || m.audio);
     if (m.document && deps.ops?.handleDocument) return handleOwnerDocument(chatId, m.document);
     // FOTO HIDUP: foto + keterangan ("/video salju", "jadikan video dengan hujan") atau membalas foto dengan perintah itu
@@ -1182,10 +1301,11 @@ Suara tiap bot (Ayyubi/Wongsobot): /suara daftar • /suara coba <NamaSuara> [ga
   }
 
   const HANDLER_DEADLINE_MS = 10 * 60_000;
-  const FAST_COMMANDS = new Set(["dokumen", "dok", "doc", "status", "id", "help", "start", "ingat", "catatan", "lupa", "memori", "note", "penyedia", "provider", "skill", "skil", "lokal", "tanya", "pasar", "emas", "ihsg", "ingatkan", "remind", "pengingat", "reminder", "cadangan", "backup", "kesehatan", "sehat", "health", "urutan", "route", "rute", "nodin", "notadinas", "kas", "laporankas", "voice", "wa2", "nomor2", "grup", "group", "gambar", "image", "img", "video", "vidio", "vid", "metaai", "env"]);
+  const FAST_COMMANDS = new Set(["dokumen", "dok", "doc", "status", "id", "help", "start", "ingat", "catatan", "lupa", "memori", "note", "penyedia", "provider", "skill", "skil", "lokal", "tanya", "pasar", "emas", "ihsg", "ingatkan", "remind", "pengingat", "reminder", "cadangan", "backup", "kesehatan", "sehat", "health", "urutan", "route", "rute", "nodin", "notadinas", "kas", "laporankas", "voice", "wa2", "nomor2", "grup", "group", "gambar", "image", "img", "video", "vidio", "vid", "metaai", "env", "stopmotion", "stop_motion"]);
   function isFastUpdate(u) {
     const m = u?.message;
     if (!m) return false;
+    if (isStopPhoto(m)) return true; // hanya menambah ke daftar (tanpa await), jadi aman jalan langsung dan urutannya terjaga
     if (m.document && deps.ops?.handleDocument) return true;
     const c = typeof m.text === "string" ? /^\/([a-z_][a-z0-9_]*)/i.exec(m.text) : null;
     if (!c) return false;
@@ -1305,6 +1425,7 @@ Suara tiap bot (Ayyubi/Wongsobot): /suara daftar • /suara coba <NamaSuara> [ga
           { command: "grup", description: "Grup WhatsApp yang dijawab bot: lihat, tambah, hapus" },
           { command: "gambar", description: "Buat gambar dari deskripsi (Gemini); /gambar grup on|off" },
           { command: "video", description: "Buat video bernarasi dari deskripsi (gratis); /video grup on|off" },
+          { command: "stopmotion", description: "Foto-foto berurutan jadi video stop motion" },
           { command: "wa2", description: "Nomor WhatsApp kedua: status dan kode tautan" },
           { command: "kas", description: "Laporan kas bulanan (Saldo Rekening & Register Kas)" },
           { command: "nodin", description: "Konsep Nota Dinas LPJ Bendahara (PDF + Word)" },

@@ -3672,12 +3672,13 @@ async function handleVideoRequestWa(sock, jid, req, { kind = "owner", who = "", 
       out = await videoGen.make(req.prompt, kind, who, {
         seconds: req.seconds || 0,
         mode: story ? "karakter" : undefined,
+        style: story ? req.style || "" : "",
         onStage: (stage) => {
           if (announced || stage !== "images") return;
           announced = true;
           const mins = req.seconds > 45 ? "3–6 menit" : "2–4 menit";
           const text = story
-            ? `🎭 Oke, animasinya sedang dibuat (naskah → latar → suara → menggambar tokoh bergerak). Biasanya ${mins}; kukirim ke sini begitu selesai.`
+            ? `🎭 Oke, animasinya${req.style === "stopmotion" ? " (gaya stop motion potongan kertas)" : ""} sedang dibuat (naskah → latar → suara → menggambar tokoh bergerak). Biasanya ${mins}; kukirim ke sini begitu selesai.`
             : `🎬 Oke, videonya sedang dibuat (naskah → gambar → suara → rakit). Biasanya ${req.seconds > 45 ? "2–4 menit" : "1–3 menit"}; kukirim ke sini begitu selesai.`;
           send({ text })
             .then((s) => note(story ? "🎭 [BOT sedang membuat animasi permintaan ini]" : "🎬 [BOT sedang membuat video permintaan ini]", s))
@@ -5173,6 +5174,12 @@ const telegram = createTelegram({
       detectMorph: (text, opts) => videoGen.detectMorph(text, opts),
       makeMorph: async (buffer, text, opts = {}) => {
         const out = await videoGen.makeMorph(buffer, text, "owner", "", opts);
+        if (out.error) await tellOwnerVideoProblem(out.kind, out.error, out.detail);
+        return out;
+      },
+      stopLimits: () => videoGen.stopLimits(),
+      makeStopMotion: async (buffers, text, opts = {}) => {
+        const out = await videoGen.makeStopMotion(buffers, text, "owner", "", opts);
         if (out.error) await tellOwnerVideoProblem(out.kind, out.error, out.detail);
         return out;
       },

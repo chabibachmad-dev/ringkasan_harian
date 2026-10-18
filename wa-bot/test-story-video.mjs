@@ -7,7 +7,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import {
   W, H, FPS, GROUND, BASE_K, parseColor, normalizeKind, makeCharacter, normalizeAction, ACTIONS, actionPose, planCharacter, createPainter, drawCharacter,
-  encodePng, paintBackground, normalizeSetting, buildStoryPrompt, parseStoryScript, fallbackStory, sceneArgs, createSceneRenderer, detectStoryMode, writeBackground, CAM_ZOOM
+  encodePng, paintBackground, normalizeSetting, buildStoryPrompt, parseStoryScript, fallbackStory, sceneArgs, createSceneRenderer, detectStoryMode, writeBackground, CAM_ZOOM, STOP_STEP, detectStoryStyle, stripStoryStyle
 } from "./story-video.js";
 import { createVideoGen, readVideoConfig, storySentNote, VIDEO_TEXT } from "./video-gen.js";
 import { createTelegram } from "./telegram.js";
@@ -492,6 +492,40 @@ ok("Telegram: /video animasi -> mode karakter, video biasa tanpa gambar AI diber
   assert.match(idx, /ANIMASI KARTUN dengan tokoh manusia tanpa wajah/, "AI percakapan diberi tahu kemampuannya");
 }
 ok("index.js: grup & pemilik, tanda mode, catatan riwayat, pengetahuan AI percakapan");
+
+// --- gaya stop motion (potongan kertas)
+{
+  assert.equal(detectStoryStyle("animasi stop motion ayah ke taman"), "stopmotion");
+  assert.equal(detectStoryStyle("animasi stop-motion"), "stopmotion");
+  assert.equal(detectStoryStyle("paper cutout style"), "stopmotion");
+  assert.equal(detectStoryStyle("animasi potongan kertas"), "stopmotion");
+  assert.equal(detectStoryStyle("animasi ayah ke taman"), "");
+  assert.equal(detectStoryStyle(""), "");
+  assert.equal(stripStoryStyle("stop motion ayah dan anak ke taman"), "ayah dan anak ke taman");
+  assert.equal(stripStoryStyle("ayah ke taman, gaya potongan kertas"), "ayah ke taman");
+  assert.equal(detectStoryMode("buatkan stop motion kancil"), true, "kata stop motion cukup untuk mode karakter");
+  assert.equal(STOP_STEP, 3);
+  // penggambar: frame dalam satu kelompok STOP_STEP identik, antar-kelompok berbeda, jalannya tetap deterministik
+  const scene = { chars: [{ id: "a", x: 0.3, face: 1, acts: [{ act: "jalan", t0: 0, t1: 1 }] }] };
+  const cast = new Map([["a", makeCharacter({ id: "a", kind: "pria" })]]);
+  const mkr = (style) => createSceneRenderer(scene, cast, 2, { style });
+  const grab = (r, i) => { const b = new Uint8Array(W * H * 4); r.draw(i, b); return Buffer.from(b).toString("base64"); };
+  const rs = mkr("stopmotion");
+  const f0 = grab(rs, 0);
+  assert.equal(grab(rs, 1), f0);
+  assert.equal(grab(rs, STOP_STEP - 1), f0);
+  assert.notEqual(grab(rs, STOP_STEP), f0);
+  assert.equal(grab(mkr("stopmotion"), STOP_STEP), grab(rs, STOP_STEP), "tanpa acak liar: hasil sama untuk frame yang sama");
+  const smooth = mkr("");
+  assert.notEqual(grab(smooth, 0), grab(smooth, 1), "gaya halus berubah tiap frame");
+  // filter ffmpeg: tepi putih + bayangan + butiran + pembekuan frame hanya pada gaya stop motion
+  const a1 = sceneArgs({ bg: "bg.png", out: "o.mp4", dur: 2, style: "stopmotion" }).join(" ");
+  assert.match(a1, /alphaextract/);
+  assert.match(a1, /noise=alls=9/);
+  assert.match(a1, /fps=25\/3,fps=25/);
+  assert.ok(!/alphaextract|noise=/.test(sceneArgs({ bg: "bg.png", out: "o.mp4", dur: 2 }).join(" ")), "gaya halus tidak berubah");
+}
+ok("gaya stop motion: deteksi & pembuangan kata, bekukan tiap 3 frame, deterministik, filter tepi/bayangan/butiran hanya di gaya ini");
 
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log(`\n${n} kelompok tes animasi karakter lulus.`);

@@ -23,6 +23,7 @@ export const GROUND = Math.round(H * 0.765); // garis tapak kaki
 export const BASE_K = 380; // piksel per "satuan tinggi" orang dewasa
 export const CAM_ZOOM = 0.06; // gerak kamera: zoom 1.00 <-> 1.06 sepanjang adegan
 export const BLEND_SEC = 0.3; // peralihan antar aksi
+export const STOP_STEP = 3; // gaya stop motion: tiap gambar ditahan 3 frame (25/3 ≈ 8,3 gambar per detik)
 
 const clamp = (x, a, b) => (x < a ? a : x > b ? b : x);
 const smooth = (x) => {
@@ -839,13 +840,27 @@ export function fallbackStory(idea, n) {
 // ---------------------------------------------------------------- merender satu adegan
 const escPath = (p) => String(p).replace(/\\/g, "/").replace(/:/g, "\\:").replace(/'/g, "\\'");
 
-export function sceneArgs({ bg, out, dur, camFrom = 1, camTo = 1 + CAM_ZOOM, textFile = null, font = "" }) {
+export function sceneArgs({ bg, out, dur, camFrom = 1, camTo = 1 + CAM_ZOOM, textFile = null, font = "", style = "" }) {
   const N = Math.max(2, Math.round(dur * FPS));
   const z = `${camFrom.toFixed(4)}+${(camTo - camFrom).toFixed(4)}*on/${N}`;
+  const stop = style === "stopmotion";
   let chain =
-    `[0:v]scale=${W * 2}:${H * 2}:force_original_aspect_ratio=increase,crop=${W * 2}:${H * 2},zoompan=z='${z}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${N}:s=${W}x${H}:fps=${FPS},setsar=1[bg];` +
-    `[1:v]format=rgba,setsar=1[fg];` +
-    `[bg][fg]overlay=format=auto:shortest=1,format=yuv420p`;
+    `[0:v]scale=${W * 2}:${H * 2}:force_original_aspect_ratio=increase,crop=${W * 2}:${H * 2},zoompan=z='${z}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${N}:s=${W}x${H}:fps=${FPS},setsar=1[bg];`;
+  if (stop) {
+    // GAYA STOP MOTION / POTONGAN KERTAS: tokoh diberi tepi putih (potongan kertas) + bayangan jatuh, butiran kertas berubah
+    // hanya di frame yang "difoto" (8,3 gambar/dtk; tiap gambar ditahan 3 frame), latar ikut membeku di kecepatan yang sama.
+    const d = dur.toFixed(2);
+    chain +=
+      `[1:v]format=rgba,setsar=1,split=2[f0][f1];` +
+      `[f0]alphaextract,format=gray,boxblur=3:2,lut=y='if(gte(val,5),255,0)',split=2[m0][m1];` + // tepi putih ±5 px (tanpa filter dilate: tidak ada di semua build ffmpeg)
+      `color=c=white:s=${W}x${H}:r=${FPS}:d=${d},format=rgba[wh];[wh][m0]alphamerge[outline];` +
+      `[m1]boxblur=6:2,lut=y=val*0.45[sm];` +
+      `color=c=black:s=${W}x${H}:r=${FPS}:d=${d},format=rgba[bk];[bk][sm]alphamerge[shadow];` +
+      `[bg][shadow]overlay=x=7:y=9:format=auto[b1];[b1][outline]overlay=format=auto[b2];` +
+      `[b2][f1]overlay=format=auto:shortest=1,format=yuv420p,eq=contrast=1.05:saturation=1.06,noise=alls=9:allf=t,fps=${FPS}/${STOP_STEP},fps=${FPS}`;
+  } else {
+    chain += `[1:v]format=rgba,setsar=1[fg];[bg][fg]overlay=format=auto:shortest=1,format=yuv420p`;
+  }
   if (textFile) {
     chain += `,drawtext=${font ? `fontfile='${escPath(font)}':` : ""}textfile='${escPath(textFile)}':expansion=none:fontsize=32:fontcolor=white:box=1:boxcolor=black@0.6:boxborderw=14:line_spacing=8:x=(w-text_w)/2:y=h-text_h-34`;
   }
@@ -866,7 +881,10 @@ export function sceneArgs({ bg, out, dur, camFrom = 1, camTo = 1 + CAM_ZOOM, tex
  * Pemeran adegan -> fungsi menggambar frame ke-i. scene.chars = [{id,x,face,acts}], cast = daftar karakter jadi (makeCharacter).
  * Karakter diurutkan dari yang paling jauh di kiri supaya tumpang tindih konsisten.
  */
-export function createSceneRenderer(scene, castMap, dur, { camFrom = 1, camTo = 1 + CAM_ZOOM } = {}) {
+export function createSceneRenderer(scene, castMap, dur, { camFrom = 1, camTo = 1 + CAM_ZOOM, style = "" } = {}) {
+  const stop = style === "stopmotion";
+  let cacheJ = -1;
+  let cache = null;
   const N = Math.max(2, Math.round(dur * FPS));
   const actors = scene.chars
     .map((c) => {
@@ -878,6 +896,28 @@ export function createSceneRenderer(scene, castMap, dur, { camFrom = 1, camTo = 
     frames: N,
     actors,
     draw(i, buf) {
+      if (stop) {
+        // frame "difoto" tiap STOP_STEP frame; frame di antaranya hanya salinan (ffmpeg juga menahannya)
+        const j = Math.floor(i / STOP_STEP);
+        if (j === cacheJ && cache) return void buf.set(cache);
+        const ii = j * STOP_STEP;
+        buf.fill(0);
+        const z = camFrom + ((camTo - camFrom) * ii) / N;
+        const p = createPainter(buf, { z, cx: W / 2, cy: H / 2 });
+        const t = ii / FPS;
+        actors.forEach((a, k) => {
+          const r = rng(j * 131 + k * 17 + 7);
+          // goyangan tangan: posisi dan sendi sedikit berbeda tiap gambar
+          const pose = a.plan.poseAt(t).slice();
+          pose[0] += (r() - 0.5) * 0.024;
+          pose[1] += (r() - 0.5) * 0.024;
+          for (const idx of [8, 9, 10, 11]) pose[idx] += (r() - 0.5) * 0.08;
+          drawCharacter(p, a.ch, { x: a.plan.xAt(t) + (r() - 0.5) * 3.2, dir: a.plan.dirAt(t), pose });
+        });
+        cacheJ = j;
+        cache = Uint8Array.from(buf);
+        return;
+      }
       buf.fill(0);
       const z = camFrom + ((camTo - camFrom) * i) / N;
       const p = createPainter(buf, { z, cx: W / 2, cy: H / 2 });
@@ -891,10 +931,10 @@ export function createSceneRenderer(scene, castMap, dur, { camFrom = 1, camTo = 
  * Render satu adegan ke klip MP4 (tanpa suara). bgFile = PNG/JPG latar. -> { code, stderr }
  * Bila drawtext (subtitle) gagal, diulang tanpa subtitle.
  */
-export async function renderSceneClip({ scene, castMap, bgFile, out, dur, textFile = null, font = "", camFrom, camTo, ffmpeg = "ffmpeg", spawnImpl = spawn, timeoutMs = 240_000, log = console }) {
-  const rend = createSceneRenderer(scene, castMap, dur, { camFrom, camTo });
+export async function renderSceneClip({ scene, castMap, bgFile, out, dur, textFile = null, font = "", camFrom, camTo, style = "", ffmpeg = "ffmpeg", spawnImpl = spawn, timeoutMs = 240_000, log = console }) {
+  const rend = createSceneRenderer(scene, castMap, dur, { camFrom, camTo, style });
   const run = (tf) =>
-    runProc(ffmpeg, sceneArgs({ bg: bgFile, out, dur, camFrom, camTo, textFile: tf, font }), {
+    runProc(ffmpeg, sceneArgs({ bg: bgFile, out, dur, camFrom, camTo, textFile: tf, font, style }), {
       timeoutMs,
       spawnImpl,
       frames: rend.frames,
@@ -922,7 +962,20 @@ export function writeBackground(dir, name, aiImage, setting, seed) {
   return f;
 }
 
-/** Kalimat meminta "animasi"/"kartun" -> animasi karakter; selain itu video gambar biasa. */
+const STOP_WORDS = /\b(?:gaya\s+)?(?:stop[\s-]?motion|stopmotion|stopmo|paper[\s-]?cut(?:out)?|potongan\s+kertas|gaya\s+kertas)\b/gi;
+
+/** Kalimat meminta "animasi"/"kartun"/"stop motion" -> animasi karakter; selain itu video gambar biasa. */
 export function detectStoryMode(text) {
-  return /\b(?:animasi|animation|animated|kartun|cartoon)\b/i.test(String(text ?? ""));
+  const t = String(text ?? "");
+  return /\b(?:animasi|animation|animated|kartun|cartoon)\b/i.test(t) || detectStoryStyle(t) === "stopmotion";
+}
+
+/** Gaya animasi yang diminta: "stopmotion" (potongan kertas, ±8 gambar/dtk) atau "" (halus, bawaan). */
+export function detectStoryStyle(text) {
+  return /\b(?:stop[\s-]?motion|stopmotion|stopmo|paper[\s-]?cut(?:out)?|potongan\s+kertas|gaya\s+kertas)\b/i.test(String(text ?? "")) ? "stopmotion" : "";
+}
+
+/** Buang kata gaya dari kalimat supaya tidak ikut jadi deskripsi cerita. */
+export function stripStoryStyle(text) {
+  return String(text ?? "").replace(STOP_WORDS, " ").replace(/\s+/g, " ").replace(/^[\s:,.-]+|[\s:,.-]+$/g, "").trim();
 }
