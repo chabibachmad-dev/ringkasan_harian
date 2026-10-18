@@ -5152,6 +5152,22 @@ const telegram = createTelegram({
       describe: () => imageGen.describe(),
       parseCommand: (arg) => imageGen.parseCommand(arg),
       setGroup: (v) => imageGen.setGroup(v),
+      detectEdit: (text, opts) => imageGen.detectEdit(text, opts),
+      canEdit: () => imageGen.canEdit(),
+      // EDIT FOTO dari Telegram: foto (Buffer) + instruksi -> { image } atau { error }
+      editPhoto: async (buffer, prompt) => {
+        let prepared;
+        try {
+          prepared = await prepareEditInput(buffer);
+        } catch (e) {
+          const kind = e?.kind === "noffmpeg" ? "noffmpeg" : "badimage";
+          await tellOwnerImageProblem(kind, IMAGE_KIND_TEXT[kind], e instanceof Error ? e.message : String(e));
+          return { error: IMAGE_KIND_TEXT[kind], kind };
+        }
+        const out = await imageGen.makeEdit(prompt, prepared, "owner");
+        if (out.error) await tellOwnerImageProblem(out.kind, out.error, out.detail);
+        return out;
+      },
       make: async (prompt) => {
         const out = await imageGen.make(prompt, "owner");
         if (out.error) await tellOwnerImageProblem(out.kind, out.error, out.detail);

@@ -715,6 +715,74 @@ ok("AI percakapan: tahu bisa membuat gambar, catatan riwayat jelas, kutipan gamb
 }
 ok("edit foto: perintah dikenali ketat, foto diperkecil (ffmpeg), multipart ke FLUX.2 klein, jatah, rotasi akun, moderasi, pemantauan terpisah");
 
+// --- Telegram: edit foto (foto + keterangan / /edit / balas foto)
+{
+  const calls = [];
+  const fakeFetch = async (url, init) => {
+    const method = String(url).split("/").pop();
+    const form = init?.body instanceof FormData;
+    calls.push({ method, form, body: init?.body && !form ? JSON.parse(init.body) : {}, fd: form ? init.body : null });
+    if (method === "getFile") return { status: 200, json: async () => ({ ok: true, result: { file_path: "photos/f.jpg" } }) };
+    if (/\/file\/bot/.test(String(url))) return { ok: true, status: 200, arrayBuffer: async () => new Uint8Array(300).buffer };
+    return { status: 200, json: async () => ({ ok: true, result: { message_id: 1 } }) };
+  };
+  const edits = [];
+  let canEdit = true;
+  const g = createImageGen({ state: mem(), config: readImageConfig({}), fetchImpl: async () => res(200, {}), log: silent });
+  const image = {
+    available: () => true,
+    describe: () => "x",
+    parseCommand: (a) => g.parseCommand(a),
+    setGroup: async () => ({ on: true, saved: true }),
+    make: async () => ({ error: "tidak dipakai" }),
+    detectEdit: (t, o) => g.detectEdit(t, o),
+    canEdit: () => canEdit,
+    editPhoto: async (buf, prompt) => {
+      edits.push({ size: buf.length, prompt });
+      return /gagal/.test(prompt) ? { error: "Jatah gambar pemilik hari ini habis." } : { image: { buffer: Buffer.from("png"), mime: "image/png" } };
+    }
+  };
+  const tcfg = { token: "T", enabled: true, ownerIds: ["111"], mirror: true, historyLimit: 4, pollTimeoutSec: 1, speakText: true };
+  const chats = [];
+  const tg = createTelegram({ config: tcfg, deps: { chat: async (h, t) => (chats.push(t), "ok"), image }, fetchImpl: fakeFetch, log: silent });
+  let id = 0;
+  const upd = async (message) => {
+    const before = calls.length;
+    await tg.handleUpdate({ update_id: ++id, message: { chat: { id: 111, type: "private" }, ...message } });
+    return calls.slice(before);
+  };
+  const texts = (cs) => cs.filter((c) => c.method === "sendMessage").map((c) => c.body.text).join("\n");
+  const ph = [{ file_id: "kecil" }, { file_id: "besar" }];
+  const r1 = await upd({ photo: ph, caption: "ubah jadi hitam putih" });
+  assert.deepEqual(edits[0], { size: 300, prompt: "ubah jadi hitam putih" });
+  assert.ok(calls.some((c) => c.method === "getFile" && c.body.file_id === "besar"), "foto terbesar yang diunduh");
+  assert.ok(r1.some((c) => c.method === "sendPhoto"), "hasil dikirim sebagai foto");
+  await upd({ photo: ph, caption: "/edit tambahkan salju di atap" });
+  assert.equal(edits[1].prompt, "tambahkan salju di atap");
+  await upd({ text: "hapus orang di belakang", reply_to_message: { photo: ph } });
+  assert.match(edits[2].prompt, /hapus orang di belakang/);
+  await upd({ text: "/ubah jadi gaya lukisan", reply_to_message: { photo: ph } });
+  assert.equal(edits[3].prompt, "jadi gaya lukisan");
+  assert.match(texts(await upd({ photo: ph, caption: "/edit" })), /Mau diedit jadi apa/);
+  assert.match(texts(await upd({ text: "/edit jadi hitam putih" })), /butuh FOTO/);
+  assert.equal(edits.length, 4);
+  const bad = await upd({ photo: ph, caption: "ubah gagal" });
+  assert.match(texts(bad), /Jatah gambar pemilik/);
+  assert.ok(!bad.some((c) => c.method === "sendPhoto"));
+  // foto tanpa keterangan / keterangan biasa tidak diedit; teks biasa tetap diobrolkan
+  const n0 = edits.length;
+  await upd({ photo: ph, caption: "foto liburan kemarin" });
+  await upd({ photo: ph });
+  assert.equal(edits.length, n0);
+  await upd({ text: "ubah jadi apa ya enaknya" });
+  assert.equal(edits.length, n0, "tanpa foto, kalimat biasa bukan perintah edit");
+  assert.ok(chats.some((t) => /ubah jadi apa ya/.test(t)));
+  canEdit = false;
+  assert.match(texts(await upd({ photo: ph, caption: "ubah jadi hitam putih" })), /butuh pembuat gambar Cloudflare/);
+  assert.equal(edits.length, n0);
+}
+ok("Telegram edit foto: foto+keterangan, /edit, balas foto, perintah tanpa foto/instruksi, galat, bukan perintah diabaikan, tanpa Cloudflare");
+
 // --- pemasangan edit foto di index.js (pemeriksaan teks sumber)
 {
   const idx = fs.readFileSync(new URL("./index.js", import.meta.url), "utf8");
@@ -733,6 +801,7 @@ ok("edit foto: perintah dikenali ketat, foto diperkecil (ffmpeg), multipart ke F
   const { imageSentNote, quotedImageNote } = await import("./image-gen.js");
   assert.match(quotedImageNote(imageSentNote("ubah jadi hitam putih", { edit: true })), /^\[GAMBAR hasil EDIT foto oleh bot ini, instruksinya: "ubah jadi hitam putih"\]$/);
   assert.match(idx, /Foto bisa diedit/, "AI percakapan tahu fitur edit");
+  assert.match(idx, /editPhoto: async \(buffer, prompt\) =>[\s\S]{0,700}imageGen\.makeEdit\(prompt, prepared, "owner"\)/, "Telegram: edit foto memakai jatah pemilik");
 }
 ok("index.js: foto di grup hanya diproses bila perintah edit, setelah izin, sebelum AI; catatan riwayat edit dikenali");
 

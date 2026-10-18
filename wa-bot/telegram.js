@@ -898,6 +898,23 @@ Suara tiap bot (Ayyubi/Wongsobot): /suara daftar • /suara coba <NamaSuara> [ga
     await sendFiles(chatId, [{ data: v.buffer, name: "morf.mp4", mime: "video/mp4", video: true, width: v.width, height: v.height }], `🧬 ${v.frames} gambar kunci${v.fallback ? " (rencana cadangan, AI teks tidak menjawab)" : ""}${v.smooth ? ", interpolasi gerak" : ""}`);
   }
 
+  /** Foto Telegram + instruksi ("ubah jadi hitam putih", "/edit tambah salju") -> foto hasil edit (Cloudflare FLUX, gratis). */
+  async function handleOwnerPhotoEdit(chatId, photo, prompt) {
+    const im = deps.image;
+    if (!im?.editPhoto) return void (await send(chatId, "Edit foto tidak tersedia di versi bot ini."));
+    if (im.canEdit && !im.canEdit()) return void (await send(chatId, "Edit foto butuh pembuat gambar Cloudflare: isi CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN (gratis) lewat /env, dan jangan mematikan Cloudflare di IMAGE_PROVIDERS."));
+    let buffer;
+    try {
+      buffer = await withAction(chatId, "upload_photo", () => downloadFile(photo.file_id));
+    } catch (e) {
+      return void (await send(chatId, `⚠️ Fotonya gagal diunduh: ${String(e?.message || e).slice(0, 160)}`).catch(() => {}));
+    }
+    const out = await withAction(chatId, "upload_photo", () => im.editPhoto(buffer, prompt));
+    if (out.error) return void (await send(chatId, `⚠️ ${out.error}`).catch(() => {}));
+    const ext = /jpe?g/i.test(out.image.mime) ? "jpg" : /webp/i.test(out.image.mime) ? "webp" : "png";
+    await sendFiles(chatId, [{ data: out.image.buffer, name: `edit.${ext}`, mime: out.image.mime || "image/png", photo: true }], "");
+  }
+
   async function handleOwnerVoice(chatId, voice) {
     if (!deps.transcribe) return void (await send(chatId, "Pesan suara belum aktif: isi GROQ_API_KEYS (atau GEMINI_API_KEYS) di .env bot lalu restart."));
     if (Number(voice.duration) > config.voiceMaxSeconds) return void (await send(chatId, `Pesan suaranya terlalu panjang (${voice.duration} dtk). Maksimal ${config.voiceMaxSeconds} detik; pecah jadi beberapa pesan.`));
@@ -1283,6 +1300,20 @@ Suara tiap bot (Ayyubi/Wongsobot): /suara daftar • /suara coba <NamaSuara> [ga
         if (need?.needsImage) return void (await send(chatId, "Fotonya belum ada. Kirim foto dengan keterangan, mis. \"jadikan video dengan salju turun\", atau balas (reply) foto yang mau dihidupkan dengan: jadikan video.").catch(() => {}));
       }
     }
+    // EDIT FOTO: foto + keterangan ("ubah jadi hitam putih" atau "/edit tambah salju"), atau balas foto dengan instruksi itu
+    if (deps.image?.editPhoto) {
+      const own = Array.isArray(m.photo) && m.photo.length ? m.photo : null;
+      const replied = !own && Array.isArray(m.reply_to_message?.photo) && m.reply_to_message.photo.length ? m.reply_to_message.photo : null;
+      const raw = (own ? String(m.caption ?? "") : typeof m.text === "string" ? m.text : "").trim();
+      const slash = /^\/(?:edit|ubah)(?:@\w+)?(?:\s+([\s\S]*))?$/i.exec(raw);
+      if (own || replied) {
+        const prompt = slash ? String(slash[1] || "").trim() : deps.image.detectEdit?.(raw, { hasImage: true })?.prompt;
+        if (slash && !prompt) return void (await send(chatId, "Mau diedit jadi apa? Contoh: /edit ubah jadi hitam putih  atau  /edit tambahkan salju").catch(() => {}));
+        if (prompt) return handleOwnerPhotoEdit(chatId, (own || replied).at(-1), prompt);
+      } else if (slash) {
+        return void (await send(chatId, "Edit foto butuh FOTO: kirim foto dengan keterangan \"/edit ubah jadi hitam putih\", atau balas (reply) foto yang mau diedit dengan perintah itu.").catch(() => {}));
+      }
+    }
     if (typeof m.text !== "string") {
       await send(chatId, "Bot membaca pesan teks dan pesan suara (tahan tombol mikrofon).").catch(() => {});
       return;
@@ -1301,7 +1332,7 @@ Suara tiap bot (Ayyubi/Wongsobot): /suara daftar • /suara coba <NamaSuara> [ga
   }
 
   const HANDLER_DEADLINE_MS = 10 * 60_000;
-  const FAST_COMMANDS = new Set(["dokumen", "dok", "doc", "status", "id", "help", "start", "ingat", "catatan", "lupa", "memori", "note", "penyedia", "provider", "skill", "skil", "lokal", "tanya", "pasar", "emas", "ihsg", "ingatkan", "remind", "pengingat", "reminder", "cadangan", "backup", "kesehatan", "sehat", "health", "urutan", "route", "rute", "nodin", "notadinas", "kas", "laporankas", "voice", "wa2", "nomor2", "grup", "group", "gambar", "image", "img", "video", "vidio", "vid", "metaai", "env", "stopmotion", "stop_motion"]);
+  const FAST_COMMANDS = new Set(["dokumen", "dok", "doc", "status", "id", "help", "start", "ingat", "catatan", "lupa", "memori", "note", "penyedia", "provider", "skill", "skil", "lokal", "tanya", "pasar", "emas", "ihsg", "ingatkan", "remind", "pengingat", "reminder", "cadangan", "backup", "kesehatan", "sehat", "health", "urutan", "route", "rute", "nodin", "notadinas", "kas", "laporankas", "voice", "wa2", "nomor2", "grup", "group", "gambar", "image", "img", "video", "vidio", "vid", "metaai", "env", "stopmotion", "stop_motion", "edit", "ubah"]);
   function isFastUpdate(u) {
     const m = u?.message;
     if (!m) return false;
