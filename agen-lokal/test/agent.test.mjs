@@ -139,6 +139,15 @@ const cfg = readConfig({ TELEGRAM_BOT_TOKEN: "T", TELEGRAM_OWNER_IDS: "111", AGE
   assert.match(await tl.get("cari_isi").run({ kata: "TOKEN_SANGAT" }), /Tidak ada yang cocok/);
   assert.ok(!/\.env(\.production)?$/m.test(await tl.get("cari_file").run({ nama: ".env" })), "berkas rahasia tidak muncul di pencarian nama")
   assert.ok(readConfig({ AGENT_ROOTS: "/", TELEGRAM_BOT_TOKEN: "t" }).problems.some((x) => /akar disk/.test(x)));
+  // nama saja (tanpa alamat): cari di folder kerja dulu, lalu di folder izin lain; berkas baru tetap di folder kerja
+  fs.writeFileSync(path.join(root, "hanya-di-akar.txt"), "x");
+  const kerja = path.join(root, "kerja");
+  assert.equal(resolveInRoots("hanya-di-akar.txt", { roots: cfg.roots, workdir: kerja }), path.join(root, "hanya-di-akar.txt"));
+  assert.equal(resolveInRoots("baru-sekali.txt", { roots: cfg.roots, workdir: kerja }), path.join(kerja, "baru-sekali.txt"));
+  fs.writeFileSync(path.join(kerja, "dobel.txt"), "x");
+  fs.writeFileSync(path.join(root, "dobel.txt"), "x");
+  assert.equal(resolveInRoots("dobel.txt", { roots: cfg.roots, workdir: kerja }), path.join(kerja, "dobel.txt"), "folder kerja diutamakan");
+  assert.throws(() => resolveInRoots("../../luar/rahasia.txt", { roots: cfg.roots, workdir: kerja }), SafetyError);
   // "~" = folder rumah
   assert.equal(expandHome("~", "/home/aku"), "/home/aku");
   assert.equal(expandHome("~/dokumen", "/home/aku"), path.join("/home/aku", "dokumen"));
@@ -343,6 +352,23 @@ ok("alat: baca/cari/web, tulis/tambah/pindah/salin/buat/hapus-ke-_sampah, perint
   await assert.rejects(() => createOllama({ url: "http://x", model: "m", timeoutMs: 20, fetchImpl: (u, init) => new Promise((_, rej) => init.signal.addEventListener("abort", () => rej(Object.assign(new Error("a"), { name: "AbortError" })))) }).chat([]), (e) => e.kind === "timeout");
   await assert.rejects(() => mk(() => res(500, "boom")).chat([]), (e) => e.kind === "http");
   assert.deepEqual(await mk(() => res(200, { models: [{ name: "qwen2.5:7b" }, { name: "llama3.1:8b" }] })).listModels(), ["qwen2.5:7b", "llama3.1:8b"]);
+}
+{
+  // thread, batas jawaban, keep_alive angka
+  const seen = [];
+  const o = createOllama({ url: "http://x", model: "m", numCtx: 4096, numThread: 6, maxTokens: 500, keepAlive: "-1", fetchImpl: async (u, init) => (seen.push(JSON.parse(init.body)), { status: 200, ok: true, text: async () => JSON.stringify({ message: { role: "assistant", content: "ok" } }) }) });
+  await o.chat([{ role: "user", content: "x" }]);
+  assert.equal(seen[0].options.num_thread, 6);
+  assert.equal(seen[0].options.num_predict, 500);
+  assert.equal(seen[0].keep_alive, -1);
+  const o2 = createOllama({ url: "http://x", model: "m", keepAlive: "4h", fetchImpl: async (u, init) => (seen.push(JSON.parse(init.body)), { status: 200, ok: true, text: async () => JSON.stringify({ message: { role: "assistant", content: "ok" } }) }) });
+  await o2.chat([{ role: "user", content: "x" }]);
+  assert.equal(seen[1].keep_alive, "4h");
+  assert.ok(!("num_thread" in seen[1].options) && !("num_predict" in seen[1].options), "bawaan: biarkan Ollama memilih");
+  const c = readConfig({ OLLAMA_NUM_THREAD: "6", OLLAMA_MAX_TOKENS: "600", TELEGRAM_BOT_TOKEN: "t", AGENT_ROOTS: path.join(os.tmpdir()) });
+  assert.equal(c.numThread, 6);
+  assert.equal(c.maxTokens, 600);
+  assert.equal(readConfig({}).numThread, 0);
 }
 ok("klien Ollama: body (num_ctx, keep_alive, tools), ganti model, galat: belum diunduh/mati/timeout/http");
 
@@ -599,6 +625,95 @@ ok("agent: loop alat, panggilan alat berupa teks, riwayat ringkas, persetujuan d
   const doc = calls.slice(b).find((c) => c.method === "sendDocument");
   assert.ok(doc && doc.form.get("document").size > 0 && doc.form.get("chat_id") === "111");
 
+  // kirim -> edit di tempat lain -> kirim balik -> ganti berkas asli (dengan cadangan)
+  {
+    const asli = path.join(cfg.workdir, "laporan-september.txt");
+    const sentMap = JSON.parse(fs.readFileSync(path.join(cfg.workdir, "_kirim.json"), "utf8"));
+    assert.equal(sentMap["laporan-september.txt"].path, asli, "pengiriman dicatat");
+    const tR = mkBot(["111"], []);
+    const doc = (name, caption) => msg(undefined, { text: undefined, document: { file_id: "fid1", file_name: name, file_size: 10 }, ...(caption ? { caption } : {}) });
+    const approvalOf = (from) => calls.slice(from).find((c) => c.method === "sendMessage" && /Minta persetujuan/.test(c.body.text || ""));
+    const tap = (a, yes, id) => tR.bot.handleUpdate({ update_id: id, callback_query: { id: `cqR${id}`, data: a.body.reply_markup.inline_keyboard[0][yes ? 0 : 1].callback_data, from: { id: 111 }, message: { chat: { id: 111 }, message_id: 9 } } });
+    const sebelum = fs.readFileSync(asli, "utf8");
+
+    // 1) nama sama -> minta persetujuan -> Izinkan -> terganti, lama dicadangkan
+    files.set("fid1", Buffer.from("VERSI EDITAN 1"));
+    b = calls.length;
+    const pr = tR.bot.handleUpdate(doc("laporan-september.txt"));
+    await tick(60);
+    const a1 = approvalOf(b);
+    assert.ok(a1, "minta persetujuan sebelum mengganti");
+    assert.match(a1.body.text, /laporan-september\.txt[\s\S]*dicadangkan dulu ke _sampah/);
+    assert.equal(fs.readFileSync(asli, "utf8"), sebelum, "belum berubah sebelum disetujui");
+    await tap(a1, true, 20);
+    await pr;
+    assert.equal(fs.readFileSync(asli, "utf8"), "VERSI EDITAN 1");
+    assert.match(texts(b), /Sudah diganti[\s\S]*Cadangan berkas lama/);
+    const cad = fs.readdirSync(path.join(cfg.workdir, "_sampah")).filter((f) => f.endsWith("-laporan-september.txt"));
+    assert.equal(cad.length, 1);
+    assert.equal(fs.readFileSync(path.join(cfg.workdir, "_sampah", cad[0]), "utf8"), sebelum, "isi lama utuh di cadangan");
+    assert.ok(!fs.readdirSync(cfg.workdir).some((f) => f.endsWith(".tmp")), "tidak ada sisa berkas sementara");
+
+    // 2) Tolak -> tidak berubah
+    files.set("fid1", Buffer.from("VERSI EDITAN 2"));
+    b = calls.length;
+    const pr2 = tR.bot.handleUpdate(doc("laporan-september.txt"));
+    await tick(60);
+    await tap(approvalOf(b), false, 21);
+    await pr2;
+    assert.equal(fs.readFileSync(asli, "utf8"), "VERSI EDITAN 1");
+    assert.match(texts(b), /Ditolak\. Tidak ada yang diubah/);
+
+    // 3) nama beda tetapi ada keterangan "kembalikan <nama asli>"
+    files.set("fid1", Buffer.from("VERSI EDITAN 3"));
+    b = calls.length;
+    const pr3 = tR.bot.handleUpdate(doc("hasil-edit.txt", "kembalikan laporan-september.txt"));
+    await tick(60);
+    const a3 = approvalOf(b);
+    assert.ok(a3);
+    assert.match(a3.body.text, /hasil-edit\.txt[\s\S]*laporan-september\.txt/);
+    assert.match(a3.body.text, /BERUBAH sejak dikirim/, "berkas asli berubah sejak dikirim -> peringatan");
+    await tap(a3, true, 22);
+    await pr3;
+    assert.equal(fs.readFileSync(asli, "utf8"), "VERSI EDITAN 3");
+
+    // 4) jenis berkas beda -> ditolak tanpa persetujuan
+    b = calls.length;
+    await tR.bot.handleUpdate(doc("hasil.xlsx", "kembalikan laporan-september.txt"));
+    assert.match(texts(b), /Jenis berkas berbeda/);
+    assert.equal(approvalOf(b), undefined);
+    assert.equal(fs.readFileSync(asli, "utf8"), "VERSI EDITAN 3");
+
+    // 5) nama tak pernah dikirim -> hanya disimpan, dengan petunjuk
+    b = calls.length;
+    await tR.bot.handleUpdate(doc("bukan-kiriman.txt"));
+    assert.match(texts(b), /Disimpan:[\s\S]*kembalikan <nama berkas asli>/);
+    assert.equal(approvalOf(b), undefined);
+
+    // 6) mode hanya-baca -> tidak menawarkan penggantian
+    const tB = mkBot(["111"], [], { mode: "baca" });
+    b = calls.length;
+    await tB.bot.handleUpdate(doc("laporan-september.txt"));
+    assert.match(texts(b), /hanya-baca/);
+    assert.equal(approvalOf(b), undefined);
+
+    // 7) alamat asal di luar folder izin / rahasia -> ditolak
+    const kmb = await import("../src/kembali.js");
+    const src = path.join(cfg.workdir, "_masuk", "uji-luar.txt");
+    fs.writeFileSync(src, "x");
+    assert.throws(() => kmb.planReturn({ workdir: cfg.workdir, roots: cfg.roots, src, entry: { path: path.join(outside, "rahasia.txt"), mtimeMs: 0 } }), SafetyError);
+    assert.throws(() => kmb.planReturn({ workdir: cfg.workdir, roots: cfg.roots, src: asli, entry: { path: asli, mtimeMs: 0 } }), /_masuk/, "sumber harus dari _masuk");
+    fs.writeFileSync(path.join(cfg.workdir, ".env"), "RAHASIA=1");
+    assert.throws(() => kmb.planReturn({ workdir: cfg.workdir, roots: cfg.roots, src, entry: { path: path.join(cfg.workdir, ".env"), mtimeMs: 0 } }), /rahasia|Jenis/);
+    // berkas asli sudah hilang -> dibuat ulang (dengan peringatan)
+    const hilang = path.join(cfg.workdir, "sub", "hilang.txt");
+    const p2 = kmb.planReturn({ workdir: cfg.workdir, roots: cfg.roots, src, entry: { path: hilang, mtimeMs: 0 } });
+    assert.match(p2.warnings.join(" "), /dibuat ulang/);
+    kmb.applyReturn({ workdir: cfg.workdir, roots: cfg.roots, src, entry: { path: hilang, mtimeMs: 0 } });
+    assert.equal(fs.readFileSync(hilang, "utf8"), "x");
+    files.set("fid1", Buffer.from("ISI KIRIMAN"));
+  }
+
   // /model
   b = calls.length;
   await t1.bot.handleUpdate(msg("/model qwen2.5:3b"));
@@ -636,7 +751,7 @@ ok("agent: loop alat, panggilan alat berupa teks, riwayat ringkas, persetujuan d
   await tick(60);
   assert.equal(calls.slice(b).filter((c) => c.method === "sendMessage" && c.body.text.startsWith("xxx")).length, 3);
 }
-ok("bot Telegram: pairing, bukan-pemilik diabaikan, perintah, persetujuan lewat tombol (izin/tolak/kedaluwarsa/dobel/orang lain/batal), berkas masuk aman, kirim berkas, /model, pesan panjang dipecah");
+ok("bot Telegram: pairing, bukan-pemilik diabaikan, perintah, persetujuan lewat tombol (izin/tolak/kedaluwarsa/dobel/orang lain/batal), berkas masuk aman, kirim berkas, kirim-edit-kembalikan (persetujuan, cadangan, caption, jenis beda, mode baca, di luar izin), /model, pesan panjang dipecah");
 
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log(`\n${n} kelompok tes Agen Lokal lulus ✅`);

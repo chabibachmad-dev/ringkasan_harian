@@ -1,4 +1,5 @@
 // Bot Telegram untuk agent: long polling (tanpa webhook/port terbuka), hanya melayani id pemilik, persetujuan lewat tombol.
+import { applyReturn, listSent, lookupSent, planReturn } from "./kembali.js";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -30,6 +31,7 @@ export const HELP = [
   "",
   "Perubahan (tulis/pindah/hapus file, perintah) selalu minta persetujuanmu lewat tombol ✅/❌. Hapus hanya memindahkan ke folder _sampah.",
   "Kirim berkas ke chat ini → disimpan di folder kerja (_masuk), lalu bisa kuolah.",
+  "Mau mengedit di tempat lain? Suruh aku \"kirim file <alamat>\", edit, lalu kirim balik berkas bernama sama: aku tawarkan untuk menggantikan yang asli (yang lama dicadangkan).",
   "",
   "/baru  lupakan percakapan   /batal  hentikan tugas   /status  kondisi   /model [nama]  lihat/ganti model   /ulang  mulai ulang agen   /id  id chat"
 ].join("\n");
@@ -124,7 +126,7 @@ export function createBot({ config, agent, ollama, fetchImpl = fetch, log = cons
     return send(chatId, [`🤖 Model aktif: ${ollama.model}${models.length ? (has ? "" : "  ⚠️ belum diunduh (ollama pull " + ollama.model + ")") : ""}`, `Ollama: ${up}`, models.length ? `Model terpasang: ${models.join(", ")}` : "", `Mode: ${config.mode === "baca" ? "hanya membaca" : "tanya dulu sebelum mengubah"}`, `Folder izin: ${config.roots.join("; ")}`, `Folder kerja: ${config.workdir}`].filter(Boolean).join("\n"));
   }
 
-  async function saveIncoming(chatId, doc) {
+  async function saveIncoming(chatId, doc, caption = "") {
     if (Number(doc.file_size) > 20 * 1024 * 1024) return send(chatId, "Berkas lebih dari 20 MB; batas unduhan bot Telegram.");
     const dir = path.join(config.workdir, "_masuk");
     const base = path.basename(doc.file_name || `berkas-${Date.now()}`).replace(/[<>:"/\\|?*\x00-\x1f]/g, "_");
@@ -134,7 +136,31 @@ export function createBot({ config, agent, ollama, fetchImpl = fetch, log = cons
     fs.mkdirSync(dir, { recursive: true });
     if (fs.existsSync(dest)) dest = path.join(dir, `${Date.now()}-${base}`);
     fs.writeFileSync(dest, buf);
-    return send(chatId, `📥 Disimpan: ${dest}\nSekarang bisa kamu suruh, mis. "ringkas file ${path.basename(dest)}".`);
+    // Berkas ini versi baru dari berkas yang tadi dikirim ke Telegram? (nama sama, atau keterangan "kembalikan <nama>")
+    const capName = /^\/?kembali(?:kan)?\s+(.+)$/i.exec(String(caption || "").trim())?.[1]?.trim();
+    const entry = lookupSent(config.workdir, capName || base);
+    if (!entry) return send(chatId, `📥 Disimpan: ${dest}\nSekarang bisa kamu suruh, mis. "ringkas file ${path.basename(dest)}".${listSent(config.workdir, 1).length ? `\n\nBila ini hasil editan berkas yang tadi kukirim dan ingin menggantikan yang asli, kirim ulang dengan keterangan: kembalikan <nama berkas asli>` : ""}`);
+    return offerReturn(chatId, dest, entry);
+  }
+
+  async function offerReturn(chatId, src, entry) {
+    if (config.mode === "baca") return send(chatId, `📥 Disimpan: ${src}\nMode hanya-baca aktif, jadi tidak bisa menggantikan berkas asli.`);
+    let plan;
+    try {
+      plan = planReturn({ workdir: config.workdir, roots: config.roots, src, entry });
+    } catch (e) {
+      return send(chatId, `📥 Disimpan: ${src}\n⚠️ Tidak bisa dikembalikan ke lokasi asal: ${e.message}`);
+    }
+    await send(chatId, `📥 Disimpan: ${src}`);
+    const summary = [`Mengganti berkas asli dengan versi yang baru kamu kirim:`, `${src}`, `→ ${plan.dest}`, `Berkas asli dicadangkan dulu ke _sampah (bisa dikembalikan).`, ...plan.warnings].join("\n");
+    const ok = await askApproval(chatId, summary, null);
+    if (!ok) return;
+    try {
+      const r = applyReturn({ workdir: config.workdir, roots: config.roots, src, entry });
+      return send(chatId, `✅ Sudah diganti: ${r.dest}${r.backup ? `\nCadangan berkas lama: ${r.backup}` : ""}`);
+    } catch (e) {
+      return send(chatId, `⚠️ Gagal mengganti: ${e.message}`);
+    }
   }
 
   async function runAgent(chatId, text) {
@@ -177,7 +203,7 @@ export function createBot({ config, agent, ollama, fetchImpl = fetch, log = cons
       log.warn?.(`pesan dari chat ${chatId} diabaikan (bukan pemilik)`);
       return;
     }
-    if (m.document) return void (await saveIncoming(chatId, m.document).catch((e) => send(chatId, `⚠️ ${e.message}`)));
+    if (m.document) return void (await saveIncoming(chatId, m.document, m.caption).catch((e) => send(chatId, `⚠️ ${e.message}`)));
     const text = typeof m.text === "string" ? m.text.trim() : "";
     if (!text) return void (await send(chatId, "Aku membaca pesan teks dan berkas. Tulis permintaanmu."));
     const cmd = /^\/([a-z_]+)(?:@\w+)?(?:\s+([\s\S]*))?$/i.exec(text);

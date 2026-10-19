@@ -54,7 +54,14 @@ export function resolveInRoots(input, { roots, workdir }) {
   if (!raw) throw new SafetyError("Alamat kosong.");
   if (raw.includes("\0")) throw new SafetyError("Alamat tidak valid.");
   if (!roots.length) throw new SafetyError("Belum ada folder yang diizinkan (AGENT_ROOTS kosong).");
-  const abs = path.isAbsolute(raw) ? path.resolve(raw) : path.resolve(workdir || roots[0], raw);
+  let abs;
+  if (path.isAbsolute(raw)) abs = path.resolve(raw);
+  else {
+    // Alamat relatif: utamakan folder kerja; bila tidak ada di sana tetapi ada di salah satu folder izin lain, pakai itu
+    // (model kecil sering hanya menyebut nama berkas). Berkas baru (belum ada di mana pun) dibuat di folder kerja.
+    const cands = [...new Set([workdir || roots[0], ...roots].map((b) => path.resolve(b, raw)))];
+    abs = cands.find((c) => fs.existsSync(c)) || cands[0];
+  }
   const real = realOfExisting(abs);
   const okRoot = roots.find((r) => isInside(realOfExisting(r), real) && isInside(r, abs));
   if (!okRoot) throw new SafetyError(`Ditolak: ${abs} berada di luar folder yang diizinkan.`);

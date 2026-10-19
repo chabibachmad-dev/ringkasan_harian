@@ -5,6 +5,7 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { commandProblem, isSecretPath, resolveInRoots, SafetyError } from "./safety.js";
 import { readFileText, TEXT_EXT } from "./docs.js";
+import { recordSent } from "./kembali.js";
 
 const MAX_OUT = 4000;
 const SKIP_DIRS = new Set(["node_modules", ".git", "$recycle.bin", "system volume information", "appdata", "windows", "program files", "program files (x86)", ".cache", ".npm", ".local", "snap", "proc", "sys"]);
@@ -185,7 +186,10 @@ export function createTools({ config, web, sendFile = null, exec = defaultExec, 
         if (!st.isFile()) throw new Error("Itu bukan berkas.");
         if (st.size > 45 * 1024 * 1024) throw new Error("Berkas lebih dari 45 MB; terlalu besar untuk Telegram.");
         await sendFile(p);
-        return `Berkas ${path.basename(p)} (${fmtSize(st.size)}) sudah dikirim ke Telegram.`;
+        try {
+          if (config.workdir) recordSent(config.workdir, p); // supaya hasil editan bisa dikembalikan ke lokasi asal
+        } catch {}
+        return `Berkas ${path.basename(p)} (${fmtSize(st.size)}) sudah dikirim ke Telegram. Bila nanti kamu kirim balik berkas bernama sama, aku akan menawarkan untuk menggantikan yang asli.`;
       }
     },
     // ------------------------------------------------------------ perlu persetujuan
@@ -259,7 +263,7 @@ export function createTools({ config, web, sendFile = null, exec = defaultExec, 
       describe: ({ file }) => `Memindahkan ke _sampah (bukan hapus permanen):\n${here(file)}`,
       run: ({ file }) => {
         const p = here(file);
-        if (!fs.existsSync(p)) throw new Error("Tidak ditemukan.");
+        if (!fs.existsSync(p)) throw new Error(`Tidak ditemukan: ${p}. Cari dulu alamat lengkapnya dengan cari_file.`);
         const trash = path.join(config.workdir || rootsOf()[0], "_sampah");
         if (p === trash || p.startsWith(trash + path.sep)) throw new Error("Itu sudah di _sampah.");
         if (rootsOf().some((r) => path.resolve(r) === p)) throw new Error("Folder induk yang diizinkan tidak boleh dibuang.");

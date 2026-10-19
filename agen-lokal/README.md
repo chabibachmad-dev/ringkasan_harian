@@ -70,6 +70,17 @@ Tulis permintaan biasa dalam bahasa Indonesia, misalnya:
 
 Perintah bot: `/status` kondisi · `/baru` lupakan percakapan · `/batal` hentikan tugas · `/model [nama]` lihat/ganti model · `/ulang` mulai ulang agen (butuh pm2/`start.sh`/`start.bat` yang menyalakannya lagi) · `/id` · `/help`. Kirim berkas ke chat → disimpan di `_masuk` dalam folder kerja, lalu bisa kamu suruh olah.
 
+## Mengedit berkas di tempat lain (kirim → edit → kembalikan)
+
+Agen tidak bisa melihat layar Excel/Word. Untuk berkas yang perlu diedit sendiri (mis. `.xls`, `.xlsx`, `.docx`), pakai alur ini:
+
+1. **Kirim ke Telegram:** tulis "kirim file C:\\...\\anggaran.xls ke sini" (Linux: `/home/.../anggaran.xls`). Agen mengirim berkasnya (maks 45 MB) dan **mencatat alamat aslinya**.
+2. **Edit di komputer lain** (unduh dari Telegram, ubah, simpan **dengan nama yang sama**).
+3. **Kirim balik** berkas itu ke chat bot. Bot mengenali namanya dan bertanya: "Mengganti berkas asli dengan versi yang baru kamu kirim … → alamat asal?" Tekan ✅.
+4. **Hasil:** berkas asli diganti utuh (lewat berkas sementara, tidak pernah setengah tertulis), dan **versi lama dicadangkan** ke `_sampah` di folder kerja, jadi selalu bisa dikembalikan.
+
+Aturan keselamatan: harus tetap di dalam folder izin; jenis berkas harus sama (`.xls` hanya menggantikan `.xls`); berkas rahasia ditolak; mode `baca` menolak penggantian; bila berkas asli **berubah** sejak dikirim, ada peringatan di pesan persetujuan; bila berkas sedang dibuka di Excel/aplikasi lain, penggantian gagal dengan pesan jelas (tutup dulu lalu kirim ulang). Bila nama berkas hasil editanmu berbeda, kirim dengan **keterangan (caption)** `kembalikan <nama berkas asli>`. Catatan pengiriman disimpan di `_kirim.json` (folder kerja), maksimal 200 berkas terakhir. Batas unduhan bot Telegram: 20 MB untuk berkas yang kamu kirim balik.
+
 ## Keamanan (baca ini)
 
 - **Pagar folder**: semua alat memeriksa alamat. Alamat di luar `AGENT_ROOTS` (termasuk lewat `..` atau simlink/junction) ditolak.
@@ -98,7 +109,7 @@ Perintah bot: `/status` kondisi · `/baru` lupakan percakapan · `/batal` hentik
 
 ## Pengaturan lain (.env)
 
-Lihat `.env.example`: `OLLAMA_MODEL`, `OLLAMA_NUM_CTX`, `OLLAMA_KEEP_ALIVE`, `AGENT_MAX_STEPS`, `AGENT_APPROVAL_TIMEOUT_SEC`, `AGENT_COMMAND_TIMEOUT_SEC`, `OLLAMA_TIMEOUT_SEC`.
+Lihat `.env.example`: `OLLAMA_MODEL`, `OLLAMA_NUM_CTX`, `OLLAMA_KEEP_ALIVE`, `OLLAMA_NUM_THREAD` (jumlah thread CPU), `OLLAMA_MAX_TOKENS` (batas panjang jawaban), `AGENT_MAX_STEPS`, `AGENT_APPROVAL_TIMEOUT_SEC`, `AGENT_COMMAND_TIMEOUT_SEC`, `OLLAMA_TIMEOUT_SEC`.
 
 ## Pengujian
 
@@ -106,4 +117,4 @@ Lihat `.env.example`: `OLLAMA_MODEL`, `OLLAMA_NUM_CTX`, `OLLAMA_KEEP_ALIVE`, `AG
 
 ## Susunan kode
 
-`src/config.js` pengaturan · `src/safety.js` pagar folder/perintah/berkas rahasia/SSRF · `src/tools.js` alat · `src/docs.js` pembaca docx/xlsx/pdf · `src/web.js` pencarian web · `src/ollama.js` klien model · `src/agent.js` putaran agent · `src/telegram.js` bot & tombol persetujuan · `src/index.js` titik masuk · `skrip/` pasang-agen.sh (pm2), pasang-ssh.sh (SSH aman), server-tanpa-tidur.sh · `PANDUAN-LINUX.md`.
+`src/config.js` pengaturan · `src/safety.js` pagar folder/perintah/berkas rahasia/SSRF · `src/tools.js` alat · `src/docs.js` pembaca docx/xlsx/pdf · `src/web.js` pencarian web · `src/ollama.js` klien model · `src/agent.js` putaran agent · `src/telegram.js` bot & tombol persetujuan · `src/kembali.js` kirim-edit-kembalikan berkas · `src/index.js` titik masuk · `skrip/` pasang-agen.sh (pm2), pasang-ssh.sh (SSH aman), server-tanpa-tidur.sh · `PANDUAN-LINUX.md`.
