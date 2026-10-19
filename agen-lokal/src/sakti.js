@@ -71,10 +71,25 @@ export function createSakti({ config, launch = launchBrowser, find = findBrowser
     return m ? m[0].trim() : "";
   };
 
+  const CLOSE_TEXT = re("^(tutup|close|ok|oke|mengerti|saya mengerti|setuju|x|×)$");
+  /** Tutup jendela pengumuman/popup yang menutupi halaman (tombol bertuliskan Tutup/Close/OK). */
+  async function tutupPopup() {
+    for (let i = 0; i < 3; i++) {
+      const items = await scan();
+      const b = items.find((x) => x.kind === "tombol" && CLOSE_TEXT.test(x.text.trim()));
+      if (!b) return i;
+      await page.click(sel(b)).catch(() => {});
+      await new Promise((r) => setTimeout(r, 700));
+    }
+    return 3;
+  }
+
   async function diagnosa(io, judul) {
     const items = await scan();
     const info = await page.info().catch(() => ({}));
-    await io.say(`${judul}\nAlamat: ${info.url || "?"}\nJudul: ${info.title || "?"}\n\nKolom/tombol yang terlihat:\n${ringkasItems(items) || "(tidak ada)"}`);
+    const frames = await page.frames().catch(() => []);
+    const teks = await page.visibleText(400).catch(() => "");
+    await io.say(`${judul}\nAlamat: ${info.url || "?"}\nJudul: ${info.title || "?"}\n\nKolom/tombol yang terlihat:\n${ringkasItems(items) || "(tidak ada)"}\n\nBingkai (iframe): ${frames.length ? frames.map((f) => `${f.bisaDibaca ? "terbaca" : "TERKUNCI"} ${f.src}`).join(" | ") : "tidak ada"}\nTeks halaman: ${teks || "(kosong)"}`);
     await io.photo(await page.screenshot(), "Tampilan halaman saat ini");
   }
 
@@ -93,6 +108,8 @@ export function createSakti({ config, launch = launchBrowser, find = findBrowser
       for (let attempt = 1; attempt <= 3; attempt++) {
         await io.say(attempt === 1 ? `🌐 Membuka ${url} …` : `🔁 Percobaan ${attempt} dari 3…`);
         await page.goto(url);
+        for (let k = 0; k < 12 && !(await scan()).length; k++) await new Promise((r) => setTimeout(r, 1000)); // portal berbasis skrip: tunggu isinya muncul
+        await tutupPopup();
         let items = await scan();
         let login = pickLogin(items);
         if (!login) {

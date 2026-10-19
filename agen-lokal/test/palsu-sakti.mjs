@@ -24,7 +24,10 @@ export function start(port) {
     if (u.pathname === "/mfa") return html(`<h2>Verifikasi dua langkah</h2>${u.searchParams.get("err") ? "<p>Kode tidak valid</p>" : ""}<form method=post action=/mfa><input name=otp placeholder="Kode OTP 6 digit"><button type=submit>Verifikasi</button></form>`);
     if (u.pathname === "/beranda") return html(`<h1>Beranda SAKTI</h1><a href=/keluar>Keluar</a>`);
     if (state.mfaOk && u.pathname === "/") return html(`<h1>Beranda SAKTI</h1><a href=/keluar>Keluar</a>`);
-    html(`<h2>Selamat datang</h2>${u.searchParams.get("err") ? "<p>Captcha atau sandi salah</p>" : ""}<form method=post action=/login><label for=u>Nama pengguna</label><input id=u name=username><label for=p>Kata sandi</label><input id=p type=password name=password><img src=/captcha.png alt=captcha id=cap><input name=captcha placeholder="Masukkan captcha"><button type=submit>Login</button></form>`);
+    // Mirip portal asli: pengumuman menutupi halaman (tombol "Tutup" berupa <span>), formulir ada di dalam iframe
+    const form = `<h2>Selamat datang</h2>${u.searchParams.get("err") ? "<p>Captcha atau sandi salah</p>" : ""}<form method=post action=/login target=_top><label for=u>Nama pengguna</label><input id=u name=username><label for=p>Kata sandi</label><input id=p type=password name=password><img src=/captcha.png alt=captcha id=cap><input name=captcha placeholder="Masukkan captcha"><button type=submit>Login</button></form>`;
+    const popup = state.popup === false ? "" : `<div id=pop style="position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:99;display:flex;align-items:center;justify-content:center"><div style="background:#fff;padding:20px"><b>PENGUMUMAN</b><p>Tidak ada gratifikasi</p><span style="cursor:pointer;background:#37c;color:#fff;padding:6px 12px" onclick="document.getElementById('pop').remove()">Tutup</span></div></div>`;
+    html(`${popup}<iframe style="width:600px;height:400px;border:0" srcdoc='${form.replace(/'/g, "&#39;")}'></iframe>`);
   });
   return new Promise((r) => srv.listen(port, "127.0.0.1", () => r({ srv, state })));
 }

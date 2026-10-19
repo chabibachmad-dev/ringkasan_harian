@@ -95,16 +95,43 @@ class Cdp {
 }
 
 // ---- skrip yang berjalan DI DALAM halaman ----
-const IN_PAGE = `(() => {
-  const vis = (e) => { const r = e.getBoundingClientRect(); const cs = getComputedStyle(e); return r.width > 2 && r.height > 2 && cs.visibility !== 'hidden' && cs.display !== 'none' && cs.opacity !== '0'; };
-  const label = (e) => {
-    const id = e.id && document.querySelector('label[for="' + CSS.escape(e.id) + '"]');
-    const wrap = e.closest('label');
-    const al = e.getAttribute('aria-label');
-    return ((id && id.innerText) || (wrap && wrap.innerText) || al || e.placeholder || e.getAttribute('title') || '').replace(/\\s+/g, ' ').trim().slice(0, 80);
+// Pembantu yang ikut masuk ke iframe sama-asal dan shadow DOM terbuka (banyak portal pemerintah memakainya).
+const DEEP = `
+const __roots = (() => {
+  const out = [];
+  const seen = new Set();
+  const visit = (doc, ox, oy) => {
+    if (seen.has(doc)) return;
+    seen.add(doc);
+    out.push({ root: doc, ox, oy });
+    const stack = [doc];
+    while (stack.length) {
+      const r = stack.pop();
+      for (const e of r.querySelectorAll('*')) {
+        if (e.shadowRoot) { out.push({ root: e.shadowRoot, ox, oy }); stack.push(e.shadowRoot); }
+        if (e.tagName === 'IFRAME' || e.tagName === 'FRAME') {
+          try {
+            const d = e.contentDocument;
+            if (d) { const bb = e.getBoundingClientRect(); visit(d, ox + bb.left + (e.clientLeft || 0), oy + bb.top + (e.clientTop || 0)); }
+          } catch (_) {}
+        }
+      }
+    }
   };
-  return { vis, label };
-})()`;
+  visit(document, 0, 0);
+  return out;
+})();
+const __find = (sel) => { for (const r of __roots) { const e = r.root.querySelector(sel); if (e) return { e, ox: r.ox, oy: r.oy }; } return null; };
+const __cs = (e) => (e.ownerDocument.defaultView || window).getComputedStyle(e);
+const __vis = (e) => { const r = e.getBoundingClientRect(); const cs = __cs(e); return r.width > 2 && r.height > 2 && cs.visibility !== 'hidden' && cs.display !== 'none' && cs.opacity !== '0'; };
+const __label = (e) => {
+  const root = e.getRootNode();
+  const id = e.id && root.querySelector && root.querySelector('label[for="' + CSS.escape(e.id) + '"]');
+  const wrap = e.closest && e.closest('label');
+  const al = e.getAttribute('aria-label');
+  return ((id && id.innerText) || (wrap && wrap.innerText) || al || e.placeholder || e.getAttribute('title') || '').replace(/\\s+/g, ' ').trim().slice(0, 80);
+};
+`;
 
 export async function launchBrowser({ exe, userDataDir, headless = false, url = "about:blank", port = 0, startTimeoutMs = 20_000, log = console }) {
   if (!exe) throw new Error("Chrome/Edge tidak ditemukan. Pasang salah satunya, atau isi SAKTI_BROWSER di .env dengan alamat lengkap chrome.exe / msedge.exe.");
@@ -170,24 +197,24 @@ export async function launchBrowser({ exe, userDataDir, headless = false, url = 
     },
     /** potret satu elemen (mis. gambar captcha) */
     async shotOf(selector) {
-      const rect = await page.eval(`(() => { const e = document.querySelector(${JSON.stringify(selector)}); if (!e) return null; e.scrollIntoView({ block: 'center' }); const r = e.getBoundingClientRect(); return { x: r.x + scrollX, y: r.y + scrollY, width: r.width, height: r.height }; })()`);
+      const rect = await page.eval(`(() => { ${DEEP} const f = __find(${JSON.stringify(selector)}); if (!f) return null; f.e.scrollIntoView({ block: 'center' }); const f2 = __find(${JSON.stringify(selector)}); const r = f2.e.getBoundingClientRect(); return { x: r.x + f2.ox + scrollX, y: r.y + f2.oy + scrollY, width: r.width, height: r.height }; })()`);
       if (!rect) throw new Error("Elemen tidak ditemukan.");
       const r = await cdp.send("Page.captureScreenshot", { format: "png", clip: { ...rect, scale: Math.max(1, Math.min(3, 240 / Math.max(1, rect.width))) }, captureBeyondViewport: true }, 30_000);
       return Buffer.from(r.data, "base64");
     },
     async exists(selector) {
-      return page.eval(`!!document.querySelector(${JSON.stringify(selector)})`);
+      return page.eval(`(() => { ${DEEP} return !!__find(${JSON.stringify(selector)}); })()`);
     },
     /** isi kolom seperti ketikan sungguhan (kerangka web seperti Angular/React ikut terpicu) */
     async fill(selector, text) {
-      const ok = await page.eval(`(() => { const e = document.querySelector(${JSON.stringify(selector)}); if (!e) return false; e.scrollIntoView({ block: 'center' }); e.focus(); if (e.select) e.select(); return true; })()`);
+      const ok = await page.eval(`(() => { ${DEEP} const f = __find(${JSON.stringify(selector)}); if (!f) return false; f.e.scrollIntoView({ block: 'center' }); f.e.focus(); if (f.e.select) f.e.select(); return true; })()`);
       if (!ok) throw new Error(`Kolom tidak ditemukan: ${selector}`);
       await cdp.send("Input.dispatchKeyEvent", { type: "keyDown", key: "Backspace", code: "Backspace", windowsVirtualKeyCode: 8 });
       await cdp.send("Input.dispatchKeyEvent", { type: "keyUp", key: "Backspace", code: "Backspace", windowsVirtualKeyCode: 8 });
       if (text) await cdp.send("Input.insertText", { text: String(text) });
     },
     async click(selector) {
-      const pt = await page.eval(`(() => { const e = document.querySelector(${JSON.stringify(selector)}); if (!e) return null; e.scrollIntoView({ block: 'center' }); const r = e.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()`);
+      const pt = await page.eval(`(() => { ${DEEP} const f = __find(${JSON.stringify(selector)}); if (!f) return null; f.e.scrollIntoView({ block: 'center' }); const g = __find(${JSON.stringify(selector)}); const r = g.e.getBoundingClientRect(); return { x: r.x + g.ox + r.width / 2, y: r.y + g.oy + r.height / 2 }; })()`);
       if (!pt) throw new Error(`Tombol tidak ditemukan: ${selector}`);
       await cdp.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: pt.x, y: pt.y });
       await cdp.send("Input.dispatchMouseEvent", { type: "mousePressed", x: pt.x, y: pt.y, button: "left", clickCount: 1 });
@@ -198,32 +225,55 @@ export async function launchBrowser({ exe, userDataDir, headless = false, url = 
       await cdp.send("Input.dispatchKeyEvent", { type: "keyDown", key, code: key, windowsVirtualKeyCode: code, text: key === "Enter" ? "\r" : undefined });
       await cdp.send("Input.dispatchKeyEvent", { type: "keyUp", key, code: key, windowsVirtualKeyCode: code });
     },
-    /** Kumpulkan kolom/tombol yang terlihat; setiap elemen diberi atribut data-agen="<jenis><n>" supaya bisa dipilih lagi. */
+    /** Kumpulkan kolom/tombol yang terlihat (termasuk di iframe sama-asal & shadow DOM); tiap elemen diberi data-agen="e<n>". */
     async scan() {
       return page.eval(`(() => {
-        const { vis, label } = ${IN_PAGE};
-        document.querySelectorAll('[data-agen]').forEach((e) => e.removeAttribute('data-agen'));
+        ${DEEP}
+        for (const r of __roots) r.root.querySelectorAll('[data-agen]').forEach((e) => e.removeAttribute('data-agen'));
         const out = [];
         let n = 0;
-        const all = document.querySelectorAll('input, select, textarea, button, a[href], [role=button], img, canvas');
-        for (const e of all) {
-          if (!vis(e)) continue;
-          const tag = e.tagName.toLowerCase();
-          const type = (e.getAttribute('type') || '').toLowerCase();
-          if (tag === 'input' && ['hidden'].includes(type)) continue;
-          if (tag === 'a' && !(e.innerText || '').trim()) continue;
-          const kind = tag === 'input' ? (type === 'password' ? 'sandi' : ['checkbox', 'radio'].includes(type) ? type : ['submit', 'button'].includes(type) ? 'tombol' : 'kolom') : tag === 'select' ? 'pilihan' : tag === 'textarea' ? 'kolom' : tag === 'img' || tag === 'canvas' ? 'gambar' : 'tombol';
+        const seen = new Set();
+        const take = (e, r, kind, tag, type) => {
           const id = 'e' + (++n);
           e.setAttribute('data-agen', id);
-          const r = e.getBoundingClientRect();
-          out.push({ id, kind, tag, type, name: e.getAttribute('name') || '', eid: e.id || '', cls: String(e.className && e.className.baseVal !== undefined ? e.className.baseVal : e.className || '').slice(0, 80), ph: e.placeholder || '', label: label(e), text: (tag === 'input' || tag === 'textarea' ? (['submit','button'].includes(type) ? e.value : '') : e.innerText || e.alt || '').replace(/\\s+/g, ' ').trim().slice(0, 80), src: tag === 'img' ? (e.getAttribute('src') || '').slice(0, 60) : '', w: Math.round(r.width), h: Math.round(r.height), top: Math.round(r.top), left: Math.round(r.left), opts: tag === 'select' ? [...e.options].slice(0, 12).map((o) => o.text.trim()) : undefined, kosong: (tag === 'input' || tag === 'textarea' || tag === 'select') ? !String(e.value || '').length : undefined });
-          if (n >= 120) break;
+          const b = e.getBoundingClientRect();
+          out.push({ id, kind, tag, type, name: e.getAttribute('name') || '', eid: e.id || '', cls: String(e.className && e.className.baseVal !== undefined ? e.className.baseVal : e.className || '').slice(0, 80), ph: e.placeholder || '', label: __label(e), text: (tag === 'input' || tag === 'textarea' ? (['submit', 'button'].includes(type) ? e.value : '') : (e.innerText || e.alt || '')).replace(/\\s+/g, ' ').trim().slice(0, 80), src: tag === 'img' ? (e.getAttribute('src') || '').slice(0, 60) : '', w: Math.round(b.width), h: Math.round(b.height), top: Math.round(b.top + r.oy), left: Math.round(b.left + r.ox), opts: tag === 'select' ? [...e.options].slice(0, 12).map((o) => o.text.trim()) : undefined, kosong: (tag === 'input' || tag === 'textarea' || tag === 'select') ? !String(e.value || '').length : undefined });
+        };
+        for (const r of __roots) {
+          for (const e of r.root.querySelectorAll('input, select, textarea, button, a[href], [role=button], img, canvas, [onclick], [tabindex], span, div, li')) {
+            if (n >= 150) break;
+            if (!__vis(e)) continue;
+            const tag = e.tagName.toLowerCase();
+            const type = (e.getAttribute('type') || '').toLowerCase();
+            if (tag === 'input' && type === 'hidden') continue;
+            let kind;
+            if (tag === 'input') kind = type === 'password' ? 'sandi' : ['checkbox', 'radio'].includes(type) ? type : ['submit', 'button'].includes(type) ? 'tombol' : 'kolom';
+            else if (tag === 'select') kind = 'pilihan';
+            else if (tag === 'textarea') kind = 'kolom';
+            else if (tag === 'img' || tag === 'canvas') kind = 'gambar';
+            else if (tag === 'button' || tag === 'a' || e.getAttribute('role') === 'button') { if (!(e.innerText || '').trim() && tag === 'a') continue; kind = 'tombol'; }
+            else {
+              // elemen biasa dianggap tombol hanya bila berperilaku seperti tombol: kursor tangan, teks pendek, dan bukan pembungkus tombol lain
+              const t = (e.innerText || '').replace(/\\s+/g, ' ').trim();
+              if (!t || t.length > 40) continue;
+              if (!(e.hasAttribute('onclick') || e.hasAttribute('tabindex') || __cs(e).cursor === 'pointer')) continue;
+              if ([...e.children].some((c) => (c.innerText || '').replace(/\\s+/g, ' ').trim() === t && (c.hasAttribute('onclick') || __cs(c).cursor === 'pointer'))) continue;
+              kind = 'tombol';
+            }
+            if (seen.has(e)) continue;
+            seen.add(e);
+            take(e, r, kind, tag, type);
+          }
         }
         return out;
       })()`);
     },
+    /** Daftar iframe yang ada di halaman dan apakah isinya bisa dibaca (sama asal). */
+    async frames() {
+      return page.eval(`(() => { ${DEEP} const out = []; for (const r of __roots) for (const f of r.root.querySelectorAll('iframe, frame')) { let ok = false; try { ok = !!f.contentDocument; } catch (_) {} out.push({ src: (f.getAttribute('src') || f.src || '(srcdoc)').slice(0, 100), bisaDibaca: ok }); } return out; })()`);
+    },
     async visibleText(max = 600) {
-      return page.eval(`(document.body ? document.body.innerText : '').replace(/\\s+/g, ' ').trim().slice(0, ${Number(max) || 600})`);
+      return page.eval(`(() => { ${DEEP} return __roots.map((r) => (r.root.body ? r.root.body.innerText : r.root.host ? r.root.host.innerText : '') || '').join(' ').replace(/\\s+/g, ' ').trim().slice(0, ${Number(max) || 600}); })()`);
     },
     async close() {
       if (closed) return;
