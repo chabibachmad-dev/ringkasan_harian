@@ -118,3 +118,15 @@ Lihat `.env.example`: `OLLAMA_MODEL`, `OLLAMA_NUM_CTX`, `OLLAMA_KEEP_ALIVE`, `OL
 ## Susunan kode
 
 `src/config.js` pengaturan · `src/safety.js` pagar folder/perintah/berkas rahasia/SSRF · `src/tools.js` alat · `src/docs.js` pembaca docx/xlsx/pdf · `src/web.js` pencarian web · `src/ollama.js` klien model · `src/agent.js` putaran agent · `src/telegram.js` bot & tombol persetujuan · `src/kembali.js` kirim-edit-kembalikan berkas · `src/index.js` titik masuk · `skrip/` pasang-agen.sh (pm2), pasang-ssh.sh (SSH aman), server-tanpa-tidur.sh · `PANDUAN-LINUX.md`.
+
+## Daftar Excel → antrian → SAKTI (tahap 1)
+
+Kirim berkas `.xlsx` berkolom **COA Sakti | Uraian | Jumlah** ke bot. Bot membacanya sendiri (tanpa model), memeriksa bentuknya (format COA, akun 6 digit, jumlah > 0, baris ganda), menampilkan ringkasan, dan menyimpan antrian di folder kerja (`_spby.json`). Belum ada yang dikirim ke SAKTI.
+
+Perintah `/sakti`:
+
+- `/sakti masuk` membuka SAKTI di Chrome/Edge komputer ini, mengisi nama pengguna dan sandi dari `.env` (`SAKTI_USER`, `SAKTI_PASS`), lalu **mengirim gambar captcha ke chat**. Kamu membalas hurufnya, dan kalau diminta, kode MFA juga lewat chat. Captcha tidak dipecahkan otomatis.
+- `/sakti halaman` mengirim tangkapan layar dan daftar kolom/tombol yang terlihat di halaman terbuka (dipakai menyiapkan langkah perekaman).
+- `/sakti foto`, `/sakti antrian`, `/sakti tutup`.
+
+Syarat: Node 22 atau lebih baru (WebSocket bawaan) dan Chrome atau Edge terpasang. Profil browser disimpan di `_browser` dalam folder kerja, jadi sesi login bisa bertahan antar-pemakaian.

@@ -56,6 +56,8 @@ export function readConfig(env = {}) {
     model: String(env.OLLAMA_MODEL || "qwen2.5:7b").trim(),
     numCtx: num(env.OLLAMA_NUM_CTX, 8192, 2048, 65536),
     keepAlive: String(env.OLLAMA_KEEP_ALIVE || "30m").trim(),
+    numThread: Math.round(num(env.OLLAMA_NUM_THREAD, 0, 0, 64)),
+    maxTokens: Math.round(num(env.OLLAMA_MAX_TOKENS, 0, 0, 8192)),
     roots,
     workdir,
     mode,
@@ -63,6 +65,10 @@ export function readConfig(env = {}) {
     maxSteps: num(env.AGENT_MAX_STEPS, 8, 1, 20),
     commandTimeoutMs: num(env.AGENT_COMMAND_TIMEOUT_SEC, 60, 5, 600) * 1000,
     requestTimeoutMs: num(env.OLLAMA_TIMEOUT_SEC, 600, 30, 3600) * 1000,
+    saktiUrl: String(env.SAKTI_URL || "https://sakti.kemenkeu.go.id/").trim(),
+    saktiUser: String(env.SAKTI_USER || "").trim(),
+    saktiPass: String(env.SAKTI_PASS || ""),
+    saktiHeadless: /^(1|ya|true|y)$/i.test(String(env.SAKTI_HEADLESS || "")),
     problems
   };
 }

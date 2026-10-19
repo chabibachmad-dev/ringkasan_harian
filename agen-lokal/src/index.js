@@ -7,6 +7,7 @@ import { createWeb } from "./web.js";
 import { createTools } from "./tools.js";
 import { createAgent } from "./agent.js";
 import { createBot } from "./telegram.js";
+import { createSakti } from "./sakti.js";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const config = readConfig({ ...loadEnvFile(path.join(root, ".env")), ...process.env });
@@ -21,12 +22,17 @@ const web = createWeb();
 let bot;
 const tools = createTools({ config, web, sendFile: (file) => bot.sendFile([...config.owners][0], file) });
 const agent = createAgent({ ollama, tools, config });
-bot = createBot({ config, agent, ollama, tools, onRestart: () => process.exit(0) }); // pm2/start.sh menyalakan lagi
+const sakti = createSakti({ config });
+bot = createBot({ config, agent, ollama, tools, sakti, onRestart: async () => {
+    await sakti.tutup().catch(() => {});
+    process.exit(0);
+  }
+}); // pm2/start.sh menyalakan lagi
 
 process.on("unhandledRejection", (e) => console.error("Galat tak tertangani:", e));
 process.on("SIGINT", () => {
   bot.stop();
-  process.exit(0);
+  sakti.tutup().catch(() => {}).finally(() => process.exit(0));
 });
 
 console.log(`🚀 Agen Lokal mulai. Model: ${config.model} · Mode: ${config.mode} · Folder: ${config.roots.join("; ")}`);

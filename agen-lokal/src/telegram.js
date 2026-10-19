@@ -1,6 +1,7 @@
 // Bot Telegram untuk agent: long polling (tanpa webhook/port terbuka), hanya melayani id pemilik, persetujuan lewat tombol.
 import { applyReturn, listSent, lookupSent, planReturn } from "./kembali.js";
 import { findDirsByName, findFilesByName } from "./tools.js";
+import { bacaAntrian, parseDaftar, ringkasan, simpanAntrian } from "./spby.js";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -33,11 +34,12 @@ export const HELP = [
   "Perubahan (tulis/pindah/hapus file, perintah) selalu minta persetujuanmu lewat tombol ✅/❌. Hapus hanya memindahkan ke folder _sampah.",
   "Kirim berkas ke chat ini → disimpan di folder kerja (_masuk), lalu bisa kuolah.",
   "Mau mengedit di tempat lain? Suruh aku \"kirim file <alamat>\", edit, lalu kirim balik berkas bernama sama: aku tawarkan untuk menggantikan yang asli (yang lama dicadangkan).",
+  "Daftar kegiatan (Excel berkolom COA Sakti | Uraian | Jumlah) yang kamu kirim ke chat ini kubaca, kuperiksa, dan kuantrikan. /sakti membuka SAKTI di komputer ini (captcha dan kode MFA kamu kirim lewat chat).",
   "",
   "/baru  lupakan percakapan   /batal  hentikan tugas   /status  kondisi   /model [nama]  lihat/ganti model   /ulang  mulai ulang agen   /id  id chat"
 ].join("\n");
 
-export function createBot({ config, agent, ollama, tools = null, fetchImpl = fetch, log = console, pollTimeoutSec = 25, onRestart = null, restartDelayMs = 1500 }) {
+export function createBot({ config, agent, ollama, tools = null, fetchImpl = fetch, log = console, pollTimeoutSec = 25, onRestart = null, restartDelayMs = 1500, sakti = null }) {
   const owners = config.owners;
   let offset = 0;
   let stopped = false;
@@ -67,6 +69,34 @@ export function createBot({ config, agent, ollama, tools = null, fetchImpl = fet
     form.append("chat_id", String(chatId));
     form.append("document", new Blob([fs.readFileSync(file)]), path.basename(file));
     return api("sendDocument", null, { form, timeoutMs: 120_000 });
+  }
+
+  async function sendPhoto(chatId, buf, caption = "") {
+    const form = new FormData();
+    form.append("chat_id", String(chatId));
+    if (caption) form.append("caption", caption.slice(0, 900));
+    form.append("photo", new Blob([buf], { type: "image/png" }), "layar.png");
+    return api("sendPhoto", null, { form, timeoutMs: 60_000 });
+  }
+
+  // Jawaban teks yang sedang ditunggu (captcha, kode MFA): pesan berikutnya dari pemilik masuk ke sini, bukan ke model.
+  const waiters = new Map(); // chatId -> { resolve, timer }
+  function ask(chatId, prompt, timeoutMs = 5 * 60_000) {
+    return new Promise((resolve) => {
+      const old = waiters.get(chatId);
+      if (old) {
+        clearTimeout(old.timer);
+        old.resolve(null);
+      }
+      const timer = setTimeout(() => {
+        waiters.delete(chatId);
+        send(chatId, "⌛ Waktu menunggu jawabanmu habis.").catch(() => {});
+        resolve(null);
+      }, timeoutMs);
+      timer.unref?.();
+      waiters.set(chatId, { resolve, timer });
+      send(chatId, `✍️ ${prompt}`).catch(() => {});
+    });
   }
 
   async function download(fileId) {
@@ -176,6 +206,14 @@ export function createBot({ config, agent, ollama, tools = null, fetchImpl = fet
     // Berkas ini versi baru dari berkas yang tadi dikirim ke Telegram? (nama sama, atau keterangan "kembalikan <nama>")
     const capName = /^\/?kembali(?:kan)?\s+(.+)$/i.exec(String(caption || "").trim())?.[1]?.trim();
     const entry = lookupSent(config.workdir, capName || base);
+    if (!entry && /\.xlsx$/i.test(dest) && !/^\/?kembali(?:kan)?\s/i.test(String(caption || "").trim())) {
+      const daftar = parseDaftar(buf);
+      if (daftar) {
+        simpanAntrian(config.workdir, { berkas: path.basename(dest), rows: daftar.rows });
+        await send(chatId, `📥 Disimpan: ${dest}`);
+        return send(chatId, `${ringkasan(daftar, path.basename(dest))}\n\nAntrian tersimpan (${daftar.rows.length} baris, belum ada yang dikirim ke SAKTI). ${sakti ? "Langkah berikutnya: /sakti masuk" : ""}`);
+      }
+    }
     if (!entry) {
       const wordedFolder = /\b(?:folder|direktori|map)\b/i.test(String(caption || ""));
       const lines = [wantDir ? `📥 Disimpan di folder yang kamu sebut: ${dest}` : `📥 Disimpan: ${dest}`];
@@ -245,6 +283,36 @@ export function createBot({ config, agent, ollama, tools = null, fetchImpl = fet
     }
   }
 
+  let saktiBusy = false;
+  async function saktiCommand(chatId, arg) {
+    if (!sakti) return void (await send(chatId, "Fitur SAKTI tidak aktif di cara menjalankan ini."));
+    const sub = (arg || "").split(/\s+/)[0].toLowerCase();
+    const io = { say: (t) => send(chatId, t), photo: (b, c) => sendPhoto(chatId, b, c), ask: (p) => ask(chatId, p) };
+    if (!sub || sub === "bantuan") {
+      const q = bacaAntrian(config.workdir);
+      return void (await send(chatId, ["SAKTI:", "/sakti masuk — buka SAKTI di komputer ini dan login (captcha & kode MFA kamu balas lewat chat)", "/sakti halaman — foto + daftar kolom/tombol halaman yang sedang terbuka", "/sakti foto — tangkapan layar saja", "/sakti antrian — baris dari Excel yang menunggu", "/sakti tutup — tutup peramban", "", `Peramban: ${sakti.terbuka ? "terbuka" : "belum dibuka"}. Antrian: ${q ? `${q.rows.length} baris dari ${q.berkas}` : "kosong"}.`, "Catatan: captcha tidak dipecahkan otomatis; gambarnya dikirim ke kamu untuk dibaca."].join("\n")));
+    }
+    if (sub === "antrian") {
+      const q = bacaAntrian(config.workdir);
+      if (!q) return void (await send(chatId, "Antrian kosong. Kirim berkas Excel (COA Sakti | Uraian | Jumlah) ke chat ini."));
+      return void (await send(chatId, `Antrian dari ${q.berkas}:\n` + q.rows.map((r) => `${r.no}. [${r.status}] akun ${r.akun} · Rp ${Math.round(r.jumlah || 0).toLocaleString("id-ID")} · ${r.uraian.slice(0, 70)}`).join("\n")));
+    }
+    if (sub === "tutup") return void (await send(chatId, (await sakti.tutup()) ? "Peramban ditutup." : "Peramban memang belum dibuka."));
+    if (!["masuk", "halaman", "foto"].includes(sub)) return void (await send(chatId, "Perintah SAKTI tidak dikenal. Kirim /sakti untuk daftar perintah."));
+    if (saktiBusy) return void (await send(chatId, "Masih ada proses SAKTI berjalan. Selesaikan dulu atau balas /batal."));
+    saktiBusy = true;
+    try {
+      if (sub === "masuk") await sakti.masuk(io);
+      else if (sub === "halaman") await sakti.halaman(io);
+      else await sakti.foto(io);
+    } catch (e) {
+      log.error?.(`sakti gagal: ${e?.stack || e}`);
+      await send(chatId, `⚠️ ${e instanceof Error ? e.message : String(e)}`).catch(() => {});
+    } finally {
+      saktiBusy = false;
+    }
+  }
+
   async function runAgent(chatId, text) {
     let statusId = null;
     let lastStatus = "";
@@ -285,6 +353,21 @@ export function createBot({ config, agent, ollama, tools = null, fetchImpl = fet
       log.warn?.(`pesan dari chat ${chatId} diabaikan (bukan pemilik)`);
       return;
     }
+    const w = waiters.get(chatId);
+    if (w && typeof m.text === "string" && m.text.trim()) {
+      const t = m.text.trim();
+      waiters.delete(chatId);
+      clearTimeout(w.timer);
+      if (/^\/batal\b/i.test(t)) {
+        w.resolve(null);
+        return;
+      }
+      if (!t.startsWith("/")) {
+        w.resolve(t);
+        return;
+      }
+      w.resolve(null); // perintah lain membatalkan penantian, lalu diproses seperti biasa
+    }
     const media = incomingMedia(m);
     if (media) return void (await saveIncoming(chatId, media.doc, m.caption, media.kind).catch((e) => send(chatId, `⚠️ ${e.message}`)));
     const text = typeof m.text === "string" ? m.text.trim() : "";
@@ -315,6 +398,7 @@ export function createBot({ config, agent, ollama, tools = null, fetchImpl = fet
         setTimeout(onRestart, restartDelayMs);
         return;
       }
+      if (name === "sakti") return void (await saktiCommand(chatId, arg));
       if (name === "model") {
         if (!arg) return void (await send(chatId, `Model aktif: ${ollama.model}\nGanti: /model qwen2.5:3b (lebih cepat) atau /model qwen2.5:7b. Model harus sudah diunduh: ollama pull <nama>`));
         if (!/^[\w.\-:/]{1,80}$/.test(arg)) return void (await send(chatId, "Nama model tidak valid."));
@@ -367,6 +451,7 @@ export function createBot({ config, agent, ollama, tools = null, fetchImpl = fet
     handleUpdate,
     sendFile,
     send,
+    sendPhoto,
     pendingCount: () => pending.size,
     async start() {
       const me = await api("getMe", {});
@@ -381,7 +466,7 @@ export function createBot({ config, agent, ollama, tools = null, fetchImpl = fet
           }
         }
       } catch {}
-      await api("setMyCommands", { commands: [{ command: "status", description: "Kondisi agent dan model" }, { command: "baru", description: "Lupakan percakapan" }, { command: "batal", description: "Hentikan tugas" }, { command: "model", description: "Lihat/ganti model" }, { command: "ulang", description: "Mulai ulang agen" }, { command: "help", description: "Bantuan" }] }).catch(() => {});
+      await api("setMyCommands", { commands: [{ command: "status", description: "Kondisi agent dan model" }, { command: "baru", description: "Lupakan percakapan" }, { command: "batal", description: "Hentikan tugas" }, { command: "model", description: "Lihat/ganti model" }, { command: "sakti", description: "Buka/kendalikan SAKTI" }, { command: "ulang", description: "Mulai ulang agen" }, { command: "help", description: "Bantuan" }] }).catch(() => {});
       void poll();
     },
     stop() {

@@ -29,19 +29,16 @@ function colIndex(ref) {
   return Math.max(0, n - 1);
 }
 
-/** Buku kerja .xlsx -> teks tab-delimited per lembar (hasil rumus yang tersimpan dibaca, bukan rumusnya). */
-export function xlsxToText(buf, { maxRows = 400 } = {}) {
+/** Buku kerja .xlsx -> [{ name, rows: string[][] }] per lembar (hasil rumus yang tersimpan dibaca, bukan rumusnya). */
+export function xlsxSheets(buf, { maxRows = 400 } = {}) {
   const files = new Map(readZip(buf).map((e) => [e.name, e]));
   const get = (n) => files.get(n)?.read().toString("utf8") || "";
   const strings = [...get("xl/sharedStrings.xml").matchAll(/<si>([\s\S]*?)<\/si>/g)].map((m) => decodeEntities([...m[1].matchAll(/<t[^>]*>([\s\S]*?)<\/t>/g)].map((x) => x[1]).join("")));
   const wb = get("xl/workbook.xml");
   const names = [...wb.matchAll(/<sheet [^>]*name="([^"]*)"/g)].map((m) => decodeEntities(m[1]));
   const sheets = [...files.keys()].filter((n) => /^xl\/worksheets\/sheet\d+\.xml$/.test(n)).sort((a, b) => Number(a.match(/\d+/)[0]) - Number(b.match(/\d+/)[0]));
-  const out = [];
-  sheets.forEach((sn, idx) => {
-    out.push(`## Lembar: ${names[idx] || `Sheet${idx + 1}`}`);
-    const rows = [...get(sn).matchAll(/<row [^>]*>([\s\S]*?)<\/row>/g)].slice(0, maxRows);
-    for (const r of rows) {
+  return sheets.map((sn, idx) => {
+    const rows = [...get(sn).matchAll(/<row [^>]*>([\s\S]*?)<\/row>/g)].slice(0, maxRows).map((r) => {
       const cells = [];
       for (const c of r[1].matchAll(/<c ([^>]*?)(?:\/>|>([\s\S]*?)<\/c>)/g)) {
         const ref = /r="([A-Z]+\d+)"/.exec(c[1])?.[1] || "A1";
@@ -50,9 +47,19 @@ export function xlsxToText(buf, { maxRows = 400 } = {}) {
         const inl = /<t[^>]*>([\s\S]*?)<\/t>/.exec(c[2] || "")?.[1];
         cells[colIndex(ref)] = type === "s" ? strings[Number(v)] ?? "" : type === "inlineStr" ? decodeEntities(inl ?? "") : decodeEntities(v);
       }
-      out.push(Array.from(cells, (x) => x ?? "").join("\t"));
-    }
+      return Array.from(cells, (x) => x ?? "");
+    });
+    return { name: names[idx] || `Sheet${idx + 1}`, rows };
   });
+}
+
+/** Buku kerja .xlsx -> teks tab-delimited per lembar. */
+export function xlsxToText(buf, { maxRows = 400 } = {}) {
+  const out = [];
+  for (const sh of xlsxSheets(buf, { maxRows })) {
+    out.push(`## Lembar: ${sh.name}`);
+    for (const r of sh.rows) out.push(r.join("\t"));
+  }
   return out.join("\n");
 }
 

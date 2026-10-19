@@ -12,6 +12,10 @@ import { createTools, defaultExec, shellName } from "../src/tools.js";
 import { createAgent, parseInlineToolCalls, buildSystemPrompt } from "../src/agent.js";
 import { createOllama, OllamaError } from "../src/ollama.js";
 import { createBot } from "../src/telegram.js";
+import { parseDaftar, parseJumlah, ringkasan, bacaAntrian } from "../src/spby.js";
+import { pickLogin, pickMfa, createSakti } from "../src/sakti.js";
+import { findBrowser } from "../src/browser.js";
+import { start as startPalsuSakti } from "./palsu-sakti.mjs";
 
 let n = 0;
 const ok = (name) => console.log(`  ✓ ${name}`) || n++;
@@ -487,6 +491,117 @@ const call = (name, args) => ({ role: "assistant", content: "", tool_calls: [{ f
 }
 ok("agent: loop alat, panggilan alat berupa teks, riwayat ringkas, persetujuan ditolak/diizinkan, mode baca, perintah berbahaya tak sampai ke pemilik, alat tak dikenal, injeksi tak tembus pagar, batas langkah, sibuk/batal");
 
+
+// .xlsx daftar kegiatan (sel teks langsung) untuk uji
+const xlsxDaftar = (rows, head = ["COA Sakti", "Uraian", "Jumlah"]) => {
+  const esc = (x) => String(x).replace(/&/g, "&amp;").replace(/</g, "&lt;");
+  const cell = (r, c, v) => (typeof v === "number" ? `<c r="${"ABC"[c]}${r}"><v>${v}</v></c>` : `<c r="${"ABC"[c]}${r}" t="inlineStr"><is><t>${esc(v)}</t></is></c>`);
+  const all = [head, ...rows];
+  return makeZip({
+    "xl/workbook.xml": '<workbook><sheets><sheet name="Bot Telegram" sheetId="1"/></sheets></workbook>',
+    "xl/worksheets/sheet1.xml": `<worksheet><sheetData>${all.map((r, i) => `<row r="${i + 1}">${r.map((v, c) => cell(i + 1, c, v)).join("")}</row>`).join("")}</sheetData></worksheet>`
+  });
+};
+const COA_OK = "538065.019.524111.015CD.4798ABA.A000000001.00000.2.2251.2.000000.000000";
+const URAIAN_OK = "Belanja barang untuk keperluan perjalanan dinas sesuai surat tugas nomor ST-1896/KNL.1401/2026 tanggal 2026-10-06 tujuan Kabupaten Klungkung an PUTU AGUS HENDRA HARJAYA dkk";
+
+// ------------------------------------------------------------------ daftar Excel + SAKTI
+{
+  assert.equal(parseJumlah("5.040.000"), 5040000);
+  assert.equal(parseJumlah("Rp 5.040.000,50"), 5040000.5);
+  assert.equal(parseJumlah(5040000), 5040000);
+  assert.equal(parseJumlah("1,500,000"), 1500000);
+  assert.ok(Number.isNaN(parseJumlah("abc")));
+  assert.ok(Number.isNaN(parseJumlah("")));
+
+  const p = parseDaftar(xlsxDaftar([[COA_OK, URAIAN_OK, 5040000], ["COA-SALAH", "", -5], [COA_OK, URAIAN_OK, 5040000]]));
+  assert.equal(p.rows.length, 3);
+  assert.equal(p.rows[0].akun, "524111");
+  assert.deepEqual(p.rows[0].masalah, []);
+  assert.match(p.rows[1].masalah.join("|"), /format COA[\s\S]*uraian kosong[\s\S]*lebih dari 0/);
+  assert.match(p.rows[2].masalah.join("|"), /sama persis dengan baris 2/);
+  const rs = ringkasan(p, "x.xlsx");
+  assert.match(rs, /3 baris/);
+  assert.match(rs, /ST-1896\/KNL\.1401\/2026 · tujuan Kabupaten Klungkung · an PUTU AGUS HENDRA HARJAYA dkk/);
+  assert.match(rs, /2 baris bermasalah/);
+  // kepala kolom boleh huruf besar/kecil dan tidak di baris pertama; berkas lain bukan daftar
+  assert.ok(parseDaftar(xlsxDaftar([[COA_OK, "u", 1000]], ["coa SAKTI", "URAIAN", "jumlah"])));
+  assert.equal(parseDaftar(xlsxDaftar([["a", "b", 1]], ["Item", "Qty", "Harga"])), null);
+  assert.equal(parseDaftar(Buffer.from("bukan zip")), null);
+
+  // pemilihan kolom formulir masuk (murni, tanpa browser)
+  const it = (id, kind, o = {}) => ({ id, kind, tag: "input", type: "", name: "", eid: "", cls: "", ph: "", label: "", text: "", src: "", w: 200, h: 30, top: 0, left: 0, ...o });
+  const lg = pickLogin([it("e1", "kolom", { name: "username" }), it("e2", "sandi", { type: "password" }), it("e3", "gambar", { tag: "img", w: 120, h: 40, src: "/captcha.png" }), it("e4", "kolom", { ph: "captcha" }), it("e5", "tombol", { type: "submit", text: "Login" })]);
+  assert.deepEqual([lg.user.id, lg.pw.id, lg.captchaImg.id, lg.captchaInput.id, lg.submit.id], ["e1", "e2", "e3", "e4", "e5"]);
+  assert.equal(pickLogin([it("e1", "kolom")]), null, "tanpa kolom sandi = bukan formulir masuk");
+  const tanpaCaptcha = pickLogin([it("e1", "kolom"), it("e2", "sandi"), it("e3", "tombol", { text: "Masuk" })]);
+  assert.equal(tanpaCaptcha.captchaImg, null);
+  assert.equal(tanpaCaptcha.captchaInput, null);
+  assert.equal(tanpaCaptcha.submit.id, "e3");
+  const mf = pickMfa([it("e1", "kolom", { ph: "Kode OTP 6 digit" }), it("e2", "tombol", { text: "Verifikasi" })]);
+  assert.deepEqual([mf.input.id, mf.submit.id], ["e1", "e2"]);
+  assert.equal(pickMfa([it("e1", "sandi"), it("e2", "kolom")]), null);
+
+  // peramban sungguhan terhadap situs tiruan (dilewati bila Chrome/Chromium tidak ada)
+  let exe = findBrowser(process.env);
+  if (!exe) {
+    const base = process.env.PLAYWRIGHT_BROWSERS_PATH || "/opt/pw-browsers";
+    try {
+      const d = fs.readdirSync(base).find((x) => /^chromium-\d+$/.test(x));
+      if (d && fs.existsSync(path.join(base, d, "chrome-linux", "chrome"))) exe = path.join(base, d, "chrome-linux", "chrome");
+    } catch {}
+  }
+  if (!exe) console.log("  - peramban tidak ada: uji SAKTI tiruan dilewati");
+  else {
+    const PORT = 18900 + Math.floor(Math.random() * 500);
+    const { srv, state } = await startPalsuSakti(PORT);
+    const wd = path.join(tmp, "sakti-kerja");
+    fs.mkdirSync(wd, { recursive: true });
+    const mk = (over = {}) => readConfig({ TELEGRAM_BOT_TOKEN: "T", AGENT_ROOTS: wd, AGENT_WORKDIR: wd, SAKTI_URL: `http://127.0.0.1:${PORT}/`, SAKTI_USER: "199001012020011001", SAKTI_PASS: "rahasia", SAKTI_HEADLESS: "1", ...over });
+    const said = [];
+    const photos = [];
+    const mkIo = (answers) => ({ say: async (t) => said.push(t), photo: async (b, c) => photos.push({ n: b.length, c }), ask: async (q) => (said.push("ASK:" + q), answers.shift() ?? null) });
+    try {
+      // tanpa kredensial -> diminta mengisi .env, browser tidak dibuka
+      const s0 = createSakti({ config: mk({ SAKTI_PASS: "" }), find: () => exe, log: silent });
+      assert.deepEqual(await s0.masuk(mkIo([])), { ok: false });
+      assert.match(said.join("\n"), /SAKTI_USER dan SAKTI_PASS belum diisi/);
+      assert.equal(s0.terbuka, false);
+
+      // alur penuh: captcha dibaca pemilik, MFA diminta, sukses
+      said.length = 0;
+      const s1 = createSakti({ config: mk(), find: () => exe, log: silent });
+      assert.deepEqual(await s1.masuk(mkIo(["AB12", "123 456"])), { ok: true });
+      assert.ok(photos.some((p) => p.c === "Captcha SAKTI" && p.n > 100), "gambar captcha dikirim ke pemilik");
+      assert.match(said.join("\n"), /ASK:Ketik huruf\/angka pada gambar captcha/);
+      assert.match(said.join("\n"), /ASK:Masukkan kode MFA/);
+      assert.match(said.join("\n"), /Sudah masuk SAKTI/);
+      assert.deepEqual(state.log[0], { username: "199001012020011001", password: "rahasia", captcha: "AB12" });
+      assert.deepEqual(state.log[1], { otp: "123456" }, "spasi pada kode MFA dibuang");
+      said.length = 0;
+      await s1.halaman(mkIo([]));
+      assert.match(said.join("\n"), /Beranda|SAKTI tiruan/);
+      assert.equal(await s1.tutup(), true);
+
+      // captcha salah -> dilaporkan, tidak sampai MFA; dibatalkan saat ditanya -> berhenti
+      said.length = 0;
+      state.mfaOk = false;
+      state.log.length = 0;
+      const s2 = createSakti({ config: mk(), find: () => exe, log: silent });
+      assert.deepEqual(await s2.masuk(mkIo(["SALAH", "SALAH", "SALAH"])), { ok: false });
+      assert.match(said.join("\n"), /Masih di halaman masuk/);
+      assert.ok(!said.join("\n").includes("ASK:Masukkan kode MFA"));
+      said.length = 0;
+      assert.deepEqual(await s2.masuk(mkIo([])), { ok: false }, "tanpa jawaban (batal) berhenti");
+      assert.match(said.join("\n"), /Dibatalkan/);
+      await s2.tutup();
+    } finally {
+      srv.close();
+    }
+  }
+}
+ok("daftar Excel (jumlah, validasi, ringkasan), pemilihan kolom login/MFA, alur login SAKTI tiruan di peramban (captcha & MFA lewat pemilik)");
+
 // ------------------------------------------------------------------ bot Telegram
 {
   const calls = [];
@@ -503,12 +618,13 @@ ok("agent: loop alat, panggilan alat berupa teks, riwayat ringkas, persetujuan d
     if (method === "getMe") result = { username: "agen_bot" };
     return { status: 200, json: async () => ({ ok: true, result }) };
   };
-  const mkBot = (owners, llmSteps, over = {}) => {
+  const mkBot = (owners, llmSteps, over0 = {}) => {
+    const { sakti = null, ...over } = over0;
     const c = { ...cfg, owners: new Set(owners), ...over };
     const llm = scripted(llmSteps);
     const tools = createTools({ config: c, web: web0, sendFile: async (f) => bot.sendFile("111", f), exec: async () => ({ code: 0, output: "", timedOut: false }) });
     const agent = createAgent({ ollama: llm, tools, config: c, log: silent });
-    const bot = createBot({ config: c, agent, ollama: llm, tools, fetchImpl: fakeFetch, log: silent });
+    const bot = createBot({ config: c, agent, ollama: llm, tools, sakti, fetchImpl: fakeFetch, log: silent });
     return { bot, llm, agent };
   };
   const msg = (text, extra = {}, from = 111, chat = 111, type = "private") => ({ update_id: 1, message: { chat: { id: chat, type }, from: { id: from }, text, ...extra } });
@@ -867,6 +983,98 @@ ok("agent: loop alat, panggilan alat berupa teks, riwayat ringkas, persetujuan d
     assert.equal(calls.slice(b).filter((c) => c.method === "sendMessage" && /Disimpan/.test(c.body.text)).length, 0);
   }
 
+  // Excel daftar kegiatan -> ringkasan + antrian; /sakti dengan jawaban captcha/MFA lewat chat
+  {
+    const jejak = [];
+    const fakeSakti = {
+      terbuka: false,
+      async masuk(io) {
+        jejak.push("masuk");
+        await io.photo(Buffer.from("PNGDATA"), "Captcha SAKTI");
+        const c = await io.ask("Ketik captcha");
+        jejak.push("captcha=" + c);
+        if (c == null) return void (await io.say("Dibatalkan."));
+        const k = await io.ask("Kode MFA");
+        jejak.push("mfa=" + k);
+        await io.say(k ? "✅ Sudah masuk SAKTI." : "Dibatalkan.");
+        return { ok: !!k };
+      },
+      async halaman(io) {
+        jejak.push("halaman");
+        await io.say("isi halaman");
+      },
+      async foto() {},
+      async tutup() {
+        jejak.push("tutup");
+        return true;
+      }
+    };
+    const tX = mkBot(["111"], [], { sakti: fakeSakti });
+    const docX = (name, caption) => msg(undefined, { text: undefined, document: { file_id: "fidX", file_name: name, file_size: 10 }, ...(caption ? { caption } : {}) });
+
+    files.set("fidX", xlsxDaftar([[COA_OK, URAIAN_OK, 5040000], ["RUSAK", "uji", 0]]));
+    b = calls.length;
+    await tX.bot.handleUpdate(docX("Daftar Kegiatan.xlsx"));
+    const prev = texts(b);
+    assert.match(prev, /2 baris, total Rp 5\.040\.000/);
+    assert.match(prev, /akun 524111 · Rp 5\.040\.000/);
+    assert.match(prev, /1 baris bermasalah/);
+    assert.match(prev, /Antrian tersimpan \(2 baris, belum ada yang dikirim ke SAKTI\)[\s\S]*\/sakti masuk/);
+    assert.equal(bacaAntrian(cfg.workdir).rows.length, 2);
+
+    // xlsx biasa (bukan daftar) tetap hanya disimpan
+    files.set("fidX", xlsxDaftar([["a", "b", 1]], ["Item", "Qty", "Harga"]));
+    b = calls.length;
+    await tX.bot.handleUpdate(docX("lain.xlsx"));
+    assert.match(texts(b), /Disimpan:/);
+    assert.doesNotMatch(texts(b), /Antrian tersimpan/);
+
+    // /sakti, /sakti antrian
+    b = calls.length;
+    await tX.bot.handleUpdate(msg("/sakti"));
+    assert.match(texts(b), /\/sakti masuk[\s\S]*Antrian: 2 baris dari Daftar Kegiatan\.xlsx[\s\S]*captcha tidak dipecahkan otomatis/);
+    b = calls.length;
+    await tX.bot.handleUpdate(msg("/sakti antrian"));
+    assert.match(texts(b), /1\. \[menunggu\] akun 524111/);
+
+    // /sakti masuk: pesan teks berikutnya = jawaban captcha, lalu kode MFA; tidak sampai ke model
+    b = calls.length;
+    const run1 = tX.bot.handleUpdate(msg("/sakti masuk"));
+    await tick(60);
+    assert.ok(calls.slice(b).some((c) => c.method === "sendPhoto"), "foto captcha dikirim");
+    assert.match(texts(b), /✍️ Ketik captcha/);
+    await tX.bot.handleUpdate(msg("AB12"));
+    await tick(60);
+    assert.match(texts(b), /✍️ Kode MFA/);
+    await tX.bot.handleUpdate(msg("123456"));
+    await run1;
+    assert.deepEqual(jejak, ["masuk", "captcha=AB12", "mfa=123456"]);
+    assert.match(texts(b), /Sudah masuk SAKTI/);
+    assert.equal(tX.llm.calls?.length ?? 0, 0, "jawaban captcha tidak masuk ke model");
+
+    // /batal saat menunggu -> dibatalkan; bukan pemilik tidak bisa memicu
+    jejak.length = 0;
+    b = calls.length;
+    const run2 = tX.bot.handleUpdate(msg("/sakti masuk"));
+    await tick(60);
+    await tX.bot.handleUpdate(msg("/batal"));
+    await run2;
+    assert.deepEqual(jejak, ["masuk", "captcha=null"]);
+    assert.match(texts(b), /Dibatalkan/);
+    b = calls.length;
+    await mkBot(["222"], [], { sakti: fakeSakti }).bot.handleUpdate(msg("/sakti masuk", {}, 111, 111));
+    assert.equal(calls.slice(b).filter((c) => c.method === "sendMessage").length, 0);
+
+    // halaman & tutup
+    jejak.length = 0;
+    await tX.bot.handleUpdate(msg("/sakti halaman"));
+    await tX.bot.handleUpdate(msg("/sakti tutup"));
+    assert.deepEqual(jejak, ["halaman", "tutup"]);
+    b = calls.length;
+    await tX.bot.handleUpdate(msg("/sakti entah"));
+    assert.match(texts(b), /tidak dikenal/);
+  }
+
   // jawaban panjang dipecah
   const t7 = mkBot(["111"], [{ role: "assistant", content: "x".repeat(9000) }]);
   b = calls.length;
@@ -874,7 +1082,7 @@ ok("agent: loop alat, panggilan alat berupa teks, riwayat ringkas, persetujuan d
   await tick(60);
   assert.equal(calls.slice(b).filter((c) => c.method === "sendMessage" && c.body.text.startsWith("xxx")).length, 3);
 }
-ok("bot Telegram: pairing, bukan-pemilik diabaikan, perintah, persetujuan lewat tombol (izin/tolak/kedaluwarsa/dobel/orang lain/batal), berkas masuk aman, kirim berkas, kirim-edit-kembalikan (persetujuan, cadangan, caption, jenis beda, mode baca, di luar izin), foto/video/suara + folder tujuan dari keterangan, /model, pesan panjang dipecah");
+ok("bot Telegram: pairing, bukan-pemilik diabaikan, perintah, persetujuan lewat tombol (izin/tolak/kedaluwarsa/dobel/orang lain/batal), berkas masuk aman, kirim berkas, kirim-edit-kembalikan (persetujuan, cadangan, caption, jenis beda, mode baca, di luar izin), foto/video/suara + folder tujuan dari keterangan, Excel daftar kegiatan + /sakti (captcha/MFA lewat chat), /model, pesan panjang dipecah");
 
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log(`\n${n} kelompok tes Agen Lokal lulus ✅`);
