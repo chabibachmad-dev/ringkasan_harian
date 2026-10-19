@@ -92,6 +92,24 @@ export function findFilesByName(config, query, { limit = 10 } = {}) {
   return hits;
 }
 
+/** Cari FOLDER menurut nama persis (tidak peka huruf besar-kecil) di folder izin, folder kerja, dan isinya. -> alamat[] */
+export function findDirsByName(config, name, { limit = 5 } = {}) {
+  const q = String(name ?? "").toLowerCase().trim();
+  if (!q) return [];
+  const hits = [];
+  const add = (d) => {
+    if (!hits.includes(d)) hits.push(d);
+  };
+  for (const r of [config.workdir, ...config.roots].filter(Boolean)) if (path.basename(r).toLowerCase() === q) add(r);
+  for (const r of config.roots) {
+    for (const e of walk(r)) {
+      if (e.dir && path.basename(e.full).toLowerCase() === q) add(e.full);
+      if (hits.length >= limit) return hits;
+    }
+  }
+  return hits;
+}
+
 const props = (o, required = []) => ({ type: "object", properties: o, required });
 
 export function createTools({ config, web, sendFile = null, exec = defaultExec, now = () => new Date() }) {

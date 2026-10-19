@@ -68,7 +68,7 @@ Tulis permintaan biasa dalam bahasa Indonesia, misalnya:
 - "berapa sisa ruang disk C?" (agent mengajukan perintah PowerShell; kamu setujui atau tolak)
 - "kirim file laporan-september.xlsx ke sini"
 
-Perintah bot: `/status` kondisi · `/baru` lupakan percakapan · `/batal` hentikan tugas · `/model [nama]` lihat/ganti model · `/ulang` mulai ulang agen (butuh pm2/`start.sh`/`start.bat` yang menyalakannya lagi) · `/id` · `/help`. Kirim berkas ke chat → disimpan di `_masuk` dalam folder kerja, lalu bisa kamu suruh olah.
+Perintah bot: `/status` kondisi · `/baru` lupakan percakapan · `/batal` hentikan tugas · `/model [nama]` lihat/ganti model · `/ulang` mulai ulang agen (butuh pm2/`start.sh`/`start.bat` yang menyalakannya lagi) · `/id` · `/help`. Kirim berkas, foto, video, atau pesan suara ke chat → disimpan di `_masuk` dalam folder kerja, lalu bisa kamu suruh olah. Bila keterangan (caption)-nya berbunyi mis. "simpan di folder laporan", berkas masuk ke folder bernama persis itu (harus satu-satunya yang bernama begitu di dalam folder izin; kalau tidak ketemu atau ada kembar, jatuh ke `_masuk` dengan penjelasan). Foto yang dikirim sebagai foto sudah dikompres Telegram; kirim sebagai File/Dokumen untuk kualitas asli.
 
 ## Mengedit berkas di tempat lain (kirim → edit → kembalikan)
 

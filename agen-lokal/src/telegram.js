@@ -1,11 +1,10 @@
 // Bot Telegram untuk agent: long polling (tanpa webhook/port terbuka), hanya melayani id pemilik, persetujuan lewat tombol.
 import { applyReturn, listSent, lookupSent, planReturn } from "./kembali.js";
-import { findFilesByName } from "./tools.js";
-import { resolveInRoots } from "./safety.js";
+import { findDirsByName, findFilesByName } from "./tools.js";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { isInside } from "./safety.js";
+import { isInside, resolveInRoots } from "./safety.js";
 
 const API = "https://api.telegram.org";
 const chunk = (text, n = 3900) => {
@@ -128,12 +127,48 @@ export function createBot({ config, agent, ollama, tools = null, fetchImpl = fet
     return send(chatId, [`🤖 Model aktif: ${ollama.model}${models.length ? (has ? "" : "  ⚠️ belum diunduh (ollama pull " + ollama.model + ")") : ""}`, `Ollama: ${up}`, models.length ? `Model terpasang: ${models.join(", ")}` : "", `Mode: ${config.mode === "baca" ? "hanya membaca" : "tanya dulu sebelum mengubah"}`, `Folder izin: ${config.roots.join("; ")}`, `Folder kerja: ${config.workdir}`].filter(Boolean).join("\n"));
   }
 
-  async function saveIncoming(chatId, doc, caption = "") {
+  /** Pesan Telegram -> { doc: {file_id, file_name, file_size}, kind } untuk berkas/foto/video/audio/suara, atau null. */
+  function incomingMedia(m) {
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+    if (m.document) return { doc: m.document, kind: "berkas" };
+    if (Array.isArray(m.photo) && m.photo.length) {
+      const big = m.photo[m.photo.length - 1]; // ukuran terbesar
+      return { doc: { file_id: big.file_id, file_size: big.file_size, file_name: `foto-${stamp}.jpg` }, kind: "foto" };
+    }
+    if (m.video) return { doc: { ...m.video, file_name: m.video.file_name || `video-${stamp}.mp4` }, kind: "video" };
+    if (m.audio) return { doc: { ...m.audio, file_name: m.audio.file_name || `audio-${stamp}.mp3` }, kind: "audio" };
+    if (m.voice) return { doc: { ...m.voice, file_name: `suara-${stamp}.ogg` }, kind: "pesan suara" };
+    if (m.video_note) return { doc: { ...m.video_note, file_name: `video-bulat-${stamp}.mp4` }, kind: "video" };
+    return null;
+  }
+
+  /** Dari keterangan "simpan ... di folder <nama>" -> alamat folder tujuan (harus ketemu persis & tunggal di folder izin), atau null. */
+  function destinationFromCaption(caption) {
+    const m = /\b(?:folder|direktori|map)\s+(.+?)\s*$/i.exec(String(caption || "").trim());
+    if (!m) return null;
+    const words = m[1].replace(/["'“”]/g, "").split(/\s+/).filter(Boolean);
+    for (let i = 0; i < Math.min(words.length, 4); i++) {
+      const hits = findDirsByName(config, words.slice(i).join(" "));
+      if (hits.length === 1) return hits[0];
+      if (hits.length > 1) return null; // ambigu: pakai _masuk
+    }
+    return null;
+  }
+
+  async function saveIncoming(chatId, doc, caption = "", kind = "berkas") {
     if (Number(doc.file_size) > 20 * 1024 * 1024) return send(chatId, "Berkas lebih dari 20 MB; batas unduhan bot Telegram.");
-    const dir = path.join(config.workdir, "_masuk");
+    const wantDir = /^\/?kembali(?:kan)?\s/i.test(String(caption || "").trim()) ? null : destinationFromCaption(caption);
+    const dir = wantDir || path.join(config.workdir, "_masuk");
     const base = path.basename(doc.file_name || `berkas-${Date.now()}`).replace(/[<>:"/\\|?*\x00-\x1f]/g, "_");
     let dest = path.join(dir, base);
-    if (!isInside(config.workdir, dest)) return send(chatId, "Nama berkas tidak valid.");
+    if (!isInside(dir, dest)) return send(chatId, "Nama berkas tidak valid.");
+    if (wantDir) {
+      try {
+        resolveInRoots(dest, config); // tujuan wajib di dalam folder izin dan bukan berkas rahasia
+      } catch (e) {
+        return send(chatId, `⚠️ ${e.message}`);
+      }
+    }
     const buf = await download(doc.file_id);
     fs.mkdirSync(dir, { recursive: true });
     if (fs.existsSync(dest)) dest = path.join(dir, `${Date.now()}-${base}`);
@@ -141,7 +176,15 @@ export function createBot({ config, agent, ollama, tools = null, fetchImpl = fet
     // Berkas ini versi baru dari berkas yang tadi dikirim ke Telegram? (nama sama, atau keterangan "kembalikan <nama>")
     const capName = /^\/?kembali(?:kan)?\s+(.+)$/i.exec(String(caption || "").trim())?.[1]?.trim();
     const entry = lookupSent(config.workdir, capName || base);
-    if (!entry) return send(chatId, `📥 Disimpan: ${dest}\nSekarang bisa kamu suruh, mis. "ringkas file ${path.basename(dest)}".${listSent(config.workdir, 1).length ? `\n\nBila ini hasil editan berkas yang tadi kukirim dan ingin menggantikan yang asli, kirim ulang dengan keterangan: kembalikan <nama berkas asli>` : ""}`);
+    if (!entry) {
+      const wordedFolder = /\b(?:folder|direktori|map)\b/i.test(String(caption || ""));
+      const lines = [wantDir ? `📥 Disimpan di folder yang kamu sebut: ${dest}` : `📥 Disimpan: ${dest}`];
+      if (kind === "foto") lines.push("(Foto lewat Telegram sudah dikompres; kirim sebagai File/Dokumen bila butuh kualitas aslinya.)");
+      if (wordedFolder && !wantDir && !/^\/?kembali(?:kan)?\s/i.test(String(caption || "").trim())) lines.push("Folder yang kamu sebut tidak ketemu (atau ada beberapa yang bernama sama), jadi kusimpan di _masuk. Tulis nama folder persisnya.");
+      if (kind === "berkas") lines.push(`Sekarang bisa kamu suruh, mis. "ringkas file ${path.basename(dest)}".`);
+      if (listSent(config.workdir, 1).length) lines.push("", "Bila ini hasil editan berkas yang tadi kukirim dan ingin menggantikan yang asli, kirim ulang dengan keterangan: kembalikan <nama berkas asli>");
+      return send(chatId, lines.join("\n"));
+    }
     return offerReturn(chatId, dest, entry);
   }
 
@@ -242,9 +285,10 @@ export function createBot({ config, agent, ollama, tools = null, fetchImpl = fet
       log.warn?.(`pesan dari chat ${chatId} diabaikan (bukan pemilik)`);
       return;
     }
-    if (m.document) return void (await saveIncoming(chatId, m.document, m.caption).catch((e) => send(chatId, `⚠️ ${e.message}`)));
+    const media = incomingMedia(m);
+    if (media) return void (await saveIncoming(chatId, media.doc, m.caption, media.kind).catch((e) => send(chatId, `⚠️ ${e.message}`)));
     const text = typeof m.text === "string" ? m.text.trim() : "";
-    if (!text) return void (await send(chatId, "Aku membaca pesan teks dan berkas. Tulis permintaanmu."));
+    if (!text) return void (await send(chatId, "Aku membaca pesan teks, berkas, foto, video, dan suara. Tulis permintaanmu."));
     const cmd = /^\/([a-z_]+)(?:@\w+)?(?:\s+([\s\S]*))?$/i.exec(text);
     if (cmd) {
       const name = cmd[1].toLowerCase();

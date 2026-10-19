@@ -494,12 +494,12 @@ ok("agent: loop alat, panggilan alat berupa teks, riwayat ringkas, persetujuan d
   const fakeFetch = async (url, init = {}) => {
     const u = String(url);
     const method = u.split("/").pop();
-    if (u.includes("/file/bot")) return { ok: true, status: 200, arrayBuffer: async () => files.get("fid1") };
+    if (u.includes("/file/bot")) return { ok: true, status: 200, arrayBuffer: async () => files.get(u.split("/").pop()) ?? files.get("fid1") };
     const form = init.body instanceof FormData;
     const body = init.body && !form ? JSON.parse(init.body) : {};
     calls.push({ method, body, form: form ? init.body : null });
     let result = { message_id: calls.length };
-    if (method === "getFile") result = { file_path: "docs/f.bin" };
+    if (method === "getFile") result = { file_path: `docs/${body.file_id}` };
     if (method === "getMe") result = { username: "agen_bot" };
     return { status: 200, json: async () => ({ ok: true, result }) };
   };
@@ -800,6 +800,73 @@ ok("agent: loop alat, panggilan alat berupa teks, riwayat ringkas, persetujuan d
     assert.equal(calls.length, b, "bukan pemilik tidak bisa memulai ulang");
   }
 
+  // foto/video/suara disimpan; keterangan "simpan ... di folder <nama>" menentukan tujuan
+  {
+    const tP = mkBot(["111"], []);
+    const photo = (caption) => msg(undefined, { text: undefined, photo: [{ file_id: "kecil", file_size: 10 }, { file_id: "fidFoto", file_size: 20 }], ...(caption ? { caption } : {}) });
+    files.set("fidFoto", Buffer.from("JPEGDATA"));
+    fs.mkdirSync(path.join(root, "proyek-x", "gambar-saya"), { recursive: true });
+    fs.mkdirSync(path.join(root, "a", "kembar-dir"), { recursive: true });
+    fs.mkdirSync(path.join(root, "b", "kembar-dir"), { recursive: true });
+
+    // 1) tanpa keterangan -> _masuk, ada catatan kompresi
+    b = calls.length;
+    await tP.bot.handleUpdate(photo());
+    assert.doesNotMatch(texts(b), /Tulis permintaanmu/);
+    assert.match(texts(b), /Disimpan:[\s\S]*_masuk[\\/]foto-[\d\-T]+\.jpg[\s\S]*dikompres/);
+    const masuk = fs.readdirSync(path.join(cfg.workdir, "_masuk")).filter((f) => f.startsWith("foto-"));
+    assert.ok(masuk.length >= 1);
+    assert.equal(fs.readFileSync(path.join(cfg.workdir, "_masuk", masuk[0]), "utf8"), "JPEGDATA", "ukuran terbesar yang diunduh");
+
+    // 2) "simpan ... di folder dokumen kerja" -> ke folder kerja (kata awalan diabaikan)
+    b = calls.length;
+    await tP.bot.handleUpdate(photo("simpan file gambar ini di folder dokumen kerja"));
+    assert.match(texts(b), /Disimpan di folder yang kamu sebut:/);
+    assert.ok(fs.readdirSync(cfg.workdir).some((f) => /^foto-.*\.jpg$/.test(f)), "foto langsung di folder kerja");
+
+    // 3) folder bersarang di folder izin
+    b = calls.length;
+    await tP.bot.handleUpdate(photo("simpan di folder gambar-saya"));
+    assert.ok(fs.readdirSync(path.join(root, "proyek-x", "gambar-saya")).some((f) => f.startsWith("foto-")));
+
+    // 4) folder tak ada / ambigu -> _masuk + penjelasan
+    for (const cap of ["simpan di folder tidak-ada-sama-sekali", "simpan di folder kembar-dir"]) {
+      b = calls.length;
+      await tP.bot.handleUpdate(photo(cap));
+      assert.match(texts(b), /_masuk/);
+      assert.match(texts(b), /tidak ketemu \(atau ada beberapa/);
+    }
+    assert.equal(fs.readdirSync(path.join(root, "a", "kembar-dir")).length, 0);
+
+    // 5) dokumen dengan keterangan folder juga dihormati; nama berkas asli dipakai
+    files.set("fidD", Buffer.from("ISI"));
+    b = calls.length;
+    await tP.bot.handleUpdate(msg(undefined, { text: undefined, document: { file_id: "fidD", file_name: "catatan-baru.txt", file_size: 3 }, caption: "taruh di folder gambar-saya" }));
+    assert.equal(fs.readFileSync(path.join(root, "proyek-x", "gambar-saya", "catatan-baru.txt"), "utf8"), "ISI");
+
+    // 6) video & pesan suara disimpan
+    files.set("fidV", Buffer.from("VID"));
+    b = calls.length;
+    await tP.bot.handleUpdate(msg(undefined, { text: undefined, video: { file_id: "fidV", file_size: 3 } }));
+    await tP.bot.handleUpdate(msg(undefined, { text: undefined, voice: { file_id: "fidV", file_size: 3 } }));
+    const masuk2 = fs.readdirSync(path.join(cfg.workdir, "_masuk"));
+    assert.ok(masuk2.some((f) => /^video-.*\.mp4$/.test(f)) && masuk2.some((f) => /^suara-.*\.ogg$/.test(f)));
+
+    // 7) keterangan "kembalikan ..." tidak dianggap tujuan folder
+    b = calls.length;
+    await tP.bot.handleUpdate(photo("kembalikan laporan-september.txt di folder kerja"));
+    assert.doesNotMatch(texts(b), /yang kamu sebut/);
+
+    // 8) lebih dari 20 MB ditolak; bukan pemilik diabaikan
+    b = calls.length;
+    await tP.bot.handleUpdate(msg(undefined, { text: undefined, photo: [{ file_id: "besar", file_size: 30 * 1024 * 1024 }] }));
+    assert.match(texts(b), /20 MB/);
+    const tQ = mkBot(["222"], []);
+    b = calls.length;
+    await tQ.bot.handleUpdate(photo());
+    assert.equal(calls.slice(b).filter((c) => c.method === "sendMessage" && /Disimpan/.test(c.body.text)).length, 0);
+  }
+
   // jawaban panjang dipecah
   const t7 = mkBot(["111"], [{ role: "assistant", content: "x".repeat(9000) }]);
   b = calls.length;
@@ -807,7 +874,7 @@ ok("agent: loop alat, panggilan alat berupa teks, riwayat ringkas, persetujuan d
   await tick(60);
   assert.equal(calls.slice(b).filter((c) => c.method === "sendMessage" && c.body.text.startsWith("xxx")).length, 3);
 }
-ok("bot Telegram: pairing, bukan-pemilik diabaikan, perintah, persetujuan lewat tombol (izin/tolak/kedaluwarsa/dobel/orang lain/batal), berkas masuk aman, kirim berkas, kirim-edit-kembalikan (persetujuan, cadangan, caption, jenis beda, mode baca, di luar izin), /model, pesan panjang dipecah");
+ok("bot Telegram: pairing, bukan-pemilik diabaikan, perintah, persetujuan lewat tombol (izin/tolak/kedaluwarsa/dobel/orang lain/batal), berkas masuk aman, kirim berkas, kirim-edit-kembalikan (persetujuan, cadangan, caption, jenis beda, mode baca, di luar izin), foto/video/suara + folder tujuan dari keterangan, /model, pesan panjang dipecah");
 
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log(`\n${n} kelompok tes Agen Lokal lulus ✅`);
