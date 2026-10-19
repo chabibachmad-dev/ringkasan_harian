@@ -16,12 +16,12 @@ if (config.problems.length) {
   process.exit(1);
 }
 
-const ollama = createOllama({ url: config.ollamaUrl, model: config.model, numCtx: config.numCtx, keepAlive: config.keepAlive, timeoutMs: config.requestTimeoutMs });
+const ollama = createOllama({ url: config.ollamaUrl, model: config.model, numCtx: config.numCtx, keepAlive: config.keepAlive, numThread: config.numThread, maxTokens: config.maxTokens, timeoutMs: config.requestTimeoutMs });
 const web = createWeb();
 let bot;
 const tools = createTools({ config, web, sendFile: (file) => bot.sendFile([...config.owners][0], file) });
 const agent = createAgent({ ollama, tools, config });
-bot = createBot({ config, agent, ollama, onRestart: () => process.exit(0) }); // pm2/start.sh menyalakan lagi
+bot = createBot({ config, agent, ollama, tools, onRestart: () => process.exit(0) }); // pm2/start.sh menyalakan lagi
 
 process.on("unhandledRejection", (e) => console.error("Galat tak tertangani:", e));
 process.on("SIGINT", () => {

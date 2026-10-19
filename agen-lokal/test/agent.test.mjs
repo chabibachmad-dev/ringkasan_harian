@@ -508,7 +508,7 @@ ok("agent: loop alat, panggilan alat berupa teks, riwayat ringkas, persetujuan d
     const llm = scripted(llmSteps);
     const tools = createTools({ config: c, web: web0, sendFile: async (f) => bot.sendFile("111", f), exec: async () => ({ code: 0, output: "", timedOut: false }) });
     const agent = createAgent({ ollama: llm, tools, config: c, log: silent });
-    const bot = createBot({ config: c, agent, ollama: llm, fetchImpl: fakeFetch, log: silent });
+    const bot = createBot({ config: c, agent, ollama: llm, tools, fetchImpl: fakeFetch, log: silent });
     return { bot, llm, agent };
   };
   const msg = (text, extra = {}, from = 111, chat = 111, type = "private") => ({ update_id: 1, message: { chat: { id: chat, type }, from: { id: from }, text, ...extra } });
@@ -625,6 +625,54 @@ ok("agent: loop alat, panggilan alat berupa teks, riwayat ringkas, persetujuan d
   const doc = calls.slice(b).find((c) => c.method === "sendDocument");
   assert.ok(doc && doc.form.get("document").size > 0 && doc.form.get("chat_id") === "111");
 
+  // "kirim file <nama>" ditangani langsung tanpa model
+  {
+    fs.mkdirSync(path.join(cfg.workdir, "arsip"), { recursive: true });
+    fs.writeFileSync(path.join(cfg.workdir, "arsip", "MP I 2026.pdf"), "%PDF-1.4 palsu");
+    fs.writeFileSync(path.join(cfg.workdir, "arsip", "kembar-a.pdf"), "a");
+    fs.writeFileSync(path.join(cfg.workdir, "arsip", "kembar-b.pdf"), "b");
+    const tD = mkBot(["111"], [{ role: "assistant", content: "TIDAK BOLEH LEWAT MODEL" }]);
+    const docs = (from) => calls.slice(from).filter((c) => c.method === "sendDocument");
+    // nama dengan spasi, tanpa alamat -> dicari lalu dikirim
+    b = calls.length;
+    await tD.bot.handleUpdate(msg("kirim file MP I 2026.pdf ke sini"));
+    await tick(60);
+    assert.equal(docs(b).length, 1);
+    assert.equal(docs(b)[0].form.get("document").name, "MP I 2026.pdf");
+    assert.ok(!/TIDAK BOLEH LEWAT MODEL/.test(texts(b)), "tidak lewat model");
+    assert.match(texts(b), /sudah dikirim/);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(cfg.workdir, "_kirim.json"), "utf8"))["mp i 2026.pdf"].path, path.join(cfg.workdir, "arsip", "MP I 2026.pdf"), "dicatat untuk alur kembalikan");
+    // variasi kalimat + alamat lengkap + tanda kutip
+    b = calls.length;
+    await tD.bot.handleUpdate(msg(`tolong kirimkan berkas "${path.join(cfg.workdir, "arsip", "MP I 2026.pdf")}"`));
+    await tick(60);
+    assert.equal(docs(b).length, 1);
+    // beberapa yang cocok -> daftar, tidak ada yang dikirim
+    b = calls.length;
+    await tD.bot.handleUpdate(msg("kirim file kembar"));
+    await tick(60);
+    assert.equal(docs(b).length, 0);
+    assert.match(texts(b), /Ada 2 berkas[\s\S]*kembar-a\.pdf[\s\S]*kembar-b\.pdf/);
+    // di luar folder izin dan berkas rahasia -> tidak dikirim (jatuh ke model)
+    b = calls.length;
+    await tD.bot.handleUpdate(msg(`kirim file ${path.join(outside, "rahasia.txt")}`));
+    await tick(60);
+    assert.equal(docs(b).length, 0);
+    assert.match(texts(b), /TIDAK BOLEH LEWAT MODEL/, "tidak ketemu di folder izin -> diserahkan ke model");
+    const tE = mkBot(["111"], [{ role: "assistant", content: "Model menjawab" }]);
+    b = calls.length;
+    await tE.bot.handleUpdate(msg("kirim file tidak-ada-sama-sekali.pdf"));
+    await tick(60);
+    assert.equal(docs(b).length, 0);
+    assert.match(texts(b), /Model menjawab/);
+    // kalimat lain tidak dicegat
+    const tF = mkBot(["111"], [{ role: "assistant", content: "Jawaban model" }]);
+    b = calls.length;
+    await tF.bot.handleUpdate(msg("kirim salam ke ibu"));
+    await tick(60);
+    assert.match(texts(b), /Jawaban model/);
+  }
+
   // kirim -> edit di tempat lain -> kirim balik -> ganti berkas asli (dengan cadangan)
   {
     const asli = path.join(cfg.workdir, "laporan-september.txt");
@@ -737,6 +785,14 @@ ok("agent: loop alat, panggilan alat berupa teks, riwayat ringkas, persetujuan d
     assert.equal(restarted, 0, "belum berhenti seketika");
     await tick(80);
     assert.equal(restarted, 1);
+    // penanda mulai-ulang ditulis; bot yang menyala kembali memberi kabar lalu menghapus penanda
+    const mark = path.join(cfg.workdir, "_ulang.json");
+    assert.ok(fs.existsSync(mark), "penanda mulai-ulang ditulis");
+    b = calls.length;
+    await bot2.start();
+    bot2.stop();
+    assert.match(texts(b), /Agen menyala kembali \(model palsu\)/);
+    assert.equal(fs.existsSync(mark), false, "penanda dihapus setelah memberi kabar");
     ({ bot } = mkBot(["999"], []));
     b = calls.length;
     await bot.handleUpdate(msg("/ulang", {}, 5, 5));

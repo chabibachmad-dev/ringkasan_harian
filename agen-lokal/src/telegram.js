@@ -1,5 +1,7 @@
 // Bot Telegram untuk agent: long polling (tanpa webhook/port terbuka), hanya melayani id pemilik, persetujuan lewat tombol.
 import { applyReturn, listSent, lookupSent, planReturn } from "./kembali.js";
+import { findFilesByName } from "./tools.js";
+import { resolveInRoots } from "./safety.js";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -36,7 +38,7 @@ export const HELP = [
   "/baru  lupakan percakapan   /batal  hentikan tugas   /status  kondisi   /model [nama]  lihat/ganti model   /ulang  mulai ulang agen   /id  id chat"
 ].join("\n");
 
-export function createBot({ config, agent, ollama, fetchImpl = fetch, log = console, pollTimeoutSec = 25, onRestart = null, restartDelayMs = 1500 }) {
+export function createBot({ config, agent, ollama, tools = null, fetchImpl = fetch, log = console, pollTimeoutSec = 25, onRestart = null, restartDelayMs = 1500 }) {
   const owners = config.owners;
   let offset = 0;
   let stopped = false;
@@ -143,6 +145,43 @@ export function createBot({ config, agent, ollama, fetchImpl = fetch, log = cons
     return offerReturn(chatId, dest, entry);
   }
 
+  const SEND_RE = /^\s*(?:tolong\s+|coba\s+)?kirim(?:kan)?\s+(?:file|berkas|dokumen)\s+(.+?)\s*(?:ke\s+(?:sini|telegram|chat(?:\s+ini)?)|lewat\s+telegram)?\s*$/i;
+
+  /** true bila permintaan sudah ditangani di sini; false = serahkan ke model. */
+  async function directSend(chatId, text) {
+    const m = SEND_RE.exec(text);
+    if (!m) return false;
+    const name = m[1].replace(/^["'“”‘’]+|["'“”‘’]+$/g, "").trim();
+    if (!name || name.length > 260) return false;
+    let target = null;
+    try {
+      const p = resolveInRoots(name, config);
+      if (fs.existsSync(p) && fs.statSync(p).isFile()) target = p;
+    } catch {}
+    if (!target) {
+      const hits = findFilesByName(config, name);
+      if (hits.length === 0) return false; // tidak ketemu: biar model yang menjawab/mencari
+      if (hits.length > 1) {
+        const exact = hits.filter((h) => path.basename(h).toLowerCase() === name.toLowerCase());
+        if (exact.length === 1) target = exact[0];
+        else {
+          await send(chatId, `Ada ${hits.length}${hits.length >= 10 ? "+" : ""} berkas yang cocok dengan "${name}". Tulis ulang dengan alamat lengkap, mis. "kirim file ${hits[0]}":\n\n${hits.map((h, i) => `${i + 1}. ${h}`).join("\n")}`);
+          return true;
+        }
+      } else target = hits[0];
+    }
+    try {
+      await send(chatId, `📤 Mengirim ${path.basename(target)}…`);
+      const out = await tools.get("kirim_file").run({ file: target });
+      log.log?.(`kirim langsung: ${target}`);
+      await send(chatId, `✅ ${out}`);
+      return true;
+    } catch (e) {
+      await send(chatId, `⚠️ ${e.message}`);
+      return true;
+    }
+  }
+
   async function offerReturn(chatId, src, entry) {
     if (config.mode === "baca") return send(chatId, `📥 Disimpan: ${src}\nMode hanya-baca aktif, jadi tidak bisa menggantikan berkas asli.`);
     let plan;
@@ -221,7 +260,11 @@ export function createBot({ config, agent, ollama, fetchImpl = fetch, log = cons
       if (name === "ulang") {
         if (!onRestart) return void (await send(chatId, "Mulai-ulang tidak tersedia di cara menjalankan ini."));
         if (agent.isRunning?.(chatId)) return void (await send(chatId, "Masih ada tugas berjalan. Kirim /batal dulu, lalu /ulang."));
-        await send(chatId, "🔄 Memulai ulang… (kembali dalam beberapa detik bila dijalankan lewat pm2)");
+        try {
+          fs.mkdirSync(config.workdir, { recursive: true });
+          fs.writeFileSync(path.join(config.workdir, "_ulang.json"), JSON.stringify({ chatId, at: Date.now() }), "utf8"); // supaya setelah menyala lagi bot memberi kabar
+        } catch {}
+        await send(chatId, "🔄 Memulai ulang… (kembali dalam ±10 detik bila dijalankan lewat pm2, start.bat, atau start.sh)");
         // putaran polling sudah meminta pembaruan berikutnya (offset naik), jadi Telegram menganggap /ulang ini terbaca;
         // jeda sebentar supaya permintaan itu sempat terkirim sebelum proses berhenti (kalau tidak, /ulang akan diulang terus)
         stopped = true;
@@ -235,6 +278,14 @@ export function createBot({ config, agent, ollama, fetchImpl = fetch, log = cons
         return void (await send(chatId, `Model diganti ke ${arg} (sampai bot dijalankan ulang). Cek /status bila belum diunduh.`));
       }
       return void (await send(chatId, `Perintah /${name} tidak dikenal.\n\n${HELP}`));
+    }
+    // "kirim file <nama atau alamat> [ke sini]" dikerjakan langsung (tanpa model): model kecil sering salah memilih alat
+    if (tools && !agent.isRunning?.(chatId)) {
+      const handled = await directSend(chatId, text).catch((e) => {
+        log.warn?.(`kirim langsung gagal: ${e.message}`);
+        return false;
+      });
+      if (handled) return;
     }
     // JANGAN ditunggu: persetujuan datang sebagai pembaruan lain saat tugas masih berjalan
     void runAgent(chatId, text);
@@ -276,6 +327,16 @@ export function createBot({ config, agent, ollama, fetchImpl = fetch, log = cons
     async start() {
       const me = await api("getMe", {});
       log.log?.(`🤖 Bot Telegram @${me.username} siap.`);
+      try {
+        const mark = path.join(config.workdir, "_ulang.json");
+        if (fs.existsSync(mark)) {
+          const m = JSON.parse(fs.readFileSync(mark, "utf8"));
+          fs.rmSync(mark, { force: true });
+          if (m?.chatId && owners.has(String(m.chatId)) && Date.now() - Number(m.at) < 10 * 60_000) {
+            await send(m.chatId, `✅ Agen menyala kembali (model ${ollama.model}). Memulai ulang memakan ${Math.max(1, Math.round((Date.now() - Number(m.at)) / 1000))} detik.`);
+          }
+        }
+      } catch {}
       await api("setMyCommands", { commands: [{ command: "status", description: "Kondisi agent dan model" }, { command: "baru", description: "Lupakan percakapan" }, { command: "batal", description: "Hentikan tugas" }, { command: "model", description: "Lihat/ganti model" }, { command: "ulang", description: "Mulai ulang agen" }, { command: "help", description: "Bantuan" }] }).catch(() => {});
       void poll();
     },

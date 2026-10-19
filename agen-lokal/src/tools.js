@@ -78,6 +78,20 @@ function walk(dir, { maxDepth = 6, maxEntries = 20_000 } = {}) {
   return out;
 }
 
+/** Cari berkas (bukan folder) menurut potongan nama di semua folder izin. -> alamat lengkap[] (maks `limit`) */
+export function findFilesByName(config, query, { limit = 10 } = {}) {
+  const q = String(query ?? "").toLowerCase().trim();
+  if (!q) return [];
+  const hits = [];
+  for (const r of config.roots) {
+    for (const e of walk(r)) {
+      if (!e.dir && path.basename(e.full).toLowerCase().includes(q)) hits.push(e.full);
+      if (hits.length >= limit) return hits;
+    }
+  }
+  return hits;
+}
+
 const props = (o, required = []) => ({ type: "object", properties: o, required });
 
 export function createTools({ config, web, sendFile = null, exec = defaultExec, now = () => new Date() }) {

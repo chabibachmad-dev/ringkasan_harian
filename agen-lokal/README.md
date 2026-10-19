@@ -74,7 +74,7 @@ Perintah bot: `/status` kondisi · `/baru` lupakan percakapan · `/batal` hentik
 
 Agen tidak bisa melihat layar Excel/Word. Untuk berkas yang perlu diedit sendiri (mis. `.xls`, `.xlsx`, `.docx`), pakai alur ini:
 
-1. **Kirim ke Telegram:** tulis "kirim file C:\\...\\anggaran.xls ke sini" (Linux: `/home/.../anggaran.xls`). Agen mengirim berkasnya (maks 45 MB) dan **mencatat alamat aslinya**.
+1. **Kirim ke Telegram:** tulis "kirim file C:\\...\\anggaran.xls ke sini" (Linux: `/home/.../anggaran.xls`). Perintah berbentuk "kirim file <nama atau alamat> [ke sini]" dikerjakan **langsung oleh bot tanpa model** (lebih cepat dan tidak salah alat): bot mencari berkasnya di folder izin, mengirimnya (maks 45 MB), dan **mencatat alamat aslinya**. Bila ada beberapa berkas bernama mirip, bot menampilkan daftar dan meminta alamat lengkap; bila tidak ada yang cocok, permintaan diserahkan ke model.
 2. **Edit di komputer lain** (unduh dari Telegram, ubah, simpan **dengan nama yang sama**).
 3. **Kirim balik** berkas itu ke chat bot. Bot mengenali namanya dan bertanya: "Mengganti berkas asli dengan versi yang baru kamu kirim … → alamat asal?" Tekan ✅.
 4. **Hasil:** berkas asli diganti utuh (lewat berkas sementara, tidak pernah setengah tertulis), dan **versi lama dicadangkan** ke `_sampah` di folder kerja, jadi selalu bisa dikembalikan.

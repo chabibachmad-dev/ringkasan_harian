@@ -32,7 +32,7 @@ command -v pdftotext >/dev/null || echo "ℹ️  PDF rumit lebih baik dengan: su
 if pm2 describe agen-lokal >/dev/null 2>&1; then
   pm2 restart agen-lokal --update-env
 else
-  pm2 start src/index.js --name agen-lokal --cwd "$DIR" --restart-delay 5000 --time
+  pm2 start src/index.js --name agen-lokal --cwd "$DIR" --restart-delay 1500 --time
 fi
 pm2 save
 echo
