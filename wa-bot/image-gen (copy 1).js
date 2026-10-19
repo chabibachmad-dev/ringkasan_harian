@@ -1,0 +1,948 @@
+// ================================================================
+// Pembuat GAMBAR (teks -> gambar) lewat Gemini ("Nano Banana"), memakai GEMINI_API_KEYS yang sama dengan bot.
+//
+// Dipakai di:
+//   - grup WhatsApp   : "bot, buatkan gambar kucing memakai topi" (grup yang diizinkan; bisa dimatikan: /gambar grup off)
+//   - chat WA pemilik : "buatkan gambar ..." atau "/gambar ..." (chat-ke-diri-sendiri atau chat dengan nomor bot)
+//   - Telegram        : /gambar <deskripsi>
+//
+// Batas harian buatan bot (OPSIONAL, bawaan 0 = tanpa batas; dihitung per hari WITA, tersimpan di bot_state "wa_image_quota"):
+//   IMAGE_OWNER_DAILY   pemilik       IMAGE_GROUP_DAILY   seluruh grup       IMAGE_PERSON_DAILY   per orang di grup
+//   Berlaku untuk membuat DAN mengedit gambar. Tanpa batas buatan, satu-satunya batas adalah jatah gratis Cloudflare.
+//
+// .env (semua opsional):
+//   GEMINI_IMAGE_MODELS=...  model gambar dicoba berurutan (kosong = bawaan di bawah)
+//   IMAGE_TIMEOUT_MS=90000   batas tunggu satu permintaan
+//
+// Dua jalur panggilan (otomatis mencoba yang cocok, lalu mengingat yang berhasil):
+//   1. Interactions API  POST /v1beta/interactions          (jalur resmi model "nano banana" terbaru)
+//   2. generateContent   POST /v1beta/models/{m}:generateContent  (cadangan, responseModalities TEXT+IMAGE)
+// ================================================================
+
+import { spawn } from "node:child_process";
+
+export const STATE_KEY = "wa_image_gen";
+export const QUOTA_KEY = "wa_image_quota";
+export const DEFAULT_IMAGE_MODELS = ["gemini-nano-banana-2.1", "gemini-3.1-flash-lite-image", "gemini-3.1-flash-image", "gemini-2.5-flash-image"];
+export const IMAGE_PROVIDER_ORDER = ["cloudflare", "gemini", "openrouter"];
+export const STATS_KEY = "wa_image_stats";
+export const CF_FREE_NEURONS = 10000; // jatah gratis Cloudflare Workers AI per akun per hari (reset 00:00 UTC)
+export const CF_NEURONS_PER_IMAGE = 57.6; // FLUX.1 schnell 1024x1024, 4 langkah (perkiraan)
+export const DEFAULT_CF_IMAGE_MODELS = ["@cf/black-forest-labs/flux-1-schnell"];
+export const DEFAULT_CF_EDIT_MODELS = ["@cf/black-forest-labs/flux-2-klein-9b", "@cf/black-forest-labs/flux-2-klein-4b"]; // menerima foto referensi (multipart input_image_0)
+export const EDIT_INPUT_MAX = 480; // sisi terpanjang foto yang dikirim (batas Cloudflare: lebih kecil dari 512x512)
+export const DEFAULT_OR_IMAGE_MODELS = ["google/gemini-2.5-flash-image"];
+const OR_URL = "https://openrouter.ai/api/v1/chat/completions";
+const API_BASE = "https://generativelanguage.googleapis.com/v1beta";
+
+const splitList = (s) =>
+  String(s || "")
+    .split(",")
+    .map((x) => x.trim())
+    .filter(Boolean);
+
+/**
+ * Akun Cloudflare: pasangan tunggal (CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN) dan/atau daftar
+ * CLOUDFLARE_ACCOUNTS=idAkun1:token1,idAkun2:token2 (jatah gratis dihitung PER AKUN, jadi akun berbeda = jatah berbeda).
+ * -> [{ account, token }] tanpa duplikat.
+ */
+export function parseCfAccounts(env = {}) {
+  const out = [];
+  const add = (account, token) => {
+    const a = String(account || "").trim();
+    const t = String(token || "").trim();
+    if (/^[A-Za-z0-9]{8,64}$/.test(a) && t.length >= 8 && !out.some((x) => x.account === a)) out.push({ account: a, token: t });
+  };
+  add(env.CLOUDFLARE_ACCOUNT_ID || env.CF_ACCOUNT_ID, env.CLOUDFLARE_API_TOKEN || env.CF_API_TOKEN);
+  for (const item of String(env.CLOUDFLARE_ACCOUNTS || "").split(",")) {
+    const i = item.indexOf(":");
+    if (i > 0) add(item.slice(0, i), item.slice(i + 1));
+  }
+  return out;
+}
+
+export function readImageConfig(env = process.env) {
+  const num = (v, d, min = 0) => (Number.isFinite(Number(v)) && String(v ?? "").trim() !== "" && Number(v) >= min ? Math.floor(Number(v)) : d);
+  const models = splitList(env.GEMINI_IMAGE_MODELS);
+  return {
+    keys: splitList(env.GEMINI_API_KEYS || env.GEMINI_API_KEY),
+    models: models.length ? models : DEFAULT_IMAGE_MODELS,
+    cfAccounts: parseCfAccounts(env),
+    // Penyedia yang dipakai. Kosong = otomatis: bila Cloudflare terisi, HANYA Cloudflare; bila tidak, Gemini lalu OpenRouter.
+    providers: splitList(env.IMAGE_PROVIDERS).map((x) => x.toLowerCase()).filter((x) => IMAGE_PROVIDER_ORDER.includes(x)),
+    cfModels: splitList(env.CLOUDFLARE_IMAGE_MODELS).length ? splitList(env.CLOUDFLARE_IMAGE_MODELS) : DEFAULT_CF_IMAGE_MODELS,
+    cfEditModels: splitList(env.CLOUDFLARE_EDIT_MODELS).length ? splitList(env.CLOUDFLARE_EDIT_MODELS) : DEFAULT_CF_EDIT_MODELS,
+    orKeys: splitList(env.OPENROUTER_API_KEYS || env.OPENROUTER_API_KEY),
+    orModels: splitList(env.OPENROUTER_IMAGE_MODELS).length ? splitList(env.OPENROUTER_IMAGE_MODELS) : DEFAULT_OR_IMAGE_MODELS,
+    timeoutMs: Math.max(10_000, num(env.IMAGE_TIMEOUT_MS, 90_000)),
+    // Bawaan 0 = TANPA batas buatan bot: membuat & mengedit gambar hanya dibatasi jatah gratis Cloudflare sendiri
+    // (akun yang jatahnya habis diistirahatkan, pengguna dapat pesan "kuota habis"). Isi angka bila ingin batas tambahan.
+    ownerDaily: num(env.IMAGE_OWNER_DAILY, 0),
+    groupDaily: num(env.IMAGE_GROUP_DAILY, 0),
+    personDaily: num(env.IMAGE_PERSON_DAILY, 0),
+    promptMax: 600
+  };
+}
+
+// ---------------------------------------------------------------- mengenali permintaan gambar
+const NOUN = "gambar|foto|ilustrasi|image|picture|poster|logo|lukisan|sketsa|kartun|wallpaper|banner|meme|desain|stiker|karikatur|infografis";
+const VERB = "buat(?:kan|in|lah)?|bikin(?:kan|in)?|generate|create|ciptakan|render|produce|make";
+const FILLER = "(?:tolong|coba|bisa|dong|ya|yah|please|pls|kak|bro|min|bang|mas|mbak|bisa tolong|bisakah|boleh)";
+const REQUEST_RE = new RegExp(
+  `^(?:${FILLER}[\\s,]+)*(?:${VERB})\\s+(?:(?:sebuah|satu|1|a|an|me|aku|saya|kami|kita|untuk(?:ku| saya| aku)?|dong|ya)\\s+)*(${NOUN})(nya)?\\b(.*)$`,
+  "is"
+);
+const SLASH_RE = /^\/(?:gambar|image|img)(?:@\w+)?(?:\s+(.*))?$/is;
+const DRAW_RE = /^(?:(?:tolong|coba|please)\s+)*draw\s+(?:me\s+)?(?:an?\s+|the\s+)?(.{3,})$/is;
+
+/**
+ * Teks pengguna -> { prompt } bila ini permintaan membuat gambar (prompt "" = belum ada deskripsi), selain itu null.
+ * Sengaja KETAT: "gambar ini apa?" / "kirim gambarnya" / "jelaskan gambaran ekonomi" bukan permintaan membuat gambar.
+ */
+export function detectImageRequest(text) {
+  const t = String(text ?? "").replace(/\s+/g, " ").trim();
+  if (!t) return null;
+  const slash = SLASH_RE.exec(t);
+  if (slash) return { prompt: cleanPrompt(slash[1] || "") };
+  const draw = DRAW_RE.exec(t);
+  if (draw) return { prompt: cleanPrompt(draw[1]) };
+  const m = REQUEST_RE.exec(t);
+  if (!m) return null;
+  const noun = m[1].toLowerCase();
+  let rest = m[3] || "";
+  // "buatkan gambarnya" / "buatkan gambar ini" -> merujuk gambar lain, bukan deskripsi baru
+  if (m[2] || /^\s*(?:ini|itu|tadi)\b/i.test(rest)) rest = "";
+  const keepNoun = !["gambar", "image", "picture"].includes(noun);
+  const prompt = cleanPrompt(`${keepNoun ? noun + " " : ""}${rest}`.trim());
+  return { prompt: keepNoun && prompt === noun ? "" : prompt };
+}
+
+/** Rapikan deskripsi: buang kata sambung pembuka ("tentang", "dari", "yang") dan tanda baca di ujung. */
+export function cleanPrompt(raw) {
+  let p = String(raw ?? "").replace(/\s+/g, " ").trim();
+  p = p.replace(/^[\s,:;\-–—]+/, "").replace(/^(?:tentang|mengenai|dari|berupa|bertema|yang|of|about|:)\s+/i, "");
+  for (let i = 0; i < 3; i++) p = p.replace(/[\s,;:!.]+(?:dong|ya|yah|deh|nih|please|pls|kak|bro|min|donk)$/i, "");
+  p = p.replace(/[\s,;:]+$/, "");
+  return p.slice(0, 600).trim();
+}
+
+// ---------------------------------------------------------------- edit foto
+const EDIT_STRONG = "edit(?:lah|kan)?|ubah(?:lah|kan)?|ganti(?:kan|lah)?|jadikan|modifikasi|hapus(?:kan)?|hilangkan|tambah(?:kan)?|beri(?:kan)?|warnai|percantik|perbaiki|cerahkan|pertajam|gelapkan|retouch|remove|erase|add|change|replace|enhance|colori[sz]e|transform|convert|turn|restyle|swap|make";
+const EDIT_WEAK = "buat(?:kan|in|lah)?|bikin(?:kan|in)?";
+const EDIT_FILLER = "(?:tolong|coba|bisa|dong|ya|yah|please|pls|kak|bro|min|bang|mas|mbak|bisakah|boleh)";
+const EDIT_STRONG_RE = new RegExp(`^(?:${EDIT_FILLER}[\\s,]+)*(?:${EDIT_STRONG})\\b\\s*(.*)$`, "is");
+const EDIT_WEAK_RE = new RegExp(`^(?:${EDIT_FILLER}[\\s,]+)*(?:${EDIT_WEAK})\\s+(?:(?:foto|gambar|image|picture)(?:nya)?\\s*)?(?:ini|itu|tadi|tersebut)?\\s*((?:jadi|menjadi|seperti|ala|bergaya)\\b.*)$`, "is");
+const EDIT_NOUN_RE = new RegExp(`^(?:${EDIT_FILLER}[\\s,]+)*(?:${EDIT_STRONG}|${EDIT_WEAK})\\b\\s*(?:foto|gambar|image|picture|pic)(?:nya)?\\s+(?:ini|itu|tadi|tersebut)\\b\\s*(.*)$`, "is");
+
+/**
+ * Teks pengguna -> { prompt, needsImage } bila ini permintaan MENGEDIT foto, selain itu null.
+ * hasImage = pesan ini membawa foto atau membalas foto: cukup kata kerja edit ("ubah jadi hitam putih", "hapus orang di belakang").
+ * Tanpa foto: harus eksplisit menyebut foto/gambar ("edit foto ini ...") -> needsImage:true (pemanggil membalas petunjuk).
+ */
+export function detectEditRequest(text, { hasImage = false } = {}) {
+  const t = String(text ?? "").replace(/\s+/g, " ").trim();
+  if (!t || /^\//.test(t)) return null;
+  const noun = EDIT_NOUN_RE.exec(t);
+  if (noun) {
+    const prompt = cleanPrompt(noun[1].replace(/^[:,\-]+\s*/, ""));
+    return hasImage ? { prompt, needsImage: false } : { prompt, needsImage: true };
+  }
+  if (!hasImage) return null;
+  const weak = EDIT_WEAK_RE.exec(t);
+  if (weak) return { prompt: cleanPrompt(weak[1]), needsImage: false };
+  if (detectImageRequest(t)?.prompt) return null; // "buatkan gambar kucing" = gambar baru, bukan edit
+  const strong = EDIT_STRONG_RE.exec(t);
+  if (strong) {
+    const prompt = cleanPrompt(t.replace(/^(?:\s*(?:tolong|coba|dong|ya|please|pls|kak|bro)[\s,]+)*/i, ""));
+    return { prompt, needsImage: false };
+  }
+  return null;
+}
+
+// Pagar khusus EDIT foto (orang sungguhan yang tidak ikut meminta): tanpa persetujuan orang di foto, bot tidak membuatkan versi
+// telanjang/dilucuti/seksual dari fotonya. Untuk gambar dari teks tidak ada penyaringan kata (diserahkan ke penyedia).
+const EDIT_BLOCK_RES = [
+  /\b(?:telanjang|bugil|topless|nude|naked|unclothed|undress\w*|porno\w*|bokep|erotis|erotic|nsfw|hentai)\b/i,
+  /\b(?:buka|lepas|copot|tanggalkan|hilangkan|undress|remove|take\s+off|strip)\s+(?:\w+\s+){0,3}(?:baju|pakaian|bajunya|pakaiannya|clothes|clothing|kerudung|jilbab|hijab)\b/i,
+  /\b(?:tanpa|without)\s+(?:busana|baju|pakaian|clothes|clothing)\b/i,
+  /\b(?:bikini|lingerie|pakaian dalam|underwear|swimsuit|baju renang)\b/i
+];
+
+/** Aturan tambahan khusus edit foto orang sungguhan. -> alasan penolakan atau null. */
+export function editPromptProblem(prompt) {
+  const p = String(prompt ?? "");
+  if (EDIT_BLOCK_RES.some((re) => re.test(p))) return "Maaf, permintaan edit foto seperti itu tidak bisa saya kerjakan.";
+  return null;
+}
+
+/** Lebar x tinggi PNG dari header (null bila bukan PNG). */
+export function pngSize(buf) {
+  if (!buf || buf.length < 24 || buf[0] !== 0x89 || buf[1] !== 0x50 || buf.toString("ascii", 12, 16) !== "IHDR") return null;
+  return { width: buf.readUInt32BE(16), height: buf.readUInt32BE(20) };
+}
+
+/** Ukuran hasil: sisi terpanjang 1024, rasio sama dengan foto, kelipatan 16, dalam 256-1920. */
+export function editSize(w, h, longest = 1024) {
+  const ww = Math.max(1, Number(w) || 1);
+  const hh = Math.max(1, Number(h) || 1);
+  const k = longest / Math.max(ww, hh);
+  const snap = (v) => Math.min(1920, Math.max(256, Math.round((v * k) / 16) * 16));
+  return { width: snap(ww), height: snap(hh) };
+}
+
+/**
+ * Foto apa pun (jpeg/png/webp) -> PNG kecil (sisi terpanjang <= EDIT_INPUT_MAX) lewat ffmpeg.
+ * -> { png, width, height, outWidth, outHeight }. Galat: Error dengan .kind "noffmpeg" | "badimage".
+ */
+export function prepareEditInput(buffer, { spawnImpl = spawn, timeoutMs = 20_000, max = EDIT_INPUT_MAX } = {}) {
+  return new Promise((resolve, reject) => {
+    const bad = (kind, msg) => reject(Object.assign(new Error(msg), { kind }));
+    if (!Buffer.isBuffer(buffer) || buffer.length < 100) return bad("badimage", "foto kosong");
+    let child;
+    try {
+      child = spawnImpl(
+        "ffmpeg",
+        ["-hide_banner", "-loglevel", "error", "-i", "pipe:0", "-frames:v", "1", "-vf", `scale=w=${max}:h=${max}:force_original_aspect_ratio=decrease`, "-f", "image2pipe", "-vcodec", "png", "pipe:1"],
+        { stdio: ["pipe", "pipe", "pipe"] }
+      );
+    } catch (e) {
+      return bad("noffmpeg", e instanceof Error ? e.message : String(e));
+    }
+    const out = [];
+    let errText = "";
+    let done = false;
+    const finish = (fn) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      fn();
+    };
+    const timer = setTimeout(() => {
+      try {
+        child.kill?.("SIGKILL");
+      } catch {
+        /* sudah selesai */
+      }
+      finish(() => bad("badimage", "ffmpeg terlalu lama"));
+    }, timeoutMs);
+    child.on("error", (e) => finish(() => bad(e?.code === "ENOENT" ? "noffmpeg" : "badimage", e instanceof Error ? e.message : String(e))));
+    child.stdout.on("data", (d) => out.push(d));
+    child.stderr?.on("data", (d) => {
+      errText += String(d).slice(0, 300);
+    });
+    child.on("close", (code) =>
+      finish(() => {
+        const png = Buffer.concat(out);
+        const size = pngSize(png);
+        if (code !== 0 || !size) return bad("badimage", `ffmpeg gagal (${code}): ${errText.replace(/\s+/g, " ").slice(0, 120)}`);
+        const o = editSize(size.width, size.height);
+        resolve({ png, width: size.width, height: size.height, outWidth: o.width, outHeight: o.height });
+      })
+    );
+    child.stdin.on("error", () => {});
+    child.stdin.end(buffer);
+  });
+}
+
+// ---------------------------------------------------------------- filter deskripsi
+// Isi gambar yang boleh dibuat/diedit DISERAHKAN ke penyedia (Cloudflare/Gemini/OpenRouter): bot tidak menyimpan daftar kata terlarang
+// untuk isi gambar; bila penyedia menolak, pengguna menerima pesan "ditolak oleh filter keamanan" (kind "blocked").
+// Satu-satunya pagar buatan bot: dokumen/bukti palsu (pemalsuan), dan untuk EDIT foto orang sungguhan lihat EDIT_BLOCK_RES.
+const BLOCK_RES = [
+  /\b(?:palsu|pemalsuan|memalsukan|fake|forge[ds]?|forgery|tiruan)\b.{0,40}\b(?:ktp|ijazah|sertifikat|paspor|passport|kwitansi|struk|nota|surat|dokumen|stempel|cap|materai|meterai|tanda tangan|rekening|bukti transfer|sk)\b/i,
+  /\b(?:ktp|ijazah|sertifikat|paspor|passport|kwitansi|struk|nota|stempel|materai|meterai|bukti transfer)\b.{0,40}\b(?:palsu|fake|tiruan|bohongan)\b/i
+];
+
+/** -> alasan penolakan (teks siap tampil) atau null bila aman. */
+export function promptProblem(prompt) {
+  const p = String(prompt ?? "");
+  if (BLOCK_RES.some((re) => re.test(p))) return "Maaf, permintaan gambar seperti itu tidak bisa saya buat (dokumen/bukti palsu).";
+  return null;
+}
+
+// ---------------------------------------------------------------- membaca respons Gemini
+function mimeFromBytes(buf) {
+  if (buf.length > 4 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return "image/png";
+  if (buf.length > 3 && buf[0] === 0xff && buf[1] === 0xd8) return "image/jpeg";
+  if (buf.length > 12 && buf.toString("ascii", 0, 4) === "RIFF" && buf.toString("ascii", 8, 12) === "WEBP") return "image/webp";
+  return null;
+}
+
+function asImage(o) {
+  if (!o || typeof o !== "object") return null;
+  // OpenRouter: {type:"image_url", image_url:{url:"data:image/png;base64,...."}}
+  const durl = typeof o.url === "string" ? o.url : "";
+  const m = /^data:(image\/[a-z0-9.+-]+);base64,(.+)$/is.exec(durl);
+  if (m && m[2].length >= 400) return { b64: m[2], mime: m[1] };
+  const inline = o.inlineData || o.inline_data;
+  const src = inline && typeof inline === "object" ? inline : o;
+  const data = src.data;
+  const mime = src.mimeType || src.mime_type || "";
+  if (typeof data !== "string" || data.length < 400) return null;
+  if (mime && !/^image\//i.test(mime)) return null;
+  if (!mime && !(inline && typeof inline === "object") && o.type !== "image") return null;
+  return { b64: data, mime: mime || "" };
+}
+
+/** Cari semua gambar & teks di respons (struktur Interactions maupun generateContent). Gambar terakhir dipakai. */
+export function parseImageResponse(json) {
+  const images = [];
+  const texts = [];
+  const walk = (node, inThought) => {
+    if (!node || typeof node !== "object") return;
+    if (Array.isArray(node)) {
+      for (const x of node) walk(x, inThought);
+      return;
+    }
+    const thought = inThought || node.type === "thought" || node.thought === true;
+    const img = asImage(node);
+    if (img) {
+      if (!thought) images.push(img);
+      return;
+    }
+    if (typeof node.text === "string" && !thought && (node.type === "text" || node.type === undefined)) texts.push(node.text);
+    for (const k of Object.keys(node)) {
+      if (k === "data" || k === "text") continue;
+      walk(node[k], thought);
+    }
+  };
+  walk(json, false);
+  const last = images[images.length - 1] || null;
+  let buffer = null;
+  let mime = "";
+  if (last) {
+    try {
+      buffer = Buffer.from(last.b64, "base64");
+      mime = mimeFromBytes(buffer) || last.mime || "image/png";
+      if (buffer.length < 300) buffer = null;
+    } catch {
+      buffer = null;
+    }
+  }
+  return { buffer, mime, text: texts.join(" ").replace(/\s+/g, " ").trim() };
+}
+
+const BLOCKED_RE = /blockReason|IMAGE_SAFETY|PROHIBITED|"SAFETY"|IMAGE_OTHER|RECITATION|content_filter|safety_block|"blocked"/i;
+
+function errorKind(status, bodyText) {
+  const b = String(bodyText || "");
+  if (status === 402) return "billing";
+  if (/daily free allocation|neurons|4006/i.test(b)) return "quota";
+  if (status === 429 || /RESOURCE_EXHAUSTED|quota|rate.?limit/i.test(b)) return "quota";
+  if (/billing|paid|free tier|not available in your|only available.*(paid|billing)|limit: 0/i.test(b) && (status === 403 || status === 400)) return "billing";
+  if (status === 401 || status === 403 || /API key (not valid|expired)|PERMISSION_DENIED/i.test(b)) return "auth";
+  if (status === 404 || (status === 400 && /not found|not supported|unsupported|unknown (name|field|model)|invalid.*model|INVALID_ARGUMENT/i.test(b))) return "api";
+  return "server";
+}
+
+export const KIND_TEXT = {
+  quota: "Kuota pembuat gambar sedang habis. Coba lagi nanti (jatah gratis pulih tiap pagi).",
+  billing: "Pembuat gambar belum bisa dipakai sekarang: kuota gratis habis dan saldo cadangan belum ada. Pemilik sudah diberi tahu.",
+  auth: "Kunci pembuat gambar ditolak. Pemilik sudah diberi tahu.",
+  unavailable: "Pembuat gambar sedang tidak tersedia. Coba lagi sebentar lagi.",
+  blocked: "Maaf, gambar itu tidak bisa dibuat (ditolak oleh filter keamanan). Coba deskripsi lain.",
+  noedit: "Edit foto butuh Cloudflare (gratis): isi CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN lewat /env, dan jangan mematikan Cloudflare di IMAGE_PROVIDERS.",
+  noffmpeg: "Edit foto belum bisa: ffmpeg belum terpasang di laptop bot (sudo apt install ffmpeg). Pemilik sudah diberi tahu.",
+  badimage: "Fotonya tidak bisa dibaca. Coba kirim ulang fotonya (JPG/PNG).",
+  nokey: "Pembuat gambar belum aktif: isi CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN (gratis) atau GEMINI_API_KEYS di .env bot."
+};
+
+/** Pesan galat singkat dari respons API (error.message), maks 140 huruf. */
+function apiMessage(r) {
+  const m = r?.json?.error?.message || r?.json?.error?.status || (typeof r?.raw === "string" ? r.raw : "");
+  return String(m).replace(/\s+/g, " ").slice(0, 140);
+}
+
+function hariWita(ms) {
+  return new Date(ms + 8 * 3600_000).toISOString().slice(0, 10);
+}
+
+/**
+ * deps: { state?: {get,set}, config, fetchImpl?, log?, now? }
+ */
+/** Teks catatan riwayat untuk gambar yang dikirim bot (dibaca AI percakapan; awalan 🖼️ dikenali di index.js). */
+export const imageSentNote = (prompt, { edit = false } = {}) =>
+  `🖼️ [BOT mengirim GAMBAR ${edit ? "hasil EDIT foto" : "buatan AI"} sesuai permintaan: "${String(prompt ?? "").replace(/\s+/g, " ").replace(/"/g, "'").slice(0, 200)}"]`;
+
+/** Catatan riwayat gambar -> teks kutipan untuk AI ("[GAMBAR buatan bot ini, permintaannya: ...]"), atau null bila bukan catatan gambar. */
+export function quotedImageNote(content) {
+  const m = /^🖼️\s*\[BOT mengirim GAMBAR (buatan AI|hasil EDIT foto) sesuai permintaan: "([\s\S]*)"\]\s*$/.exec(String(content ?? ""));
+  if (!m) return null;
+  return m[1] === "buatan AI" ? `[GAMBAR buatan bot ini, permintaannya: "${m[2]}"]` : `[GAMBAR hasil EDIT foto oleh bot ini, instruksinya: "${m[2]}"]`;
+}
+
+export function createImageGen({ state = null, config = readImageConfig({}), fetchImpl = globalThis.fetch, log = console, now = () => Date.now(), translate = null } = {}) {
+  let groupsOn = true;
+  let quota = { day: hariWita(now()), owner: 0, group: 0, people: {} };
+  const apiPref = new Map(); // model -> "interactions" | "generate"
+  let rr = 0;
+
+  const cfList = () => config.cfAccounts || [];
+  const hasCf = () => cfList().length > 0;
+  const cfRest = new Map(); // idAkun -> ms: akun diistirahatkan (jatah harian habis / token ditolak)
+  let cfRr = 0;
+  let geminiRest = 0; // ms: Gemini dilewati sampai waktu ini (jatah gratis 0 untuk model gambar -> percuma dicoba terus)
+  const tail = (a) => `…${String(a).slice(-4)}`;
+  const provList = () => (config.providers?.length ? config.providers : hasCf() ? ["cloudflare"] : ["gemini", "openrouter"]);
+  const on = (p) => provList().includes(p);
+  const available = () => ((on("gemini") && config.keys.length > 0) || (on("openrouter") && (config.orKeys?.length ?? 0) > 0) || (on("cloudflare") && hasCf())) && typeof fetchImpl === "function";
+
+  // ---- pemantauan: hitungan hari ini (hari UTC, sama dengan reset jatah Cloudflare), tersimpan di bot_state
+  const utcDay = (ms) => new Date(ms).toISOString().slice(0, 10);
+  let stats = { day: utcDay(now()), prov: {}, acct: {}, lastOkAt: 0, lastError: "", lastErrorAt: 0 };
+  const rollStats = () => {
+    const d = utcDay(now());
+    if (stats.day !== d) stats = { day: d, prov: {}, acct: {}, lastOkAt: stats.lastOkAt, lastError: stats.lastError, lastErrorAt: stats.lastErrorAt };
+  };
+  const saveStats = () => {
+    Promise.resolve(state?.set(STATS_KEY, stats)).catch(() => {});
+  };
+  function bump(provider, ok, account = null, err = "", edit = false) {
+    rollStats();
+    const p = (stats.prov[provider] ||= { ok: 0, fail: 0 });
+    p[ok ? "ok" : "fail"] += 1;
+    if (account) {
+      const a = (stats.acct[account] ||= { ok: 0, fail: 0 });
+      // Edit foto dihitung terpisah: biaya neuronnya beda dengan gambar biasa, jadi tidak ikut perkiraan neuron.
+      if (edit && ok) a.edit = (a.edit || 0) + 1;
+      else a[ok ? "ok" : "fail"] += 1;
+    }
+    if (ok) stats.lastOkAt = now();
+    else {
+      stats.lastError = `${provider}${account ? ` ${String(account).slice(-4)}` : ""}: ${String(err).slice(0, 100)}`;
+      stats.lastErrorAt = now();
+    }
+    saveStats();
+  }
+
+  async function load() {
+    if (!state) return groupsOn;
+    try {
+      const v = await state.get(STATE_KEY);
+      groupsOn = v !== "off";
+      const q = await state.get(QUOTA_KEY);
+      if (q && typeof q === "object" && q.day === hariWita(now())) quota = { day: q.day, owner: q.owner | 0, group: q.group | 0, people: { ...(q.people || {}) } };
+      const st = await state.get(STATS_KEY);
+      if (st && typeof st === "object" && st.day === utcDay(now())) stats = { day: st.day, prov: st.prov || {}, acct: st.acct || {}, lastOkAt: st.lastOkAt | 0, lastError: String(st.lastError || ""), lastErrorAt: st.lastErrorAt | 0 };
+    } catch (e) {
+      log.warn?.(`🖼️ [Gambar] gagal membaca pengaturan tersimpan: ${e instanceof Error ? e.message : e}`);
+    }
+    return groupsOn;
+  }
+
+  const groupEnabled = () => groupsOn && available();
+
+  async function setGroup(value) {
+    groupsOn = Boolean(value);
+    let saved = true;
+    try {
+      await state?.set(STATE_KEY, groupsOn ? "on" : "off");
+    } catch {
+      saved = false;
+    }
+    return { on: groupsOn, saved };
+  }
+
+  function rollDay() {
+    const d = hariWita(now());
+    if (quota.day !== d) quota = { day: d, owner: 0, group: 0, people: {} };
+  }
+
+  async function saveQuota() {
+    try {
+      await state?.set(QUOTA_KEY, quota);
+    } catch {
+      /* hanya berlaku sampai bot restart */
+    }
+  }
+
+  /**
+   * Pesan jatah SEBELUM membuat gambar. kind: "owner" | "group"; who = kunci orang (mis. jid peserta).
+   * -> { ok:true, release() } atau { ok:false, reason }
+   */
+  async function reserve(kind, who = "") {
+    rollDay();
+    if (kind === "owner") {
+      if (config.ownerDaily > 0 && quota.owner >= config.ownerDaily) return { ok: false, reason: `Jatah gambar pemilik hari ini (${config.ownerDaily}) sudah habis. Reset 00.00 WITA.` };
+      quota.owner += 1;
+    } else {
+      if (config.groupDaily > 0 && quota.group >= config.groupDaily) return { ok: false, reason: `Jatah gambar untuk semua grup hari ini (${config.groupDaily}) sudah habis. Coba lagi besok ya.` };
+      const key = String(who || "?");
+      if (config.personDaily > 0 && (quota.people[key] || 0) >= config.personDaily) return { ok: false, reason: `Jatah gambarmu hari ini (${config.personDaily}) sudah habis. Coba lagi besok ya.` };
+      quota.group += 1;
+      quota.people[key] = (quota.people[key] || 0) + 1;
+    }
+    await saveQuota();
+    let released = false;
+    return {
+      ok: true,
+      release: async () => {
+        if (released) return;
+        released = true;
+        rollDay();
+        if (kind === "owner") quota.owner = Math.max(0, quota.owner - 1);
+        else {
+          quota.group = Math.max(0, quota.group - 1);
+          const key = String(who || "?");
+          if (quota.people[key]) quota.people[key] = Math.max(0, quota.people[key] - 1);
+        }
+        await saveQuota();
+      }
+    };
+  }
+
+  async function post(url, key, body) {
+    const res = await fetchImpl(url, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-goog-api-key": key },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(config.timeoutMs)
+    });
+    const raw = await res.text();
+    let json = null;
+    try {
+      json = JSON.parse(raw);
+    } catch {
+      /* bukan JSON */
+    }
+    return { status: res.status, ok: res.ok, raw, json };
+  }
+
+  async function callApi(api, model, key, prompt) {
+    if (api === "interactions") {
+      return post(`${API_BASE}/interactions`, key, { model, input: [{ type: "text", text: prompt }] });
+    }
+    return post(`${API_BASE}/models/${encodeURIComponent(model)}:generateContent`, key, {
+      contents: [{ role: "user", parts: [{ text: prompt }] }],
+      generationConfig: { responseModalities: ["TEXT", "IMAGE"] }
+    });
+  }
+
+  /**
+   * Buat gambar. -> { buffer, mime, model, text }. Galat: Error dengan .kind (quota|billing|auth|blocked|unavailable|nokey) dan pesan siap tampil.
+   */
+  async function generate(prompt) {
+    const details = []; // rincian per penyedia, untuk pemilik (bukan untuk grup)
+    const addDetail = (line) => {
+      if (!details.includes(line)) details.push(line);
+    };
+    const fail = (kind, extra = "") => Object.assign(new Error(KIND_TEXT[kind] + (extra ? ` (${extra})` : "")), { kind, detail: details.join("\n") });
+    if (!available()) throw fail("nokey");
+    const p = String(prompt ?? "").trim().slice(0, config.promptMax);
+    if (!p) throw fail("blocked");
+    const seen = new Set();
+    let worst = null; // kategori galat terpenting: quota > billing > auth > unavailable
+    const rank = { quota: 4, billing: 3, auth: 2, unavailable: 1 };
+    const note = (kind) => {
+      if (!worst || rank[kind] > rank[worst]) worst = kind;
+    };
+    // Penyedia GRATIS dulu: Cloudflare Workers AI (FLUX.1 schnell, jatah harian gratis tanpa kartu).
+    if (on("cloudflare") && hasCf()) {
+      let cfPrompt = p;
+      if (translate) {
+        // FLUX jauh lebih paham bahasa Inggris: deskripsi diterjemahkan dulu (gagal -> pakai aslinya).
+        try {
+          const t = String((await translate(p)) ?? "").replace(/\s+/g, " ").trim();
+          if (t && t.length <= 800) cfPrompt = t;
+        } catch (e) {
+          log.warn?.(`🖼️ [Gambar] terjemahan deskripsi gagal, pakai aslinya: ${e instanceof Error ? e.message : e}`);
+        }
+      }
+      const nextUtcMidnight = () => {
+        const d = new Date(now());
+        return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1);
+      };
+      for (const model of config.cfModels || []) {
+        const accts = cfList();
+        const startAt = cfRr++ % accts.length;
+        let triedAny = false;
+        for (let i = 0; i < accts.length; i++) {
+          const acc = accts[(startAt + i) % accts.length];
+          if ((cfRest.get(acc.account) || 0) > now()) continue; // akun sedang istirahat
+          triedAny = true;
+          let r;
+          try {
+            const res = await fetchImpl(`https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(acc.account)}/ai/run/${model}`, {
+              method: "POST",
+              headers: { "content-type": "application/json", authorization: `Bearer ${acc.token}` },
+              body: JSON.stringify({ prompt: cfPrompt, steps: 4 }),
+              signal: AbortSignal.timeout(config.timeoutMs)
+            });
+            const raw = await res.text();
+            let json = null;
+            try {
+              json = JSON.parse(raw);
+            } catch {
+              /* bukan JSON */
+            }
+            r = { status: res.status, ok: res.ok, raw, json };
+          } catch (e) {
+            log.warn?.(`🖼️ [Gambar] Cloudflare ${tail(acc.account)} ${model}: ${e instanceof Error ? e.message : e}`);
+            addDetail(`Cloudflare ${tail(acc.account)} ${model}: ${e instanceof Error ? e.message : e}`);
+            bump("cloudflare", false, acc.account, e instanceof Error ? e.message : String(e));
+            note("unavailable");
+            continue;
+          }
+          const b64 = r.json?.result?.image;
+          if (r.ok && typeof b64 === "string" && b64.length > 400) {
+            const buffer = Buffer.from(b64, "base64");
+            bump("cloudflare", true, acc.account);
+            return { buffer, mime: mimeFromBytes(buffer) || "image/jpeg", model: `cloudflare:${model}`, text: "" };
+          }
+          const kind = r.ok ? "server" : errorKind(r.status, r.raw);
+          log.warn?.(`🖼️ [Gambar] Cloudflare ${tail(acc.account)} ${model} HTTP ${r.status} (${kind}): ${String(r.raw).replace(/\s+/g, " ").slice(0, 160)}`);
+          addDetail(`Cloudflare ${tail(acc.account)} ${model}: HTTP ${r.status} ${kind} — ${apiMessage(r)}`);
+          if (/nsfw|moderat|flagged|inappropriate/i.test(r.raw)) throw fail("blocked");
+          bump("cloudflare", false, acc.account, `HTTP ${r.status} ${kind}`);
+          if (kind === "quota") cfRest.set(acc.account, nextUtcMidnight()); // jatah harian: pulih 00:00 UTC
+          else if (kind === "auth") cfRest.set(acc.account, now() + 3600_000);
+          note(kind === "api" || kind === "server" ? "unavailable" : kind);
+          if (kind === "api") break; // model tidak ada -> model berikutnya
+        }
+        if (!triedAny) {
+          addDetail("Cloudflare: semua akun sedang istirahat (jatah harian habis / token ditolak)");
+          note("quota");
+        }
+      }
+    }
+    const geminiOn = on("gemini") && config.keys.length > 0 && geminiRest <= now();
+    if (on("gemini") && config.keys.length > 0 && !geminiOn) addDetail("Gemini: dilewati (jatah gratis 0 untuk model gambar; dicoba lagi nanti)");
+    const start = config.keys.length ? rr++ % config.keys.length : 0;
+    for (const model of geminiOn ? config.models : []) {
+      if (geminiRest > now()) break;
+      const apis = apiPref.get(model) === "generate" ? ["generate", "interactions"] : ["interactions", "generate"];
+      for (let i = 0; i < config.keys.length; i++) {
+        if (geminiRest > now()) break;
+        const key = config.keys[(start + i) % config.keys.length];
+        let modelMissing = false;
+        for (const api of apis) {
+          const id = `${model}|${key}|${api}`;
+          if (seen.has(id)) continue;
+          seen.add(id);
+          let r;
+          try {
+            r = await callApi(api, model, key, p);
+          } catch (e) {
+            log.warn?.(`🖼️ [Gambar] ${model}/${api}: ${e instanceof Error ? e.message : e}`);
+            note("unavailable");
+            break;
+          }
+          if (r.ok) {
+            const out = parseImageResponse(r.json ?? {});
+            if (out.buffer) {
+              apiPref.set(model, api);
+              bump("gemini", true);
+              return { buffer: out.buffer, mime: out.mime, model, text: out.text };
+            }
+            // Berhasil tanpa gambar: ditolak filter / model hanya menjawab teks.
+            if (BLOCKED_RE.test(r.raw) || out.text) {
+              log.warn?.(`🖼️ [Gambar] ${model}: tanpa gambar${out.text ? ` ("${out.text.slice(0, 80)}")` : ""}`);
+              throw fail("blocked");
+            }
+            note("unavailable");
+            break;
+          }
+          const kind = errorKind(r.status, r.raw);
+          log.warn?.(`🖼️ [Gambar] ${model}/${api} HTTP ${r.status} (${kind}): ${String(r.raw).replace(/\s+/g, " ").slice(0, 160)}`);
+          if (kind !== "api") {
+            addDetail(`Gemini ${model}: HTTP ${r.status} ${kind} — ${apiMessage(r)}`);
+            bump("gemini", false, null, `HTTP ${r.status} ${kind}`);
+          }
+          if (kind === "quota" && /limit:\s*0\b/i.test(r.raw)) geminiRest = now() + 6 * 3600_000; // jatah gratis memang 0: berhenti mencoba 6 jam
+          if (kind === "api") {
+            modelMissing = true;
+            continue; // coba jalur panggilan lain untuk model ini
+          }
+          if (kind === "quota" || kind === "billing" || kind === "auth") {
+            note(kind);
+            break; // ganti key
+          }
+          if (/SAFETY|PROHIBITED|blockReason/i.test(r.raw)) throw fail("blocked");
+          note("unavailable");
+          break;
+        }
+        if (modelMissing && !worst) note("unavailable");
+      }
+    }
+    // Cadangan: OpenRouter (model gambar berbayar/kredit; dicoba bila Gemini habis/ditolak/tidak ada kunci).
+    for (const model of on("openrouter") ? config.orModels || [] : []) {
+      for (const key of config.orKeys || []) {
+        let r;
+        try {
+          const res = await fetchImpl(OR_URL, {
+            method: "POST",
+            headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
+            body: JSON.stringify({ model, messages: [{ role: "user", content: p }], modalities: ["image", "text"] }),
+            signal: AbortSignal.timeout(config.timeoutMs)
+          });
+          const raw = await res.text();
+          let json = null;
+          try {
+            json = JSON.parse(raw);
+          } catch {
+            /* bukan JSON */
+          }
+          r = { status: res.status, ok: res.ok, raw, json };
+        } catch (e) {
+          log.warn?.(`🖼️ [Gambar] OpenRouter ${model}: ${e instanceof Error ? e.message : e}`);
+          note("unavailable");
+          continue;
+        }
+        if (r.ok) {
+          const out = parseImageResponse(r.json ?? {});
+          if (out.buffer) {
+            bump("openrouter", true);
+            return { buffer: out.buffer, mime: out.mime, model: `openrouter:${model}`, text: out.text };
+          }
+          if (/content_filter|safety|moderation/i.test(r.raw) || out.text) throw fail("blocked");
+          note("unavailable");
+          continue;
+        }
+        const kind = errorKind(r.status, r.raw);
+        log.warn?.(`🖼️ [Gambar] OpenRouter ${model} HTTP ${r.status} (${kind}): ${String(r.raw).replace(/\s+/g, " ").slice(0, 160)}`);
+        addDetail(`OpenRouter ${model}: HTTP ${r.status} ${kind} — ${apiMessage(r)}`);
+        bump("openrouter", false, null, `HTTP ${r.status} ${kind}`);
+        note(kind === "api" || kind === "server" ? "unavailable" : kind);
+        if (kind === "api") break; // model tidak ada -> model berikutnya
+      }
+    }
+    // Gemini habis/ditolak DAN OpenRouter kehabisan saldo: tampilkan sebagai "billing" supaya pemilik tahu harus mengisi saldo.
+    if ((config.orKeys?.length ?? 0) > 0 && details.some((d) => /^OpenRouter .*HTTP 402/.test(d)) && (worst === "quota" || worst === "billing" || worst === "auth")) {
+      throw fail("billing");
+    }
+    throw fail(worst || "unavailable");
+  }
+
+  /**
+   * Satu paket untuk pemanggil: cek deskripsi -> pesan jatah -> buat gambar (jatah dikembalikan bila gagal).
+   * -> { image:{buffer,mime,model} } atau { error:"teks siap tampil", kind }
+   * kind: "owner" | "group"
+   */
+  async function make(prompt, kind = "owner", who = "") {
+    const p = cleanPrompt(prompt);
+    if (!p) return { error: "Mau digambar apa? Contoh: buatkan gambar kucing memakai topi astronot.", kind: "empty" };
+    const bad = promptProblem(p);
+    if (bad) return { error: bad, kind: "refused" };
+    if (!available()) return { error: KIND_TEXT.nokey, kind: "nokey" };
+    const slot = await reserve(kind, who);
+    if (!slot.ok) return { error: slot.reason, kind: "limit" };
+    try {
+      return { image: await generate(p) };
+    } catch (e) {
+      await slot.release().catch(() => {});
+      return { error: e instanceof Error ? e.message : String(e), kind: e?.kind || "unavailable", detail: e?.detail || "" };
+    }
+  }
+
+  /**
+   * Data pemantauan (untuk layar Status aplikasi & /status). Perkiraan neuron = jumlah gambar berhasil x 57,6 per akun
+   * (hanya perkiraan: angka resmi ada di dashboard Cloudflare).
+   */
+  function monitor() {
+    rollDay();
+    rollStats();
+    const today = now();
+    const d = new Date(today);
+    const resetAt = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1);
+    const accounts = cfList().map((acc) => {
+      const a = stats.acct[acc.account] || { ok: 0, fail: 0 };
+      const used = Math.round(a.ok * CF_NEURONS_PER_IMAGE);
+      const rest = cfRest.get(acc.account) || 0;
+      return {
+        id: tail(acc.account),
+        ok: a.ok,
+        fail: a.fail,
+        edits: a.edit || 0,
+        usedNeurons: used,
+        freeNeurons: CF_FREE_NEURONS,
+        imagesLeft: Math.max(0, Math.floor((CF_FREE_NEURONS - used) / CF_NEURONS_PER_IMAGE)),
+        resting: rest > today,
+        restUntil: rest > today ? rest : 0
+      };
+    });
+    return {
+      enabled: available(),
+      providers: provList().filter((p) => (p === "cloudflare" ? hasCf() : p === "gemini" ? config.keys.length > 0 : (config.orKeys?.length ?? 0) > 0)),
+      groupsOn,
+      quota: {
+        owner: { used: quota.owner, limit: config.ownerDaily },
+        group: { used: quota.group, limit: config.groupDaily },
+        personLimit: config.personDaily
+      },
+      today: { day: stats.day, byProvider: stats.prov },
+      cloudflare: accounts,
+      resetAt,
+      lastOkAt: stats.lastOkAt,
+      lastError: stats.lastError,
+      lastErrorAt: stats.lastErrorAt
+    };
+  }
+
+  /** Ringkasan satu-dua baris untuk /status Telegram. fmtClock(ms) -> "08:00". */
+  function monitorText(fmtClock = (ms) => new Date(ms).toISOString().slice(11, 16) + " UTC") {
+    const m = monitor();
+    if (!m.enabled) return "mati (isi CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN lewat /env)";
+    const okTotal = Object.values(m.today.byProvider).reduce((n, p) => n + (p.ok || 0), 0);
+    const failTotal = Object.values(m.today.byProvider).reduce((n, p) => n + (p.fail || 0), 0);
+    const parts = [`${m.providers.join(" > ") || "-"} • grup ${m.groupsOn ? "aktif" : "mati"} • hari ini ${okTotal} berhasil, ${failTotal} gagal`];
+    for (const a of m.cloudflare) {
+      parts.push(
+        `  Cloudflare ${a.id}: ${a.ok} gambar${a.edits ? ` + ${a.edits} edit foto (neuron edit tidak ikut dihitung)` : ""} ≈ ${a.usedNeurons.toLocaleString("id-ID")}/${a.freeNeurons.toLocaleString("id-ID")} neuron (sisa ±${a.imagesLeft} gambar)` +
+          (a.resting ? `, JATAH HABIS (pulih ${fmtClock(a.restUntil)})` : `, reset ${fmtClock(m.resetAt)}`)
+      );
+    }
+    if (m.lastError && m.lastErrorAt && now() - m.lastErrorAt < 24 * 3600_000) parts.push(`  Galat terakhir: ${m.lastError}`);
+    return parts.join("\n");
+  }
+
+  function describe() {
+    rollDay();
+    const sisa = (limit, used) => (limit > 0 ? `${Math.max(0, limit - used)}/${limit}` : "tanpa batas");
+    const m = monitor();
+    return (
+      `grup: ${groupsOn ? "AKTIF" : "mati"} • penyedia: ${m.providers.length ? m.providers.join(" > ") : "belum ada"}` +
+      `${hasCf() && on("cloudflare") ? ` • GRATIS: Cloudflare ${config.cfModels[0].split("/").pop()}${cfList().length > 1 ? ` (${cfList().length} akun)` : ""}` : ""}` +
+      `${on("gemini") && config.keys.length ? ` • Gemini ${config.models[0]}` : ""}${on("openrouter") && config.orKeys?.length ? ` • OpenRouter ${config.orModels[0]}` : ""}\n` +
+      (config.ownerDaily > 0 || config.groupDaily > 0 || config.personDaily > 0
+        ? `Jatah hari ini (batas buatan bot) — pemilik: ${sisa(config.ownerDaily, quota.owner)}, semua grup: ${sisa(config.groupDaily, quota.group)} (per orang: ${config.personDaily || "tanpa batas"})\n`
+        : `Batas gambar: diserahkan ke Cloudflare (tanpa jatah buatan bot); hari ini ${quota.owner} gambar pemilik, ${quota.group} gambar grup\n`) +
+      monitorText()
+    );
+  }
+
+  const canEdit = () => on("cloudflare") && hasCf() && typeof fetchImpl === "function";
+
+  /**
+   * Edit foto lewat Cloudflare (FLUX.2 klein menerima foto referensi). prepared = hasil prepareEditInput().
+   * -> { buffer, mime, model }. Galat: Error dengan .kind dan pesan siap tampil (sama seperti generate()).
+   */
+  async function editImage(prompt, prepared) {
+    const details = [];
+    const addDetail = (line) => {
+      if (!details.includes(line)) details.push(line);
+    };
+    const fail = (kind, extra = "") => Object.assign(new Error(KIND_TEXT[kind] + (extra ? ` (${extra})` : "")), { kind, detail: details.join("\n") });
+    if (!canEdit()) throw fail("noedit");
+    const p = String(prompt ?? "").trim().slice(0, config.promptMax);
+    if (!p) throw fail("blocked");
+    let instruction = p;
+    if (translate) {
+      try {
+        const t = String((await translate(p)) ?? "").replace(/\s+/g, " ").trim();
+        if (t && t.length <= 800) instruction = t;
+      } catch (e) {
+        log.warn?.(`🖼️ [Edit] terjemahan instruksi gagal, pakai aslinya: ${e instanceof Error ? e.message : e}`);
+      }
+    }
+    const fullPrompt = `Edit the photo (image 0): ${instruction}. Keep everything else, including people's faces and the composition, unchanged unless asked.`;
+    const nextUtcMidnight = () => {
+      const d = new Date(now());
+      return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1);
+    };
+    let worst = null;
+    const rank = { quota: 4, billing: 3, auth: 2, unavailable: 1 };
+    const note = (kind) => {
+      if (!worst || rank[kind] > rank[worst]) worst = kind;
+    };
+    for (const model of config.cfEditModels || []) {
+      const accts = cfList();
+      const startAt = cfRr++ % accts.length;
+      let triedAny = false;
+      for (let i = 0; i < accts.length; i++) {
+        const acc = accts[(startAt + i) % accts.length];
+        if ((cfRest.get(acc.account) || 0) > now()) continue;
+        triedAny = true;
+        let r;
+        try {
+          const fd = new FormData();
+          fd.append("prompt", fullPrompt);
+          fd.append("width", String(prepared.outWidth));
+          fd.append("height", String(prepared.outHeight));
+          fd.append("input_image_0", new Blob([prepared.png], { type: "image/png" }), "input.png");
+          const res = await fetchImpl(`https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(acc.account)}/ai/run/${model}`, {
+            method: "POST",
+            headers: { authorization: `Bearer ${acc.token}` },
+            body: fd,
+            signal: AbortSignal.timeout(config.timeoutMs)
+          });
+          const ct = String(res.headers?.get?.("content-type") || "");
+          if (res.ok && /^image\//i.test(ct) && typeof res.arrayBuffer === "function") {
+            const buffer = Buffer.from(await res.arrayBuffer());
+            r = { status: res.status, ok: true, raw: "", json: null, buffer };
+          } else {
+            const raw = await res.text();
+            let json = null;
+            try {
+              json = JSON.parse(raw);
+            } catch {
+              /* bukan JSON */
+            }
+            r = { status: res.status, ok: res.ok, raw, json };
+          }
+        } catch (e) {
+          log.warn?.(`🖼️ [Edit] Cloudflare ${tail(acc.account)} ${model}: ${e instanceof Error ? e.message : e}`);
+          addDetail(`Cloudflare ${tail(acc.account)} ${model}: ${e instanceof Error ? e.message : e}`);
+          bump("cloudflare", false, acc.account, e instanceof Error ? e.message : String(e), true);
+          note("unavailable");
+          continue;
+        }
+        const b64 = r.json?.result?.image;
+        const buffer = r.buffer || (r.ok && typeof b64 === "string" && b64.length > 400 ? Buffer.from(b64, "base64") : null);
+        if (buffer && buffer.length > 300) {
+          bump("cloudflare", true, acc.account, "", true);
+          return { buffer, mime: mimeFromBytes(buffer) || "image/jpeg", model: `cloudflare:${model}`, text: "" };
+        }
+        const kind = r.ok ? "server" : errorKind(r.status, r.raw);
+        log.warn?.(`🖼️ [Edit] Cloudflare ${tail(acc.account)} ${model} HTTP ${r.status} (${kind}): ${String(r.raw).replace(/\s+/g, " ").slice(0, 160)}`);
+        addDetail(`Cloudflare ${tail(acc.account)} ${model}: HTTP ${r.status} ${kind} — ${apiMessage(r)}`);
+        if (/nsfw|moderat|flagged|inappropriate/i.test(r.raw)) throw fail("blocked");
+        bump("cloudflare", false, acc.account, `HTTP ${r.status} ${kind}`, true);
+        if (kind === "quota") cfRest.set(acc.account, nextUtcMidnight());
+        else if (kind === "auth") cfRest.set(acc.account, now() + 3600_000);
+        note(kind === "api" || kind === "server" ? "unavailable" : kind);
+        if (kind === "api") break; // model tidak ada/ditolak -> model berikutnya
+      }
+      if (!triedAny) {
+        addDetail("Cloudflare: semua akun sedang istirahat (jatah harian habis / token ditolak)");
+        note("quota");
+      }
+    }
+    throw fail(worst || "unavailable");
+  }
+
+  /** Satu paket edit foto untuk pemanggil: cek instruksi -> jatah -> edit (jatah dikembalikan bila gagal). -> { image } atau { error, kind, detail } */
+  async function makeEdit(prompt, prepared, kind = "group", who = "") {
+    const p = cleanPrompt(prompt);
+    if (!p) return { error: "Mau diedit jadi apa? Contoh: bot, ubah foto ini jadi hitam putih.", kind: "empty" };
+    const bad = promptProblem(p) || editPromptProblem(p);
+    if (bad) return { error: bad, kind: "refused" };
+    if (!canEdit()) return { error: KIND_TEXT.noedit, kind: "noedit" };
+    const slot = await reserve(kind, who);
+    if (!slot.ok) return { error: slot.reason, kind: "limit" };
+    try {
+      return { image: await editImage(p, prepared) };
+    } catch (e) {
+      await slot.release().catch(() => {});
+      return { error: e instanceof Error ? e.message : String(e), kind: e?.kind || "unavailable", detail: e?.detail || "" };
+    }
+  }
+
+  /** Perintah /gambar dari Telegram: tanpa argumen = status; "grup on|off" = saklar; selain itu = deskripsi (ditangani pemanggil). */
+  function parseCommand(arg) {
+    const a = String(arg ?? "").trim();
+    if (!a || /^(?:status|info)$/i.test(a)) return { kind: "status" };
+    const m = /^(?:grup|group|wag|wa)?\s*(on|off|aktif|mati|nyala)$/i.exec(a);
+    if (m) return { kind: "group", value: /^(?:on|aktif|nyala)$/i.test(m[1]) };
+    return { kind: "prompt", prompt: cleanPrompt(a) };
+  }
+
+  /** Ganti konfigurasi tanpa restart (dipakai /env). Jatah harian & saklar grup tetap; istirahat akun Cloudflare direset. */
+  function reconfigure(next) {
+    config = next;
+    cfRest.clear();
+    apiPref.clear();
+    geminiRest = 0;
+  }
+
+  return { available, canEdit, load, groupEnabled, setGroup, reserve, generate, make, makeEdit, editImage, describe, parseCommand, reconfigure, monitor, monitorText, detect: detectImageRequest, detectEdit: detectEditRequest, problem: promptProblem };
+}

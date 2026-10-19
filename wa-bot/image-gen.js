@@ -161,12 +161,12 @@ export function detectEditRequest(text, { hasImage = false } = {}) {
 
 // Pagar khusus EDIT foto (orang sungguhan yang tidak ikut meminta): tanpa persetujuan orang di foto, bot tidak membuatkan versi
 // telanjang/dilucuti/seksual dari fotonya. Untuk gambar dari teks tidak ada penyaringan kata (diserahkan ke penyedia).
-const EDIT_BLOCK_RES = [
-  /\b(?:telanjang|bugil|topless|nude|naked|unclothed|undress\w*|porno\w*|bokep|erotis|erotic|nsfw|hentai)\b/i,
-  /\b(?:buka|lepas|copot|tanggalkan|hilangkan|undress|remove|take\s+off|strip)\s+(?:\w+\s+){0,3}(?:baju|pakaian|bajunya|pakaiannya|clothes|clothing|kerudung|jilbab|hijab)\b/i,
-  /\b(?:tanpa|without)\s+(?:busana|baju|pakaian|clothes|clothing)\b/i,
-  /\b(?:bikini|lingerie|pakaian dalam|underwear|swimsuit|baju renang)\b/i
-];
+//const EDIT_BLOCK_RES = [
+//  /\b(?:telanjang|bugil|topless|nude|naked|unclothed|undress\w*|porno\w*|bokep|erotis|erotic|nsfw|hentai)\b/i,
+//  /\b(?:buka|lepas|copot|tanggalkan|hilangkan|undress|remove|take\s+off|strip)\s+(?:\w+\s+){0,3}(?:baju|pakaian|bajunya|pakaiannya|clothes|clothing|kerudung|jilbab|hijab)\b/i,
+//  /\b(?:tanpa|without)\s+(?:busana|baju|pakaian|clothes|clothing)\b/i,
+//  /\b(?:bikini|lingerie|pakaian dalam|underwear|swimsuit|baju renang)\b/i
+//];
 
 /** Aturan tambahan khusus edit foto orang sungguhan. -> alasan penolakan atau null. */
 export function editPromptProblem(prompt) {
