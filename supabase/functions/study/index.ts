@@ -94,6 +94,7 @@
 //   class_list          { before? }                                          -> { items:[{id,title,fileName,lang,pageCount,creatorName,createdAt}], hasMore }   (tab "Class"; tanpa PIN)
 //   class_get           { classId }                                          -> { classroom:{...,summary,sections:[{heading,say}]} }   (tanpa PIN; teks sumber PDF tidak dikirim)
 //   class_create        { playerId, pin, text, fileName?, pageCount?, engine? }  -> { classroom:{...} }   (teks PDF diekstrak di peramban; AI meringkas + menulis naskah lisan per bagian)
+//   class_live          { playerId, pin, topic, engine? }                    -> { classroom:{...,kind:"live",topic} }   (KELAS LIVE tanpa PDF: AI menyiapkan penjelasan materi yang diminta pemain sesuai grade/kelasnya; butuh migrasi 0043)
 //   class_ask           { classId, playerId, pin, question, history? }       -> { reply, say, lang, provider, remaining }   (tanya-jawab dengan guru tentang SATU kelas; tanpa tabel)
 //   class_tts           { playerId, pin, classId?, idx? | text? }            -> { audio, mime }   (suara guru: naskah bagian #idx milik kelas, atau teks jawaban ≤450 huruf)
 //   class_transcribe    { playerId, pin, audio, mime }                       -> { text, engine }   (suara -> teks, bahasa otomatis)
@@ -158,7 +159,11 @@ import {
 import type { ParsedQuestion } from "../_shared/study-core.ts";
 import {
   CLASS_SOURCE_MIN,
+  CLASS_TOPIC_MIN,
   buildClassAskPrompt,
+  buildLivePrompt,
+  cleanClassTopic,
+  liveSourceText,
   buildClassPrompt,
   cleanClassHistory,
   cleanClassQuestion,
@@ -634,7 +639,13 @@ function takeClassStt(playerId: string): Response | null {
 }
 
 // Tabel belum dibuat (migrasi 0042 belum dijalankan) -> pesan jelas, bukan galat mentah.
-const classMissing = (e: { code?: string; message?: string } | null | undefined) => !!e && (e.code === "42P01" || e.code === "PGRST205" || /study_classrooms/.test(e.message ?? ""));
+const classMissing = (e: { code?: string; message?: string } | null | undefined) => !!e && e.code !== "42703" && (e.code === "42P01" || e.code === "PGRST205" || /study_classrooms/.test(e.message ?? ""));
+// Kolom kind/topic (migrasi 0043) belum ada -> kueri diulang tanpa keduanya, jadi tab Class tetap jalan sebelum 0043.
+// deno-lint-ignore no-explicit-any
+async function selectClass(build: (cols: string) => PromiseLike<{ data: any; error: any }>, cols: string) {
+  const r = await build(`${cols},kind,topic`);
+  return r.error?.code === "42703" ? await build(cols) : r;
+}
 const classUnavailable = () => fail("Fitur Class belum aktif di server (migrasi 0042 belum dijalankan).", 503, { classUnavailable: true });
 
 const classRow = (c: Row, withBody = false) => ({
@@ -646,6 +657,8 @@ const classRow = (c: Row, withBody = false) => ({
   pageCount: c.page_count ?? null,
   creatorName: c.creator_name,
   createdAt: c.created_at,
+  kind: c.kind === "live" ? "live" : "pdf",
+  topic: c.topic ?? null,
   ...(withBody ? { summary: c.summary, sections: Array.isArray(c.sections) ? (c.sections as Row[]).map((x) => ({ heading: String(x.heading ?? ""), say: String(x.say ?? "") })) : [] } : {})
 });
 
@@ -1683,9 +1696,11 @@ Deno.serve(async (req) => {
         }
         before = body.before;
       }
-      let q = admin.from("study_classrooms").select("id,creator_id,title,file_name,lang,page_count,creator_name,created_at").order("created_at", { ascending: false }).limit(CLASS_PAGE + 1);
-      if (before) q = q.lt("created_at", before);
-      const { data, error } = await q;
+      const { data, error } = await selectClass((cols) => {
+        let q = admin.from("study_classrooms").select(cols).order("created_at", { ascending: false }).limit(CLASS_PAGE + 1);
+        if (before) q = q.lt("created_at", before);
+        return q;
+      }, "id,creator_id,title,file_name,lang,page_count,creator_name,created_at");
       if (error) return classMissing(error) ? classUnavailable() : fail(error.message, 500);
       const rows = (data ?? []) as Row[];
       return json({ ok: true, items: rows.slice(0, CLASS_PAGE).map((c) => classRow(c)), hasMore: rows.length > CLASS_PAGE });
@@ -1694,7 +1709,7 @@ Deno.serve(async (req) => {
     // ------------------------------------------------------------ class: isi ringkasan + naskah (tanpa PIN)
     if (action === "class_get") {
       if (!isUuid(body.classId)) return fail("Kelas tidak valid.");
-      const { data: c, error } = await admin.from("study_classrooms").select("id,creator_id,title,file_name,lang,page_count,creator_name,created_at,summary,sections").eq("id", body.classId).maybeSingle();
+      const { data: c, error } = await selectClass((cols) => admin.from("study_classrooms").select(cols).eq("id", body.classId).maybeSingle(), "id,creator_id,title,file_name,lang,page_count,creator_name,created_at,summary,sections");
       if (error) return classMissing(error) ? classUnavailable() : fail(error.message, 500);
       if (!c) return fail("Kelas itu tidak ditemukan.", 404);
       return json({ ok: true, classroom: classRow(c, true) });
@@ -1745,6 +1760,58 @@ Deno.serve(async (req) => {
       return json({ ok: true, classroom: classRow(c, true) });
     }
 
+    // ------------------------------------------------------------ class: KELAS LIVE tanpa PDF (PIN pemain)
+    // Pemain menulis materi yang ingin dijelaskan; AI menyiapkan ringkasan + naskah lisan sesuai grade/kelas pemain.
+    if (action === "class_live") {
+      const auth = await checkPlayerPin(admin, body.playerId, body.pin);
+      if (auth instanceof Response) return auth;
+      const p = auth.player;
+      const topic = cleanClassTopic(body.topic);
+      if (!topic) return fail(`Tulis materi yang ingin dijelaskan (minimal ${CLASS_TOPIC_MIN} huruf).`);
+      // migrasi 0043 belum dijalankan: tolak SEBELUM memakai jatah/AI
+      const probe = await admin.from("study_classrooms").select("kind").limit(1);
+      if (probe.error?.code === "42703") return fail("Kelas live belum aktif di server (migrasi 0043 belum dijalankan).", 503, { classUnavailable: true });
+      if (probe.error && classMissing(probe.error)) return classUnavailable();
+      const slot = await takeGenerationSlot(admin, p.id, "material");
+      if (slot) return slot;
+      const engine = parseEngine(body.engine);
+      await wireReporters(admin);
+      const keys = getGeminiApiKeys();
+      const prompt = buildLivePrompt(topic, String(p.grade ?? "Umum"), typeof p.class_level === "number" ? p.class_level : null);
+      let made: ReturnType<typeof parseClassMade> = null;
+      let provider = "gemini";
+      let lastError = "";
+      let tokens = 0;
+      let cost = 0;
+      for (let attempt = 0; attempt < CLASS_CREATE_ATTEMPTS && !made; attempt++) {
+        try {
+          const r = await generateJsonText(prompt.system, prompt.user, keys, { temperature: 0.6, engine, budgetMs: 90_000 });
+          tokens += r.tokensUsed;
+          cost += r.costUsd;
+          if (r.provider) provider = r.provider;
+          made = parseClassMade(r.text, topic, topic);
+          if (!made) lastError = "AI mengembalikan penjelasan yang tidak bisa dipakai.";
+        } catch (err) {
+          lastError = err instanceof Error ? err.message : String(err);
+          console.error("study class_live:", lastError);
+          if (/429|quota|exhaust|batas kuota|rate.?limit|PerDay/i.test(lastError)) break;
+        }
+      }
+      await recordTokens(admin, tokens, cost);
+      if (!made) {
+        const quota = /429|quota|exhaust|batas kuota|rate.?limit|PerDay/i.test(lastError);
+        return fail(quota ? "Guru AI sedang penuh (kuota gratis habis). Tunggu sebentar lalu coba lagi." : `Gagal menyiapkan kelas live. ${lastError}`.trim().slice(0, 300), 502, { generationFailed: true });
+      }
+      const { data: c, error } = await admin
+        .from("study_classrooms")
+        .insert({ creator_id: p.id, creator_name: p.name, title: made.title, file_name: null, lang: made.lang, page_count: null, summary: made.summary, sections: made.sections, source_text: liveSourceText(made), provider, kind: "live", topic })
+        .select("id,creator_id,title,file_name,lang,page_count,creator_name,created_at,summary,sections,kind,topic")
+        .single();
+      if (error?.code === "42703") return fail("Kelas live belum aktif di server (migrasi 0043 belum dijalankan).", 503, { classUnavailable: true });
+      if (error || !c) return classMissing(error) ? classUnavailable() : fail(error?.message || "Gagal menyimpan kelas.", 500);
+      return json({ ok: true, classroom: classRow(c, true) });
+    }
+
     // ------------------------------------------------------------ class: tanya guru (PIN / token pemain)
     if (action === "class_ask") {
       if (!isUuid(body.classId)) return fail("Kelas tidak valid.");
@@ -1753,14 +1820,14 @@ Deno.serve(async (req) => {
       const p = auth.player;
       const question = cleanClassQuestion(body.question);
       if (question.length < 1) return fail("Tulis atau ucapkan pertanyaannya dulu.");
-      const { data: c, error: cerr } = await admin.from("study_classrooms").select("id,title,lang,summary,source_text").eq("id", body.classId).maybeSingle();
+      const { data: c, error: cerr } = await selectClass((cols) => admin.from("study_classrooms").select(cols).eq("id", body.classId).maybeSingle(), "id,title,lang,summary,source_text");
       if (cerr) return classMissing(cerr) ? classUnavailable() : fail(cerr.message, 500);
       if (!c) return fail("Kelas itu tidak ditemukan.", 404);
       const lim = takeClassAsk(p.id as string);
       if (lim instanceof Response) return lim;
       await wireReporters(admin);
       const keys = getGeminiApiKeys();
-      const prompt = buildClassAskPrompt({ title: String(c.title ?? ""), lang: c.lang === "en" ? "en" : "id", summary: String(c.summary ?? ""), source: String(c.source_text ?? ""), history: cleanClassHistory(body.history), question });
+      const prompt = buildClassAskPrompt({ title: String(c.title ?? ""), lang: c.lang === "en" ? "en" : "id", summary: String(c.summary ?? ""), source: String(c.source_text ?? ""), history: cleanClassHistory(body.history), question, live: c.kind === "live" });
       let ans: ReturnType<typeof parseClassAnswer> = null;
       let provider = "gemini";
       let lastError = "";

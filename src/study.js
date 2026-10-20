@@ -911,6 +911,7 @@ async function onBodyClick(e) {
     return classroom.onAct(act, btn);
   }
   if (act === "class-new") return pickClassPdf();
+  if (act === "class-live") return openLiveClass();
   if (act === "class-view") return openClass(id);
   if (act === "class-del") return deleteClass(id);
   if (act === "class-more" || act === "class-reload") return loadClasses(act === "class-reload");
@@ -2701,7 +2702,8 @@ function classesHtml() {
       (it) => `
     <article class="study-material" data-class="${esc(it.id)}">
       <div class="study-material-title">${esc(it.title)}</div>
-      <div class="study-post-chips"><span class="study-badge">${it.lang === "en" ? "English" : "Indonesia"}</span>${it.pageCount ? `<span class="study-badge">${esc(L("study_cls_pages", { n: it.pageCount }))}</span>` : ""}</div>
+      <div class="study-post-chips">${it.kind === "live" ? `<span class="study-badge study-badge--solid">${esc(L("study_cls_live_badge"))}</span>` : ""}<span class="study-badge">${it.lang === "en" ? "English" : "Indonesia"}</span>${it.pageCount ? `<span class="study-badge">${esc(L("study_cls_pages", { n: it.pageCount }))}</span>` : ""}</div>
+      ${it.kind === "live" && it.topic ? `<p class="study-material-detail">${esc(it.topic)}</p>` : ""}
       <div class="study-row-meta">${esc(L("study_mat_by", { name: it.creatorName }))} · ${esc(fmtDate(it.createdAt))}</div>
       <div class="study-material-actions">
         <button type="button" class="primary-btn" data-act="class-view" data-id="${esc(it.id)}">${esc(L("study_cls_open"))}</button>
@@ -2711,7 +2713,7 @@ function classesHtml() {
     )
     .join("");
   return `
-    <div class="study-actions"><button type="button" class="primary-btn" data-act="class-new" ${S.classBusy ? "disabled" : ""}>${esc(L("study_cls_new"))}</button></div>
+    <div class="study-actions"><button type="button" class="primary-btn" data-act="class-live" ${S.classBusy ? "disabled" : ""}>${esc(L("study_cls_live_new"))}</button><button type="button" class="secondary-btn" data-act="class-new" ${S.classBusy ? "disabled" : ""}>${esc(L("study_cls_new"))}</button></div>
     <p class="study-hint">${esc(L("study_cls_intro"))}</p>
     ${S.classBusy ? `<div class="study-card" role="status"><p>${esc(S.classBusy)}</p></div>` : ""}
     ${c.error ? `<div class="study-card"><p>${esc(c.error)}</p><button type="button" class="secondary-btn" data-act="class-reload">${esc(L("study_reload"))}</button></div>` : ""}
@@ -2783,7 +2785,44 @@ async function uploadClassPdf(file) {
   }
 }
 
-async function openClass(id, known) {
+// Kelas live: pemain menulis materi yang ingin dijelaskan (tanpa PDF); AI menyiapkan, lalu guru langsung menjelaskan.
+async function openLiveClass() {
+  if (S.classBusy) return;
+  if (!S.overview) return window.alert(L("study_loading"));
+  if (!(S.overview.players || []).length) return window.alert(L("study_no_players"));
+  if (!(await ensureViewer())) return;
+  const out = await openFormDialog({
+    title: L("study_cls_live_title"),
+    intro: L("study_cls_live_intro"),
+    okLabel: L("study_cls_live_go"),
+    cancelLabel: L("study_cancel"),
+    busyLabel: L("study_cls_live_busy"),
+    fields: [{ key: "topic", label: L("study_cls_live_topic"), type: "textarea", rows: 3, maxlength: 300, placeholder: L("study_cls_live_ph"), help: L("study_cls_live_help") }],
+    onSubmit: async (v) => {
+      const topic = String(v.topic || "").replace(/\s+/g, " ").trim();
+      if (topic.length < 3) return { ok: false, error: L("study_cls_live_required") };
+      const me = S.viewer;
+      if (!me) return { ok: false, error: L("study_mchat_login") };
+      unlockSpeech(); // dalam ketukan pemain: suara guru boleh langsung berbunyi setelah kelas jadi
+      const res = await studyCall("class_live", { playerId: me.id, pin: me.pin, topic, engine: "auto" }, { timeoutMs: 150000 });
+      if (!res.ok) {
+        if (res.pinWrong || res.locked) S.viewer = null;
+        return { ok: false, error: errText(res) };
+      }
+      return { ok: true, value: { classroom: res.classroom } };
+    }
+  });
+  if (!out) return;
+  const cls = out.classroom;
+  S.classes.items = [{ ...cls, summary: undefined, sections: undefined }, ...S.classes.items.filter((i) => i.id !== cls.id)];
+  S.classes.loaded = true;
+  if (S.view === "home") {
+    render();
+    openClass(cls.id, cls, { autoplay: true });
+  }
+}
+
+async function openClass(id, known, opts = {}) {
   const base = known || S.classes.items.find((i) => i.id === id);
   if (!base) return;
   if (S.view !== "class") pushView();
@@ -2791,7 +2830,10 @@ async function openClass(id, known) {
   S.view = "class";
   render();
   window.scrollTo(0, 0);
-  if (known?.summary) return;
+  if (known?.summary) {
+    if (opts.autoplay) classroom.autoStart();
+    return;
+  }
   await fetchClassBody(id);
 }
 

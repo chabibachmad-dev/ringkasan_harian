@@ -535,7 +535,8 @@ export function createClassroom(deps) {
     body.innerHTML = `
       <div class="study-card">
         <div class="study-row-title">${esc(m.title)}</div>
-        <div class="study-row-meta">${esc(L("study_mat_by", { name: m.creatorName }))}${m.pageCount ? ` · ${esc(L("study_cls_pages", { n: m.pageCount }))}` : ""}${m.fileName ? ` · ${esc(m.fileName)}` : ""}</div>
+        <div class="study-row-meta">${m.kind === "live" ? `<span class="study-badge study-badge--solid">${esc(L("study_cls_live_badge"))}</span> ` : ""}${esc(L("study_mat_by", { name: m.creatorName }))}${m.pageCount ? ` · ${esc(L("study_cls_pages", { n: m.pageCount }))}` : ""}${m.fileName ? ` · ${esc(m.fileName)}` : ""}</div>
+        ${m.kind === "live" && m.topic ? `<div class="study-row-meta">${esc(m.topic)}</div>` : ""}
       </div>
       <div class="cls-stage" id="cls-stage">
         <div class="cls-teacher">${teacherSvg()}</div>
@@ -600,6 +601,10 @@ export function createClassroom(deps) {
     },
     render,
     dispose,
+    /** Langsung mulai menjelaskan dari bagian pertama (kelas live yang baru jadi). */
+    autoStart() {
+      if (cs && cs.sections && cs.sections.length && !cs.playing) playSection(0);
+    },
     /** Penangan klik data-act="cls-*" (dipanggil dalam sentuhan pengguna). */
     async onAct(act, btn) {
       if (!cs) return;
