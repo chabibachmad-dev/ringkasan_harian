@@ -237,7 +237,7 @@ export async function launchBrowser({ exe, userDataDir, headless = false, url = 
       const rect = await page.eval(`(() => { ${DEEP} const f = __find(${JSON.stringify(selector)}); if (!f) return null; f.e.scrollIntoView({ block: 'center' }); const hid = __unblock(${JSON.stringify(selector)}); const f2 = __find(${JSON.stringify(selector)}); const r = f2.e.getBoundingClientRect(); return { x: r.x + f2.ox + scrollX, y: r.y + f2.oy + scrollY, width: r.width, height: r.height, hid }; })()`);
       page.lastUnblocked = rect?.hid || 0;
       if (!rect) throw new Error("Elemen tidak ditemukan.");
-      const r = await cdp.send("Page.captureScreenshot", { format: "png", clip: { x: rect.x, y: rect.y, width: rect.width, height: rect.height, scale: Math.max(1, Math.min(3, 240 / Math.max(1, rect.width))) }, captureBeyondViewport: true }, 30_000);
+      const r = await cdp.send("Page.captureScreenshot", { format: "png", clip: { x: rect.x, y: rect.y, width: rect.width, height: rect.height, scale: Math.max(1, Math.min(3, 240 / Math.max(1, rect.width))) }, captureBeyondViewport: false }, 30_000);
       return Buffer.from(r.data, "base64");
     },
     async exists(selector) {
@@ -279,7 +279,7 @@ export async function launchBrowser({ exe, userDataDir, headless = false, url = 
           out.push({ id, kind, tag, type, name: e.getAttribute('name') || '', eid: e.id || '', cls: String(e.className && e.className.baseVal !== undefined ? e.className.baseVal : e.className || '').slice(0, 80), ph: e.placeholder || '', label: __label(e), text: (tag === 'input' || tag === 'textarea' ? (['submit', 'button'].includes(type) ? e.value : '') : (e.innerText || e.alt || '')).replace(/\\s+/g, ' ').trim().slice(0, 80), src: tag === 'img' ? (e.getAttribute('src') || '').slice(0, 60) : '', w: Math.round(b.width), h: Math.round(b.height), top: Math.round(b.top + r.oy), left: Math.round(b.left + r.ox), opts: tag === 'select' ? [...e.options].slice(0, 12).map((o) => o.text.trim()) : undefined, kosong: (tag === 'input' || tag === 'textarea' || tag === 'select') ? !String(e.value || '').length : undefined });
         };
         for (const r of __roots) {
-          for (const e of r.root.querySelectorAll('input, select, textarea, button, a, label, [role=button], img, canvas, [onclick], [tabindex], span, div, li')) {
+          for (const e of r.root.querySelectorAll('input, select, textarea, button, a, label, [role=button], img, canvas, svg, [onclick], [tabindex], span, div, li')) {
             if (n >= 150) break;
             if (!__vis(e)) continue;
             const tag = e.tagName.toLowerCase();
@@ -289,7 +289,7 @@ export async function launchBrowser({ exe, userDataDir, headless = false, url = 
             if (tag === 'input') kind = type === 'password' ? 'sandi' : ['checkbox', 'radio'].includes(type) ? type : ['submit', 'button'].includes(type) ? 'tombol' : 'kolom';
             else if (tag === 'select') kind = 'pilihan';
             else if (tag === 'textarea') kind = 'kolom';
-            else if (tag === 'img' || tag === 'canvas') kind = 'gambar';
+            else if (tag === 'img' || tag === 'canvas' || tag === 'svg') kind = 'gambar';
             else if (tag === 'button' || e.getAttribute('role') === 'button' || (tag === 'a' && e.hasAttribute('href'))) { if (!(e.innerText || '').trim() && tag === 'a') continue; kind = 'tombol'; }
             else {
               // elemen biasa dianggap tombol hanya bila berperilaku seperti tombol: kursor tangan, teks pendek, dan bukan pembungkus tombol lain

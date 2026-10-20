@@ -23,8 +23,11 @@ export function pickLogin(items) {
   const gambar = items.filter((i) => i.kind === "gambar" && i.w >= 40 && i.w <= 450 && i.h >= 15 && i.h <= 200);
   let captchaImg = gambar.find((i) => /captcha/i.test(hay(i))) || null;
   if (!captchaImg && captchaInput) {
-    const ci = items.indexOf(captchaInput);
-    captchaImg = gambar.map((g) => ({ g, d: Math.abs(items.indexOf(g) - ci) })).sort((a, b) => a.d - b.d)[0]?.g || null;
+    // tidak ada petunjuk nama: ambil gambar yang letaknya paling dekat dengan kolom captcha (bukan menurut urutan di kode halaman)
+    const mid = (i) => [i.left + i.w / 2, i.top + i.h / 2];
+    const [cx, cy] = mid(captchaInput);
+    const dekat = gambar.map((g) => ({ g, d: Math.hypot(mid(g)[0] - cx, mid(g)[1] - cy) })).filter((x) => x.d < 450).sort((a, b) => a.d - b.d);
+    captchaImg = dekat[0]?.g || null;
   }
   const tombol = items.filter((i) => i.kind === "tombol" && items.indexOf(i) > pwIdx - 1);
   const submit = tombol.find((i) => i.type === "submit") || tombol.find((i) => LOGIN_TEXT.test(i.text)) || tombol.find((i) => /login|masuk|sign/i.test(i.text)) || null;
@@ -48,7 +51,8 @@ export function pickMfa(items, text = "") {
     const input = kolom.filter((k) => k.top <= submit.top + 4).sort((a, b) => submit.top - a.top - (submit.top - b.top))[0] || null;
     return input ? { input, submit } : null;
   }
-  const input = kolom.find((i) => MFA_HINT.test(hay(i))) || (kolom.length === 1 ? kolom[0] : null);
+  const adaTeks = MFA_TEXT.test(text);
+  const input = kolom.find((i) => MFA_HINT.test(hay(i))) || (adaTeks && kolom.length === 1 ? kolom[0] : null); // satu kolom pencarian di beranda BUKAN kolom MFA
   if (!input) return null;
   const submit = tombol.find((i) => i.type === "submit") || tombol.find((i) => /verif|kirim|submit|lanjut|masuk|login|ok\b/i.test(i.text)) || null;
   return { input, submit };
@@ -150,7 +154,9 @@ export function createSakti({ config, launch = launchBrowser, find = findBrowser
         await page.fill(sel(login.user), config.saktiUser);
         await page.fill(sel(login.pw), config.saktiPass);
         if (login.captchaImg && login.captchaInput) {
-          await io.photo(await page.shotOf(sel(login.captchaImg)), "Captcha SAKTI");
+          const c = login.captchaImg;
+          await io.photo(await page.shotOf(sel(c)), `Captcha SAKTI (elemen ${c.tag}${c.eid ? ` #${c.eid}` : ""} ${c.w}×${c.h})`);
+          await io.photo(await page.screenshot(), "Halaman login saat ini (cadangan: bila potongan di atas keliru, baca captcha dari sini)");
           const ans = await io.ask("Ketik huruf/angka pada gambar captcha. Balas \"ulang\" untuk gambar baru, atau /batal untuk berhenti.");
           if (ans == null) {
             await io.say("Dibatalkan. Peramban dibiarkan terbuka; /sakti tutup untuk menutupnya.");

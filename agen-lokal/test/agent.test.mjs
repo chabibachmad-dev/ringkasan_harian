@@ -533,6 +533,8 @@ const URAIAN_OK = "Belanja barang untuk keperluan perjalanan dinas sesuai surat 
   const it = (id, kind, o = {}) => ({ id, kind, tag: "input", type: "", name: "", eid: "", cls: "", ph: "", label: "", text: "", src: "", w: 200, h: 30, top: 0, left: 0, ...o });
   const lg = pickLogin([it("e1", "kolom", { name: "username" }), it("e2", "sandi", { type: "password" }), it("e3", "gambar", { tag: "img", w: 120, h: 40, src: "/captcha.png" }), it("e4", "kolom", { ph: "captcha" }), it("e5", "tombol", { type: "submit", text: "Login" })]);
   assert.deepEqual([lg.user.id, lg.pw.id, lg.captchaImg.id, lg.captchaInput.id, lg.submit.id], ["e1", "e2", "e3", "e4", "e5"]);
+  const tanpaNama = pickLogin([it("e0", "gambar", { tag: "img", w: 70, h: 24, src: "/logo.png", top: 5, left: 5 }), it("e1", "kolom", { top: 60, left: 10 }), it("e2", "sandi", { top: 100, left: 10 }), it("e3", "gambar", { tag: "img", w: 90, h: 32, src: "/c/7.png", top: 140, left: 10 }), it("e4", "kolom", { top: 140, left: 110, ph: "Masukkan kode" }), it("e5", "tombol", { type: "submit", text: "Login", top: 190, left: 10 })]);
+  assert.equal(tanpaNama.captchaImg.id, "e3", "gambar terdekat dengan kolom captcha, bukan logo di atas");
   assert.equal(pickLogin([it("e1", "kolom")]), null, "tanpa kolom sandi = bukan formulir masuk");
   const tanpaCaptcha = pickLogin([it("e1", "kolom"), it("e2", "sandi"), it("e3", "tombol", { text: "Masuk" })]);
   assert.equal(tanpaCaptcha.captchaImg, null);
@@ -541,6 +543,9 @@ const URAIAN_OK = "Belanja barang untuk keperluan perjalanan dinas sesuai surat 
   const mf = pickMfa([it("e1", "kolom", { ph: "Kode OTP 6 digit" }), it("e2", "tombol", { text: "Verifikasi" })]);
   assert.deepEqual([mf.input.id, mf.submit.id], ["e1", "e2"]);
   assert.equal(pickMfa([it("e1", "sandi"), it("e2", "kolom")]), null);
+  // beranda dengan satu kolom pencarian BUKAN halaman MFA (kekeliruan yang pernah terjadi)
+  assert.equal(pickMfa([it("e1", "kolom", { ph: "Pencarian Menu" }), it("e2", "tombol", { text: "Keluar" })], "Beranda SAKTI To Do List"), null);
+  assert.ok(pickMfa([it("e1", "kolom"), it("e2", "tombol", { text: "Verifikasi" })], "Verifikasi dua langkah: masukkan kode"), "satu kolom + teks verifikasi = MFA");
 
   // peramban sungguhan terhadap situs tiruan (dilewati bila Chrome/Chromium tidak ada)
   let exe = findBrowser(process.env);
@@ -572,7 +577,8 @@ const URAIAN_OK = "Belanja barang untuk keperluan perjalanan dinas sesuai surat 
       said.length = 0;
       const s1 = createSakti({ config: mk(), find: () => exe, log: silent });
       assert.deepEqual(await s1.masuk(mkIo(["AB12", "123 456"])), { ok: true });
-      assert.ok(photos.some((p) => p.c === "Captcha SAKTI" && p.n > 100), "gambar captcha dikirim ke pemilik");
+      assert.ok(photos.some((p) => /^Captcha SAKTI \(elemen img/.test(p.c) && p.n > 100), "gambar captcha dikirim ke pemilik");
+      assert.ok(photos.some((p) => /cadangan/.test(p.c)), "tangkapan layar cadangan ikut dikirim");
       assert.match(said.join("\n"), /ASK:Ketik huruf\/angka pada gambar captcha/);
       assert.match(said.join("\n"), /ASK:Masukkan kode MFA/);
       assert.match(said.join("\n"), /Sudah masuk SAKTI/);
