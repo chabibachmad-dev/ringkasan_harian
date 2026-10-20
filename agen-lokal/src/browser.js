@@ -122,6 +122,19 @@ const __roots = (() => {
   return out;
 })();
 const __find = (sel) => { for (const r of __roots) { const e = r.root.querySelector(sel); if (e) return { e, ox: r.ox, oy: r.oy }; } return null; };
+const __pointEl = (x, y) => {
+  let doc = document, ox = 0, oy = 0, el = null;
+  for (let i = 0; i < 6; i++) {
+    el = doc.elementFromPoint(x - ox, y - oy);
+    if (el && el.tagName === 'IFRAME') {
+      let d = null; try { d = el.contentDocument; } catch (_) {}
+      if (!d) break;
+      const b = el.getBoundingClientRect(); ox += b.left + (el.clientLeft || 0); oy += b.top + (el.clientTop || 0); doc = d; continue;
+    }
+    break;
+  }
+  return el;
+};
 const __cs = (e) => (e.ownerDocument.defaultView || window).getComputedStyle(e);
 const __vis = (e) => { const r = e.getBoundingClientRect(); const cs = __cs(e); return r.width > 2 && r.height > 2 && cs.visibility !== 'hidden' && cs.display !== 'none' && cs.opacity !== '0'; };
 const __label = (e) => {
@@ -130,6 +143,30 @@ const __label = (e) => {
   const wrap = e.closest && e.closest('label');
   const al = e.getAttribute('aria-label');
   return ((id && id.innerText) || (wrap && wrap.innerText) || al || e.placeholder || e.getAttribute('title') || '').replace(/\\s+/g, ' ').trim().slice(0, 80);
+};
+
+const __unblock = (sel) => {
+  // sembunyikan penutup (popup/overlay posisi tetap) yang menimpa elemen sasaran; kembalikan jumlah yang disembunyikan
+  let n = 0;
+  for (let i = 0; i < 8; i++) {
+    const g = __find(sel);
+    if (!g) return n;
+    const r = g.e.getBoundingClientRect();
+    const top = __pointEl(r.x + g.ox + r.width / 2, r.y + g.oy + r.height / 2);
+    if (!top || top === g.e || g.e.contains(top) || top.contains(g.e) || (g.e.getRootNode() === top.getRootNode() && top.getRootNode().host && top.getRootNode().host.contains(g.e))) return n;
+    let victim = null;
+    for (let e = top; e && e !== e.ownerDocument.body && e !== e.ownerDocument.documentElement; e = e.parentElement) {
+      if (e.contains(g.e)) break;
+      const p = __cs(e).position;
+      if (p === 'fixed') victim = e;
+      else if (!victim && (p === 'absolute' || p === 'sticky') ) victim = e;
+    }
+    if (!victim) return n;
+    victim.setAttribute('data-agen-sembunyi', '1');
+    victim.style.setProperty('display', 'none', 'important');
+    n++;
+  }
+  return n;
 };
 `;
 
@@ -197,9 +234,10 @@ export async function launchBrowser({ exe, userDataDir, headless = false, url = 
     },
     /** potret satu elemen (mis. gambar captcha) */
     async shotOf(selector) {
-      const rect = await page.eval(`(() => { ${DEEP} const f = __find(${JSON.stringify(selector)}); if (!f) return null; f.e.scrollIntoView({ block: 'center' }); const f2 = __find(${JSON.stringify(selector)}); const r = f2.e.getBoundingClientRect(); return { x: r.x + f2.ox + scrollX, y: r.y + f2.oy + scrollY, width: r.width, height: r.height }; })()`);
+      const rect = await page.eval(`(() => { ${DEEP} const f = __find(${JSON.stringify(selector)}); if (!f) return null; f.e.scrollIntoView({ block: 'center' }); const hid = __unblock(${JSON.stringify(selector)}); const f2 = __find(${JSON.stringify(selector)}); const r = f2.e.getBoundingClientRect(); return { x: r.x + f2.ox + scrollX, y: r.y + f2.oy + scrollY, width: r.width, height: r.height, hid }; })()`);
+      page.lastUnblocked = rect?.hid || 0;
       if (!rect) throw new Error("Elemen tidak ditemukan.");
-      const r = await cdp.send("Page.captureScreenshot", { format: "png", clip: { ...rect, scale: Math.max(1, Math.min(3, 240 / Math.max(1, rect.width))) }, captureBeyondViewport: true }, 30_000);
+      const r = await cdp.send("Page.captureScreenshot", { format: "png", clip: { x: rect.x, y: rect.y, width: rect.width, height: rect.height, scale: Math.max(1, Math.min(3, 240 / Math.max(1, rect.width))) }, captureBeyondViewport: true }, 30_000);
       return Buffer.from(r.data, "base64");
     },
     async exists(selector) {
@@ -214,7 +252,8 @@ export async function launchBrowser({ exe, userDataDir, headless = false, url = 
       if (text) await cdp.send("Input.insertText", { text: String(text) });
     },
     async click(selector) {
-      const pt = await page.eval(`(() => { ${DEEP} const f = __find(${JSON.stringify(selector)}); if (!f) return null; f.e.scrollIntoView({ block: 'center' }); const g = __find(${JSON.stringify(selector)}); const r = g.e.getBoundingClientRect(); return { x: r.x + g.ox + r.width / 2, y: r.y + g.oy + r.height / 2 }; })()`);
+      const pt = await page.eval(`(() => { ${DEEP} const f = __find(${JSON.stringify(selector)}); if (!f) return null; f.e.scrollIntoView({ block: 'center' }); const hid = __unblock(${JSON.stringify(selector)}); const g = __find(${JSON.stringify(selector)}); const r = g.e.getBoundingClientRect(); return { x: r.x + g.ox + r.width / 2, y: r.y + g.oy + r.height / 2, hid }; })()`);
+      if (pt) page.lastUnblocked = pt.hid || 0;
       if (!pt) throw new Error(`Tombol tidak ditemukan: ${selector}`);
       await cdp.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: pt.x, y: pt.y });
       await cdp.send("Input.dispatchMouseEvent", { type: "mousePressed", x: pt.x, y: pt.y, button: "left", clickCount: 1 });
@@ -240,7 +279,7 @@ export async function launchBrowser({ exe, userDataDir, headless = false, url = 
           out.push({ id, kind, tag, type, name: e.getAttribute('name') || '', eid: e.id || '', cls: String(e.className && e.className.baseVal !== undefined ? e.className.baseVal : e.className || '').slice(0, 80), ph: e.placeholder || '', label: __label(e), text: (tag === 'input' || tag === 'textarea' ? (['submit', 'button'].includes(type) ? e.value : '') : (e.innerText || e.alt || '')).replace(/\\s+/g, ' ').trim().slice(0, 80), src: tag === 'img' ? (e.getAttribute('src') || '').slice(0, 60) : '', w: Math.round(b.width), h: Math.round(b.height), top: Math.round(b.top + r.oy), left: Math.round(b.left + r.ox), opts: tag === 'select' ? [...e.options].slice(0, 12).map((o) => o.text.trim()) : undefined, kosong: (tag === 'input' || tag === 'textarea' || tag === 'select') ? !String(e.value || '').length : undefined });
         };
         for (const r of __roots) {
-          for (const e of r.root.querySelectorAll('input, select, textarea, button, a[href], [role=button], img, canvas, [onclick], [tabindex], span, div, li')) {
+          for (const e of r.root.querySelectorAll('input, select, textarea, button, a, label, [role=button], img, canvas, [onclick], [tabindex], span, div, li')) {
             if (n >= 150) break;
             if (!__vis(e)) continue;
             const tag = e.tagName.toLowerCase();
@@ -251,7 +290,7 @@ export async function launchBrowser({ exe, userDataDir, headless = false, url = 
             else if (tag === 'select') kind = 'pilihan';
             else if (tag === 'textarea') kind = 'kolom';
             else if (tag === 'img' || tag === 'canvas') kind = 'gambar';
-            else if (tag === 'button' || tag === 'a' || e.getAttribute('role') === 'button') { if (!(e.innerText || '').trim() && tag === 'a') continue; kind = 'tombol'; }
+            else if (tag === 'button' || e.getAttribute('role') === 'button' || (tag === 'a' && e.hasAttribute('href'))) { if (!(e.innerText || '').trim() && tag === 'a') continue; kind = 'tombol'; }
             else {
               // elemen biasa dianggap tombol hanya bila berperilaku seperti tombol: kursor tangan, teks pendek, dan bukan pembungkus tombol lain
               const t = (e.innerText || '').replace(/\\s+/g, ' ').trim();
