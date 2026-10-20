@@ -550,15 +550,6 @@ export function createClassroom(deps) {
         <button type="button" class="secondary-btn" id="cls-next" data-act="cls-next">${esc(L("study_cls_next"))}</button>
       </div>
       <p class="study-hint" id="cls-status" role="status"></p>
-      <div class="study-card">
-        <div class="study-expl-title">${esc(L("study_cls_summary"))}</div>
-        <article class="study-material-body chat-md">${deps.renderMd(cs.summary)}</article>
-        <p class="study-hint">${esc(L("study_cls_hint"))}</p>
-      </div>
-      <div class="study-card">
-        <div class="study-expl-title">${esc(L("study_cls_sections"))}</div>
-        <ol class="cls-sections" id="cls-sections">${secs}</ol>
-      </div>
       <div class="study-card cls-ask">
         <div class="study-expl-title">${esc(L("study_cls_ask_title"))}</div>
         <div id="cls-turns" class="cls-turns"></div>
@@ -571,6 +562,15 @@ export function createClassroom(deps) {
           </div>
           <small class="study-hint" id="cls-remaining"></small>
         </div>
+      </div>
+      <div class="study-card">
+        <div class="study-expl-title">${esc(L("study_cls_summary"))}</div>
+        <article class="study-material-body chat-md">${deps.renderMd(cs.summary)}</article>
+        <p class="study-hint">${esc(L("study_cls_hint"))}</p>
+      </div>
+      <div class="study-card">
+        <div class="study-expl-title">${esc(L("study_cls_sections"))}</div>
+        <ol class="cls-sections" id="cls-sections">${secs}</ol>
       </div>`;
     const sel = $("cls-mic-lang");
     if (sel) sel.addEventListener("change", () => cs && (cs.micLang = sel.value === "en" ? "en" : "id"));
