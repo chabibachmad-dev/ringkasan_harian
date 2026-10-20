@@ -589,6 +589,19 @@ const URAIAN_OK = "Belanja barang untuk keperluan perjalanan dinas sesuai surat 
       assert.match(said.join("\n"), /Beranda|SAKTI tiruan/);
       assert.equal(await s1.tutup(), true);
 
+      // isian otomatis dari peramban (nama pengguna & sandi lama sudah terisi): harus dikosongkan dulu, bukan ditambah
+      said.length = 0;
+      state.autofill = true;
+      state.mfaOk = false;
+      state.log.length = 0;
+      const s1a = createSakti({ config: mk(), find: () => exe, log: silent });
+      assert.deepEqual(await s1a.masuk(mkIo(["AB12", "123456"])), { ok: true });
+      assert.deepEqual(state.log[0], { username: "199001012020011001", password: "rahasia", captcha: "AB12" }, "isi otomatis tertimpa, tidak tergandakan");
+      await s1a.tutup();
+      state.autofill = false;
+      state.mfaOk = false;
+      state.log.length = 0;
+
       // MFA berupa jendela di atas halaman masuk (kolom sandi masih terlihat di belakangnya)
       said.length = 0;
       state.mfaModal = true;

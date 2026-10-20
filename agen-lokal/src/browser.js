@@ -173,8 +173,23 @@ const __unblock = (sel) => {
 export async function launchBrowser({ exe, userDataDir, headless = false, url = "about:blank", port = 0, startTimeoutMs = 20_000, log = console }) {
   if (!exe) throw new Error("Chrome/Edge tidak ditemukan. Pasang salah satunya, atau isi SAKTI_BROWSER di .env dengan alamat lengkap chrome.exe / msedge.exe.");
   fs.mkdirSync(userDataDir, { recursive: true });
+  // profil khusus agen: tanpa tawaran simpan sandi dan tanpa isi-otomatis (sering menimpa isian yang kita ketik)
+  try {
+    const dflt = path.join(userDataDir, "Default");
+    fs.mkdirSync(dflt, { recursive: true });
+    const pf = path.join(dflt, "Preferences");
+    let prefs = {};
+    try {
+      prefs = JSON.parse(fs.readFileSync(pf, "utf8"));
+    } catch {}
+    prefs.credentials_enable_service = false;
+    prefs.credentials_enable_autosignin = false;
+    prefs.profile = { ...(prefs.profile || {}), password_manager_enabled: false };
+    prefs.autofill = { ...(prefs.autofill || {}), profile_enabled: false, credit_card_enabled: false };
+    fs.writeFileSync(pf, JSON.stringify(prefs), "utf8");
+  } catch {}
   const dport = port || 9300 + Math.floor(Math.random() * 600);
-  const args = [`--remote-debugging-port=${dport}`, "--remote-debugging-address=127.0.0.1", `--user-data-dir=${userDataDir}`, "--no-first-run", "--no-default-browser-check", "--disable-popup-blocking", "--window-size=1366,900"];
+  const args = [`--remote-debugging-port=${dport}`, "--remote-debugging-address=127.0.0.1", `--user-data-dir=${userDataDir}`, "--no-first-run", "--no-default-browser-check", "--disable-popup-blocking", "--window-size=1366,900", "--password-store=basic", "--disable-save-password-bubble"];
   if (headless) args.push("--headless=new");
   if (typeof process.getuid === "function" && process.getuid() === 0) args.push("--no-sandbox");
   args.push(url);
@@ -245,11 +260,25 @@ export async function launchBrowser({ exe, userDataDir, headless = false, url = 
     },
     /** isi kolom seperti ketikan sungguhan (kerangka web seperti Angular/React ikut terpicu) */
     async fill(selector, text) {
-      const ok = await page.eval(`(() => { ${DEEP} const f = __find(${JSON.stringify(selector)}); if (!f) return false; f.e.scrollIntoView({ block: 'center' }); f.e.focus(); if (f.e.select) f.e.select(); return true; })()`);
-      if (!ok) throw new Error(`Kolom tidak ditemukan: ${selector}`);
-      await cdp.send("Input.dispatchKeyEvent", { type: "keyDown", key: "Backspace", code: "Backspace", windowsVirtualKeyCode: 8 });
-      await cdp.send("Input.dispatchKeyEvent", { type: "keyUp", key: "Backspace", code: "Backspace", windowsVirtualKeyCode: 8 });
-      if (text) await cdp.send("Input.insertText", { text: String(text) });
+      const want = String(text ?? "");
+      const read = () => page.eval(`(() => { ${DEEP} const f = __find(${JSON.stringify(selector)}); return f ? String(f.e.value ?? '') : null; })()`);
+      // 1) kosongkan dulu (isi otomatis dari peramban/pengelola sandi dibuang), dengan cara yang juga dikenali kerangka web
+      const clear = () => page.eval(`(() => { ${DEEP} const f = __find(${JSON.stringify(selector)}); if (!f) return false; const e = f.e; e.scrollIntoView({ block: 'center' }); e.focus(); const proto = e.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype; const set = Object.getOwnPropertyDescriptor(proto, 'value'); if (set && set.set) set.set.call(e, ''); else e.value = ''; e.dispatchEvent(new Event('input', { bubbles: true })); e.dispatchEvent(new Event('change', { bubbles: true })); e.focus(); return true; })()`);
+      if (!(await clear())) throw new Error(`Kolom tidak ditemukan: ${selector}`);
+      if (!want) return;
+      await cdp.send("Input.insertText", { text: want });
+      // 2) periksa isinya; bila masih bercampur dengan isi otomatis, pilih semua lalu timpa
+      let got = await read();
+      for (let i = 0; i < 2 && got !== want; i++) {
+        await clear();
+        await cdp.send("Input.dispatchKeyEvent", { type: "keyDown", key: "a", code: "KeyA", windowsVirtualKeyCode: 65, modifiers: 2, commands: ["selectAll"] });
+        await cdp.send("Input.dispatchKeyEvent", { type: "keyUp", key: "a", code: "KeyA", windowsVirtualKeyCode: 65, modifiers: 2 });
+        await cdp.send("Input.dispatchKeyEvent", { type: "keyDown", key: "Backspace", code: "Backspace", windowsVirtualKeyCode: 8 });
+        await cdp.send("Input.dispatchKeyEvent", { type: "keyUp", key: "Backspace", code: "Backspace", windowsVirtualKeyCode: 8 });
+        await cdp.send("Input.insertText", { text: want });
+        got = await read();
+      }
+      if (got !== want) throw new Error("Kolom tidak terisi seperti yang diminta (isi otomatis peramban mengganggu?).");
     },
     async click(selector) {
       const pt = await page.eval(`(() => { ${DEEP} const f = __find(${JSON.stringify(selector)}); if (!f) return null; f.e.scrollIntoView({ block: 'center' }); const hid = __unblock(${JSON.stringify(selector)}); const g = __find(${JSON.stringify(selector)}); const r = g.e.getBoundingClientRect(); return { x: r.x + g.ox + r.width / 2, y: r.y + g.oy + r.height / 2, hid }; })()`);
