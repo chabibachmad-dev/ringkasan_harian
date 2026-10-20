@@ -10,7 +10,7 @@ export function start(port) {
     if (u.pathname === "/login" && req.method === "POST") {
       let body = ""; req.on("data", (d) => (body += d)); req.on("end", () => {
         const p = new URLSearchParams(body); state.log.push(Object.fromEntries(p));
-        if (p.get("username") === "199001012020011001" && p.get("password") === "rahasia" && p.get("captcha") === state.captcha) { res.writeHead(302, { location: "/mfa" }); return res.end(); }
+        if (p.get("username") === "199001012020011001" && p.get("password") === "rahasia" && p.get("captcha") === state.captcha) { res.writeHead(302, { location: state.mfaModal ? "/?mfa=1" : "/mfa" }); return res.end(); }
         res.writeHead(302, { location: "/?err=1" }); res.end();
       }); return;
     }
@@ -27,7 +27,9 @@ export function start(port) {
     // Mirip portal asli: pengumuman menutupi halaman (tombol "Tutup" berupa <span>), formulir ada di dalam iframe
     const form = `<h2>Selamat datang</h2>${u.searchParams.get("err") ? "<p>Captcha atau sandi salah</p>" : ""}<form method=post action=/login target=_top><label for=u>Nama pengguna</label><input id=u name=username><label for=p>Kata sandi</label><input id=p type=password name=password><img src=/captcha.png alt=captcha id=cap><input name=captcha placeholder="Masukkan captcha"><button type=submit>Login</button></form>`;
     const popup = state.popup === false ? "" : `<div id=pop style="position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:99;display:flex;align-items:center;justify-content:center"><div style="background:#fff;padding:20px"><b>PENGUMUMAN</b><p>Tidak ada gratifikasi</p>${state.popup === "tanpa-tutup" ? "" : `<span style="cursor:pointer;background:#37c;color:#fff;padding:6px 12px" onclick="document.getElementById('pop').remove()">Tutup</span>`}</div></div>`;
-    html(`${popup}<iframe style="width:600px;height:400px;border:0" srcdoc='${form.replace(/'/g, "&#39;")}'></iframe>`);
+    // MFA berupa jendela di atas halaman masuk yang masih terlihat di belakangnya (muncul sesaat kemudian, seperti ajax)
+    const modal = u.searchParams.get("mfa") ? `<script>setTimeout(()=>{const d=document.createElement('div');d.id='mfa';d.style.cssText='position:fixed;left:20%;top:260px;width:360px;background:#fff;border:1px solid #999;z-index:100;padding:10px';d.innerHTML='<b>Verifikasi Multifactor Authentication</b><p>Langkah Verifikasi MFA</p><form method=post action=/mfa target=_top><input name=otp><button type=submit style="background:#4a4;color:#fff">Verifikasi MFA</button></form>';document.body.appendChild(d)},700)</script>` : "";
+    html(`${modal}${state.mfaModal && u.searchParams.get("mfa") ? "" : popup}<iframe style="width:600px;height:400px;border:0" srcdoc='${form.replace(/'/g, "&#39;")}'></iframe>`);
   });
   return new Promise((r) => srv.listen(port, "127.0.0.1", () => r({ srv, state })));
 }

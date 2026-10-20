@@ -583,6 +583,25 @@ const URAIAN_OK = "Belanja barang untuk keperluan perjalanan dinas sesuai surat 
       assert.match(said.join("\n"), /Beranda|SAKTI tiruan/);
       assert.equal(await s1.tutup(), true);
 
+      // MFA berupa jendela di atas halaman masuk (kolom sandi masih terlihat di belakangnya)
+      said.length = 0;
+      state.mfaModal = true;
+      state.mfaOk = false;
+      state.log.length = 0;
+      const s1m = createSakti({ config: mk(), find: () => exe, log: silent });
+      assert.deepEqual(await s1m.masuk(mkIo(["AB12", "123 456"])), { ok: true });
+      assert.match(said.join("\n"), /ASK:Masukkan kode MFA/);
+      assert.deepEqual(state.log[1], { otp: "123456" });
+      state.mfaOk = false;
+      state.log.length = 0;
+      said.length = 0;
+      assert.deepEqual(await s1m.masuk(mkIo(["AB12", "000000"])), { ok: false }, "kode MFA salah ditolak");
+      assert.match(said.join("\n"), /Kode MFA belum diterima|Masih di halaman masuk/);
+      await s1m.tutup();
+      state.mfaModal = false;
+      state.mfaOk = false;
+      state.log.length = 0;
+
       // pengumuman tanpa tombol tutup yang menimpa formulir: bot tetap bisa memotret captcha & menekan Login
       said.length = 0;
       photos.length = 0;

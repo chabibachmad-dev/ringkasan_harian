@@ -31,13 +31,25 @@ export function pickLogin(items) {
   return { user, pw, captchaInput: captchaImg ? captchaInput : captchaInput && CAPTCHA_HINT.test(hay(captchaInput)) ? captchaInput : null, captchaImg, submit };
 }
 
-/** Kolom kode MFA (bukan kolom sandi) + tombol kirimnya. */
-export function pickMfa(items) {
-  if (items.some((i) => i.kind === "sandi")) return null;
+const MFA_TEXT = re("multi.?factor|\\bMFA\\b|kode (otp|verifikasi|otentikasi|autentikasi)|authenticator|two.?factor|dua langkah");
+
+/**
+ * Kolom kode MFA + tombol kirimnya. Dua bentuk: halaman tersendiri (tanpa kolom sandi), atau jendela (modal) yang
+ * muncul di atas halaman masuk yang masih terlihat di belakangnya (teks halaman memuat "Multifactor"/"MFA").
+ */
+export function pickMfa(items, text = "") {
+  const tombol = items.filter((i) => i.kind === "tombol");
   const kolom = items.filter((i) => i.kind === "kolom");
+  if (items.some((i) => i.kind === "sandi")) {
+    if (!MFA_TEXT.test(text)) return null;
+    const submit = tombol.find((i) => /verifikasi|verify/i.test(i.text)) || null;
+    if (!submit) return null;
+    // kolom yang paling dekat DI ATAS tombol "Verifikasi" = kolom di dalam jendela MFA (formulir login ada di belakang, lebih tinggi)
+    const input = kolom.filter((k) => k.top <= submit.top + 4).sort((a, b) => submit.top - a.top - (submit.top - b.top))[0] || null;
+    return input ? { input, submit } : null;
+  }
   const input = kolom.find((i) => MFA_HINT.test(hay(i))) || (kolom.length === 1 ? kolom[0] : null);
   if (!input) return null;
-  const tombol = items.filter((i) => i.kind === "tombol");
   const submit = tombol.find((i) => i.type === "submit") || tombol.find((i) => /verif|kirim|submit|lanjut|masuk|login|ok\b/i.test(i.text)) || null;
   return { input, submit };
 }
@@ -149,10 +161,14 @@ export function createSakti({ config, launch = launchBrowser, find = findBrowser
         }
         await page.click(sel(login.submit)).catch(async () => page.press("Enter"));
         await page.settle(25_000);
-        await new Promise((r) => setTimeout(r, 1500));
-
-        items = await scan();
-        const mfa = pickMfa(items);
+        // tunggu hasilnya: jendela/halaman MFA muncul, atau halaman masuk hilang (kadang lewat ajax, beberapa detik)
+        let mfa = null;
+        for (let k = 0; k < 12; k++) {
+          await new Promise((r) => setTimeout(r, 1000));
+          items = await scan();
+          mfa = pickMfa(items, await page.visibleText(2500).catch(() => ""));
+          if (mfa || (items.length && !items.some((i) => i.kind === "sandi"))) break;
+        }
         if (mfa) {
           await io.photo(await page.screenshot(), "Halaman verifikasi (MFA)");
           const code = await io.ask("Masukkan kode MFA (angka dari aplikasi autentikator/pesan). /batal untuk berhenti.");
@@ -164,10 +180,20 @@ export function createSakti({ config, launch = launchBrowser, find = findBrowser
           if (mfa.submit) await page.click(sel(mfa.submit)).catch(() => page.press("Enter"));
           else await page.press("Enter");
           await page.settle(25_000);
-          await new Promise((r) => setTimeout(r, 1500));
-          items = await scan();
+          // tunggu sampai jendela MFA dan halaman masuk hilang (berhasil) atau tetap ada (kode ditolak)
+          for (let k = 0; k < 12; k++) {
+            await new Promise((r) => setTimeout(r, 1000));
+            items = await scan();
+            if (items.length && !items.some((i) => i.kind === "sandi") && !pickMfa(items, await page.visibleText(2500).catch(() => ""))) break;
+          }
         }
 
+        if (items.some((i) => i.kind === "sandi") && pickMfa(items, await page.visibleText(2500).catch(() => ""))) {
+          const err = await errorText();
+          await io.say(`⚠️ Kode MFA belum diterima${err ? `: "${err}"` : ""}. Kirim /sakti masuk untuk mengulang.`);
+          await io.photo(await page.screenshot(), "Halaman saat ini");
+          return { ok: false };
+        }
         if (items.some((i) => i.kind === "sandi")) {
           const err = await errorText();
           await io.say(`⚠️ Masih di halaman masuk${err ? `: "${err}"` : ""}.`);
@@ -175,7 +201,7 @@ export function createSakti({ config, launch = launchBrowser, find = findBrowser
           if (/captcha|gambar|kode/i.test(err) && attempt < 3) continue;
           return { ok: false };
         }
-        if (pickMfa(items)) {
+        if (pickMfa(items, await page.visibleText(2500).catch(() => ""))) {
           const err = await errorText();
           await io.say(`⚠️ Kode MFA belum diterima${err ? `: "${err}"` : ""}. Kirim /sakti masuk untuk mengulang.`);
           await io.photo(await page.screenshot(), "Halaman saat ini");
