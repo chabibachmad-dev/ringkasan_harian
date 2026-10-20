@@ -64,7 +64,7 @@ export async function transcribeWithGroq(
       form.append("model", model);
       form.append("response_format", "verbose_json");
       form.append("temperature", "0");
-      form.append("language", opts.language || "en");
+      if (opts.language !== "auto") form.append("language", opts.language || "en"); // "auto" = Whisper menebak bahasanya
       if (opts.prompt) form.append("prompt", opts.prompt);
       const res = await fetchImpl(GROQ_STT_URL, { method: "POST", headers: { Authorization: `Bearer ${key}` }, body: form, signal: ctrl.signal });
       const raw = await res.text();

@@ -4982,3 +4982,302 @@ button.study-trow:active {
     animation: none;
   }
 }
+
+
+/* ---- Study: menu hamburger di kanan atas (isinya Pemain Baru, Pelajaran Baru, Kompetisi, Speaking) ---- */
+.study-menu-icon {
+  width: 22px;
+  height: 22px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  display: block;
+}
+
+.study-menu {
+  position: absolute;
+  top: calc(100% - 4px);
+  right: 12px;
+  z-index: 40;
+  min-width: 200px;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg-card);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.22);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.study-menu[hidden] {
+  display: none;
+}
+
+.study-menu-item {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 0.95rem;
+  text-align: left;
+  padding: 11px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.study-menu-item:hover,
+.study-menu-item:focus-visible {
+  background: var(--bg-hover, rgba(127, 127, 127, 0.14));
+  outline: none;
+}
+
+/* ---------------------------------------------------------------- Study > Class (guru pixel-art) */
+.study-tab {
+  min-width: 0;
+  padding-left: 4px;
+  padding-right: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cls-stage {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 10px 0;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--bg-card, var(--bg));
+}
+
+.cls-teacher {
+  flex: 0 0 auto;
+  width: 112px;
+  height: 112px;
+  border-radius: 12px;
+  background: #cfe3f7;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.pixel-teacher {
+  width: 100%;
+  height: 100%;
+  image-rendering: pixelated;
+}
+
+/* papan tulis: tetap gelap di tema terang maupun gelap */
+.cls-board {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 112px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: #1f3d33;
+  color: #f4f1e8;
+  border: 3px solid #8b5e3c;
+}
+
+.cls-board-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px 10px;
+  font-size: 0.9rem;
+}
+
+.cls-tag {
+  font-size: 0.72rem;
+  opacity: 0.75;
+}
+
+.cls-tag:empty {
+  display: none;
+}
+
+.cls-cap-text {
+  margin: 6px 0 0;
+  font-size: 0.95rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+/* kedip tiap ±4 detik; mulut bergerak hanya saat bicara */
+.pt-eyes-closed,
+.pt-mouth-open {
+  visibility: hidden;
+}
+
+.pt-eyes-open {
+  animation: pt-eyes-open 4s steps(1, end) infinite;
+}
+
+.pt-eyes-closed {
+  animation: pt-eyes-closed 4s steps(1, end) infinite;
+}
+
+@keyframes pt-eyes-open {
+  0%, 94% { visibility: visible; }
+  95%, 100% { visibility: hidden; }
+}
+
+@keyframes pt-eyes-closed {
+  0%, 94% { visibility: hidden; }
+  95%, 100% { visibility: visible; }
+}
+
+.cls-stage.is-speaking .pt-mouth-closed {
+  animation: pt-mouth-closed 0.36s steps(1, end) infinite;
+}
+
+.cls-stage.is-speaking .pt-mouth-open {
+  animation: pt-mouth-open 0.36s steps(1, end) infinite;
+}
+
+@keyframes pt-mouth-closed {
+  0%, 49% { visibility: hidden; }
+  50%, 100% { visibility: visible; }
+}
+
+@keyframes pt-mouth-open {
+  0%, 49% { visibility: visible; }
+  50%, 100% { visibility: hidden; }
+}
+
+.cls-stage.is-speaking .pixel-teacher {
+  animation: pt-bob 0.72s ease-in-out infinite;
+}
+
+@keyframes pt-bob {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-2px); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pt-eyes-open,
+  .pt-eyes-closed,
+  .cls-stage.is-speaking .pixel-teacher {
+    animation: none;
+  }
+}
+
+.cls-controls {
+  display: flex;
+  gap: 8px;
+}
+
+.cls-controls .primary-btn {
+  flex: 1 1 auto;
+}
+
+.cls-sections {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.cls-sec {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.cls-sec.is-on {
+  border-color: var(--accent);
+  font-weight: 700;
+}
+
+.cls-sec-no {
+  flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  font-size: 0.8rem;
+}
+
+.cls-turns {
+  display: grid;
+  gap: 10px;
+  margin: 8px 0;
+}
+
+.cls-turn {
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.cls-turn--user {
+  background: var(--bg-card, transparent);
+}
+
+.cls-turn-who {
+  margin-bottom: 4px;
+  font-size: 0.78rem;
+  font-weight: 700;
+  opacity: 0.8;
+}
+
+.cls-turn-body {
+  overflow-wrap: anywhere;
+}
+
+.cls-ask-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.cls-ask-actions select {
+  min-height: 44px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+}
+
+.cls-ask-actions .primary-btn {
+  margin-left: auto;
+}
+
+.cls-mic.is-on {
+  background: #c0392b;
+  border-color: #c0392b;
+  color: #fff;
+}
+
+@media (max-width: 420px) {
+  .cls-stage {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .cls-teacher {
+    align-self: center;
+  }
+}

@@ -159,8 +159,19 @@ export function detectEditRequest(text, { hasImage = false } = {}) {
   return null;
 }
 
-/** Aturan tambahan khusus edit foto orang sungguhan dinonaktifkan. */
+// Pagar khusus EDIT foto (orang sungguhan yang tidak ikut meminta): tanpa persetujuan orang di foto, bot tidak membuatkan versi
+// telanjang/dilucuti/seksual dari fotonya. Untuk gambar dari teks tidak ada penyaringan kata (diserahkan ke penyedia).
+const EDIT_BLOCK_RES = [
+  /\b(?:telanjang|bugil|topless|nude|naked|unclothed|undress\w*|porno\w*|bokep|erotis|erotic|nsfw|hentai)\b/i,
+  /\b(?:buka|lepas|copot|tanggalkan|hilangkan|undress|remove|take\s+off|strip)\s+(?:\w+\s+){0,3}(?:baju|pakaian|bajunya|pakaiannya|clothes|clothing|kerudung|jilbab|hijab)\b/i,
+  /\b(?:tanpa|without)\s+(?:busana|baju|pakaian|clothes|clothing)\b/i,
+  /\b(?:bikini|lingerie|pakaian dalam|underwear|swimsuit|baju renang)\b/i
+];
+
+/** Aturan tambahan khusus edit foto orang sungguhan. -> alasan penolakan atau null. */
 export function editPromptProblem(prompt) {
+  const p = String(prompt ?? "");
+  if (EDIT_BLOCK_RES.some((re) => re.test(p))) return "Maaf, permintaan edit foto seperti itu tidak bisa saya kerjakan.";
   return null;
 }
 
@@ -234,8 +245,18 @@ export function prepareEditInput(buffer, { spawnImpl = spawn, timeoutMs = 20_000
 }
 
 // ---------------------------------------------------------------- filter deskripsi
-/** Filter prompt dinonaktifkan. */
+// Isi gambar yang boleh dibuat/diedit DISERAHKAN ke penyedia (Cloudflare/Gemini/OpenRouter): bot tidak menyimpan daftar kata terlarang
+// untuk isi gambar; bila penyedia menolak, pengguna menerima pesan "ditolak oleh filter keamanan" (kind "blocked").
+// Satu-satunya pagar buatan bot: dokumen/bukti palsu (pemalsuan), dan untuk EDIT foto orang sungguhan lihat EDIT_BLOCK_RES.
+const BLOCK_RES = [
+  /\b(?:palsu|pemalsuan|memalsukan|fake|forge[ds]?|forgery|tiruan)\b.{0,40}\b(?:ktp|ijazah|sertifikat|paspor|passport|kwitansi|struk|nota|surat|dokumen|stempel|cap|materai|meterai|tanda tangan|rekening|bukti transfer|sk)\b/i,
+  /\b(?:ktp|ijazah|sertifikat|paspor|passport|kwitansi|struk|nota|stempel|materai|meterai|bukti transfer)\b.{0,40}\b(?:palsu|fake|tiruan|bohongan)\b/i
+];
+
+/** -> alasan penolakan (teks siap tampil) atau null bila aman. */
 export function promptProblem(prompt) {
+  const p = String(prompt ?? "");
+  if (BLOCK_RES.some((re) => re.test(p))) return "Maaf, permintaan gambar seperti itu tidak bisa saya buat (dokumen/bukti palsu).";
   return null;
 }
 
@@ -345,7 +366,7 @@ export const imageSentNote = (prompt, { edit = false } = {}) =>
 
 /** Catatan riwayat gambar -> teks kutipan untuk AI ("[GAMBAR buatan bot ini, permintaannya: ...]"), atau null bila bukan catatan gambar. */
 export function quotedImageNote(content) {
-  const m = /^🖼️\s*\[BOT mengirim GAMBAR (buatan AI\vert{}hasil EDIT foto) sesuai permintaan: "([\s\S]*)"\]\s*$/.exec(String(content ?? ""));
+  const m = /^🖼️\s*\[BOT mengirim GAMBAR (buatan AI|hasil EDIT foto) sesuai permintaan: "([\s\S]*)"\]\s*$/.exec(String(content ?? ""));
   if (!m) return null;
   return m[1] === "buatan AI" ? `[GAMBAR buatan bot ini, permintaannya: "${m[2]}"]` : `[GAMBAR hasil EDIT foto oleh bot ini, instruksinya: "${m[2]}"]`;
 }
@@ -571,7 +592,7 @@ export function createImageGen({ state = null, config = readImageConfig({}), fet
           const kind = r.ok ? "server" : errorKind(r.status, r.raw);
           log.warn?.(`🖼️ [Gambar] Cloudflare ${tail(acc.account)} ${model} HTTP ${r.status} (${kind}): ${String(r.raw).replace(/\s+/g, " ").slice(0, 160)}`);
           addDetail(`Cloudflare ${tail(acc.account)} ${model}: HTTP ${r.status} ${kind} — ${apiMessage(r)}`);
-          // Filter blokir NSFW Cloudflare dihilangkan
+          if (/nsfw|moderat|flagged|inappropriate/i.test(r.raw)) throw fail("blocked");
           bump("cloudflare", false, acc.account, `HTTP ${r.status} ${kind}`);
           if (kind === "quota") cfRest.set(acc.account, nextUtcMidnight()); // jatah harian: pulih 00:00 UTC
           else if (kind === "auth") cfRest.set(acc.account, now() + 3600_000);
@@ -614,8 +635,9 @@ export function createImageGen({ state = null, config = readImageConfig({}), fet
               return { buffer: out.buffer, mime: out.mime, model, text: out.text };
             }
             // Berhasil tanpa gambar: ditolak filter / model hanya menjawab teks.
-            if (out.text) {
+            if (BLOCKED_RE.test(r.raw) || out.text) {
               log.warn?.(`🖼️ [Gambar] ${model}: tanpa gambar${out.text ? ` ("${out.text.slice(0, 80)}")` : ""}`);
+              throw fail("blocked");
             }
             note("unavailable");
             break;
@@ -635,6 +657,7 @@ export function createImageGen({ state = null, config = readImageConfig({}), fet
             note(kind);
             break; // ganti key
           }
+          if (/SAFETY|PROHIBITED|blockReason/i.test(r.raw)) throw fail("blocked");
           note("unavailable");
           break;
         }
@@ -671,9 +694,7 @@ export function createImageGen({ state = null, config = readImageConfig({}), fet
             bump("openrouter", true);
             return { buffer: out.buffer, mime: out.mime, model: `openrouter:${model}`, text: out.text };
           }
-          if (out.text) {
-            // Biarkan lewat
-          }
+          if (/content_filter|safety|moderation/i.test(r.raw) || out.text) throw fail("blocked");
           note("unavailable");
           continue;
         }
@@ -874,7 +895,7 @@ export function createImageGen({ state = null, config = readImageConfig({}), fet
         const kind = r.ok ? "server" : errorKind(r.status, r.raw);
         log.warn?.(`🖼️ [Edit] Cloudflare ${tail(acc.account)} ${model} HTTP ${r.status} (${kind}): ${String(r.raw).replace(/\s+/g, " ").slice(0, 160)}`);
         addDetail(`Cloudflare ${tail(acc.account)} ${model}: HTTP ${r.status} ${kind} — ${apiMessage(r)}`);
-        // Filter blokir NSFW Cloudflare pada edit foto dihilangkan
+        if (/nsfw|moderat|flagged|inappropriate/i.test(r.raw)) throw fail("blocked");
         bump("cloudflare", false, acc.account, `HTTP ${r.status} ${kind}`, true);
         if (kind === "quota") cfRest.set(acc.account, nextUtcMidnight());
         else if (kind === "auth") cfRest.set(acc.account, now() + 3600_000);

@@ -13,6 +13,7 @@ import { pointsFormula, studyCardFileName } from "./study-text.js";
 import { recognitionSupported, synthSupported, startListening, speakText, stopSpeaking, unlockSpeech, recorderSupported, startRecording, releaseMic, micHeld, idleAudio, playWav, speechToken, audioPlayable } from "./study-voice.js";
 import { renderLessonCard, renderRoomCard, shareOrSaveCard } from "./study-card.js";
 import { createMatChatSheet, newChat } from "./study-matchat.js";
+import { CLASS_SOURCE_LIMIT, checkPdfFile, createClassroom } from "./study-class.js";
 import { allowedClasses, allowedMaterialGrades, classesOf, classPercent, computePoints, formatClock, gradeText, lessonClasses, lessonGrades, PRACTICE_QUESTIONS as PRACTICE_COUNT, timeLimitSeconds } from "../supabase/functions/_shared/study-core.ts";
 
 const $ = (id) => document.getElementById(id);
@@ -132,7 +133,7 @@ const S = {
   resultFrom: "profile", // dari mana hasil dibuka: "profile" (milik sendiri) | "feed" (detil kegiatan pemain lain)
   viewer: null, // { id, name, grade, pin } pemain yang sudah "masuk" untuk suka/komentar/detil/room; PIN hanya di memori
   stack: [], // tumpukan layar (profil publik, hasil, materi, daftar room) supaya tombol kembali ke asalnya
-  tab: "timeline", // tab beranda: "timeline" (default) | "board" (leaderboard) | "materi"
+  tab: "timeline", // tab beranda: "timeline" (default) | "board" (leaderboard) | "materi" | "class"
   feed: null, // timeline global (beranda)
   pub: null, // profil publik yang sedang dibuka: { id, player, stats, sub, feeds }
   rr: null, // tabel hasil kompetisi yang sedang dibuka
@@ -140,7 +141,9 @@ const S = {
   room: null, // room yang sedang diikuti: { id, creds, state, busy, leftQuiz }
   materials: { items: [], hasMore: false, loading: false, loaded: false, error: "" },
   material: null, // materi yang sedang dibaca: { id, title, ..., content (null = masih dimuat) }
-  matChat: null // diskusi AI tentang materi yang sedang dibaca (hanya di memori; hilang saat keluar dari materi)
+  matChat: null, // diskusi AI tentang materi yang sedang dibaca (hanya di memori; hilang saat keluar dari materi)
+  classes: { items: [], hasMore: false, loading: false, loaded: false, error: "" }, // tab Class: daftar kelas (PDF yang dijelaskan guru AI)
+  classBusy: "" // teks status selagi PDF dibaca/diringkas ("" = tidak sedang mengunggah)
 };
 
 // ---------------------------------------------------------------- util
@@ -195,6 +198,30 @@ export function initStudy(context) {
   const bell = $("study-notif-icon");
   if (bell) bell.innerHTML = BELL_SVG;
   $("study-notif-btn")?.addEventListener("click", () => openNotifications());
+  const menuIcon = $("study-menu-icon");
+  if (menuIcon) menuIcon.innerHTML = MENU_SVG;
+  $("study-menu-btn")?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    toggleStudyMenu();
+  });
+  // pilihan di menu hamburger memakai penanganan yang sama dengan tombol di badan halaman
+  $("study-menu")?.addEventListener("click", (e) => {
+    const b = e.target.closest?.("[data-act]");
+    if (!b) return;
+    closeStudyMenu();
+    onBodyClick({ target: b });
+  });
+  document.addEventListener("click", (e) => {
+    if (!$("study-menu") || $("study-menu").hidden) return;
+    if (e.target.closest?.("#study-menu, #study-menu-btn")) return;
+    closeStudyMenu();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && $("study-menu") && !$("study-menu").hidden) {
+      closeStudyMenu();
+      $("study-menu-btn")?.focus();
+    }
+  });
   $("study-body")?.addEventListener("click", onBodyClick);
   startMicSweep();
   let lastUnlock = 0;
@@ -211,6 +238,7 @@ export function initStudy(context) {
   $("study-body")?.addEventListener("change", onBodyChange);
   $("study-body")?.addEventListener("input", onBodyInput);
   $("study-body")?.addEventListener("keydown", (e) => {
+    if (S.view === "class" && classroom.onKey(e)) return;
     if (e.key === "Enter" && !e.isComposing && e.target?.id === "study-speak-input") {
       e.preventDefault();
       unlockSpeech();
@@ -245,7 +273,9 @@ export function hideStudyScreen() {
   S.quiz = null;
   S.stack = [];
   S.view = "home";
+  closeStudyMenu();
   dropMatChat();
+  classroom.dispose();
   stopSpeakIO();
   S.speak = null;
   stopPoll();
@@ -269,10 +299,12 @@ export function showStudyScreen() {
   S.material = null;
   S.feed = newFeed(null, null);
   S.materials = { items: [], hasMore: false, loading: false, loaded: false, error: "" };
+  S.classes = { items: [], hasMore: false, loading: false, loaded: false, error: "" };
   restoreLogin();
   render();
   loadOverview();
   if (S.tab === "materi") loadMaterials(true);
+  else if (S.tab === "class") loadClasses(true);
   else if (S.tab === "timeline") loadFeed(S.feed, "first");
 }
 
@@ -321,6 +353,14 @@ function onBack() {
   if (S.view === "speaklist") {
     stopSpeakIO();
     S.speak = null;
+    if (!popView()) {
+      S.view = "home";
+      render();
+    }
+    return;
+  }
+  if (S.view === "class") {
+    classroom.dispose();
     if (!popView()) {
       S.view = "home";
       render();
@@ -395,6 +435,7 @@ function setTopbar() {
       profile: S.player?.name,
       public: S.pub?.player?.name || L("study_pub_title"),
       material: L("study_mat_title"),
+      class: L("study_cls_view_title"),
       quiz: S.quiz?.kind === "room" ? L("study_kind_competition") : L("study_quiz_title"),
       result: L("study_result_title"),
       rooms: L("study_rooms_title"),
@@ -407,6 +448,39 @@ function setTopbar() {
     title.textContent = titles[S.view] || L("study_title");
   }
   if (settingsBtn) settingsBtn.hidden = S.view !== "home";
+  const menuBtn = $("study-menu-btn");
+  if (menuBtn) menuBtn.hidden = S.view !== "home";
+  if (S.view !== "home") closeStudyMenu();
+}
+
+// ---------------------------------------------------------------- menu hamburger (kanan atas)
+const MENU_SVG = '<svg class="study-menu-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>';
+
+function studyMenuItems() {
+  return [
+    ["new-player", L("study_new_player")],
+    ["new-lesson", L("study_new_lesson")],
+    ["rooms", L("study_rooms_btn")],
+    ...(S.overview?.speak ? [["speak", L("study_speak_btn")]] : [])
+  ];
+}
+
+function closeStudyMenu() {
+  const m = $("study-menu");
+  if (m) m.hidden = true;
+  $("study-menu-btn")?.setAttribute("aria-expanded", "false");
+}
+
+function toggleStudyMenu() {
+  const m = $("study-menu");
+  if (!m) return;
+  if (!m.hidden) return closeStudyMenu();
+  m.innerHTML = studyMenuItems()
+    .map(([act, label]) => `<button type="button" role="menuitem" class="study-menu-item" data-act="${act}">${esc(label)}</button>`)
+    .join("");
+  m.hidden = false;
+  $("study-menu-btn")?.setAttribute("aria-expanded", "true");
+  m.querySelector(".study-menu-item")?.focus();
 }
 
 function render() {
@@ -419,12 +493,14 @@ function render() {
   else if (S.view === "result") renderResult(body);
   else if (S.view === "public") renderPublic(body);
   else if (S.view === "material") renderMaterial(body);
+  else if (S.view === "class") classroom.render(body);
   else if (S.view === "rooms") renderRooms(body);
   else if (S.view === "room") renderRoom(body);
   else if (S.view === "roomresult") renderRoomResult(body);
   else if (S.view === "notif") renderNotif(body);
   else if (S.view === "speaklist") renderSpeakList(body);
   else if (S.view === "speak") renderSpeakChat(body);
+  if (S.view !== "class") classroom.dispose(); // suara & mikrofon guru berhenti begitu keluar dari layar kelas
   // diskusi AI hanya hidup selama layar materi yang sama masih terbuka
   if (S.matChat && (S.view !== "material" || !S.material || S.material.id !== S.matChat.materialId)) dropMatChat();
   typesetMath(body).catch(() => {});
@@ -535,16 +611,10 @@ function renderHome(body) {
   const tab = (id, label) =>
     `<button type="button" role="tab" id="study-tab-${id}" class="study-tab ${S.tab === id ? "is-on" : ""}" aria-selected="${S.tab === id ? "true" : "false"}" data-act="tab" data-tab="${id}">${esc(label)}</button>`;
   body.innerHTML = `
-    <div class="study-actions study-actions--chips">
-      <button type="button" class="secondary-btn" data-act="new-player">${esc(L("study_new_player"))}</button>
-      <button type="button" class="secondary-btn" data-act="new-lesson">${esc(L("study_new_lesson"))}</button>
-      <button type="button" class="secondary-btn" data-act="rooms">${esc(L("study_rooms_btn"))}</button>
-      ${S.overview?.speak ? `<button type="button" class="secondary-btn" data-act="speak">${esc(L("study_speak_btn"))}</button>` : ""}
-    </div>
-    <div class="study-tabs" role="tablist">${tab("timeline", L("study_tab_timeline"))}${tab("board", L("study_tab_board"))}${tab("materi", L("study_tab_materi"))}</div>
+    <div class="study-tabs" role="tablist">${tab("timeline", L("study_tab_timeline"))}${tab("board", L("study_tab_board"))}${tab("materi", L("study_tab_materi"))}${tab("class", L("study_tab_class"))}</div>
     ${S.loading && S.tab === "board" ? `<p class="status-text">${esc(L("study_loading"))}</p>` : ""}
     ${S.tab === "timeline" ? "" : viewerBarHtml()}
-    <div role="tabpanel">${S.tab === "materi" ? materialsHtml() : S.tab === "timeline" ? timelineHtml() : boardHtml}</div>`;
+    <div role="tabpanel">${S.tab === "materi" ? materialsHtml() : S.tab === "class" ? classesHtml() : S.tab === "timeline" ? timelineHtml() : boardHtml}</div>`;
   // kegiatan baru (pelajaran/kompetisi/materi selesai) sejak timeline dimuat: segarkan diam-diam
   if (S.tab === "timeline" && S.feed && S.feed.stale && !S.feed.loading) setTimeout(() => S.feed && loadFeed(S.feed, "refresh"), 0);
 }
@@ -829,6 +899,21 @@ async function onBodyClick(e) {
   if (act === "pub-tab") return switchPubTab(btn.dataset.tab);
   if (act === "pub-reload") return S.pub && loadPublic(S.pub);
   if (act === "feed-reload") return loadFeed(shownFeed(), "first");
+  if (act === "cls-reload") {
+    const cur = classroom.current();
+    if (!cur) return;
+    classroom.setError(cur.id, "");
+    render();
+    return fetchClassBody(cur.id);
+  }
+  if (act.startsWith("cls-")) {
+    unlockSpeech(); // suara guru baru boleh berbunyi otomatis setelah sentuhan pengguna (iOS/Safari)
+    return classroom.onAct(act, btn);
+  }
+  if (act === "class-new") return pickClassPdf();
+  if (act === "class-view") return openClass(id);
+  if (act === "class-del") return deleteClass(id);
+  if (act === "class-more" || act === "class-reload") return loadClasses(act === "class-reload");
   if (act === "mat-new") return openMaterialCreate();
   if (act === "mat-view") return openMaterial(id);
   if (act === "mat-pdf") return materialPdf(id, btn);
@@ -2140,6 +2225,7 @@ async function toggleComments(key) {
 }
 
 function onBodyInput(e) {
+  if (e.target?.id === "cls-input") return classroom.onInput(e.target);
   if (e.target?.id === "study-speak-input" && S.speak) {
     S.speak.draft = e.target.value;
     return;
@@ -2230,10 +2316,11 @@ async function openDetail(key) {
 const MATERIAL_DETAIL_MAX = 300;
 
 function switchTab(tab) {
-  if (tab !== "timeline" && tab !== "board" && tab !== "materi") return;
+  if (tab !== "timeline" && tab !== "board" && tab !== "materi" && tab !== "class") return;
   S.tab = tab;
   render();
   if (tab === "materi" && !S.materials.loaded && !S.materials.loading) loadMaterials(true);
+  if (tab === "class" && !S.classes.loaded && !S.classes.loading) loadClasses(true);
   if (tab === "timeline" && S.feed && !S.feed.loaded && !S.feed.loading) loadFeed(S.feed, "first");
 }
 
@@ -2559,6 +2646,209 @@ async function deleteMaterial(id) {
   if (S.feed) S.feed.stale = true;
   if (S.view === "home") render();
   window.alert(L("study_mat_del_done"));
+}
+
+// ================================================================ Class (PDF -> ringkasan AI -> guru pixel-art yang menjelaskan)
+// Daftar kelas terlihat semua pemain (seperti Materi). Teks PDF dibaca di peramban (pdf.js); server meringkas dan menulis
+// naskah penjelasan. Layar kelas + suara + tanya-jawab ada di study-class.js.
+const classroom = createClassroom({
+  L: (k, v) => L(k, v),
+  esc,
+  $,
+  renderMd: mdBlock,
+  typeset: (el) => typesetMath(el).catch(() => {}),
+  errText,
+  signedIn: () => !!S.viewer,
+  ensureSignedIn: () => ensureViewer(),
+  isOpen: () => S.view === "class" && !!$("screen-study") && !$("screen-study").hidden,
+  call: async (action, params, opts) => {
+    const v = S.viewer;
+    if (!v) return { ok: false, message: L("study_mchat_login"), status: 401 };
+    const res = await studyCall(action, { ...params, playerId: v.id, pin: v.pin }, opts);
+    if (!res.ok && (res.pinWrong || res.locked)) S.viewer = null;
+    return res;
+  }
+});
+
+async function loadClasses(reset) {
+  const c = S.classes;
+  if (c.loading) return;
+  c.loading = true;
+  c.error = "";
+  if (reset) {
+    c.items = [];
+    c.hasMore = false;
+  }
+  render();
+  const last = c.items[c.items.length - 1];
+  const res = await studyCall("class_list", { before: reset ? undefined : last?.createdAt });
+  c.loading = false;
+  if (!res.ok) {
+    c.error = errText(res);
+  } else {
+    const have = new Set(c.items.map((i) => i.id));
+    c.items = c.items.concat(res.items.filter((i) => !have.has(i.id)));
+    c.hasMore = res.hasMore;
+    c.loaded = true;
+  }
+  if (S.view === "home") render();
+}
+
+function classesHtml() {
+  const c = S.classes;
+  const cards = c.items
+    .map(
+      (it) => `
+    <article class="study-material" data-class="${esc(it.id)}">
+      <div class="study-material-title">${esc(it.title)}</div>
+      <div class="study-post-chips"><span class="study-badge">${it.lang === "en" ? "English" : "Indonesia"}</span>${it.pageCount ? `<span class="study-badge">${esc(L("study_cls_pages", { n: it.pageCount }))}</span>` : ""}</div>
+      <div class="study-row-meta">${esc(L("study_mat_by", { name: it.creatorName }))} · ${esc(fmtDate(it.createdAt))}</div>
+      <div class="study-material-actions">
+        <button type="button" class="primary-btn" data-act="class-view" data-id="${esc(it.id)}">${esc(L("study_cls_open"))}</button>
+        <button type="button" class="study-link-btn" data-act="class-del" data-id="${esc(it.id)}">${esc(L("study_mat_delete"))}</button>
+      </div>
+    </article>`
+    )
+    .join("");
+  return `
+    <div class="study-actions"><button type="button" class="primary-btn" data-act="class-new" ${S.classBusy ? "disabled" : ""}>${esc(L("study_cls_new"))}</button></div>
+    <p class="study-hint">${esc(L("study_cls_intro"))}</p>
+    ${S.classBusy ? `<div class="study-card" role="status"><p>${esc(S.classBusy)}</p></div>` : ""}
+    ${c.error ? `<div class="study-card"><p>${esc(c.error)}</p><button type="button" class="secondary-btn" data-act="class-reload">${esc(L("study_reload"))}</button></div>` : ""}
+    ${c.loaded && c.items.length === 0 && !c.error ? `<p class="status-text">${esc(L("study_cls_empty"))}</p>` : ""}
+    ${cards}
+    ${c.loading ? `<p class="status-text">${esc(L("study_loading"))}</p>` : c.hasMore ? `<div class="study-actions"><button type="button" class="secondary-btn" data-act="class-more">${esc(L("study_tl_more"))}</button></div>` : ""}`;
+}
+
+function setClassBusy(text) {
+  S.classBusy = text;
+  if (S.view === "home" && S.tab === "class") render();
+}
+
+// Pilih PDF -> baca teksnya di peramban -> kirim ke server -> buka kelasnya.
+function pickClassPdf() {
+  if (S.classBusy) return;
+  if (!S.overview) return window.alert(L("study_loading"));
+  if (!(S.overview.players || []).length) return window.alert(L("study_no_players"));
+  const input = document.createElement("input");
+  input.type = "file";
+  input.accept = "application/pdf,.pdf";
+  input.addEventListener("change", () => {
+    const file = input.files && input.files[0];
+    if (file) uploadClassPdf(file);
+  });
+  input.click();
+}
+
+async function uploadClassPdf(file) {
+  const bad = checkPdfFile(file);
+  if (bad) return window.alert(L(bad === "toobig" ? "study_cls_too_big" : "study_cls_not_pdf"));
+  if (!(await ensureViewer())) return;
+  setClassBusy(L("study_cls_pdf_reading"));
+  let extracted;
+  try {
+    const { extractPdfText } = await import("./pdfText.js");
+    extracted = await extractPdfText(file);
+  } catch (err) {
+    setClassBusy("");
+    return window.alert(L("study_cls_read_failed", { e: err instanceof Error ? err.message : String(err) }));
+  }
+  const text = extracted.text.replace(/\[Halaman \d+\]/g, " ");
+  if (text.replace(/\s/g, "").length < 80) {
+    setClassBusy("");
+    return window.alert(L("study_cls_no_text"));
+  }
+  if (extracted.text.length > CLASS_SOURCE_LIMIT && !window.confirm(L("study_cls_long_confirm"))) {
+    setClassBusy("");
+    return;
+  }
+  setClassBusy(L("study_cls_reading"));
+  const v = S.viewer;
+  const res = await studyCall(
+    "class_create",
+    { playerId: v.id, pin: v.pin, text: extracted.text.slice(0, CLASS_SOURCE_LIMIT), fileName: file.name, pageCount: extracted.pageCount, engine: "auto" },
+    { timeoutMs: 150000 }
+  );
+  setClassBusy("");
+  if (!res.ok) {
+    if (res.pinWrong || res.locked) S.viewer = null;
+    return window.alert(errText(res));
+  }
+  const cls = res.classroom;
+  S.classes.items = [{ ...cls, summary: undefined, sections: undefined }, ...S.classes.items.filter((i) => i.id !== cls.id)];
+  S.classes.loaded = true;
+  if (S.view === "home") {
+    render();
+    openClass(cls.id, cls);
+  }
+}
+
+async function openClass(id, known) {
+  const base = known || S.classes.items.find((i) => i.id === id);
+  if (!base) return;
+  if (S.view !== "class") pushView();
+  classroom.open({ ...base, summary: known?.summary || null, sections: known?.sections || null });
+  S.view = "class";
+  render();
+  window.scrollTo(0, 0);
+  if (known?.summary) return;
+  await fetchClassBody(id);
+}
+
+// Muat ringkasan + naskah kelas yang sedang dibuka (juga dipakai tombol "Muat ulang").
+async function fetchClassBody(id) {
+  const res = await studyCall("class_get", { classId: id });
+  const cur = classroom.current();
+  if (!cur || cur.id !== id) return; // pengguna sudah pindah
+  if (!res.ok) {
+    if (res.status === 404) {
+      handleFailure(res);
+      classroom.dispose();
+      S.classes.items = S.classes.items.filter((i) => i.id !== id);
+      if (!popView()) {
+        S.view = "home";
+        render();
+      }
+      return;
+    }
+    classroom.setError(id, errText(res));
+    return render();
+  }
+  classroom.setLoaded(res.classroom);
+  render();
+}
+
+async function deleteClass(id) {
+  const c = S.classes.items.find((i) => i.id === id);
+  if (!c) return;
+  const parentSet = !!S.overview?.settings?.parentPinSet;
+  const creatorOk = !!c.creatorId && (S.overview?.players || []).some((p) => p.id === c.creatorId);
+  const options = [];
+  if (creatorOk) options.push({ value: "creator", label: L("study_cls_del_creator") });
+  if (parentSet) options.push({ value: "parent", label: L("study_mat_del_parent") });
+  if (options.length === 0) return window.alert(L("study_cls_del_no_way"));
+  const done = await openFormDialog({
+    title: L("study_cls_del_title"),
+    intro: L("study_cls_del_intro", { title: c.title }),
+    okLabel: L("study_mat_delete"),
+    cancelLabel: L("study_cancel"),
+    busyLabel: L("study_loading"),
+    fields: [
+      { key: "as", label: L("study_mat_del_as"), type: "select", value: options[0].value, options },
+      { key: "pin", label: L("study_pin"), type: "pin" }
+    ],
+    onSubmit: async (v) => {
+      if (!validPinFormat(v.pin)) return { ok: false, error: L("study_pin_invalid") };
+      const params = v.as === "parent" ? { parentPin: v.pin } : { playerId: c.creatorId, pin: v.pin };
+      const res = await studyCall("class_delete", { classId: id, ...params });
+      if (!res.ok) return { ok: false, error: errText(res) };
+      return { ok: true, value: true };
+    }
+  });
+  if (!done) return;
+  S.classes.items = S.classes.items.filter((i) => i.id !== id);
+  if (S.view === "home") render();
+  window.alert(L("study_cls_del_done"));
 }
 
 // ---------------------------------------------------------------- redeem

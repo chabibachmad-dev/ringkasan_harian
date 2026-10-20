@@ -116,10 +116,11 @@ function scoreVoice(v) {
   return s;
 }
 
-function pickVoice() {
+function pickVoice(lang = "en") {
   try {
     const voices = window.speechSynthesis.getVoices() || [];
-    const en = voices.filter((v) => /^en([-_]|$)/i.test(v.lang));
+    const re = new RegExp(`^${lang === "id" ? "id" : "en"}([-_]|$)`, "i");
+    const en = voices.filter((v) => re.test(v.lang));
     if (!en.length) return null;
     return en.slice().sort((a, b) => scoreVoice(b) - scoreVoice(a))[0] || null;
   } catch {
@@ -207,12 +208,12 @@ function sentencesOf(text) {
 
 // Ucapkan teks bahasa Inggris. onEnd dipanggil setelah selesai (atau gagal / dibatalkan oleh stopSpeaking tidak memanggilnya).
 // Bila peramban tak pernah memanggil onend (bug iOS), penjaga waktu memanggilnya. Mengembalikan true bila diminta diputar.
-export function speakText(text, { rate = 1, onEnd } = {}) {
+export function speakText(text, { rate = 1, onEnd, lang = "en" } = {}) {
   if (!synthSupported() || !String(text || "").trim()) return false;
   try {
     stopSpeaking();
     const token = speakToken;
-    const voice = pickVoice();
+    const voice = pickVoice(lang);
     const parts = sentencesOf(text);
     let done = false;
     const finish = () => {
@@ -225,7 +226,7 @@ export function speakText(text, { rate = 1, onEnd } = {}) {
     const guard = setTimeout(finish, guardMs + parts.length * 400);
     parts.forEach((part, i) => {
       const u = new window.SpeechSynthesisUtterance(part);
-      u.lang = voice?.lang || "en-US";
+      u.lang = voice?.lang || (lang === "id" ? "id-ID" : "en-US");
       if (voice) u.voice = voice;
       u.rate = rate;
       u.pitch = 1.02;

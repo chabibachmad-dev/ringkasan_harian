@@ -91,6 +91,13 @@
 //   material_create     { playerId, pin, subject, grade, classLevel?, detail, engine? }   -> { material:{...,content} }
 //   material_chat       { materialId, playerId, pin, question, history?:[{role:"user"|"ai",text}] }   -> { reply, provider, remaining }   (diskusi AI tentang SATU materi; tanpa tabel: riwayat dikirim klien tiap giliran dan dipangkas di server; Gemini dulu, penyedia cadangan bila Gemini gagal)
 //   material_delete     { materialId, playerId?, pin? | parentPin }          -> { ok }   (pembuatnya dengan PIN, atau orang tua bila PIN-nya sudah dibuat)
+//   class_list          { before? }                                          -> { items:[{id,title,fileName,lang,pageCount,creatorName,createdAt}], hasMore }   (tab "Class"; tanpa PIN)
+//   class_get           { classId }                                          -> { classroom:{...,summary,sections:[{heading,say}]} }   (tanpa PIN; teks sumber PDF tidak dikirim)
+//   class_create        { playerId, pin, text, fileName?, pageCount?, engine? }  -> { classroom:{...} }   (teks PDF diekstrak di peramban; AI meringkas + menulis naskah lisan per bagian)
+//   class_ask           { classId, playerId, pin, question, history? }       -> { reply, say, lang, provider, remaining }   (tanya-jawab dengan guru tentang SATU kelas; tanpa tabel)
+//   class_tts           { playerId, pin, classId?, idx? | text? }            -> { audio, mime }   (suara guru: naskah bagian #idx milik kelas, atau teks jawaban ≤450 huruf)
+//   class_transcribe    { playerId, pin, audio, mime }                       -> { text, engine }   (suara -> teks, bahasa otomatis)
+//   class_delete        { classId, playerId?, pin? | parentPin }             -> { ok }
 
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { corsHeaders } from "../_shared/cors.ts";
@@ -149,6 +156,19 @@ import {
   verifyPin
 } from "../_shared/study-core.ts";
 import type { ParsedQuestion } from "../_shared/study-core.ts";
+import {
+  CLASS_SOURCE_MIN,
+  buildClassAskPrompt,
+  buildClassPrompt,
+  cleanClassHistory,
+  cleanClassQuestion,
+  cleanClassSource,
+  cleanFileName,
+  cleanPageCount,
+  cleanTtsText,
+  parseClassAnswer,
+  parseClassMade
+} from "../_shared/study-classroom.ts";
 
 type Admin = ReturnType<typeof createClient>;
 // deno-lint-ignore no-explicit-any
@@ -569,6 +589,64 @@ const materialRow = (m: Row, withContent = false) => ({
   creatorName: m.creator_name,
   createdAt: m.created_at,
   ...(withContent ? { content: m.content } : {})
+});
+
+// ---------------------------------------------------------------- class (PDF -> guru pixel-art): bantu
+const CLASS_PAGE = 20;
+const CLASS_CREATE_ATTEMPTS = 2;
+const CLASS_ASK_PER_PLAYER_DAY = 80; // batas LUNAK (ingatan isolate) tanya guru per pemain per hari
+const CLASS_ASK_GLOBAL_DAY = 600;
+const CLASS_STT_PER_PLAYER_DAY = 100;
+const CLASS_TTS_PER_PLAYER_DAY = 200;
+const CLASS_TTS_STYLE = "warm, friendly and clear, like a kind teacher explaining a lesson to a student; natural conversational pace with small pauses";
+const classAskUse = new Map<string, { day: number; n: number }>();
+let classAskGlobal = { day: 0, n: 0 };
+const classSttUse = new Map<string, { day: number; n: number }>();
+const classTtsUse = new Map<string, { day: number; n: number }>();
+
+function takeClassAsk(playerId: string): Response | { refund: () => void; remaining: () => number } {
+  const day = Math.floor(Date.now() / 86_400_000);
+  const used = classAskUse.get(playerId);
+  const mine = used && used.day === day ? used : { day, n: 0 };
+  if (classAskGlobal.day !== day) classAskGlobal = { day, n: 0 };
+  if (mine.n >= CLASS_ASK_PER_PLAYER_DAY) return fail(`Batas harian tercapai: maksimal ${CLASS_ASK_PER_PLAYER_DAY} pertanyaan ke guru per pemain per hari. Coba lagi besok.`, 429, { dailyLimit: true });
+  if (classAskGlobal.n >= CLASS_ASK_GLOBAL_DAY) return fail("Batas harian tanya guru untuk seluruh pemain sudah tercapai. Coba lagi besok.", 429, { dailyLimit: true });
+  mine.n++;
+  classAskGlobal.n++;
+  classAskUse.set(playerId, mine);
+  return {
+    refund: () => {
+      mine.n = Math.max(0, mine.n - 1);
+      classAskGlobal.n = Math.max(0, classAskGlobal.n - 1);
+    },
+    remaining: () => Math.max(0, CLASS_ASK_PER_PLAYER_DAY - mine.n)
+  };
+}
+
+function takeClassStt(playerId: string): Response | null {
+  const day = Math.floor(Date.now() / 86_400_000);
+  const used = classSttUse.get(playerId);
+  const mine = used && used.day === day ? used : { day, n: 0 };
+  if (mine.n >= CLASS_STT_PER_PLAYER_DAY) return fail("Batas harian pengenal suara tercapai. Ketik pertanyaanmu, atau coba lagi besok.", 429, { dailyLimit: true, sttQuota: true });
+  mine.n++;
+  classSttUse.set(playerId, mine);
+  return null;
+}
+
+// Tabel belum dibuat (migrasi 0042 belum dijalankan) -> pesan jelas, bukan galat mentah.
+const classMissing = (e: { code?: string; message?: string } | null | undefined) => !!e && (e.code === "42P01" || e.code === "PGRST205" || /study_classrooms/.test(e.message ?? ""));
+const classUnavailable = () => fail("Fitur Class belum aktif di server (migrasi 0042 belum dijalankan).", 503, { classUnavailable: true });
+
+const classRow = (c: Row, withBody = false) => ({
+  id: c.id,
+  creatorId: c.creator_id ?? null,
+  title: c.title,
+  fileName: c.file_name ?? null,
+  lang: c.lang === "en" ? "en" : "id",
+  pageCount: c.page_count ?? null,
+  creatorName: c.creator_name,
+  createdAt: c.created_at,
+  ...(withBody ? { summary: c.summary, sections: Array.isArray(c.sections) ? (c.sections as Row[]).map((x) => ({ heading: String(x.heading ?? ""), say: String(x.say ?? "") })) : [] } : {})
 });
 
 // ---------------------------------------------------------------- timeline: bantu
@@ -1592,6 +1670,217 @@ Deno.serve(async (req) => {
         if (par instanceof Response) return par;
       }
       const { error } = await admin.from("study_materials").delete().eq("id", m.id);
+      if (error) return fail(error.message, 500);
+      return json({ ok: true });
+    }
+
+    // ------------------------------------------------------------ class: daftar (tanpa PIN)
+    if (action === "class_list") {
+      let before: string | null = null;
+      if (typeof body.before === "string" && body.before) {
+        if (body.before.length > 40 || !/^\d{4}-\d{2}-\d{2}T[\d:.]+(Z|[+-]\d{2}:?\d{2})$/.test(body.before) || Number.isNaN(new Date(body.before).getTime())) {
+          return fail("Kursor halaman tidak valid.");
+        }
+        before = body.before;
+      }
+      let q = admin.from("study_classrooms").select("id,creator_id,title,file_name,lang,page_count,creator_name,created_at").order("created_at", { ascending: false }).limit(CLASS_PAGE + 1);
+      if (before) q = q.lt("created_at", before);
+      const { data, error } = await q;
+      if (error) return classMissing(error) ? classUnavailable() : fail(error.message, 500);
+      const rows = (data ?? []) as Row[];
+      return json({ ok: true, items: rows.slice(0, CLASS_PAGE).map((c) => classRow(c)), hasMore: rows.length > CLASS_PAGE });
+    }
+
+    // ------------------------------------------------------------ class: isi ringkasan + naskah (tanpa PIN)
+    if (action === "class_get") {
+      if (!isUuid(body.classId)) return fail("Kelas tidak valid.");
+      const { data: c, error } = await admin.from("study_classrooms").select("id,creator_id,title,file_name,lang,page_count,creator_name,created_at,summary,sections").eq("id", body.classId).maybeSingle();
+      if (error) return classMissing(error) ? classUnavailable() : fail(error.message, 500);
+      if (!c) return fail("Kelas itu tidak ditemukan.", 404);
+      return json({ ok: true, classroom: classRow(c, true) });
+    }
+
+    // ------------------------------------------------------------ class: buat dari teks PDF (PIN pemain)
+    if (action === "class_create") {
+      const auth = await checkPlayerPin(admin, body.playerId, body.pin);
+      if (auth instanceof Response) return auth;
+      const p = auth.player;
+      const source = cleanClassSource(body.text);
+      if (!source) return fail(`PDF ini tidak punya teks yang bisa dibaca (minimal ${CLASS_SOURCE_MIN} huruf). PDF hasil scan/foto belum didukung; pakai PDF yang teksnya bisa diblok.`);
+      const fileName = cleanFileName(body.fileName);
+      const pageCount = cleanPageCount(body.pageCount);
+      const slot = await takeGenerationSlot(admin, p.id, "material");
+      if (slot) return slot;
+      const engine = parseEngine(body.engine);
+      await wireReporters(admin);
+      const keys = getGeminiApiKeys();
+      const prompt = buildClassPrompt(source, fileName, pageCount);
+      let made: ReturnType<typeof parseClassMade> = null;
+      let provider = "gemini";
+      let lastError = "";
+      let tokens = 0;
+      let cost = 0;
+      for (let attempt = 0; attempt < CLASS_CREATE_ATTEMPTS && !made; attempt++) {
+        try {
+          const r = await generateJsonText(prompt.system, prompt.user, keys, { temperature: 0.5, engine, budgetMs: 90_000 });
+          tokens += r.tokensUsed;
+          cost += r.costUsd;
+          if (r.provider) provider = r.provider;
+          made = parseClassMade(r.text, source, fileName.replace(/\.pdf$/i, ""));
+          if (!made) lastError = "AI mengembalikan ringkasan yang tidak bisa dipakai.";
+        } catch (err) {
+          lastError = err instanceof Error ? err.message : String(err);
+          console.error("study class_create:", lastError);
+          if (/429|quota|exhaust|batas kuota|rate.?limit|PerDay/i.test(lastError)) break;
+        }
+      }
+      await recordTokens(admin, tokens, cost);
+      if (!made) return fail(`Gagal menyiapkan kelas. ${lastError}`.trim().slice(0, 300), 502, { generationFailed: true });
+      const { data: c, error } = await admin
+        .from("study_classrooms")
+        .insert({ creator_id: p.id, creator_name: p.name, title: made.title, file_name: fileName || null, lang: made.lang, page_count: pageCount, summary: made.summary, sections: made.sections, source_text: source, provider })
+        .select("id,creator_id,title,file_name,lang,page_count,creator_name,created_at,summary,sections")
+        .single();
+      if (error || !c) return classMissing(error) ? classUnavailable() : fail(error?.message || "Gagal menyimpan kelas.", 500);
+      return json({ ok: true, classroom: classRow(c, true) });
+    }
+
+    // ------------------------------------------------------------ class: tanya guru (PIN / token pemain)
+    if (action === "class_ask") {
+      if (!isUuid(body.classId)) return fail("Kelas tidak valid.");
+      const auth = await checkPlayerPin(admin, body.playerId, body.pin);
+      if (auth instanceof Response) return auth;
+      const p = auth.player;
+      const question = cleanClassQuestion(body.question);
+      if (question.length < 1) return fail("Tulis atau ucapkan pertanyaannya dulu.");
+      const { data: c, error: cerr } = await admin.from("study_classrooms").select("id,title,lang,summary,source_text").eq("id", body.classId).maybeSingle();
+      if (cerr) return classMissing(cerr) ? classUnavailable() : fail(cerr.message, 500);
+      if (!c) return fail("Kelas itu tidak ditemukan.", 404);
+      const lim = takeClassAsk(p.id as string);
+      if (lim instanceof Response) return lim;
+      await wireReporters(admin);
+      const keys = getGeminiApiKeys();
+      const prompt = buildClassAskPrompt({ title: String(c.title ?? ""), lang: c.lang === "en" ? "en" : "id", summary: String(c.summary ?? ""), source: String(c.source_text ?? ""), history: cleanClassHistory(body.history), question });
+      let ans: ReturnType<typeof parseClassAnswer> = null;
+      let provider = "gemini";
+      let lastError = "";
+      let tokens = 0;
+      let cost = 0;
+      for (let attempt = 0; attempt < 2 && !ans; attempt++) {
+        try {
+          const r = await generateJsonText(prompt.system, prompt.user, keys, { temperature: 0.5, engine: "auto", order: "gemini-first", budgetMs: 30_000 });
+          tokens += r.tokensUsed;
+          cost += r.costUsd;
+          if (r.provider) provider = r.provider;
+          ans = parseClassAnswer(r.text);
+          if (!ans) lastError = "AI mengembalikan jawaban kosong.";
+        } catch (err) {
+          lastError = err instanceof Error ? err.message : String(err);
+          console.error("study class_ask:", lastError);
+          if (/429|quota|exhaust|batas kuota|rate.?limit|PerDay/i.test(lastError)) break;
+        }
+      }
+      await recordTokens(admin, tokens, cost);
+      if (!ans) {
+        lim.refund();
+        const quota = /429|quota|exhaust|batas kuota|rate.?limit|PerDay/i.test(lastError);
+        return fail(quota ? "Guru AI sedang penuh (kuota gratis habis). Tunggu sebentar lalu coba lagi." : `Guru AI belum menjawab. ${lastError}`.trim().slice(0, 300), 502, { generationFailed: true });
+      }
+      return json({ ok: true, reply: ans.reply, say: ans.say, lang: c.lang === "en" ? "en" : "id", provider, remaining: lim.remaining() });
+    }
+
+    // ------------------------------------------------------------ class: suara guru (PIN / token pemain)
+    // Hanya membacakan naskah bagian yang TERSIMPAN, atau teks jawaban guru (≤450 huruf, dibersihkan); bukan layanan TTS umum:
+    // butuh PIN pemain + batas harian lunak.
+    if (action === "class_tts") {
+      const auth = await checkPlayerPin(admin, body.playerId, body.pin);
+      if (auth instanceof Response) return auth;
+      let text = "";
+      if (body.classId !== undefined && body.classId !== null) {
+        if (!isUuid(body.classId)) return fail("Kelas tidak valid.");
+        const idx = Number(body.idx);
+        if (!Number.isInteger(idx) || idx < 0) return fail("Bagian tidak valid.");
+        const { data: c, error } = await admin.from("study_classrooms").select("sections").eq("id", body.classId).maybeSingle();
+        if (error) return classMissing(error) ? classUnavailable() : fail(error.message, 500);
+        if (!c) return fail("Kelas itu tidak ditemukan.", 404);
+        const sec = Array.isArray(c.sections) ? (c.sections as Row[])[idx] : null;
+        text = cleanTtsText(sec?.say);
+      } else {
+        text = cleanTtsText(body.text);
+      }
+      if (text.length < 2) return fail("Tidak ada teks untuk dibacakan.");
+      const used = classTtsUse.get(auth.player.id as string) ?? { day: 0, n: 0 };
+      const today = Math.floor(Date.now() / 86400000);
+      if (used.day !== today) {
+        used.day = today;
+        used.n = 0;
+      }
+      if (used.n >= CLASS_TTS_PER_PLAYER_DAY) return fail("Batas suara guru harian tercapai; memakai suara perangkat.", 429, { dailyLimit: true });
+      used.n++;
+      classTtsUse.set(auth.player.id as string, used);
+      await wireReporters(admin);
+      try {
+        const r = await synthesizeSpeech(text, getGeminiApiKeys(), { style: CLASS_TTS_STYLE });
+        return json({ ok: true, audio: r.wavBase64, mime: "audio/wav" });
+      } catch (err) {
+        used.n = Math.max(0, used.n - 1);
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error("study class_tts:", msg);
+        const quota = /429|quota|exhaust|batas kuota|rate.?limit|PerDay/i.test(msg);
+        return fail(`Suara guru tidak tersedia. ${msg}`.slice(0, 300), quota ? 429 : 502, { generationFailed: true, ttsQuota: quota, ttsDaily: quota && /PerDay|harian|daily/i.test(msg) });
+      }
+    }
+
+    // ------------------------------------------------------------ class: suara -> teks (bahasa otomatis)
+    if (action === "class_transcribe") {
+      const auth = await checkPlayerPin(admin, body.playerId, body.pin);
+      if (auth instanceof Response) return auth;
+      const audio = typeof body.audio === "string" ? body.audio : "";
+      const mime = body.mime === "audio/wav" || body.mime === "audio/x-wav" ? "audio/wav" : "";
+      if (!mime) return fail("Format rekaman tidak didukung.");
+      if (audio.length < 200 || audio.length > SPEAK_AUDIO_MAX_B64 || !/^[A-Za-z0-9+/]+={0,2}$/.test(audio)) return fail("Rekaman tidak valid atau terlalu panjang (maksimal ±20 detik).");
+      const lim = takeClassStt(auth.player.id as string);
+      if (lim) return lim;
+      await wireReporters(admin);
+      try {
+        const groqKeys = getGroqSttKeys();
+        if (groqKeys.length > 0) {
+          try {
+            const g = await transcribeWithGroq(audio, mime, groqKeys, { language: "auto", prompt: "A student asking a teacher a question about a lesson. Transcribe exactly what was said, in the language spoken." });
+            return json({ ok: true, text: g.text, engine: "groq" });
+          } catch (gErr) {
+            console.error("study class_transcribe groq gagal, pakai Gemini:", gErr instanceof Error ? gErr.message : String(gErr));
+          }
+        }
+        const r = await transcribeAudio(audio, mime, getGeminiApiKeys());
+        await recordTokens(admin, r.tokensUsed, r.costUsd);
+        return json({ ok: true, text: r.text, engine: "gemini" });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error("study class_transcribe:", msg);
+        if (/429|quota|exhaust|batas kuota|rate.?limit|PerDay/i.test(msg)) {
+          return fail("Pengenal suara sedang penuh. Tunggu sebentar lalu coba lagi, atau ketik pertanyaanmu.", 429, { generationFailed: true, sttQuota: true });
+        }
+        return fail(`Gagal mengubah suara jadi teks. ${msg}`.slice(0, 200).trim(), 502, { generationFailed: true });
+      }
+    }
+
+    // ------------------------------------------------------------ class: hapus (pembuat dengan PIN / orang tua)
+    if (action === "class_delete") {
+      if (!isUuid(body.classId)) return fail("Kelas tidak valid.");
+      const { data: c } = await admin.from("study_classrooms").select("id,creator_id").eq("id", body.classId).maybeSingle();
+      if (!c) return fail("Kelas itu tidak ditemukan.", 404);
+      if (body.playerId) {
+        const v = await checkPlayerPin(admin, body.playerId, body.pin);
+        if (v instanceof Response) return v;
+        if (v.player.id !== c.creator_id) return fail("Hanya pembuat kelas yang bisa menghapusnya.", 403);
+      } else {
+        const settings = await loadSettings(admin);
+        if (!settings?.parent_pin_hash) return fail("PIN orang tua belum dibuat. Buat dulu di Setting.", 403);
+        const par = await checkParentPin(admin, body.parentPin);
+        if (par instanceof Response) return par;
+      }
+      const { error } = await admin.from("study_classrooms").delete().eq("id", c.id);
       if (error) return fail(error.message, 500);
       return json({ ok: true });
     }
