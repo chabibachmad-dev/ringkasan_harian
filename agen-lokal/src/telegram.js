@@ -290,7 +290,7 @@ export function createBot({ config, agent, ollama, tools = null, fetchImpl = fet
     const io = { say: (t) => send(chatId, t), photo: (b, c) => sendPhoto(chatId, b, c), ask: (p) => ask(chatId, p) };
     if (!sub || sub === "bantuan") {
       const q = bacaAntrian(config.workdir);
-      return void (await send(chatId, ["SAKTI:", "/sakti masuk — buka SAKTI di komputer ini dan login (captcha & kode MFA kamu balas lewat chat)", "/sakti halaman — foto + daftar kolom/tombol halaman yang sedang terbuka", "/sakti foto — tangkapan layar saja", "/sakti antrian — baris dari Excel yang menunggu", "/sakti tutup — tutup peramban", "", `Peramban: ${sakti.terbuka ? "terbuka" : "belum dibuka"}. Antrian: ${q ? `${q.rows.length} baris dari ${q.berkas}` : "kosong"}.`, "Catatan: captcha tidak dipecahkan otomatis; gambarnya dikirim ke kamu untuk dibaca."].join("\n")));
+      return void (await send(chatId, ["SAKTI:", "/sakti masuk — buka SAKTI di komputer ini dan login (captcha & kode MFA kamu balas lewat chat)", "/sakti menu [nama] — buka menu di sidebar SAKTI (bawaan: Mencatat Perintah Bayar)", "/sakti halaman — foto + daftar kolom/tombol halaman yang sedang terbuka", "/sakti foto — tangkapan layar saja", "/sakti antrian — baris dari Excel yang menunggu", "/sakti tutup — tutup peramban", "", `Peramban: ${sakti.terbuka ? "terbuka" : "belum dibuka"}. Antrian: ${q ? `${q.rows.length} baris dari ${q.berkas}` : "kosong"}.`, "Catatan: captcha tidak dipecahkan otomatis; gambarnya dikirim ke kamu untuk dibaca."].join("\n")));
     }
     if (sub === "antrian") {
       const q = bacaAntrian(config.workdir);
@@ -298,11 +298,12 @@ export function createBot({ config, agent, ollama, tools = null, fetchImpl = fet
       return void (await send(chatId, `Antrian dari ${q.berkas}:\n` + q.rows.map((r) => `${r.no}. [${r.status}] akun ${r.akun} · Rp ${Math.round(r.jumlah || 0).toLocaleString("id-ID")} · ${r.uraian.slice(0, 70)}`).join("\n")));
     }
     if (sub === "tutup") return void (await send(chatId, (await sakti.tutup()) ? "Peramban ditutup." : "Peramban memang belum dibuka."));
-    if (!["masuk", "halaman", "foto"].includes(sub)) return void (await send(chatId, "Perintah SAKTI tidak dikenal. Kirim /sakti untuk daftar perintah."));
+    if (!["masuk", "halaman", "foto", "menu"].includes(sub)) return void (await send(chatId, "Perintah SAKTI tidak dikenal. Kirim /sakti untuk daftar perintah."));
     if (saktiBusy) return void (await send(chatId, "Masih ada proses SAKTI berjalan. Selesaikan dulu atau balas /batal."));
     saktiBusy = true;
     try {
       if (sub === "masuk") await sakti.masuk(io);
+      else if (sub === "menu") await sakti.menu(io, (arg || "").replace(/^menu\s*/i, "").trim() || "Mencatat Perintah Bayar");
       else if (sub === "halaman") await sakti.halaman(io);
       else await sakti.foto(io);
     } catch (e) {

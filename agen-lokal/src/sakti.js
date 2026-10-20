@@ -222,6 +222,58 @@ export function createSakti({ config, launch = launchBrowser, find = findBrowser
       return { ok: false };
     },
 
+    /** Buka menu di sidebar: ketik namanya di "Pencarian Menu" lalu klik hasil yang cocok; bila tak ketemu, buka grup menu satu per satu. */
+    async menu(io, nama) {
+      if (!page?.alive) {
+        await io.say("Peramban belum dibuka. Kirim /sakti masuk dulu.");
+        return { ok: false };
+      }
+      const want = String(nama || "").trim();
+      const norm = (t) => String(t || "").toLowerCase().replace(/\s+/g, " ").trim();
+      const cocok = (items) => {
+        const n = norm(want);
+        const c = items.filter((i) => i.kind === "tombol" && norm(i.text) && norm(i.text).length <= 80 && norm(i.text).includes(n));
+        return c.find((i) => norm(i.text) === n) || c.find((i) => norm(i.text).startsWith(n)) || c[0] || null;
+      };
+      let items = await scan();
+      let hit = null;
+      const box = items.find((i) => i.kind === "kolom" && re("pencarian menu|cari menu|search").test(`${i.ph} ${i.label} ${i.name} ${i.eid}`));
+      if (box) {
+        await page.fill(sel(box), want);
+        for (let k = 0; k < 4 && !hit; k++) {
+          if (k === 2) await page.press("Enter");
+          await new Promise((r) => setTimeout(r, 1000));
+          items = await scan();
+          hit = cocok(items.filter((i) => i.id !== box.id));
+        }
+      }
+      if (!hit) {
+        // cadangan: buka grup menu di sidebar (tombol/teks pendek di sisi kiri) satu per satu sampai tombol sasaran terlihat
+        const klik = new Set();
+        for (let k = 0; k < 14 && !hit; k++) {
+          items = await scan();
+          hit = cocok(items);
+          if (hit) break;
+          const grup = items.find((i) => i.kind === "tombol" && i.left < 260 && i.top > 90 && i.w < 320 && !klik.has(norm(i.text)) && norm(i.text).length > 2 && !re("keluar|logout|log out|sign out|hapus|delete|batal|simpan|kirim|submit").test(i.text));
+          if (!grup) break;
+          klik.add(norm(grup.text));
+          await page.click(sel(grup)).catch(() => {});
+          await new Promise((r) => setTimeout(r, 600));
+        }
+      }
+      if (!hit) {
+        await diagnosa(io, `⚠️ Menu "${want}" tidak ketemu di sidebar.`);
+        return { ok: false };
+      }
+      await page.click(sel(hit)).catch(() => {});
+      await page.settle(20_000);
+      await new Promise((r) => setTimeout(r, 2000));
+      const info = await page.info().catch(() => ({}));
+      await io.say(`📂 Membuka menu: ${hit.text}\nHalaman: ${info.title || ""} ${info.url || ""}\n\nKirim /sakti halaman untuk melihat kolom dan tombol di halaman ini.`);
+      await io.photo(await page.screenshot(), `Menu ${hit.text}`);
+      return { ok: true };
+    },
+
     /** Foto + daftar kolom/tombol halaman yang sedang terbuka. */
     async halaman(io) {
       if (!page?.alive) return void (await io.say("Peramban belum dibuka. Kirim /sakti masuk dulu."));

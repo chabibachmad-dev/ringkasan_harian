@@ -10,7 +10,7 @@ export function start(port) {
     if (u.pathname === "/login" && req.method === "POST") {
       let body = ""; req.on("data", (d) => (body += d)); req.on("end", () => {
         const p = new URLSearchParams(body); state.log.push(Object.fromEntries(p));
-        if (p.get("username") === "199001012020011001" && p.get("password") === "rahasia" && p.get("captcha") === state.captcha) { res.writeHead(302, { location: state.mfaModal ? "/?mfa=1" : "/mfa" }); return res.end(); }
+        if (p.get("username") === "199001012020011001" && p.get("password") === "rahasia" && p.get("captcha") === state.captcha) { if (state.noMfa) { state.mfaOk = true; res.writeHead(302, { location: "/beranda" }); return res.end(); } res.writeHead(302, { location: state.mfaModal ? "/?mfa=1" : "/mfa" }); return res.end(); }
         res.writeHead(302, { location: "/?err=1" }); res.end();
       }); return;
     }
@@ -22,8 +22,11 @@ export function start(port) {
       }); return;
     }
     if (u.pathname === "/mfa") return html(`<h2>Verifikasi dua langkah</h2>${u.searchParams.get("err") ? "<p>Kode tidak valid</p>" : ""}<form method=post action=/mfa><input name=otp placeholder="Kode OTP 6 digit"><button type=submit>Verifikasi</button></form>`);
-    if (u.pathname === "/beranda") return html(`<h1>Beranda SAKTI</h1><input placeholder="Pencarian Menu"><a href=/keluar>Keluar</a>`);
-    if (state.mfaOk && u.pathname === "/") return html(`<h1>Beranda SAKTI</h1><input placeholder="Pencarian Menu"><a href=/keluar>Keluar</a>`);
+    if (u.pathname === "/spby") return html(`<h2>Mencatat Perintah Bayar</h2><input placeholder="Nomor SPBy"><button>Simpan</button>`);
+    const berandaHtml = `<h1>Beranda SAKTI</h1><input id=q placeholder="Pencarian Menu" oninput="f()"><div id=res></div><a href=/keluar>Keluar</a><script>const M=['Mencatat Perintah Bayar','Mencatat Pengembalian','Rekam Uang Persediaan'];function f(){const v=document.getElementById('q').value.toLowerCase();document.getElementById('res').innerHTML=v?M.filter(x=>x.toLowerCase().includes(v)).map(x=>'<div style="cursor:pointer;padding:4px" onclick="location=\\'/spby\\'">'+x+'</div>').join(''):''}</script>`;
+    if (u.pathname === "/beranda") return html(berandaHtml);
+    if (false) return html(`<h1>Beranda SAKTI</h1><input placeholder="Pencarian Menu"><a href=/keluar>Keluar</a>`);
+    if (state.mfaOk && u.pathname === "/") return html(berandaHtml);
     // Mirip portal asli: pengumuman menutupi halaman (tombol "Tutup" berupa <span>), formulir ada di dalam iframe
     const form = `<h2>Selamat datang</h2>${u.searchParams.get("err") ? "<p>Captcha atau sandi salah</p>" : ""}<img src=/logo.png style="width:70px;height:24px;display:block"><form method=post action=/login target=_top><label for=u>Nama pengguna</label><input id=u name=username ${state.autofill ? "value=199001012020011001" : ""}><label for=p>Kata sandi</label><input id=p type=password name=password ${state.autofill ? "value=sandi-lama" : ""}><br><br><br><img src=/c/7.png style="width:90px;height:32px;vertical-align:middle"><input name=captcha placeholder="Masukkan kode"><button type=submit>Login</button></form>`;
     const popup = state.popup === false ? "" : `<div id=pop style="position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:99;display:flex;align-items:center;justify-content:center"><div style="background:#fff;padding:20px"><b>PENGUMUMAN</b><p>Tidak ada gratifikasi</p>${state.popup === "tanpa-tutup" ? "" : `<span style="cursor:pointer;background:#37c;color:#fff;padding:6px 12px" onclick="document.getElementById('pop').remove()">Tutup</span>`}</div></div>`;

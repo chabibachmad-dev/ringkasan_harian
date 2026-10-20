@@ -584,10 +584,33 @@ const URAIAN_OK = "Belanja barang untuk keperluan perjalanan dinas sesuai surat 
       assert.match(said.join("\n"), /Sudah masuk SAKTI/);
       assert.deepEqual(state.log[0], { username: "199001012020011001", password: "rahasia", captcha: "AB12" });
       assert.deepEqual(state.log[1], { otp: "123456" }, "spasi pada kode MFA dibuang");
+      // buka menu lewat kotak "Pencarian Menu", lalu menu yang tak ada
+      said.length = 0;
+      photos.length = 0;
+      assert.deepEqual(await s1.menu(mkIo([]), "Mencatat Perintah Bayar"), { ok: true });
+      assert.match(said.join("\n"), /Membuka menu: Mencatat Perintah Bayar[\s\S]*\/spby/);
+      assert.ok(photos.some((p) => /Menu Mencatat Perintah Bayar/.test(p.c)));
+      said.length = 0;
+      assert.deepEqual(await s1.menu(mkIo([]), "Menu Yang Tidak Ada"), { ok: false });
+      assert.match(said.join("\n"), /tidak ketemu di sidebar/);
       said.length = 0;
       await s1.halaman(mkIo([]));
       assert.match(said.join("\n"), /Beranda|SAKTI tiruan/);
       assert.equal(await s1.tutup(), true);
+
+      // kadang tidak ada MFA sama sekali: langsung masuk
+      said.length = 0;
+      state.noMfa = true;
+      state.mfaOk = false;
+      state.log.length = 0;
+      const s1n = createSakti({ config: mk(), find: () => exe, log: silent });
+      assert.deepEqual(await s1n.masuk(mkIo(["AB12"])), { ok: true });
+      assert.ok(!said.join("\n").includes("ASK:Masukkan kode MFA"), "tanpa MFA tidak ada permintaan kode");
+      assert.equal(state.log.length, 1);
+      await s1n.tutup();
+      state.noMfa = false;
+      state.mfaOk = false;
+      state.log.length = 0;
 
       // isian otomatis dari peramban (nama pengguna & sandi lama sudah terisi): harus dikosongkan dulu, bukan ditambah
       said.length = 0;
@@ -1116,6 +1139,16 @@ ok("daftar Excel (jumlah, validasi, ringkasan), pemilihan kolom login/MFA, alur 
     b = calls.length;
     await mkBot(["222"], [], { sakti: fakeSakti }).bot.handleUpdate(msg("/sakti masuk", {}, 111, 111));
     assert.equal(calls.slice(b).filter((c) => c.method === "sendMessage").length, 0);
+
+    // /sakti menu [nama]
+    fakeSakti.menu = async (io, nama) => {
+      jejak.push("menu=" + nama);
+      return { ok: true };
+    };
+    jejak.length = 0;
+    await tX.bot.handleUpdate(msg("/sakti menu"));
+    await tX.bot.handleUpdate(msg("/sakti menu Rekam Uang Persediaan"));
+    assert.deepEqual(jejak, ["menu=Mencatat Perintah Bayar", "menu=Rekam Uang Persediaan"]);
 
     // halaman & tutup
     jejak.length = 0;
