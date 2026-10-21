@@ -21,3 +21,8 @@ FILE DIUBAH: index.js, package.json, README.md, .env.example, test-agenda.mjs, t
 
 CATATAN: pertanyaan "kamu bisa balas pakai suara?" sekarang dijawab langsung dari status fitur (tanpa AI); jawaban AI yang masih menyangkal kemampuan aktif diganti jawaban fakta.
 FILE tambahan diubah: capabilities.js
+
+VERSI 3: bot mengenali PEMILIK nomor (grup & chat pribadi): tidak lagi menjawab "disampaikan ke pemilik nomor".
+- Pastikan .env berisi WA_OWNER_NUMBER=0857xxxxxxx (nomor pribadimu). Bila di log grup tertulis "pemilik: tidak" padahal itu kamu,
+  isi WA_OWNER_LIDS=<angka id berakhiran lid yang tampil di log> lalu restart.
+FILE tambahan: test-owner.mjs

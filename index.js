@@ -75,7 +75,7 @@ import { formatForWhatsApp, detectPdfRequest, detectOfficeRequest, cleanAnswerFo
 import { buildDocx, buildXlsx, officeFileName, MIME_DOCX, MIME_XLSX } from "./office-doc.js";
 import { pdfBufferToMarkdown, PDF_MAX_BYTES } from "./pdf-extract.js";
 import { PDF_QA_DEFAULT_MAX_CHARS, PDF_QA_LOCAL_MAX_CHARS, buildPdfContext, isPdfDoc, isReadQuestion, pdfAttachTag, pdfContextNote, pdfReadMessage, shouldReadPdf } from "./pdf-qa.js";
-import { buildCapabilityNote, buildVoiceReplyNote, correctionAnswer, denyingCapability, detectVoiceQuestion, voiceCapabilityAnswer } from "./capabilities.js";
+import { OWNER_ASKER_NOTE, OWNER_CLAIM_NOTE, OWNER_DEFLECT_FALLBACK, OWNER_DEFLECT_FIX, buildCapabilityNote, buildVoiceReplyNote, correctionAnswer, deflectsToOwner, denyingCapability, detectVoiceQuestion, senderLabel, voiceCapabilityAnswer } from "./capabilities.js";
 import { detectEditRequest, replaceInText, replaceInDocx, docxToMarkdown, numberDiff, buildEditPrompt, buildEditUserMessage, unwrapFence, hasESignature, AI_EDIT_MAX_CHARS } from "./doc-edit.js";
 import { createPersonaVoice } from "./persona-voice.js";
 import { buildPdf, titleFromText, pdfFileName } from "./pdf-doc.js";
@@ -427,7 +427,9 @@ function isGroupJid(jid) {
 function withGroupNote(basePrompt, jid, { local = false } = {}) {
   // Nomor kedua boleh punya nama bot sendiri (WA2_NAME): AI memperkenalkan diri dengan nama itu.
   const base = currentAccountId() === MAIN_ACCOUNT ? basePrompt : personaPrompt(basePrompt, wa2Config.botName);
-  if (!isGroupJid(jid)) return base;
+  // Pengirim pesan terakhir = pemilik nomor (dikenali dari id pengirim, bukan dari isi pesan): AI tidak boleh menjawab "akan disampaikan ke pemilik".
+  const ownerNote = waAccountContext.getStore()?.ownerAsker ? OWNER_ASKER_NOTE : "";
+  if (!isGroupJid(jid)) return `${base}${ownerNote}`;
   // Balasan grup berupa suara: bahasa jawaban dipaksa (/voice wag kor ...) atau diminta anggota grup ("jawab pakai bahasa Korea").
   const replyLang = waAccountContext.getStore()?.replyLang;
   const ctxFlags = waAccountContext.getStore();
@@ -459,7 +461,7 @@ function withGroupNote(basePrompt, jid, { local = false } = {}) {
     const maxChars = local ? PDF_GROUP_LOCAL_MAX_CHARS : PDF_GROUP_MAX_CHARS;
     pdfNote = pdfContextNote({ name: ctxFlags.pdf.name, pages: ctxFlags.pdf.pages, truncatedPages: ctxFlags.pdf.truncatedPages, fromReply: ctxFlags.pdf.fromReply, ctx: buildPdfContext(ctxFlags.pdf.markdown, ctxFlags.pdf.question, { maxChars }) });
   }
-  return `${base}${GROUP_PROMPT_NOTE}${capNote}${imageNote}${videoNote}${fileNote}${voiceNote}${pdfNote}${ctxFlags?.retryNote ? `\n\n${ctxFlags.retryNote}` : ""}${replyLang ? langInstruction(replyLang) : ""}`;
+  return `${base}${GROUP_PROMPT_NOTE}${ownerNote || OWNER_CLAIM_NOTE}${capNote}${imageNote}${videoNote}${fileNote}${voiceNote}${pdfNote}${ctxFlags?.retryNote ? `\n\n${ctxFlags.retryNote}` : ""}${replyLang ? langInstruction(replyLang) : ""}`;
 }
 
 // Buang awalan "Nama: " & baris "(mengutip: ...)" supaya pencarian dokumen/web
@@ -2999,6 +3001,8 @@ async function handleGroupMessage(msg, sock) {
   }
 
   const sender = msg.pushName || "Anggota grup";
+  const ownerAsker = isOwnerSender(msg, false); // pemilik nomor yang bertanya di grup
+  console.log(`👥 [${subject || "?"}] pengirim: ${sender} (id: ${senderUserParts(msg).slice(2).join(", ") || "?"}) pemilik: ${ownerAsker ? "ya" : "tidak"}${ownerAsker || !OWNER_NUMBER ? "" : " -- kalau ini nomormu tapi tertulis tidak, isi WA_OWNER_LIDS=<id di atas> di .env"}`);
   // Edit foto: foto di pesan ini, atau foto yang DIBALAS (termasuk gambar buatan bot sendiri).
   const quotedImage = !photo && ctx?.quotedMessage ? unwrapMessageContent(ctx.quotedMessage)?.imageMessage || null : null;
   // Foto hidup ("bot, jadikan video dengan salju" + foto/balas foto) didahulukan: kata "jadikan" juga dikenali sebagai edit foto.
@@ -3055,7 +3059,7 @@ async function handleGroupMessage(msg, sock) {
   }
 
   const stored =
-    `${sender}: ${groupAudio ? "🎤 " : ""}${text}` +
+    `${senderLabel(sender, ownerAsker)}: ${groupAudio ? "🎤 " : ""}${text}` +
     (readPdf ? ` ${pdfAttachTag(pdfCandidate.fileName, !docAttached)}` : "") +
     (quotedText ? `\n(mengutip: "${quotedText.replace(/\s+/g, " ").slice(0, GROUP_QUOTE_MAX_CHARS)}")` : "");
   const { error } = await supabase.from("whatsapp_messages").insert({
@@ -3213,6 +3217,7 @@ async function handleGroupMessage(msg, sock) {
       flags.wantFile = fileReq ? fileReq.format : "";
       flags.textOnly = textOnly && !fileReq;
       flags.groupSubject = subject || ""; // untuk suara khusus per grup (/suara grup ...)
+      flags.ownerAsker = ownerAsker; // pengirim = pemilik nomor -> AI tidak menjawab "disampaikan ke pemilik"
       flags.pdf = pdfCtx; // isi PDF yang dilampirkan/dibalas (null = tidak ada)
       flags.retryNote = "";
       // jawaban pesan ini akan dibacakan jadi voice note -> AI diberi tahu (supaya tidak bilang "aku tidak bisa menjawab dengan suara")
@@ -3285,6 +3290,15 @@ async function handleGroupMessage(msg, sock) {
     }
   } catch (e) {
     console.error("Pemeriksa kontradiksi gagal (jawaban dikirim apa adanya):", e instanceof Error ? e.message : String(e));
+  }
+  // Pemilik nomor yang bertanya tidak boleh dijawab "akan disampaikan ke pemilik": tulis ulang sekali, bila masih begitu pakai jawaban netral.
+  if (ownerAsker && deflectsToOwner(result.reply)) {
+    console.warn("👥 Jawaban melempar urusan ke 'pemilik' padahal penanyanya pemilik; minta AI menulis ulang sekali.");
+    const acctCtx = waAccountContext.getStore();
+    if (acctCtx) acctCtx.retryNote = OWNER_DEFLECT_FIX;
+    const again = await generateAutoReply(groupJid).catch(() => null);
+    if (acctCtx) acctCtx.retryNote = "";
+    result = again?.reply && !deflectsToOwner(again.reply) ? again : { ...result, reply: OWNER_DEFLECT_FALLBACK };
   }
   // Diminta berkas (PDF/Excel/Word): kirim jawaban sebagai berkas. Gagal membuatnya -> tetap dikirim sebagai teks.
   if (fileReq && (await deliverGroupFile(sock, groupJid, fileReq.format, result.reply, { quoted: msg, waName: subject || null, result, hint: fileHint }))) return;
@@ -4094,6 +4108,10 @@ async function handleIncoming(msg, sock) {
   // tersimpan & tampil di aplikasi juga (TANPA memicu auto-reply -- lihat
   // bagian bawah fungsi ini).
   const isSelfChat = getOwnJids(sock).includes(jid);
+  {
+    const st = waAccountContext.getStore();
+    if (st) st.ownerAsker = isOwnerSender(msg, isSelfChat); // chat pribadi dari pemilik: AI tahu lawan bicaranya pemilik
+  }
   // Nomor kedua: HP-nya dipegang orang lain, jadi chat-ke-diri-sendiri di sana TIDAK dianggap perintah pemilik -- diabaikan sama sekali.
   if (isSelfChat && sock.waAccount?.secondary) return;
 
