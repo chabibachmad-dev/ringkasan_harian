@@ -1,0 +1,20 @@
+PATCH AYYUBI: kenal kemampuan sendiri (suara dll) + baca PDF di grup WhatsApp
+
+PASANG
+1. Cadangkan dulu index.js lama:  cp index.js index.js.bak
+2. Ekstrak zip ini DI DALAM folder wa-bot (timpa file yang sama):  unzip -o patch-ayyubi-pdf-kemampuan.zip
+3. Pastikan poppler terpasang (untuk baca PDF):  sudo apt install poppler-utils   (cek: pdftotext -v)
+4. Tes (opsional):  node test-pdf-qa.mjs
+5. Restart bot. Saat start akan muncul baris:  "📄 Baca PDF di grup: aktif (...)"
+
+CARA PAKAI (di grup)
+- Kirim PDF dengan keterangan "@bot ringkas" / "@bot apa isinya?" / "@bot berapa total anggarannya?"
+- Atau balas (reply) PDF siapa pun dengan "bot, siapa yang tanda tangan?" / "bot, ringkas"
+- Tanya "bot, kamu bisa apa saja?" -> bot menjawab sesuai fitur yang AKTIF (suara, PDF, gambar, video, ...)
+
+PENGATURAN .env (semua opsional, lihat .env.example)
+WA_GROUP_PDF_READ=on|off, WA_GROUP_PDF_READ_MAX_PER_DAY=15, WA_GROUP_PDF_MAX_CHARS=36000,
+WA_GROUP_PDF_LOCAL_MAX_CHARS=12000, WA_GROUP_PDF_NUM_CTX=8192
+
+FILE BARU: capabilities.js, pdf-qa.js, test-pdf-qa.mjs
+FILE DIUBAH: index.js, package.json, README.md, .env.example, test-agenda.mjs, test-doc-edit.mjs, test-image-gen.mjs, test-pdf-extract.mjs

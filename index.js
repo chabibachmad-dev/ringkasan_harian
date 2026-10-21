@@ -1,0 +1,5733 @@
+// Bot WhatsApp (pakai Baileys -- library TIDAK RESMI yang bicara langsung
+// ke protokol WhatsApp Web, tanpa Puppeteer/browser) buat fitur "WhatsApp di
+// dalam aplikasi" di Ringkasan Harian.
+//
+// KENAPA INI SKRIP TERPISAH, BUKAN EDGE FUNCTION?
+// Supabase Edge Function itu stateless & cuma hidup sebentar per-request --
+// tidak bisa dipakai buat pegang satu koneksi WebSocket ke WhatsApp yang
+// harus tetap nyambung 24 jam. Makanya bot ini WAJIB jalan sebagai proses
+// Node.js yang hidup terus-menerus (lihat README.md buat cara jalaninnya +
+// cara biar auto-restart kalau laptop di-reboot).
+//
+// ALUR KERJANYA (lihat juga komentar di migrations/0011_whatsapp_messages.sql):
+//   1. Login SEKALI lewat scan QR code (sesi disimpan di folder
+//      auth_session/, otomatis dipakai lagi tiap bot di-restart -- TIDAK
+//      perlu scan ulang kecuali folder itu dihapus atau sesi di-logout dari
+//      HP).
+//   2. Pesan WhatsApp MASUK -> langsung disimpan ke tabel whatsapp_messages
+//      (Supabase) lewat service_role key.
+//   3. Tiap beberapa detik (POLL_INTERVAL_MS), bot CEK tabel whatsapp_messages
+//      nyari baris status='pending' (ini dibikin sama Edge Function
+//      `whatsapp` action "send", waktu user balas chat dari aplikasi) ->
+//      beneran dikirim lewat WhatsApp -> status diupdate jadi 'sent' atau
+//      'failed'.
+//
+// CATATAN PENTING soal nomor WA yang dipakai di sini: karena ini BUKAN
+// WhatsApp Business API resmi, nomor yang di-scan QR di sini sebaiknya
+// nomor KHUSUS buat bot ini (bukan nomor yang masih aktif dipakai manual di
+// HP), karena begitu sesi dipegang Baileys, pemakaian manual bersamaan di
+// app WhatsApp biasa bisa bikin salah satu sisi ke-logout/bentrok.
+
+import { execFile } from "node:child_process";
+import "dotenv/config";
+import dns from "node:dns";
+import net from "node:net";
+
+// Jaringan rumahan sering membuat fetch() gagal ("fetch failed") ke Telegram/Supabase/Gemini: Node mencoba IPv6 dan IPv4 bergantian
+// dengan batas waktu bawaan hanya 250 ms per percobaan, dan IPv6 yang rusak membuat koneksi macet. Dua pelonggaran (aman, bisa dimatikan):
+//   NET_IPV4_FIRST=false          pakai urutan DNS bawaan (bawaan bot: IPv4 dulu)
+//   NET_ATTEMPT_TIMEOUT_MS=3000   batas waktu tiap percobaan alamat (bawaan Node 250)
+const NET_IPV4_FIRST = !["0", "false", "off", "tidak", "no"].includes(String(process.env.NET_IPV4_FIRST ?? "").trim().toLowerCase());
+const NET_ATTEMPT_TIMEOUT_MS = Math.max(250, Math.min(20000, Number(process.env.NET_ATTEMPT_TIMEOUT_MS) || 3000));
+// "Happy eyeballs" bawaan Node SELALU mencoba alamat IPv6 lebih dulu (selang-seling dengan IPv4), apa pun urutan DNS-nya. Pada jaringan
+// dengan IPv6 yang rusak (DNS memberi IPv6 tapi rutenya buntu) koneksi ke Telegram jadi ETIMEDOUT padahal `curl -4` normal.
+// Bawaan bot: matikan happy eyeballs, jadi Node memakai alamat pertama dari DNS (IPv4 karena NET_IPV4_FIRST). NET_AUTOSELECT_FAMILY=true mengembalikannya.
+const NET_AUTOSELECT = ["1", "true", "on", "ya", "yes"].includes(String(process.env.NET_AUTOSELECT_FAMILY ?? "").trim().toLowerCase());
+try {
+  if (NET_IPV4_FIRST) dns.setDefaultResultOrder("ipv4first");
+  net.setDefaultAutoSelectFamily?.(NET_AUTOSELECT);
+  net.setDefaultAutoSelectFamilyAttemptTimeout?.(NET_ATTEMPT_TIMEOUT_MS);
+  console.log(`🌐 Jaringan: ${NET_IPV4_FIRST ? "IPv4 dulu" : "urutan DNS bawaan"}, ${NET_AUTOSELECT ? `happy eyeballs aktif (batas ${NET_ATTEMPT_TIMEOUT_MS} ms/alamat)` : "satu alamat per koneksi (happy eyeballs mati)"}`);
+} catch (err) {
+  console.warn("🌐 Gagal mengatur opsi jaringan:", err instanceof Error ? err.message : String(err));
+}
+import { createClient } from "@supabase/supabase-js";
+import makeWASocket, { useMultiFileAuthState, fetchLatestBaileysVersion, DisconnectReason, downloadMediaMessage } from "@whiskeysockets/baileys";
+import pino from "pino";
+import qrcode from "qrcode-terminal";
+import * as cheerio from "cheerio";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { createSimab, SIMAB_OLLAMA_SYSTEM } from "./simab.js";
+import { createTelegram, readTelegramConfig } from "./telegram.js";
+import { createTranscriber, describeError, readSttConfig, voiceToCommand } from "./voice-input.js";
+import { audioOf, createWaTutor, readWaVoiceConfig } from "./wa-voice.js";
+import { createSpeaker, readTtsConfig } from "./voice-output.js";
+import { buildTutorSystemPrompt, buildTutorUserPrompt, parseTutorReply } from "./tutor.js";
+import { createAppAgentWorker } from "./app-agent.js";
+import { createFallbackChain, readFallbackConfig } from "./llm-fallback.js";
+import { classifyRoute, createAiRoute, parseRouteCommand } from "./ai-route.js";
+import { createNodin, parseNodinCommand, readNodinConfig } from "./nodin.js";
+import { createKas, parseKasCommand, readKasConfig } from "./kas.js";
+import { VOICE_LANGS, createGroupVoice, detectRequestedLang, detectTextOnlyRequest, langInstruction, readGroupVoiceConfig } from "./group-voice.js";
+import { formatForWhatsApp, detectPdfRequest, detectOfficeRequest, cleanAnswerForFile, titleForFile } from "./wa-format.js";
+import { buildDocx, buildXlsx, officeFileName, MIME_DOCX, MIME_XLSX } from "./office-doc.js";
+import { pdfBufferToMarkdown, PDF_MAX_BYTES } from "./pdf-extract.js";
+import { PDF_QA_DEFAULT_MAX_CHARS, PDF_QA_LOCAL_MAX_CHARS, buildPdfContext, isPdfDoc, isReadQuestion, pdfAttachTag, pdfContextNote, pdfReadMessage, shouldReadPdf } from "./pdf-qa.js";
+import { buildCapabilityNote, buildVoiceReplyNote, denyingCapability } from "./capabilities.js";
+import { detectEditRequest, replaceInText, replaceInDocx, docxToMarkdown, numberDiff, buildEditPrompt, buildEditUserMessage, unwrapFence, hasESignature, AI_EDIT_MAX_CHARS } from "./doc-edit.js";
+import { createPersonaVoice } from "./persona-voice.js";
+import { buildPdf, titleFromText, pdfFileName } from "./pdf-doc.js";
+import { overlayReplacePdf } from "./pdf-overlay.js";
+import { MAIN_ACCOUNT, SECOND_ACCOUNT, acctFields, createAccountRouter, isPairedCreds, isStalePairing, pairingInstructions, personaPrompt, readSecondAccountConfig } from "./wa-accounts.js";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { createOfficeFeed, readOfficeConfig, chatLabel, reasonText, aiReason, ollamaReason, ollamaJobLabel, officeVideoStages } from "./office-feed.js";
+import { qrToPng } from "./qr-png.js";
+import { createGroupList } from "./group-list.js";
+import { createVideoGen, readVideoConfig, videoSentNote, photoVideoSentNote, storySentNote, morphSentNote, VIDEO_TEXT } from "./video-gen.js";
+const VIDEO_NOPHOTO_TEXT = VIDEO_TEXT.nophoto;
+import { createImageGen, readImageConfig, imageSentNote, quotedImageNote, prepareEditInput, KIND_TEXT as IMAGE_KIND_TEXT } from "./image-gen.js";
+import { createEnvEditor } from "./env-edit.js";
+import { createMetaAi, readMetaAiConfig, parseMetaAiArg, unsafeTarget } from "./meta-ai.js";
+import { createWebSearch, readSearchConfig } from "./web-search.js";
+import { createRegMonitor, readRegMonitorConfig } from "./reg-monitor.js";
+import { createKhatamReminder } from "./khatam.js";
+import { createPriorityQueue, PRIORITY } from "./ollama-queue.js";
+import { openKbIndex } from "./kb-index.js";
+import { createKbIngestWorker, readKbConfig } from "./kb-ingest.js";
+import { createKbRetrievalWorker } from "./kb-retrieval.js";
+import { createDocFolderWorker } from "./doc-folder.js";
+import { guardDocAnswer } from "./docguard.js";
+import { createLocalDocs, parseDokumenCommand } from "./local-docs.js";
+import { createOps, readOpsConfig } from "./ops.js";
+import { ollamaChatStream } from "./ollama-http.js";
+import { createProviderStats, parseProviderCommand } from "./provider-stats.js";
+import { createSkillAdmin, createSkills, parseSkillCommand } from "./skills.js";
+import { createLocalChat, parseLocalChatCommand } from "./local-chat.js";
+import { createMarketBrief, createMarketData, parseMarketCommand, readMarketBriefConfig } from "./market-brief.js";
+import { handleMemoryCommand, openOwnerMemory, parseMemoryCommand } from "./owner-memory.js";
+import { createReminders, openReminderStore, parseReminderCommand } from "./reminders.js";
+import { buildExplainPrompt, createIbadah, openIbadahStore } from "./ibadah.js";
+import { createAgenda, openAgendaStore } from "./agenda.js";
+import { createBackup, parseBackupCommand, readBackupConfig } from "./backup.js";
+import { backupCheck, createHealth, createRestartTracker, databaseCheck, diskCheck, memoryCheck, ollamaCheck, parseHealthCommand, readHealthConfig, whatsappCheck } from "./health.js";
+
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_MS) || 4000;
+
+if (!SUPABASE_URL || !SERVICE_ROLE_KEY) {
+  console.error("SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY belum di-set. Salin .env.example jadi .env lalu isi dulu.");
+  process.exit(1);
+}
+
+const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY);
+
+// ================================================================
+// Auto-reply pakai AI (Gemini) -- OPSIONAL, DEFAULT MATI.
+//
+// Nyala HANYA kalau WA_AUTO_REPLY_ENABLED=true DAN GEMINI_API_KEY diisi di
+// .env (pakai API key Google AI Studio yang SAMA dengan yang dipasang
+// sebagai secret GEMINI_API_KEY di Supabase buat fitur "Obrolan AI" --
+// lihat https://aistudio.google.com/apikey).
+//
+// KENAPA GEMINI DIPANGGIL LANGSUNG DARI SINI (bukan lewat Edge Function
+// `whatsapp`)? Beda dari frontend (browser, tidak dipercaya, makanya harus
+// lewat Edge Function + CHAT_ACCESS_CODE), skrip bot ini SUDAH pegang
+// service_role key (akses penuh ke database, lebih tinggi derajat
+// kepercayaannya drpd anon key) dan memang didesain bicara LANGSUNG ke
+// Supabase tanpa lewat Edge Function (lihat handleIncoming/
+// processPendingOutgoing di atas) -- jadi manggil Gemini langsung dari sini
+// juga konsisten dengan pola itu, drpd nambah satu lompatan jaringan lagi
+// via Edge Function.
+//
+// CATATAN: logika hitung biaya (estimateCostUsd/getModelPricing) di bawah
+// ini SENGAJA DIDUPLIKASI dari supabase/functions/_shared/gemini.ts (bukan
+// di-share) karena yang satu jalan di Deno/TypeScript (Edge Function) dan
+// yang ini di Node.js biasa -- kalau suatu saat tarif resmi Gemini berubah,
+// PASTIKAN update KEDUA tempat ini supaya catatan "token terpakai hari ini"
+// di footer aplikasi tetap akurat.
+const WA_AUTO_REPLY_ENABLED = (process.env.WA_AUTO_REPLY_ENABLED || "").toLowerCase() === "true";
+// Boleh isi BEBERAPA API key Gemini dipisah koma (GEMINI_API_KEYS=key1,key2,key3)
+// -- tiap key biasanya dari akun Google BEDA (masing2 py jatah gratis 20
+// request/hari sendiri2, lihat GEMINI_KEY_COOLDOWN_MS di bawah). Tetap
+// terima GEMINI_API_KEY (tunggal, nama lama) sbg fallback kalau
+// GEMINI_API_KEYS tidak diisi, biar .env lama tidak rusak.
+const GEMINI_API_KEYS = (process.env.GEMINI_API_KEYS || process.env.GEMINI_API_KEY || "")
+  .split(",")
+  .map((k) => k.trim())
+  .filter(Boolean);
+const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-3.6-flash";
+// Log jumlah key yang kebaca (cuma 4 karakter terakhir) -- supaya gampang
+// cek di `pm2 logs` apakah GEMINI_API_KEYS di .env benar2 terbaca semua.
+if (GEMINI_API_KEYS.length > 0 && (process.env.WA_AI_ENGINE || "ollama").trim().toLowerCase() === "gemini") {
+  console.log(
+    `🔑 ${GEMINI_API_KEYS.length} API key Gemini terbaca (${GEMINI_API_KEYS.map((k) => "..." + k.slice(-4)).join(", ")}), model ${GEMINI_MODEL}.`
+  );
+}
+// Penyedia CADANGAN (Groq, OpenRouter): dipakai hanya setelah semua key Gemini gagal/habis kuota.
+// Diatur lewat GROQ_API_KEYS / OPENROUTER_API_KEYS di .env (lihat llm-fallback.js & .env.example).
+// Statistik penyedia AI untuk /penyedia (hanya hitungan berhasil/gagal di memori; tanpa isi percakapan atau key).
+const providerStats = createProviderStats();
+const llmFallback = createFallbackChain({ config: readFallbackConfig(process.env), onEvent: (e) => reportLlmEvent(e) });
+if (llmFallback.available() && (process.env.WA_AI_ENGINE || "ollama").trim().toLowerCase() === "gemini") {
+  console.log(`🛟 Penyedia cadangan AI aktif (setelah Gemini): ${llmFallback.describe()}`);
+}
+// Berapa pesan terakhir (masuk+keluar) di satu obrolan yang dikasihkan ke
+// AI sebagai konteks -- sengaja lebih pendek drpd riwayat Obrolan AI (yang
+// 40) karena chat WA biasanya lebih singkat/kasual, dan tiap pesan WA baru
+// memicu 1 panggilan AI (beda dari Obrolan AI yang cuma kepanggil waktu
+// user benar-benar kirim) -- riwayat lebih pendek = lebih hemat token/waktu.
+const AUTO_REPLY_HISTORY_LIMIT = 20;
+
+// ----------------------------------------------------------------
+// Pilihan "mesin" AI buat auto-reply WA: "ollama" (default, model lokal
+// jalan di laptop sendiri -- gratis & privasi penuh, lihat blok RAG + web
+// search di bawah) atau "gemini" (cara lama, lihat callGeminiOnce dkk).
+// Kode Gemini SENGAJA TETAP DIPERTAHANKAN (bukan dihapus) biar gampang
+// pindah balik tinggal ganti WA_AI_ENGINE di .env, tanpa perlu
+// install-ulang/tulis ulang apa pun -- walau praktiknya auto-reply WA
+// sekarang jalan pakai "ollama" per keputusan user (hasil tes pembuktian
+// konsep RAG: qwen2.5:3b + potongan dokumen relevan = akurat, lihat
+// riwayat percakapan).
+const WA_AI_ENGINE = (process.env.WA_AI_ENGINE || "ollama").toLowerCase();
+const OLLAMA_BASE_URL = process.env.OLLAMA_BASE_URL || "http://127.0.0.1:11434";
+const OLLAMA_MODEL = process.env.OLLAMA_MODEL || "qwen2.5:3b";
+// Berapa lama model dibiarkan di RAM setelah panggilan terakhir (format Ollama: "5m", "30s", "0").
+// Makin pendek = RAM lebih cepat lega, tapi pesan berikutnya kena ongkos muat ulang (±5-8 dtk).
+const OLLAMA_KEEP_ALIVE = process.env.OLLAMA_KEEP_ALIVE || "5m";
+// num_ctx = ukuran jendela konteks (dalam token) yang diminta ke Ollama --
+// default bawaan Ollama cuma 2048, kekecilan begitu riwayat obrolan +
+// konteks dokumen + hasil pencarian web digabung. 4096 aman buat RAM 7.5GB
+// dgn model 3B di laptop spek pas-pasan (lihat spek yang di-share user).
+const OLLAMA_NUM_CTX = Number(process.env.OLLAMA_NUM_CTX) || 4096;
+// Batas maksimal PANJANG JAWABAN (dalam token, lihat options.num_predict di
+// callOllamaChat) -- bukan cuma hemat waktu generate, tapi juga wajar buat
+// chat WA (balasan sependek2nya tetap lebih natural drpd esai panjang di WA).
+// Diukur dari tes --verbose user langsung di server: eval rate CUMA ~4.5
+// token/detik (CPU i5-4200M, 2014, tanpa akselerasi khusus) -- 300 token
+// output = sekitar 65 detik generate SAJA, belum prompt eval & load model.
+// Suhu saat jawaban memakai KONTEKS DOKUMEN (balasan WA & chat aplikasi): rendah = patuh pada teks,
+// tidak berimajinasi. 0 sampai 1; bawaan 0.1.
+const OLLAMA_DOC_TEMPERATURE = Number.isFinite(Number(process.env.OLLAMA_DOC_TEMPERATURE)) && process.env.OLLAMA_DOC_TEMPERATURE !== undefined && process.env.OLLAMA_DOC_TEMPERATURE !== "" ? Math.min(1, Math.max(0, Number(process.env.OLLAMA_DOC_TEMPERATURE))) : 0.1;
+const OLLAMA_MAX_OUTPUT_TOKENS = Number(process.env.OLLAMA_MAX_OUTPUT_TOKENS) || 300;
+// Inferensi CPU-only di laptop tua bisa LAMBAT -- dari tes nyata di server
+// user (376 token prompt + 356 token jawaban = total ~104 detik, lihat
+// riwayat percakapan), 120 detik awal TERBUKTI sering kurang begitu
+// prompt/jawabannya dikit lebih besar. Dinaikkan jadi 4 menit, kasih ruang
+// lebih drpd auto-reply dianggap "gagal" padahal cuma masih mikir --
+// dikombinasikan dgn OLLAMA_MAX_OUTPUT_TOKENS & pemangkasan konteks (lihat
+// RAG_CONTEXT_BUDGET_CHARS, WEB_SEARCH_MAX_RESULTS, OLLAMA_HISTORY_LIMIT)
+// biar kejadian "mepet/lewat batas" ini lebih jarang, bukan cuma ditutupi
+// dgn nunggu lebih lama.
+const OLLAMA_TIMEOUT_MS = Number(process.env.OLLAMA_TIMEOUT_MS) || 240000;
+// Riwayat obrolan yang dikirim ke Ollama SENGAJA lebih pendek drpd punya
+// Gemini (AUTO_REPLY_HISTORY_LIMIT=20) -- tiap pesan riwayat nambah token
+// prompt yang harus "dibaca" dulu (prompt eval, lihat hasil tes), & itu ikut
+// numpuk ke total waktu tunggu di CPU lambat begini.
+const OLLAMA_HISTORY_LIMIT = Number(process.env.OLLAMA_HISTORY_LIMIT) || 10;
+
+// ----------------------------------------------------------------
+// Nomor PEMILIK (nomor WA utama kamu, BUKAN nomor bot ini) -- tujuan
+// peringatan "semua API key habis" & ringkasan percakapan harian. Cukup
+// isi angka nomornya di .env (WA_OWNER_NUMBER=085719965097 atau
+// 6285719965097 -- "0" di depan otomatis jadi "62"). Sengaja lewat .env,
+// BUKAN ditulis di kode, supaya nomor pribadi tidak ikut ke-commit ke GitHub.
+function normalizeOwnerNumber(raw) {
+  let digits = String(raw || "").replace(/\D/g, "");
+  if (!digits) return null;
+  if (digits.startsWith("0")) digits = `62${digits.slice(1)}`;
+  else if (digits.startsWith("8")) digits = `62${digits}`;
+  return digits;
+}
+const OWNER_NUMBER = normalizeOwnerNumber(process.env.WA_OWNER_NUMBER);
+const OWNER_JID = OWNER_NUMBER ? `${OWNER_NUMBER}@s.whatsapp.net` : null;
+
+// ---- Nomor WhatsApp kedua (opsional; lihat wa-accounts.js) ----
+// Nomor utama memakai currentSock + folder auth_session seperti biasa. Nomor kedua = sesi Baileys terpisah (WA2_*).
+const wa2Config = readSecondAccountConfig(process.env);
+const waAccountContext = new AsyncLocalStorage(); // akun yang sedang memproses suatu pesan (supaya riwayat ditandai benar)
+const currentAccountId = () => waAccountContext.getStore()?.account || MAIN_ACCOUNT;
+const accountRouter = createAccountRouter({ supabase });
+// Kantor AI (halaman "Kantor" di aplikasi): ringkasan kegiatan bot dipancarkan ke Supabase. Isi pesan TIDAK pernah dikirim. Lihat office-feed.js.
+// Pemancar mulai di akhir berkas (presence membaca imageGen/videoGen/speaker yang dibuat belakangan).
+const office = createOfficeFeed({
+  supabase,
+  ...readOfficeConfig(process.env),
+  presence: async () => {
+    const list = [];
+    // "Agen Lokal" = server Linux dengan Ollama: dianggap masuk kerja bila Ollama menjawab.
+    try {
+      const r = await fetch(`${OLLAMA_BASE_URL}/api/tags`, { signal: AbortSignal.timeout(2500) });
+      if (r.ok) list.push({ who: "agen", detail: `Ollama (${OLLAMA_MODEL})` });
+    } catch {
+      /* Ollama mati: Agen Lokal tampak tidur */
+    }
+    if (waOpen) {
+      list.push({ who: "ayyubi", detail: "WhatsApp utama" });
+      if (videoGen.available() || videoGen.storyAvailable()) list.push({ who: "video", detail: "Studio video" });
+      if (imageGen.available()) list.push({ who: "gambar", detail: "Studio gambar" });
+      if (speaker.available()) list.push({ who: "suara", detail: "Studio suara" });
+    }
+    if (WA2_ACCOUNT_DEF?.open) list.push({ who: "wongsobot", detail: WA2_ACCOUNT_DEF.label || "Nomor kedua" });
+    return list;
+  }
+});
+/** Karyawan AI yang sedang bekerja menurut akun WA yang memproses pesan. */
+const officeWho = () => (currentAccountId() === SECOND_ACCOUNT ? "wongsobot" : "ayyubi");
+const MAIN_ACCOUNT_DEF = { id: MAIN_ACCOUNT, label: "Nomor utama", authDir: "auth_session", secondary: false, sock: null, open: false, pairing: false };
+const WA2_ACCOUNT_DEF = wa2Config.enabled ? { id: wa2Config.id, label: wa2Config.label, authDir: wa2Config.authDir, secondary: true, sock: null, open: false, pairing: false } : null;
+// Zona waktu buat "tengah malam"/jam ringkasan harian & label jam di pesan.
+// Default WITA (sama dgn jam ringkasan berita di aplikasi) -- ganti ke
+// Asia/Jakarta + label WIB kalau mau waktu Jawa.
+const WA_TIMEZONE = process.env.WA_TIMEZONE || "Asia/Makassar";
+const WA_TIMEZONE_LABEL = process.env.WA_TIMEZONE_LABEL || "WITA";
+// Ringkasan percakapan harian ke nomor pemilik: nyala otomatis kalau
+// WA_OWNER_NUMBER diisi (matikan lewat WA_DAILY_SUMMARY_ENABLED=false).
+const WA_DAILY_SUMMARY_ENABLED = OWNER_JID !== null && (process.env.WA_DAILY_SUMMARY_ENABLED || "true").toLowerCase() !== "false";
+const WA_DAILY_SUMMARY_HOUR = Math.min(23, Math.max(0, Number(process.env.WA_DAILY_SUMMARY_HOUR ?? 20) || 20));
+// Mesin pembuat ringkasan harian: "ollama" (DEFAULT -- model lokal di laptop ini,
+// isi percakapan WA tidak keluar dari laptop & tidak makan kuota Gemini) atau
+// "gemini". Kalau "ollama" gagal (mis. "ollama serve" mati), WA_SUMMARY_GEMINI_FALLBACK
+// (default true) mengizinkan jatuh ke Gemini; set "false" kalau mau ketat: isi
+// percakapan TIDAK BOLEH dikirim ke Google sama sekali (gagal = daftar sederhana).
+const WA_SUMMARY_ENGINE = (process.env.WA_SUMMARY_ENGINE || "ollama").trim().toLowerCase() === "gemini" ? "gemini" : "ollama";
+const WA_SUMMARY_GEMINI_FALLBACK = (process.env.WA_SUMMARY_GEMINI_FALLBACK || "true").trim().toLowerCase() !== "false";
+// Ringkasan lokal boleh lama (jalan sekali sehari, tak ada yang menunggu).
+const WA_SUMMARY_OLLAMA_TIMEOUT_MS = Number(process.env.WA_SUMMARY_OLLAMA_TIMEOUT_MS) || 600000;
+// Cadangan lokal buat auto-reply: kalau Gemini gagal karena KUOTA (semua key
+// habis / 429 / 503), pertanyaan yang BUKAN soal angka/aturan dijawab Ollama
+// dulu daripada cuma "sistem penuh". Pertanyaan angka/aturan tetap diantre
+// buat dijawab Gemini nanti (model 3B terbukti mudah mengarang angka).
+const WA_OLLAMA_FALLBACK_ENABLED = (process.env.WA_OLLAMA_FALLBACK_ENABLED || "true").trim().toLowerCase() !== "false";
+// Batas tunggu jawaban Ollama utk cadangan ini -- lebih pendek dari OLLAMA_TIMEOUT_MS
+// supaya kontak tidak menunggu terlalu lama sebelum jatuh ke antrean.
+const WA_OLLAMA_FALLBACK_TIMEOUT_MS = Number(process.env.WA_OLLAMA_FALLBACK_TIMEOUT_MS) || 90000;
+// Template jawaban (tabel wa_quick_replies) cuma dicoba kalau pesannya
+// PENDEK -- pesan panjang hampir pasti pertanyaan rumit yang butuh AI,
+// jangan sampai kata kunci nyasar di tengah kalimat panjang memicu template.
+const QUICK_REPLY_MAX_WORDS = 12;
+// Retry pesan yang gagal dibalas AI (tabel wa_retry_queue): dicek tiap menit,
+// maksimal beberapa percobaan, kadaluarsa setelah RETRY_EXPIRE_HOURS jam.
+const RETRY_CHECK_INTERVAL_MS = 60_000;
+const RETRY_MAX_ATTEMPTS = 6;
+const RETRY_EXPIRE_HOURS = 24;
+
+if (WA_AUTO_REPLY_ENABLED && WA_AI_ENGINE === "gemini" && GEMINI_API_KEYS.length === 0 && !llmFallback.available()) {
+  console.warn(
+    "⚠️  WA_AUTO_REPLY_ENABLED=true + WA_AI_ENGINE=gemini tapi GEMINI_API_KEY(S) belum diisi di .env -- auto-reply TIDAK akan jalan sampai diisi."
+  );
+}
+// Auto-reply dianggap "siap jalan" kalau: enabled DAN (pakai ollama -- tidak
+// butuh API key apa pun, cukup Ollama-nya jalan di laptop -- ATAU pakai
+// gemini DAN minimal 1 API key sudah diisi).
+const AUTO_REPLY_ACTIVE = WA_AUTO_REPLY_ENABLED && (WA_AI_ENGINE === "ollama" || GEMINI_API_KEYS.length > 0 || llmFallback.available());
+console.log(
+  `🤖 Auto-reply AI: ${AUTO_REPLY_ACTIVE ? `AKTIF (mesin: ${WA_AI_ENGINE}${WA_AI_ENGINE === "gemini" ? `, ${GEMINI_API_KEYS.length} API key Gemini${llmFallback.available() ? " + cadangan Groq/OpenRouter" : ""}` : ""})` : "mati"}`
+);
+
+// Prompt ini menentukan gaya & batasan balasan otomatis. Dibuat SELENGKAP
+// Obrolan AI di aplikasi (boleh diskusi bebas, bantu coding, akses
+// pencarian Google) per permintaan user -- TAPI tetap pakai 1 rem pengaman
+// yang sengaja TIDAK dihilangkan: tidak boleh bikin janji/komitmen atas
+// nama pemilik nomor, karena ini mengatasnamakan pemilik nomor WA ASLI ke
+// kontak SUNGGUHAN secara otomatis, tanpa sempat dibaca/disetujui dulu
+// (beda dari Obrolan AI biasa yang cuma pemiliknya sendiri yang baca).
+// Lihat juga diskusi risiko soal ini di percakapan sebelumnya.
+const WA_BASE_SYSTEM_PROMPT = `Kamu adalah asisten AI yang membalas pesan WhatsApp ATAS NAMA pemilik nomor ini secara OTOMATIS, tanpa pemilik nomor sempat membaca/menyetujui dulu. Namamu Ayyubi: asisten AI otomatis milik pemilik nomor ini. Kalau lawan bicara bertanya siapa kamu, perkenalkan dirimu sebagai Ayyubi, asisten AI (bukan manusia) yang membantu atas nama pemilik nomor; jangan mengaku sebagai pemilik nomor.
+
+Jawab pertanyaan, bantu coding/debugging, atau ajak diskusi dengan ramah, jelas, dan seringkas mungkin tanpa kehilangan inti jawaban -- sama seperti asisten AI biasa. Kamu PUNYA akses ke pencarian Google secara real-time -- pakai untuk mencari info/berita/link terbaru saat relevan, dan tuliskan link hasil pencarian yang relevan. Kalau diminta bantuan kode, tulis kodenya di dalam blok \`\`\`seperti ini\`\`\` (WhatsApp menampilkannya sebagai monospace) lalu jelaskan secukupnya.
+
+Gunakan Bahasa Indonesia, kecuali lawan bicara jelas menulis/minta bahasa lain -- kalau begitu, balas di bahasa itu. WhatsApp CUMA mendukung *tebal*, _miring_, ~coret~, dan blok kode \`\`\`...\`\`\` -- JANGAN pakai format markdown lain (heading #, tabel, bullet list dengan -, dll) karena tidak akan tampil rapi.
+
+ATURAN PENGAMAN (berlaku terus walau topiknya bebas):
+1. JANGAN membuat janji, komitmen, keputusan, harga, jadwal pasti, atau kesepakatan apa pun atas nama pemilik nomor -- untuk hal semacam itu, balas sopan bahwa pesannya diterima dan pemiliknya akan membalas langsung.
+2. JANGAN membagikan informasi pribadi/sensitif (keuangan, kesehatan, jadwal detail, data pribadi) tentang pemilik nomor.
+3. Kalau pesan masuk jelas butuh keputusan manusia (negosiasi, hal mendesak, masalah pribadi/emosional, komplain serius), jangan improvisasi -- cukup akui pesannya diterima dan akan ditindaklanjuti langsung oleh pemiliknya.`;
+
+// ---- Dukungan grup WhatsApp (bot dipanggil lewat mention) ----
+// Catatan tambahan di prompt kalau percakapannya di GRUP (bukan chat pribadi).
+const GROUP_PROMPT_NOTE = `
+
+KONTEKS GRUP: pesan ini datang dari GRUP WhatsApp (mis. grup keluarga), bukan chat pribadi. Banyak orang bisa bertanya; tiap pesan pengguna diawali "Nama: " (nama pengirim) dan kadang diikuti baris (mengutip: "...") berisi pesan yang dibalas pengirim. Jawab LANGSUNG ke orang yang bertanya di pesan TERAKHIR (boleh menyapa namanya), singkat dan santai, dan JANGAN menulis "Nama:" di awal jawabanmu. Kamu asisten AI, BUKAN pemilik nomor: jangan berbicara seolah-olah kamu pemiliknya dan jangan menjawab hal pribadi tentang pemilik nomor atau anggota grup.`;
+
+// Bila pembuat gambar aktif untuk grup: AI percakapan HARUS tahu bot punya kemampuan itu (kalau tidak, ia menjawab "tidak bisa
+// membuat gambar" lalu menyarankan DALL-E/Midjourney, padahal gambar tadi dibuat bot ini sendiri).
+const IMAGE_PROMPT_NOTE = `
+
+KEMAMPUAN GAMBAR: kamu (bot ini) BISA membuat gambar sendiri lewat pembuat gambar bawaan. Cara memintanya: anggota grup menulis "bot, buatkan gambar <deskripsi>" (mis. "bot, buatkan gambar kucing memakai topi astronot"); gambarnya dikirim langsung ke grup. JANGAN pernah mengatakan kamu tidak bisa membuat atau mengirim gambar, dan JANGAN menyarankan layanan lain (DALL-E, Midjourney, Stable Diffusion, dll). Foto bisa diedit: anggota grup mengirim foto dengan keterangan "bot, ubah jadi hitam putih" (atau membalas foto itu dengan "bot, edit foto ini jadi ...", termasuk gambar buatan bot); hasilnya dikirim ke grup. Kamu sendiri tidak bisa melihat isi foto yang dikirim anggota. Kalau ada yang minta gambar tetapi kalimatnya belum memakai pola itu, ajari pola di atas dengan singkat. Kamu juga BISA mengirim jawaban sebagai berkas PDF: anggota cukup menulis "bot, ... dalam bentuk PDF" atau membalas jawabanmu dengan "bot, jadikan pdf"; jangan pernah bilang tidak bisa membuat PDF. Hasil juga bisa dikirim sebagai Word atau Excel ("bot, ... dalam bentuk Excel", atau balas jawabanmu dengan "bot, jadikan excel/word"); dan kalau ada anggota membagikan file PDF di grup, anggota bisa membalas file itu dengan "bot, convert ke excel" atau "bot, jadikan word" (khusus PDF yang berisi teks, bukan hasil scan). Baris riwayat berawalan "🖼️" atau kutipan berawalan "[GAMBAR" berarti BOT INI SENDIRI yang membuat dan mengirim gambar itu: jelaskan sesuai deskripsi permintaannya (kamu tidak bisa melihat pikselnya, jadi katakan "itu gambar yang tadi kubuat sesuai permintaan: ..." dan jangan mengarang detail yang tidak ada di deskripsi).`;
+
+// Bila pembuat video aktif untuk grup: AI percakapan harus tahu bot bisa membuat video (jangan bilang tidak bisa / menyarankan aplikasi lain).
+const VIDEO_PROMPT_NOTE = `
+
+KEMAMPUAN VIDEO: kamu (bot ini) BISA membuat video pendek bernarasi (gambar + suara + subtitle, 20-60 detik) sendiri. Cara memintanya: anggota grup menulis "bot, buatkan video <deskripsi>" (mis. "bot, buatkan video kancil dan buaya"; boleh tambah durasi: "bot, buatkan video 30 detik tentang siklus air"); videonya dikirim langsung ke grup beberapa menit kemudian dan jatahnya terbatas per hari. JANGAN mengatakan kamu tidak bisa membuat video dan jangan menyarankan aplikasi/layanan lain; kalau ada yang minta video tetapi kalimatnya belum memakai pola itu, ajari pola di atas dengan singkat. Foto juga bisa DIHIDUPKAN jadi video (gerak kamera + efek salju/hujan/debu/kunang-kunang/bintang/konfeti/kabut/sinar/daun/kelopak, nuansa warna, tulisan): anggota grup mengirim foto dengan keterangan "bot, jadikan video dengan salju turun" (boleh tambah durasi dan tulisan, mis. "bot, jadikan video 10 detik dengan konfeti, tulisan \"Selamat Ulang Tahun\"") atau membalas foto dengan "bot, jadikan video"; ini gratis dan lebih cepat daripada video buatan AI. Selain itu bot bisa membuat ANIMASI KARTUN dengan tokoh manusia tanpa wajah yang bergerak (berjalan, melambai, menunjuk, melompat, duduk, bertepuk tangan, berdoa, dll.) dengan narasi suara dan subtitle: anggota grup menulis "bot, buatkan animasi <cerita>" (mis. "bot, buatkan animasi ayah dan anak ke taman"); tokohnya hanya manusia (pria, wanita, anak, kakek, nenek; boleh berhijab/berpeci), bukan hewan. Baris riwayat berawalan "🎭", "🎬" atau "🎞️" berarti BOT INI SENDIRI yang membuat dan mengirim video itu sesuai deskripsi permintaannya (kamu tidak bisa melihat isinya).`;
+
+// Permintaan "jadikan PDF/Word/Excel": sistem yang membuat berkasnya dari jawabanmu -- AI cukup menulis isinya.
+const FILE_NOTE_COMMON = ` Mulai LANGSUNG dengan judul "# ..." tanpa sapaan (jangan "Halo <nama>"), jangan menyebut nama penanya, dan jangan menyinggung perintah bot lain (mis. pembuatan gambar) atau menawarkan hal lain di akhir. Tabel WAJIB memakai sintaks tabel markdown (baris "| kolom | kolom |" lalu baris "|---|---|"); JANGAN menggambar tabel dengan karakter ===, +---+ atau di dalam blok kode.`;
+const FILE_NOTES = {
+  pdf: `
+
+PERMINTAAN PDF: jawabanmu akan DIKIRIM OLEH SISTEM sebagai berkas PDF. Jadi tulis LANGSUNG isi dokumennya (lengkap, rapi, terstruktur; boleh judul, daftar, dan tabel). JANGAN bilang kamu tidak bisa membuat PDF dan jangan menyarankan aplikasi lain.${FILE_NOTE_COMMON}`,
+  docx: `
+
+PERMINTAAN WORD: jawabanmu akan DIKIRIM OLEH SISTEM sebagai berkas Word (.docx). Jadi tulis LANGSUNG isi dokumennya (lengkap, rapi, terstruktur; boleh judul, daftar, dan tabel). JANGAN bilang kamu tidak bisa membuat file Word dan jangan menyarankan aplikasi lain.${FILE_NOTE_COMMON}`,
+  xlsx: `
+
+PERMINTAAN EXCEL: jawabanmu akan DIKIRIM OLEH SISTEM sebagai berkas Excel (.xlsx): setiap tabel menjadi satu lembar. Jadi tulis datanya sebagai TABEL, satu tabel per topik, dengan judul "## Nama Lembar" (maks 30 huruf) tepat sebelum tiap tabel. Tulis angka polos (mis. 3500000) dan taruh satuannya di judul kolom (mis. "Harga (Rp)"). JANGAN bilang kamu tidak bisa membuat file Excel dan jangan menyarankan aplikasi lain.${FILE_NOTE_COMMON}`
+};
+// Permintaan "jawab pakai teks": jawaban tertulis (bukan untuk dibacakan).
+const TEXT_PROMPT_NOTE = `
+
+PERMINTAAN TEKS: penanya minta jawaban TERTULIS (bukan suara). Tulis jawaban lengkap sebagai teks biasa yang enak dibaca/disalin (boleh memakai daftar atau tabel); tidak perlu disesuaikan untuk dibacakan.`;
+
+// ---- Baca PDF di grup (lihat pdf-qa.js) ----
+const PDF_GROUP_READ = !/^(0|off|false|no|mati)$/i.test(String(process.env.WA_GROUP_PDF_READ ?? "on").trim());
+const PDF_GROUP_MAX_CHARS = Math.max(2000, Number(process.env.WA_GROUP_PDF_MAX_CHARS) || PDF_QA_DEFAULT_MAX_CHARS);
+const PDF_GROUP_LOCAL_MAX_CHARS = Math.max(2000, Number(process.env.WA_GROUP_PDF_LOCAL_MAX_CHARS) || PDF_QA_LOCAL_MAX_CHARS + 3000);
+const PDF_GROUP_NUM_CTX = Math.max(4096, Number(process.env.WA_GROUP_PDF_NUM_CTX) || 8192); // jendela konteks Ollama khusus pertanyaan PDF
+const PDF_GROUP_DAILY_MAX = Math.max(0, Number(process.env.WA_GROUP_PDF_READ_MAX_PER_DAY ?? 15) || 0);
+let pdfToolMissing = false; // diisi saat start bila pdftotext tidak ada
+
+/** Kemampuan bot di grup SAAT INI, dari fitur yang benar-benar aktif (dipakai capabilities.js untuk prompt AI). */
+function groupCapabilityFlags() {
+  let voice = "none";
+  try {
+    if (speaker.available()) voice = groupVoice.enabled() ? "on" : "off";
+  } catch {
+    /* suara belum siap */
+  }
+  const safe = (fn) => {
+    try {
+      return Boolean(fn());
+    } catch {
+      return false;
+    }
+  };
+  return {
+    voice,
+    voiceLangs: Object.values(VOICE_LANGS).map((l) => l.name),
+    voiceMaxChars: voice === "none" ? 0 : readGroupVoiceConfig(process.env, ttsConfig.maxChars).maxChars,
+    hearVoice: safe(() => waVoiceCfg.inGroups && transcriber.available()),
+    pdfRead: PDF_GROUP_READ && !pdfToolMissing,
+    pdfConvert: !pdfToolMissing,
+    pdfMaxMb: Math.round(PDF_MAX_BYTES / 1024 / 1024),
+    image: safe(() => imageGen.available() && imageGen.groupEnabled()),
+    imageEdit: safe(() => imageGen.groupEnabled()),
+    video: safe(() => videoGen.groupEnabled()),
+    photoVideo: safe(() => videoGen.photoGroupEnabled()),
+    story: safe(() => videoGen.storyGroupEnabled())
+  };
+}
+
+function isGroupJid(jid) {
+  return typeof jid === "string" && jid.endsWith("@g.us");
+}
+
+function withGroupNote(basePrompt, jid, { local = false } = {}) {
+  // Nomor kedua boleh punya nama bot sendiri (WA2_NAME): AI memperkenalkan diri dengan nama itu.
+  const base = currentAccountId() === MAIN_ACCOUNT ? basePrompt : personaPrompt(basePrompt, wa2Config.botName);
+  if (!isGroupJid(jid)) return base;
+  // Balasan grup berupa suara: bahasa jawaban dipaksa (/voice wag kor ...) atau diminta anggota grup ("jawab pakai bahasa Korea").
+  const replyLang = waAccountContext.getStore()?.replyLang;
+  const ctxFlags = waAccountContext.getStore();
+  const fileNote = ctxFlags?.wantFile ? FILE_NOTES[ctxFlags.wantFile] || "" : ctxFlags?.textOnly ? TEXT_PROMPT_NOTE : "";
+  let imageNote = "";
+  try {
+    if (imageGen.available() && imageGen.groupEnabled() && !ctxFlags?.wantFile) imageNote = IMAGE_PROMPT_NOTE;
+  } catch {
+    /* pembuat gambar belum siap: tanpa catatan */
+  }
+  let videoNote = "";
+  try {
+    if ((videoGen.groupEnabled() || videoGen.photoGroupEnabled()) && !ctxFlags?.wantFile) videoNote = VIDEO_PROMPT_NOTE;
+  } catch {
+    /* pembuat video belum siap: tanpa catatan */
+  }
+  // Daftar kemampuan bot (dari fitur yang benar-benar aktif) + catatan "jawaban ini akan dibacakan" + isi PDF yang dilampirkan/dibalas.
+  let capNote = "";
+  let voiceNote = "";
+  try {
+    const caps = groupCapabilityFlags();
+    capNote = buildCapabilityNote(caps);
+    if (ctxFlags?.voiceReply) voiceNote = buildVoiceReplyNote(caps);
+  } catch (e) {
+    console.error("Catatan kemampuan grup gagal disusun:", e instanceof Error ? e.message : String(e));
+  }
+  let pdfNote = "";
+  if (ctxFlags?.pdf) {
+    const maxChars = local ? PDF_GROUP_LOCAL_MAX_CHARS : PDF_GROUP_MAX_CHARS;
+    pdfNote = pdfContextNote({ name: ctxFlags.pdf.name, pages: ctxFlags.pdf.pages, truncatedPages: ctxFlags.pdf.truncatedPages, fromReply: ctxFlags.pdf.fromReply, ctx: buildPdfContext(ctxFlags.pdf.markdown, ctxFlags.pdf.question, { maxChars }) });
+  }
+  return `${base}${GROUP_PROMPT_NOTE}${capNote}${imageNote}${videoNote}${fileNote}${voiceNote}${pdfNote}${ctxFlags?.retryNote ? `\n\n${ctxFlags.retryNote}` : ""}${replyLang ? langInstruction(replyLang) : ""}`;
+}
+
+// Buang awalan "Nama: " & baris "(mengutip: ...)" supaya pencarian dokumen/web
+// tidak ikut membawa nama pengirim. Hanya dipakai utk jid grup.
+function stripGroupMeta(jid, text) {
+  if (!isGroupJid(jid) || typeof text !== "string") return text;
+  return text.replace(/\n\(mengutip:[\s\S]*$/, "").replace(/^[^:\n]{1,40}:\s+/, "");
+}
+
+// CATATAN SOAL Dokumen Pengetahuan (tabel knowledge_documents) & web search:
+// sempat diputuskan auto-reply WA TIDAK ikut baca Dokumen Pengetahuan sama
+// sekali (lihat riwayat git) -- itu berlaku SELAMA mesinnya Gemini (yang
+// Gemini-nya sendiri sudah py akses Google Search bawaan lewat tools:
+// google_search di callGeminiOnce, jadi dokumen dirasa tidak perlu).
+//
+// Begitu pindah ke mesin "ollama" (model LOKAL, TIDAK punya akses internet
+// bawaan sama sekali), ceritanya beda: tanpa dikasih konteks, model kecil
+// (3B parameter) kebukti ASAL NGARANG kalau ditanya istilah/aturan resmi
+// yang spesifik (lihat hasil tes qwen2.5:3b soal "LPH" & "bendahara
+// pengeluaran" di riwayat percakapan -- jawabannya ngawur total tanpa
+// konteks, tapi akurat begitu dikasih potongan teks aslinya). Makanya
+// KHUSUS jalur "ollama", auto-reply WA ikut baca Dokumen Pengetahuan LAGI
+// (RAG sederhana, lihat fetchRelevantKnowledgeChunks) DAN dilengkapi
+// pencarian web manual (lihat webSearchBing, scraping Bing HTML -- gratis,
+// tanpa API key, krn model lokal tidak bisa googling sendiri; awalnya
+// coba DuckDuckGo tapi ternyata diblokir ISP user, lihat catatan di
+// webSearchBing).
+//
+// Ringkasnya:
+//   - WA_AI_ENGINE=gemini -> TIDAK pakai Dokumen Pengetahuan (asli), googling
+//     lewat tools bawaan Gemini.
+//   - WA_AI_ENGINE=ollama (default sekarang) -> PAKAI Dokumen Pengetahuan
+//     (RAG) + googling manual (Bing) sebagai "mata" buat model lokal.
+
+// ================================================================
+// RAG (Retrieval-Augmented Generation) SEDERHANA buat mesin "ollama" --
+// nyari potongan Dokumen Pengetahuan yang relevan tanpa butuh vector
+// database/embedding model (terlalu berat buat laptop spek pas-pasan ini,
+// lihat spek CPU/RAM yang di-share user) -- cukup skor "berapa banyak kata
+// penting yang sama" antara pertanyaan & tiap potongan dokumen. Kasar, tapi
+// cukup buat kasus pakai "dokumen resmi berbahasa Indonesia yang istilahnya
+// spesifik" (lihat hasil tes LPH/bendahara pengeluaran) -- dan JAUH lebih
+// ringan drpd embedding.
+// ================================================================
+const RAG_CHUNK_SIZE_CHARS = 700;
+// Diperkecil dari 3000 -> 1500 char (~375 token) setelah tes kecepatan nyata
+// di server user (eval rate ~4.5 token/detik, lihat OLLAMA_TIMEOUT_MS) --
+// prompt yang lebih kecil = prompt eval lebih cepat = lebih jarang kebentur
+// timeout, dgn tetap nyisa cukup ruang buat 1-2 potongan dokumen relevan.
+const RAG_CONTEXT_BUDGET_CHARS = 1500;
+// Dokumen LOKAL (folder dokumen/peraturan-md) bawaannya HANYA untuk pemilik (chat aplikasi + /dokumen).
+// DOC_LOCAL_WA_CONTACTS=true = balasan otomatis Ollama ke kontak/grup juga boleh memakainya (hati-hati: isinya bisa terkutip ke orang lain).
+const DOC_LOCAL_WA_CONTACTS = ["1", "true", "ya", "on", "yes"].includes(String(process.env.DOC_LOCAL_WA_CONTACTS ?? "").trim().toLowerCase());
+const DOC_LOCAL_BUDGET_CHARS = Math.max(1500, Math.min(12000, Number(process.env.DOC_LOCAL_BUDGET_CHARS) || 3500));
+// Kalau potongan dokumen dgn skor tertinggi >= angka ini, pertanyaannya
+// dianggap "jelas soal dokumen kita" -> SKIP pencarian web (lebih cepat &
+// lebih privat, tidak perlu kirim apa pun ke Bing -- DAN lebih penting lagi
+// di CPU lambat begini: skip 1 sumber konteks = prompt lebih kecil = lebih
+// cepat).
+const RAG_STRONG_MATCH_SCORE = 4;
+
+// Daftar kata umum Bahasa Indonesia yang DIBUANG waktu scoring (supaya kata
+// kayak "yang", "untuk", "dengan" tidak dianggap "match" ke semua potongan
+// dokumen secara percuma).
+const ID_STOPWORDS = new Set([
+  "yang", "untuk", "dengan", "pada", "dari", "dan", "atau", "ini", "itu",
+  "ke", "di", "adalah", "akan", "juga", "saja", "bisa", "ada", "tidak",
+  "apa", "apakah", "bagaimana", "kalau", "jika", "karena", "sebagai",
+  "oleh", "dalam", "para", "sudah", "belum", "lebih", "kurang", "agar",
+  "supaya", "hal", "nya", "mu", "ku", "saya", "kamu", "anda", "kita",
+  "mereka", "dia", "tersebut", "begitu", "maka", "namun", "tetapi", "serta",
+  "antara", "tiap", "setiap", "banyak", "sedikit", "satu", "dua", "tiga",
+  "tolong", "mohon", "coba", "gimana", "kenapa", "siapa", "dimana", "kapan",
+  "berapa"
+]);
+
+// Ejaan/singkatan yang SERING beda antara cara orang menulis di WA & di
+// dokumen resmi -- disamakan di kedua sisi (pertanyaan & potongan dokumen)
+// supaya "Jogja" nyambung ke "Yogyakarta" di tabel tarif.
+const ID_ALIASES = {
+  jogja: "yogyakarta",
+  jogjakarta: "yogyakarta",
+  yogya: "yogyakarta",
+  jogyakarta: "yogyakarta",
+  diy: "yogyakarta",
+  gol: "golongan"
+};
+
+// Perluasan KHUSUS sisi pertanyaan: kata yang diketik orang -> istilah yang
+// kemungkinan tertulis di dokumen resmi (alternatif, BUKAN tambahan wajib).
+// Mis. "honor ppk" -> dokumen menulis "honorarium ... Pejabat Pembuat Komitmen".
+const QUERY_EXPANSIONS = {
+  ppk: ["pejabat", "pembuat", "komitmen"],
+  pptk: ["pejabat", "pelaksana", "teknis", "kegiatan"],
+  kpa: ["kuasa", "pengguna", "anggaran"],
+  bpp: ["bendahara", "pengeluaran", "pembantu"],
+  honor: ["honorarium"],
+  honorer: ["honorarium"],
+  uh: ["uang", "harian"],
+  sbm: ["standar", "biaya", "masukan"],
+  sbk: ["standar", "biaya", "keluaran"],
+  perdin: ["perjalanan", "dinas"],
+  spj: ["pertanggungjawaban"]
+};
+
+function tokenizeForScoring(text) {
+  return (text || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .split(/\s+/)
+    .map((w) => ID_ALIASES[w] ?? w)
+    .filter((w) => w.length > 2 && !ID_STOPWORDS.has(w));
+}
+
+// Pecah teks dokumen jadi potongan ~RAG_CHUNK_SIZE_CHARS karakter, usahakan
+// tidak motong di tengah paragraf (gabung paragraf pendek sampai mendekati
+// batas ukuran).
+// Satu paragraf yang jauh lebih panjang dari ukuran potongan (mis. tabel tarif
+// hasil ekstrak PDF yang tidak punya baris kosong) dipecah per baris, dan kalau
+// sebuah baris saja sudah kepanjangan, dipotong per jendela karakter yang
+// saling tumpang-tindih sedikit -- supaya 1 potongan tidak jadi puluhan ribu
+// karakter & baris tabel yang terpotong masih utuh di potongan sebelah.
+function splitOversizedText(text, size) {
+  if (text.length <= size * 2) return [text];
+  const overlap = Math.min(200, Math.floor(size / 4));
+  const out = [];
+  let buf = "";
+  for (const line of text.split("\n")) {
+    if (line.length > size * 2) {
+      if (buf) {
+        out.push(buf);
+        buf = "";
+      }
+      for (let i = 0; i < line.length; i += size - overlap) out.push(line.slice(i, i + size));
+      continue;
+    }
+    if (buf && buf.length + line.length + 1 > size) {
+      out.push(buf);
+      buf = line;
+    } else {
+      buf = buf ? `${buf}\n${line}` : line;
+    }
+  }
+  if (buf) out.push(buf);
+  return out;
+}
+
+// Judul bagian/tabel dokumen resmi ("Tabel 30 Satuan Biaya Penginapan...",
+// "Lampiran I", "BAB II") -- dipakai sebagai konteks potongan lanjutan.
+const HEADING_RE = /^(tabel|lampiran|bab)\b/i;
+
+function chunkDocumentText(text, chunkSize) {
+  // PENTING (tabel panjang): baris-baris tabel di potongan ke-2 dst. TIDAK
+  // memuat judul tabelnya ("Penginapan", "Perjalanan Dinas"...), jadi baris
+  // "D.I. Yogyakarta ..." tidak akan nyambung ke pertanyaan soal penginapan &
+  // tak pernah ketemu. Solusi: tiap potongan lanjutan dari paragraf yang
+  // dipecah diberi awalan "(Lanjutan dari: <judul/awal bagian>…)".
+  let lastHeading = "";
+  let carry = ""; // judul yang menunggu digabung ke paragraf isi berikutnya
+  const paragraphs = [];
+  for (const raw of (text || "").split(/\n{2,}/)) {
+    let p = raw.trim();
+    if (!p) continue;
+    if (p.length <= 200 && HEADING_RE.test(p)) {
+      // Judul digabung ke paragraf isi tepat di bawahnya (bukan jadi potongan
+      // sendiri) supaya isi tabel & judulnya selalu 1 kesatuan.
+      carry = carry ? `${carry} ${p.replace(/\s+/g, " ")}` : p.replace(/\s+/g, " ");
+      lastHeading = carry;
+      continue;
+    }
+    if (carry) {
+      p = `${carry}\n${p}`;
+      carry = "";
+    }
+    const parts = splitOversizedText(p, chunkSize);
+    if (parts.length === 1) {
+      paragraphs.push(parts[0]);
+      continue;
+    }
+    const head = p.slice(0, 160).replace(/\s+/g, " ");
+    const ctx = lastHeading && !head.startsWith(lastHeading.slice(0, 40)) ? `${lastHeading} | ${head}` : head;
+    parts.forEach((part, i) => paragraphs.push(i === 0 ? part : `(Lanjutan dari: ${ctx}…)\n${part}`));
+  }
+  if (carry) paragraphs.push(carry);
+  const chunks = [];
+  let buffer = "";
+  for (const p of paragraphs) {
+    if (buffer && (buffer.length + p.length + 2) > chunkSize) {
+      chunks.push(buffer);
+      buffer = p;
+    } else {
+      buffer = buffer ? `${buffer}\n\n${p}` : p;
+    }
+  }
+  if (buffer) chunks.push(buffer);
+  return chunks;
+}
+
+// Cari potongan Dokumen Pengetahuan paling relevan dgn `question`, dibatasi
+// total `budgetChars` karakter (biar prompt ke Ollama tidak kegedean --
+// inget num_ctx cuma 4096 token & inferensinya CPU-only). Return array
+// kosong kalau tabel kosong/error (BUKAN exception -- kegagalan RAG tidak
+// boleh bikin seluruh auto-reply gagal, cukup lanjut tanpa konteks dokumen).
+// Peringkat potongan dari kumpulan dokumen {title, content} (tanpa akses database) --
+// dipakai fetchRelevantKnowledgeChunks (Dokumen Pengetahuan) & agen chat aplikasi
+// (lampiran file).
+function rankKnowledgeChunks(docs, question, budgetChars) {
+  const qWords = new Set(tokenizeForScoring(question));
+  if (qWords.size === 0 || !docs || docs.length === 0) return [];
+
+  const scored = [];
+  for (const doc of docs) {
+    for (const chunk of chunkDocumentText(doc.content, RAG_CHUNK_SIZE_CHARS)) {
+      const chunkWords = tokenizeForScoring(chunk);
+      if (chunkWords.length === 0) continue;
+      let score = 0;
+      for (const w of chunkWords) {
+        if (qWords.has(w)) score++;
+      }
+      if (score > 0) scored.push({ score, title: doc.title, text: chunk });
+    }
+  }
+  scored.sort((a, b) => b.score - a.score);
+
+  const picked = [];
+  let used = 0;
+  for (const item of scored) {
+    if (used >= budgetChars) break;
+    picked.push(item);
+    used += item.text.length;
+  }
+  return picked;
+}
+
+// Indeks pencarian dokumen di laptop (SQLite FTS5, lihat kb-index.js / kb-ingest.js).
+// Diisi saat start; kalau gagal dibuka, RAG kembali ke cara lama (ambil dari Supabase).
+let kbIndex = null;
+
+// Saring dokumen menurut potongan judul (mis. grup yang hanya boleh memakai surat tertentu). titles=null -> semua.
+function titleMatches(title, titles) {
+  if (!titles || titles.length === 0) return true;
+  const t = String(title || "").toLowerCase();
+  return titles.some((x) => t.includes(String(x).toLowerCase()));
+}
+
+// includeLocal: dokumen folder lokal (id 'local:') hanya ikut bila pemanggilnya memang boleh membacanya
+// (chat aplikasi milik pemilik, perintah /dokumen). Bawaan false, jadi balasan otomatis ke kontak tidak membocorkannya.
+async function fetchRelevantKnowledgeChunks(question, budgetChars, titles = null, { includeLocal = false } = {}) {
+  // Dokumen yang diupload lewat laptop diindeks FULL (tanpa batas ukuran) --
+  // cari di indeks itu dulu. Rekonsiliasi berkala menjamin isinya sama dengan
+  // tabel knowledge_documents, jadi kalau indeks ada isinya, tak perlu ke Supabase.
+  if (kbIndex && kbIndex.hasDocs()) {
+    return kbIndex.search(question, { budgetChars, maxChunks: 8, titles, excludeLocal: !includeLocal }).map(({ title, text }) => ({ title, text }));
+  }
+  const qWords = new Set(tokenizeForScoring(question));
+  if (qWords.size === 0) return [];
+
+  const { data, error } = await supabase.from("knowledge_documents").select("title, content").neq("content", "");
+  if (error) {
+    console.error("RAG: gagal ambil Dokumen Pengetahuan, lanjut tanpa konteks dokumen:", error.message);
+    return [];
+  }
+  const docs = (data ?? []).filter((d) => titleMatches(d.title, titles));
+  if (docs.length === 0) return [];
+  return rankKnowledgeChunks(docs, question, budgetChars);
+}
+
+// ----------------------------------------------------------------
+// Versi untuk mesin GEMINI: dokumen jadi sumber UTAMA angka/tarif/aturan
+// (model dapat potongan dokumen + hasil web, bukan Google Search). Beda dari
+// versi Ollama di atas:
+//   - skor berbobot "kelangkaan kata" (IDF): kata yang jarang di seluruh
+//     dokumen (mis. "yogyakarta") jauh lebih berharga daripada kata yang ada
+//     di mana-mana (mis. "tarif", "golongan") -- jadi baris tabel yang memuat
+//     nama wilayah yang ditanyakan menang atas potongan yang cuma mengulang
+//     kata umum;
+//   - wajib cocok minimal 2 kata berbeda (kecuali query-nya cuma 1-2 kata)
+//     supaya tidak menyodorkan potongan yang kebetulan cuma 1 kata sama
+//     (potongan lanjutan tabel membawa judul tabelnya, lihat chunkDocumentText,
+//     jadi baris "Yogyakarta" di tabel PENGINAPAN cocok 2 kata, sedangkan baris
+//     "Yogyakarta" di tabel uang harian tidak);
+//   - budget lebih besar (Gemini jauh lebih lega dari Ollama CPU), tapi tetap
+//     DIBATASI -- tidak "baca seluruh dokumen";
+//   - dokumen dipotong & diindeks SEKALI lalu di-cache GEMINI_RAG_CACHE_MS,
+//     supaya tiap pertanyaan tidak menarik ulang & memproses semua dokumen.
+// ----------------------------------------------------------------
+const GEMINI_RAG_BUDGET_CHARS = Number(process.env.GEMINI_RAG_BUDGET_CHARS) > 0 ? Number(process.env.GEMINI_RAG_BUDGET_CHARS) : 10000;
+const GEMINI_RAG_MAX_CHUNKS = Number(process.env.GEMINI_RAG_MAX_CHUNKS) > 0 ? Number(process.env.GEMINI_RAG_MAX_CHUNKS) : 8;
+const GEMINI_RAG_MAX_CHUNK_CHARS = 2500;
+const GEMINI_RAG_CACHE_MS = 5 * 60_000;
+let knowledgeIndexCache = { at: 0, chunks: [], df: new Map() };
+
+async function getKnowledgeIndexCached() {
+  if (Date.now() - knowledgeIndexCache.at < GEMINI_RAG_CACHE_MS) return knowledgeIndexCache;
+  const { data, error } = await supabase.from("knowledge_documents").select("title, content");
+  if (error) {
+    console.error("RAG: gagal ambil Dokumen Pengetahuan, lanjut tanpa konteks dokumen:", error.message);
+    return knowledgeIndexCache; // pakai indeks lama kalau ada
+  }
+  const chunks = [];
+  const df = new Map(); // kata -> jumlah potongan yang memuatnya
+  for (const doc of data ?? []) {
+    for (const text of chunkDocumentText(doc.content, RAG_CHUNK_SIZE_CHARS)) {
+      const counts = new Map();
+      for (const w of tokenizeForScoring(text)) counts.set(w, (counts.get(w) || 0) + 1);
+      if (counts.size === 0) continue;
+      chunks.push({ title: doc.title, text, counts });
+      for (const w of counts.keys()) df.set(w, (df.get(w) || 0) + 1);
+    }
+  }
+  knowledgeIndexCache = { at: Date.now(), chunks, df };
+  return knowledgeIndexCache;
+}
+
+// Return [{ score, distinct, title, text }] terurut skor menurun (bisa kosong).
+async function fetchKnowledgeChunksForGemini(query, titles = null) {
+  // Indeks lengkap di laptop (FTS5 + imbuhan, seluruh teks, ber-halaman) lebih baik daripada salinan Supabase yang
+  // terpotong; pencari TF-IDF di bawah hanya cadangan bila indeks laptop tidak aktif/kosong.
+  if (kbIndex && kbIndex.hasDocs()) {
+    return kbIndex
+      // excludeLocal: dokumen dari folder lokal laptop (id 'local:') tidak boleh dikirim ke Gemini/Groq/OpenRouter.
+      .search(query, { budgetChars: GEMINI_RAG_BUDGET_CHARS, maxChunks: GEMINI_RAG_MAX_CHUNKS, titles, excludeLocal: true })
+      .map((b) => ({ score: b.score, distinct: 0, title: b.title, text: b.text }));
+  }
+  const baseTokens = [...new Set(tokenizeForScoring(query))];
+  if (baseTokens.length === 0) return [];
+  // Tiap kata pertanyaan = 1 "grup" alternatif (kata itu + perluasannya).
+  const groups = baseTokens.map((w) => [w, ...(QUERY_EXPANSIONS[w] ?? [])]);
+  const { chunks, df } = await getKnowledgeIndexCached();
+  if (chunks.length === 0) return [];
+  const n = chunks.length;
+  const minDistinct = Math.min(2, groups.length);
+
+  const scored = [];
+  for (const ch of chunks) {
+    if (!titleMatches(ch.title, titles)) continue;
+    let distinct = 0;
+    let score = 0;
+    for (const group of groups) {
+      let best = 0;
+      for (const w of group) {
+        const c = ch.counts.get(w);
+        if (!c) continue;
+        const s = Math.log(1 + n / (df.get(w) || 1)) * (1 + 0.1 * Math.min(c - 1, 4));
+        if (s > best) best = s;
+      }
+      if (best > 0) {
+        distinct++;
+        score += best;
+      }
+    }
+    if (distinct >= minDistinct) scored.push({ score, distinct, title: ch.title, text: ch.text });
+  }
+  scored.sort((a, b) => b.score - a.score);
+
+  const picked = [];
+  let used = 0;
+  for (const item of scored) {
+    if (picked.length >= GEMINI_RAG_MAX_CHUNKS || used >= GEMINI_RAG_BUDGET_CHARS) break;
+    const text = item.text.length > GEMINI_RAG_MAX_CHUNK_CHARS ? `${item.text.slice(0, GEMINI_RAG_MAX_CHUNK_CHARS)}...` : item.text;
+    picked.push({ ...item, text });
+    used += text.length;
+  }
+  return picked;
+}
+
+// ================================================================
+// Pencarian web "manual" buat model lokal (yang TIDAK punya akses internet
+// bawaan seperti Gemini) -- scraping halaman hasil BING (bing.com/search),
+// BUKAN API resmi berbayar, tanpa API key, cocok buat pemakaian personal
+// skala kecil begini.
+//
+// KENAPA BING, BUKAN DuckDuckGo? Sempat dicoba DuckDuckGo duluan, tapi
+// kebukti (lihat tes di server user, error ERR_TLS_CERT_ALTNAME_INVALID
+// dgn sertifikat milik domain ISP "ioh.co.id") provider internet user
+// MEMBLOKIR/meng-intersepsi koneksi ke html.duckduckgo.com di level
+// jaringan -- bukan soal kode. Bing & Google dites BISA diakses normal
+// (status 200) dari jaringan yang sama, jadi dipindah ke Bing (scraping
+// Google lebih berisiko kena CAPTCHA/block krn lebih agresif deteksi bot).
+//
+// Kalau suatu saat strukturnya berubah atau diblokir juga & parsing ini
+// berhenti nemu apa-apa, paling auto-reply jalan TANPA hasil web (fallback
+// aman, lihat pemanggil), bukan bikin bot crash -- tapi jalankan
+// test-ollama-websearch.mjs buat ketahuan dari awal kalau ini kejadian.
+// ================================================================
+async function webSearchBing(query, maxResults) {
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10000);
+    const url = `https://www.bing.com/search?q=${encodeURIComponent(query)}`;
+    let res;
+    try {
+      res = await fetch(url, {
+        headers: {
+          "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+          "Accept-Language": "id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7"
+        },
+        signal: controller.signal
+      });
+    } finally {
+      clearTimeout(timeout);
+    }
+    if (!res.ok) return [];
+    const html = await res.text();
+    const $ = cheerio.load(html);
+    const results = [];
+    // Struktur umum halaman hasil Bing: tiap hasil ada di <li class="b_algo">,
+    // judul di dalam <h2>, ringkasan di ".b_caption p" (kadang berubah jadi
+    // class ".b_lineclampN" tergantung versi) -- dicoba beberapa fallback
+    // selector ringkasan biar tidak gampang nemu 0 hasil cuma gara2 Bing
+    // ganti nama class.
+    // Snippet dipotong max 220 karakter -- Bing kadang ngasih cuplikan cukup
+    // panjang, dan tiap karakter ekstra di sini ikut numpuk ke ukuran prompt
+    // yang harus "dibaca" Ollama (lihat catatan kecepatan di
+    // RAG_CONTEXT_BUDGET_CHARS).
+    const SNIPPET_MAX_CHARS = 220;
+    $("li.b_algo").each((_, el) => {
+      if (results.length >= maxResults) return;
+      const title = $(el).find("h2").text().trim();
+      let snippet = $(el).find(".b_caption p").first().text().trim();
+      if (!snippet) snippet = $(el).find("[class^='b_lineclamp']").first().text().trim();
+      if (!snippet) snippet = $(el).find("p").first().text().trim();
+      if (snippet.length > SNIPPET_MAX_CHARS) snippet = `${snippet.slice(0, SNIPPET_MAX_CHARS)}...`;
+      if (title || snippet) results.push({ title, snippet });
+    });
+    return results;
+  } catch (err) {
+    console.error("Web search (Bing) gagal, lanjut tanpa hasil web:", err instanceof Error ? err.message : String(err));
+    return [];
+  }
+}
+// Diperkecil dari 4 -> 3 hasil (alasan sama: makin sedikit teks yang
+// disodorkan ke Ollama, makin cepat prompt eval-nya -- lihat catatan
+// kecepatan di RAG_CONTEXT_BUDGET_CHARS).
+const WEB_SEARCH_MAX_RESULTS = 3;
+
+// Pencarian web: API (Tavily/Serper/Brave, kalau key-nya diisi di .env) dengan rotasi key, lalu Bing
+// (scraping di atas) sebagai cadangan terakhir. Hasil API membawa URL sumber. Lihat web-search.js.
+const webSearch = createWebSearch({ config: readSearchConfig(process.env), bing: webSearchBing, onEvent: (e) => reportLlmEvent(e) });
+if (webSearch.available()) console.log(`🔎 Pencarian web: ${webSearch.describe()}`);
+
+// Gabung potongan dokumen + hasil web (kalau ada) jadi 1 blok teks yang
+// ditaruh SEBELUM pertanyaan asli di giliran "user" terakhir -- pola ini
+// (konteks + pertanyaan dalam 1 pesan yang sama) PERSIS yang terbukti
+// jalan di tes manual qwen2.5:3b (lihat riwayat percakapan: model jadi
+// akurat & tidak ngarang begitu konteksnya ditaruh jadi satu kesatuan
+// dengan pertanyaan, drpd dipisah jadi system message terpisah yang kadang
+// diabaikan model kecil).
+function buildGroundedUserMessage(originalText, docChunks, webResults) {
+  const parts = [];
+  if (docChunks.length > 0) {
+    const docBlock = docChunks.map((c) => `[Dari dokumen: ${c.title}]\n${c.text}`).join("\n\n");
+    parts.push(`KONTEKS DOKUMEN (dari Dokumen Pengetahuan, dicarikan otomatis, mungkin relevan -- kalau tidak relevan, abaikan):\n${docBlock}`);
+  }
+  if (webResults.length > 0) {
+    const webBlock = webResults.map((r, i) => `${i + 1}. ${r.title} -- ${r.snippet}${r.url ? `\n   Sumber: ${r.url}` : ""}`).join("\n");
+    parts.push(`HASIL PENCARIAN WEB (dicarikan otomatis, mungkin relevan -- kalau tidak relevan, abaikan):\n${webBlock}`);
+  }
+  if (parts.length === 0) return originalText;
+  return `${parts.join("\n\n")}\n\nPertanyaan dari kontak: ${originalText}`;
+}
+
+// Prompt sistem KHUSUS mesin "ollama" -- isinya sama persis dgn
+// WA_BASE_SYSTEM_PROMPT (rem pengaman TIDAK berubah) tapi paragraf
+// "akses pencarian Google" diganti penjelasan soal blok KONTEKS
+// DOKUMEN/HASIL PENCARIAN WEB yang disisipkan manual (lihat
+// buildGroundedUserMessage) -- model lokal tidak punya tools bawaan
+// seperti Gemini, jadi perlu dikasih tau eksplisit gimana cara pakai
+// konteks itu & kapan HARUS mengaku tidak tahu drpd mengarang.
+const WA_OLLAMA_SYSTEM_PROMPT = `Kamu adalah asisten AI yang membalas pesan WhatsApp ATAS NAMA pemilik nomor ini secara OTOMATIS, tanpa pemilik nomor sempat membaca/menyetujui dulu. Namamu Ayyubi: asisten AI otomatis milik pemilik nomor ini. Kalau lawan bicara bertanya siapa kamu, perkenalkan dirimu sebagai Ayyubi, asisten AI (bukan manusia) yang membantu atas nama pemilik nomor; jangan mengaku sebagai pemilik nomor. Kamu jalan sebagai model AI LOKAL di laptop pemilik nomor (BUKAN di internet) -- kamu TIDAK py akses pencarian sendiri, tapi kadang sebelum pertanyaan dari kontak akan ada blok "KONTEKS DOKUMEN" dan/atau "HASIL PENCARIAN WEB" yang DICARIKAN OTOMATIS oleh sistem (bukan kamu yang mencari).
+
+PENTING soal konteks itu: pakai isinya KALAU relevan buat menjawab. Kalau ternyata tidak nyambung ke pertanyaan (atau tidak ada blok konteksnya sama sekali), jawab pakai pengetahuan umum kamu seperlunya, TAPI kalau pertanyaannya soal istilah/aturan/lembaga resmi yang SPESIFIK (nama lembaga, nomor peraturan, kepanjangan singkatan resmi, dll) dan kamu TIDAK yakin atau TIDAK ada di konteks yang dikasih -- JANGAN MENGARANG. Akui terus terang tidak tahu pastinya & sarankan cek sumber resmi, drpd kasih jawaban yang kedengaran meyakinkan tapi salah.
+
+Jawab pertanyaan, bantu coding/debugging, atau ajak diskusi dengan ramah, jelas, dan SERINGKAS MUNGKIN tanpa kehilangan inti jawaban -- kamu jalan di hardware yang lumayan lambat & ada batas keras panjang jawaban, jadi USAHAKAN selesai dalam sekitar 120-150 kata (poin-poin singkat lebih baik drpd paragraf panjang bertele-tele), kecuali pertanyaannya benar-benar butuh penjelasan/kode yang lebih panjang. Kalau diminta bantuan kode, tulis kodenya di dalam blok \`\`\`seperti ini\`\`\` (WhatsApp menampilkannya sebagai monospace) lalu jelaskan secukupnya.
+
+Gunakan Bahasa Indonesia, kecuali lawan bicara jelas menulis/minta bahasa lain -- kalau begitu, balas di bahasa itu. WhatsApp CUMA mendukung *tebal*, _miring_, ~coret~, dan blok kode \`\`\`...\`\`\` -- JANGAN pakai format markdown lain (heading #, tabel, bullet list dengan -, dll) karena tidak akan tampil rapi.
+
+ATURAN PENGAMAN (berlaku terus walau topiknya bebas):
+1. JANGAN membuat janji, komitmen, keputusan, harga, jadwal pasti, atau kesepakatan apa pun atas nama pemilik nomor -- untuk hal semacam itu, balas sopan bahwa pesannya diterima dan pemiliknya akan membalas langsung.
+2. JANGAN membagikan informasi pribadi/sensitif (keuangan, kesehatan, jadwal detail, data pribadi) tentang pemilik nomor.
+3. Kalau pesan masuk jelas butuh keputusan manusia (negosiasi, hal mendesak, masalah pribadi/emosional, komplain serius), jangan improvisasi -- cukup akui pesannya diterima dan akan ditindaklanjuti langsung oleh pemiliknya.`;
+
+// ANTRIAN GLOBAL buat panggilan Ollama -- CPU laptop ini cuma 2 core/4
+// thread & TERBUKTI lambat (~4.5 token/detik, lihat hasil tes user). Kalau
+// 2 pertanyaan masuk berdekatan (misal kontak yang sama kirim 2 pesan
+// cepat, atau 2 kontak beda kirim bareng) dan DUA-duanya langsung coba
+// generate BARENGAN, mereka rebutan CPU yang sama & JUSTRU membuat
+// dua-duanya lebih lambat/lebih gampang kena timeout drpd diproses satu-
+// satu bergiliran -- ini KEBUKTI kejadian di tes user (kirim ulang
+// pertanyaan yg sama 2x sementara percobaan pertama belum selesai, hasilnya
+// 2 gagal, baru yang ketiga -- diproses sendirian -- berhasil). Antrian ini
+// memaksa cuma ADA 1 panggilan Ollama yang benar2 jalan dalam satu waktu;
+// panggilan lain nunggu giliran drpd jalan bareng & saling memperlambat.
+// Satu baris "Waktu sekarang: ..." -- model lokal juga TIDAK tahu tanggal hari ini.
+function currentDateLine() {
+  const nowText = new Intl.DateTimeFormat("id-ID", { dateStyle: "full", timeStyle: "short", timeZone: WA_TIMEZONE }).format(new Date());
+  return `Waktu sekarang: ${nowText} ${WA_TIMEZONE_LABEL}. Anggap ini tanggal hari ini.`;
+}
+
+// Antrean berprioritas (lihat ollama-queue.js): chat aplikasi (0) mendahului
+// balasan WhatsApp (1) yang mendahului pekerjaan latar seperti ringkasan harian (2).
+// `pending` = jumlah panggilan yang lagi jalan/menunggu giliran -- cadangan
+// auto-reply tidak mau ikut mengantre di belakang pekerjaan lain, supaya kontak
+// tidak menunggu lama; lihat sendAutoReply.
+const ollamaQueue = createPriorityQueue({ agingMs: Number(process.env.OLLAMA_QUEUE_AGING_MS) || 120000 });
+function enqueueOllamaCall(fn, opts) {
+  // Kantor AI: setiap pekerjaan model lokal terlihat sebagai kerja "Agen Lokal" (server Linux + Ollama).
+  const agen = office.task("agen");
+  const boss = opts?.label === "wa-reply" ? office.task(officeWho()) : null;
+  const what = ollamaJobLabel(opts?.label);
+  if (ollamaQueue.pending > 0) agen.think(`${what} (antre ${ollamaQueue.pending})`);
+  boss?.handoff("agen", "pesan", "Menyerahkan ke model lokal (Ollama)");
+  return ollamaQueue.enqueue(async () => {
+    agen.work(what, 35);
+    try {
+      const out = await fn();
+      agen.done("Selesai");
+      if (boss) agen.handoff(officeWho(), "pesan", "Jawaban jadi");
+      return out;
+    } catch (err) {
+      agen.fail(ollamaReason(err));
+      throw err;
+    }
+  }, opts);
+}
+
+// Cadangan: model yang terakhir dipakai. Kalau panggilan berikutnya memakai
+// model LAIN, model lama dibongkar dari RAM dulu (keep_alive 0) -- laptop ini
+// hanya 7,5 GB RAM, dua model dimuat bareng akan membuat sistem swap berat.
+let lastOllamaModel = null;
+async function unloadOllamaModel(model) {
+  try {
+    await fetch(`${OLLAMA_BASE_URL}/api/generate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model, keep_alive: 0 }),
+      signal: AbortSignal.timeout(15000)
+    });
+  } catch {
+    // best-effort
+  }
+}
+
+// Info memori laptop (Linux) untuk halaman Status Sistem.
+function readMemInfo() {
+  try {
+    const txt = fs.readFileSync("/proc/meminfo", "utf8");
+    const kb = (k) => {
+      const m = txt.match(new RegExp(`^${k}:\\s+(\\d+)`, "m"));
+      return m ? Number(m[1]) : 0;
+    };
+    return {
+      totalMB: Math.round(kb("MemTotal") / 1024),
+      availableMB: Math.round(kb("MemAvailable") / 1024),
+      swapUsedMB: Math.round((kb("SwapTotal") - kb("SwapFree")) / 1024)
+    };
+  } catch {
+    return null;
+  }
+}
+
+// Satu kali panggilan ke Ollama (server lokal, default port 11434 -- lihat
+// OLLAMA_BASE_URL) pakai endpoint /api/chat (format "messages" kayak
+// OpenAI/Gemini chat API, BUKAN /api/generate yang formatnya 1 prompt
+// mentah). stream:false biar responsnya 1 JSON utuh sekali balik, bukan
+// potongan-potongan (lebih gampang ditangani drpd streaming, auto-reply WA
+// toh baru dikirim setelah teksnya LENGKAP).
+async function callOllamaChat(messages, { timeoutMs = OLLAMA_TIMEOUT_MS, maxTokens = OLLAMA_MAX_OUTPUT_TOKENS, numCtx = OLLAMA_NUM_CTX, format = undefined, temperature = 0.4, model = OLLAMA_MODEL, onToken = undefined } = {}) {
+  if (lastOllamaModel && lastOllamaModel !== model) await unloadOllamaModel(lastOllamaModel);
+  lastOllamaModel = model;
+  // Lewat node:http + stream (lihat ollama-http.js): fetch bawaan Node memutus
+  // request yang menunggu > 300 detik ("fetch failed"), padahal di laptop ini
+  // jawaban berbasis dokumen bisa lebih lama dari itu.
+  let content;
+  try {
+    ({ content } = await ollamaChatStream({
+      baseUrl: OLLAMA_BASE_URL,
+      timeoutMs,
+      onToken,
+      body: {
+        model,
+        messages,
+        // keep_alive: berapa lama model dibiarkan di RAM sejak pemakaian terakhir
+        // (lihat OLLAMA_KEEP_ALIVE di atas).
+        keep_alive: OLLAMA_KEEP_ALIVE,
+        ...(format ? { format } : {}),
+        options: { num_ctx: numCtx, num_predict: maxTokens, temperature }
+      }
+    }));
+  } catch (err) {
+    providerStats.record({ provider: "ollama", kind: "error", error: err instanceof Error ? err.message : String(err) });
+    throw err;
+  }
+  providerStats.record({ provider: "ollama", kind: "success", model });
+  return content;
+}
+
+// Versi generateAutoReply KHUSUS mesin "ollama": ambil riwayat (sama persis
+// query & urutan dgn versi Gemini di bawah -- lihat catatan descending+
+// reverse di sana soal kenapa), lalu SISIPKAN konteks RAG + web search ke
+// pertanyaan TERAKHIR sebelum dikirim ke Ollama. tokensUsed/costUsd selalu
+// 0 (model lokal, tidak ada biaya/kuota token API) -- recordTokenUsage
+// sudah otomatis skip kalau tokensUsed 0, jadi tidak mencemari angka
+// pemakaian Gemini di footer aplikasi.
+async function generateAutoReplyWithOllama(jid, { timeoutMs } = {}) {
+  const { data: historyRowsDesc, error: historyErr } = await supabase
+    .from("whatsapp_messages")
+    .select("direction, content")
+    .eq("wa_jid", jid)
+    .order("created_at", { ascending: false })
+    .limit(OLLAMA_HISTORY_LIMIT);
+  if (historyErr) throw new Error(`Gagal ambil riwayat: ${historyErr.message}`);
+
+  const historyRows = (historyRowsDesc ?? []).slice().reverse();
+  const messages = historyRows
+    .filter((row) => row.content)
+    .map((row) => ({ role: row.direction === "in" ? "user" : "assistant", content: row.content }));
+
+  while (messages.length > 0 && messages[messages.length - 1].role === "assistant") {
+    messages.pop();
+  }
+  if (messages.length === 0) return null;
+
+  const question = messages[messages.length - 1].content;
+  const searchQuestion = stripGroupMeta(jid, question);
+
+  // Grup: obrolan santai tidak perlu dokumen/web (lihat GROUP_LOOKUP_RE).
+  // Dokumen (pencarian lokal, murah) boleh selalu dicari di grup (WA_GROUP_DOCS); web (Bing) tetap hanya bila ada kata kunci.
+  // Pertanyaan tentang PDF yang dilampirkan/dibalas: jawab dari isi PDF saja (tanpa cari web/dokumen lain yang tidak nyambung).
+  const pdfAsked = Boolean(isGroupJid(jid) && waAccountContext.getStore()?.pdf);
+  const lookupAllowed = !pdfAsked && (!isGroupJid(jid) || GROUP_LOOKUP_RE.test(searchQuestion));
+  const docsAllowed = !pdfAsked && (lookupAllowed || (GROUP_DOCS_ALWAYS && searchQuestion.trim().split(/\s+/).length >= 3));
+  const pinnedTitles = docTitlesFor(jid);
+  const docChunks = docsAllowed ? await fetchRelevantKnowledgeChunks(searchQuestion, RAG_CONTEXT_BUDGET_CHARS, pinnedTitles, { includeLocal: DOC_LOCAL_WA_CONTACTS }) : [];
+  const topScore = docChunks[0]?.score ?? 0;
+  const webResults = !lookupAllowed || pinnedTitles || topScore >= RAG_STRONG_MATCH_SCORE ? [] : await webSearch.search(searchQuestion, WEB_SEARCH_MAX_RESULTS, { snippetChars: 220 });
+
+  // Log diagnostik ringan (BUKAN isi lengkap dokumen/pertanyaan, cuma
+  // judul+skor) -- biar kalau jawabannya aneh/salah sasaran lagi, langsung
+  // ketahuan dari `pm2 logs` apakah sebabnya RAG salah nyangkut ke dokumen
+  // yang gak relevan (lihat judulnya), pencarian Bing yang di-skip/gagal,
+  // atau murni modelnya sendiri yang salah paham walau konteksnya benar.
+  const docTitlesPreview = docChunks.map((c) => `"${c.title}"(skor ${c.score})`).join(", ") || "-";
+  console.log(
+    `🔍 [RAG+web] jid=${jid} skorTertinggi=${topScore} dokumenDipakai=[${docTitlesPreview}] ` +
+      `webDi-skip=${topScore >= RAG_STRONG_MATCH_SCORE ? "ya (skor kuat)" : "tidak"} hasilWeb=${webResults.length}`
+  );
+
+  messages[messages.length - 1] = {
+    role: "user",
+    content: buildGroundedUserMessage(question, docChunks, webResults)
+  };
+
+  // Lewat antrian (enqueueOllamaCall) -- lihat catatan di atasnya kenapa:
+  // timer timeout (OLLAMA_TIMEOUT_MS) baru mulai jalan begitu giliran
+  // permintaan ini BENERAN dieksekusi (bukan dari saat masuk antrian), jadi
+  // nunggu antrian TIDAK ikut makan jatah waktu timeout-nya.
+  const replyText = await enqueueOllamaCall(
+    () =>
+      callOllamaChat(
+        [{ role: "system", content: `${withGroupNote(WA_OLLAMA_SYSTEM_PROMPT, jid, { local: true })}\n\n${currentDateLine()}` }, ...messages],
+        { ...(timeoutMs ? { timeoutMs } : {}), ...(docChunks.length > 0 || pdfAsked ? { temperature: OLLAMA_DOC_TEMPERATURE } : {}), ...(pdfAsked ? { numCtx: Math.max(OLLAMA_NUM_CTX, PDF_GROUP_NUM_CTX) } : {}) }
+      ),
+    { priority: PRIORITY.WA, label: "wa-reply" }
+  );
+
+  return { reply: replyText.trim(), tokensUsed: 0, costUsd: 0 };
+}
+
+// Tabel harga & logika estimasi biaya -- SALINAN dari
+// supabase/functions/_shared/gemini.ts, lihat catatan sinkronisasi di atas.
+const GEMINI_3_6_FLASH_PRICE_BUMP_AT = new Date("2027-01-01T00:00:00Z");
+function getModelPricing(model) {
+  const table = {
+    "gemini-3.6-flash": new Date() < GEMINI_3_6_FLASH_PRICE_BUMP_AT ? { input: 0.75, output: 3.75 } : { input: 1.5, output: 7.5 },
+    "gemini-3.5-flash": { input: 1.5, output: 9.0 }
+  };
+  return table[model] ?? table["gemini-3.6-flash"];
+}
+function estimateCostUsd(model, promptTokens, outputTokens) {
+  const price = getModelPricing(model);
+  return (promptTokens / 1_000_000) * price.input + (outputTokens / 1_000_000) * price.output;
+}
+
+// ================================================================
+// ROTASI BEBERAPA API KEY GEMINI -- lihat GEMINI_API_KEYS di atas. Dipakai
+// kalau user py lebih dari 1 akun Google, tiap akun bikin API key sendiri2
+// di AI Studio, masing2 dapat jatah gratis 20 request/hari SENDIRI2 --
+// begitu key yang lagi dipakai kena 429 (RESOURCE_EXHAUSTED, lihat error
+// "GenerateRequestsPerDayPerProjectPerModel-FreeTier" yg kejadian di
+// riwayat percakapan), otomatis pindah ke key berikutnya yg belum habis,
+// drpd auto-reply diam/fallback padahal masih ada jatah di key lain.
+//
+// Kapan sebuah key dianggap "boleh dicoba lagi": quota gratis Gemini
+// kebiasaannya reset tiap tengah malam Pacific Time (konsisten dgn
+// timezone yg sudah dipakai utk token_usage harian di recordTokenUsage di
+// bawah) -- jadi begitu 1 key kena 429, ditandai "jangan dipakai lagi
+// sampai tengah malam Pacific berikutnya" drpd dicoba berulang2 sia2.
+const geminiKeyExhaustedUntil = new Map(); // apiKey -> timestamp ms boleh dicoba lagi
+let geminiKeyCursor = 0; // index key yg jadi titik mulai pencarian berikutnya
+
+function nextMidnightPacificMs() {
+  const pacificNowStr = new Date().toLocaleString("en-US", { timeZone: "America/Los_Angeles" });
+  const pacificNow = new Date(pacificNowStr);
+  const nextMidnight = new Date(pacificNow);
+  nextMidnight.setHours(24, 0, 5, 0); // +5 detik jaga2 drpd pas-pasan
+  return Date.now() + (nextMidnight.getTime() - pacificNow.getTime());
+}
+
+// Cari API key yg belum ditandai habis, mulai dari geminiKeyCursor (biar
+// gilirannya muter rata, bukan selalu balik ke key #0 duluan). Return null
+// kalau SEMUA key lagi dalam masa "habis".
+function pickAvailableGeminiKey() {
+  const now = Date.now();
+  for (let i = 0; i < GEMINI_API_KEYS.length; i++) {
+    const idx = (geminiKeyCursor + i) % GEMINI_API_KEYS.length;
+    const key = GEMINI_API_KEYS[idx];
+    if (now >= (geminiKeyExhaustedUntil.get(key) || 0)) return key;
+  }
+  return null;
+}
+
+// Tanggal "hari ini" zona Pasifik (YYYY-MM-DD) -- sama dgn kunci harian
+// token_usage & reset kuota Gemini.
+function pacificDateString() {
+  return new Intl.DateTimeFormat("en-CA", { timeZone: "America/Los_Angeles" }).format(new Date());
+}
+
+// Pengenal key yang AMAN disimpan/ditampilkan: 4 karakter terakhir saja.
+function geminiKeyHint(key) {
+  return key.slice(-4);
+}
+
+// Ambil teks jawaban dari respons Gemini dengan menggabung SEMUA bagian
+// (parts) yang berupa teks. Model "thinking" kadang mengirim bagian PERTAMA
+// berisi text:"" + thoughtSignature, dan jawaban aslinya baru ada di bagian
+// berikutnya -- membaca parts[0] saja salah mengira respons kosong & bot
+// membalas "sistem penuh" padahal AI-nya sebenarnya menjawab.
+function extractGeminiText(data) {
+  const parts = data?.candidates?.[0]?.content?.parts;
+  if (!Array.isArray(parts)) return "";
+  return parts
+    .filter((p) => typeof p?.text === "string" && !p.thought)
+    .map((p) => p.text)
+    .join("");
+}
+
+// Ringkas pesan error 429 dari Google jadi 1 baris yang memuat PENYEBAB-nya.
+// Respons aslinya JSON panjang; bagian yang berguna (quotaId / quotaMetric,
+// model, retryDelay) ada di "details" SETELAH kalimat generik "You exceeded
+// your current quota...", jadi kalau cuma dipotong 300 karakter dari depan
+// bagian itu hilang. Gagal parse = jatuh ke potongan teks mentah.
+function summarizeGeminiError(raw) {
+  const text = String(raw ?? "");
+  try {
+    const start = text.indexOf("{");
+    const parsed = start >= 0 ? JSON.parse(text.slice(start)) : null;
+    const e = parsed?.error;
+    if (e) {
+      const parts = [];
+      if (e.code) parts.push(String(e.code));
+      const violations = [];
+      let retry = "";
+      for (const d of e.details ?? []) {
+        if (Array.isArray(d?.violations)) violations.push(...d.violations);
+        if (d?.retryDelay) retry = String(d.retryDelay);
+      }
+      for (const v of violations.slice(0, 3)) {
+        const model = v?.quotaDimensions?.model;
+        parts.push(`${v?.quotaId || v?.quotaMetric || "kuota?"}${model ? ` [${model}]` : ""}`);
+      }
+      if (retry) parts.push(`retry ${retry}`);
+      const msg = String(e.message ?? "").split("\n")[0].slice(0, 140);
+      if (msg) parts.push(msg);
+      if (parts.length > 1 || (parts.length === 1 && msg)) return parts.join(" | ").slice(0, 600);
+    }
+  } catch {
+    // bukan JSON -- pakai teks mentah di bawah
+  }
+  return text.slice(0, 600);
+}
+
+// Catat kejadian key ke tabel gemini_key_usage (buat layar "Status API
+// Gemini" di aplikasi). Best-effort: gagal catat TIDAK boleh mengganggu
+// auto-reply (mis. migration 0013 belum dijalankan).
+let keyReportWarned = false;
+function reportKeyEvent(key, { requestsInc = 0, exhaustedUntilMs = null, error = null } = {}) {
+  if (requestsInc > 0) providerStats.record({ provider: "gemini", kind: "success", model: GEMINI_MODEL, keyHint: geminiKeyHint(key) });
+  else if (exhaustedUntilMs) providerStats.record({ provider: "gemini", kind: "exhausted", keyHint: geminiKeyHint(key), untilMs: exhaustedUntilMs, error: summarizeGeminiError(error) });
+  supabase
+    .rpc("report_gemini_key_event", {
+      p_usage_date: pacificDateString(),
+      p_key_hint: geminiKeyHint(key),
+      p_source: "wa-bot",
+      p_requests_inc: requestsInc,
+      p_exhausted_until: exhaustedUntilMs ? new Date(exhaustedUntilMs).toISOString() : null,
+      p_error: error ? summarizeGeminiError(error) : null
+    })
+    .then(({ error: rpcErr }) => {
+      if (rpcErr && !keyReportWarned) {
+        keyReportWarned = true;
+        console.warn(`Gagal catat status key Gemini ke database (sudah jalankan migration 0013?): ${rpcErr.message}`);
+      }
+    })
+    .catch(() => {});
+}
+
+// Catat pemakaian penyedia cadangan (Groq/OpenRouter) untuk layar "Status Sistem" di aplikasi
+// (tabel gemini_key_usage, kolom provider -- migration 0020). Hanya 4 karakter terakhir key.
+let llmReportWarned = false;
+function reportLlmEvent(e) {
+  providerStats.record(e);
+  supabase
+    .rpc("report_llm_key_event", {
+      p_provider: e.provider,
+      p_usage_date: new Date().toISOString().slice(0, 10),
+      p_key_hint: e.keyHint,
+      p_source: "wa-bot",
+      p_requests_inc: e.kind === "success" ? 1 : 0,
+      p_exhausted_until: e.untilMs ? new Date(e.untilMs).toISOString() : null,
+      p_error: e.kind === "success" ? null : e.error ?? null,
+      p_model: e.kind === "success" ? e.model || null : null,
+      p_clear_exhausted: e.kind === "success"
+    })
+    .then(({ error }) => {
+      if (error && !llmReportWarned) {
+        llmReportWarned = true;
+        console.warn(`Gagal catat pemakaian penyedia cadangan/pencarian (sudah jalankan migration 0020 dan 0022?): ${error.message}`);
+      }
+    })
+    .catch(() => {});
+}
+
+// Waktu start/restart bot: ingat key yang SUDAH habis hari ini (dicatat bot
+// ini sendiri sebelumnya), supaya habis restart bot tidak buang-buang request
+// mencoba key yang sudah pasti ditolak lagi. Hanya baris source='wa-bot' yang
+// dipakai -- status dari Edge Function chat bisa beda (model/jalur berbeda).
+async function primeExhaustedKeysFromDb() {
+  if (WA_AI_ENGINE !== "gemini" || GEMINI_API_KEYS.length === 0) return;
+  try {
+    const baseQuery = () =>
+      supabase
+        .from("gemini_key_usage")
+        .select("key_hint, exhausted_until")
+        .eq("usage_date", pacificDateString())
+        .eq("source", "wa-bot")
+        .gt("exhausted_until", new Date().toISOString());
+    // Hanya baris Gemini (kolom provider ada sejak migration 0020; sebelum itu semua baris memang Gemini).
+    let { data, error } = await baseQuery().eq("provider", "gemini");
+    if (error) ({ data, error } = await baseQuery());
+    if (error) return; // tabel belum ada / error lain: abaikan, bot tetap jalan normal
+    for (const row of data ?? []) {
+      const matches = GEMINI_API_KEYS.filter((k) => geminiKeyHint(k) === row.key_hint);
+      if (matches.length !== 1) continue; // hint ambigu: lebih aman tidak ditebak
+      geminiKeyExhaustedUntil.set(matches[0], new Date(row.exhausted_until).getTime());
+      console.log(`ℹ️  API key Gemini ...${row.key_hint} tercatat masih habis kuota, dilewati sampai reset.`);
+    }
+  } catch (_err) {
+    /* abaikan */
+  }
+}
+
+// ---------------- Alert "semua API key habis" ke nomor pemilik ----------------
+// True kalau SEMUA key lagi dalam masa istirahat PANJANG (> 10 menit = jatah
+// harian habis, bukan sekadar rate-limit per menit yang sembuh sendiri).
+function allGeminiKeysExhaustedForLong() {
+  if (GEMINI_API_KEYS.length === 0) return false;
+  const threshold = Date.now() + 10 * 60_000;
+  return GEMINI_API_KEYS.every((k) => (geminiKeyExhaustedUntil.get(k) || 0) > threshold);
+}
+
+function formatClockInTimezone(ms) {
+  return new Intl.DateTimeFormat("id-ID", { timeZone: WA_TIMEZONE, hour: "2-digit", minute: "2-digit", hourCycle: "h23" })
+    .format(new Date(ms))
+    .replace(".", ":");
+}
+
+// Dipanggil tiap kali sebuah key ditandai habis (atau saat semua key sudah
+// habis waktu mau dipakai). Maksimal SEKALI per hari (dicatat di bot_state,
+// jadi aman walau bot di-restart) supaya tidak spam.
+let allKeysAlertInFlight = false;
+async function notifyOwnerAllKeysExhausted() {
+  const waReady = Boolean(OWNER_JID && currentSock);
+  if ((!waReady && !telegramCanNotify()) || allKeysAlertInFlight || !allGeminiKeysExhaustedForLong()) return;
+  allKeysAlertInFlight = true;
+  try {
+    const today = pacificDateString();
+    const { data } = await supabase.from("bot_state").select("value").eq("key", "all_keys_alert_date").maybeSingle();
+    if (data?.value === today) return;
+
+    const resetMs = Math.min(...GEMINI_API_KEYS.map((k) => geminiKeyExhaustedUntil.get(k) || Infinity));
+    const resetText = Number.isFinite(resetMs) ? `sekitar pukul ${formatClockInTimezone(resetMs)} ${WA_TIMEZONE_LABEL}` : "besok";
+    const alertText =
+        `⚠️ *Semua API key Gemini habis kuota harian* (${GEMINI_API_KEYS.length} key).\n\n` +
+        `Gemini tidak bisa dipakai sampai kuota reset, ${resetText}. ` +
+        (llmFallback.available() ? "" : `Pesan WA yang masuk selama itu akan dibalas otomatis begitu kuota kembali.`) + `\n\n` +
+        (llmFallback.available()
+          ? `Bot WA beralih otomatis ke penyedia cadangan (${llmFallback.describe()}), jadi balasan tetap jalan tanpa Google Search.`
+          : `Tambah API key baru di GEMINI_API_KEYS (bot WA) dan secret Supabase kalau mau tetap jalan sebelum itu.`);
+    if (waReady) await currentSock.sendMessage(OWNER_JID, { text: alertText });
+    await mirrorToTelegram(alertText);
+    await supabase.from("bot_state").upsert({ key: "all_keys_alert_date", value: today, updated_at: new Date().toISOString() });
+    console.log("📣 Peringatan 'semua key habis' dikirim ke nomor pemilik.");
+  } catch (err) {
+    console.error("Gagal kirim peringatan semua-key-habis:", err instanceof Error ? err.message : String(err));
+  } finally {
+    allKeysAlertInFlight = false;
+  }
+}
+
+function markGeminiKeyExhausted(key, err) {
+  // 429 "PerDay" = jatah harian habis (tunggu reset tengah malam Pacific);
+  // 429 lain biasanya cuma rate-limit per menit -- cukup istirahat 1 menit.
+  const isDaily = /PerDay/i.test(err?.message || "");
+  const untilMs = isDaily ? nextMidnightPacificMs() : Date.now() + 60_000;
+  geminiKeyExhaustedUntil.set(key, untilMs);
+  const idx = GEMINI_API_KEYS.indexOf(key);
+  geminiKeyCursor = (idx + 1) % GEMINI_API_KEYS.length; // mulai dr key berikutnya lain kali
+  console.warn(
+    `⚠️  API key Gemini #${idx + 1}/${GEMINI_API_KEYS.length} kena ${isDaily ? "kuota harian (sampai tengah malam Pacific Time)" : "rate limit (istirahat 1 menit)"}, pindah ke key lain.`
+  );
+  reportKeyEvent(key, { exhaustedUntilMs: untilMs, error: err?.message });
+  if (isDaily) notifyOwnerAllKeysExhausted().catch(() => {});
+}
+
+// Satu kali panggilan mentah ke Gemini API. withTools=true nyalakan akses
+// pencarian Google (lihat WA_BASE_SYSTEM_PROMPT). Melempar Error (dengan
+// properti .status) kalau gagal, ditangani pemanggil (callGeminiWithRetry).
+// Batas waktu 1 panggilan Gemini. Tanpa ini fetch bisa menggantung berpuluh detik sampai menit saat jaringan buruk
+// (balasan WA terasa "lama banget"). Balasan WA/grup memakai batas pendek; ringkasan & tugas lain memakai yang panjang.
+const GEMINI_TIMEOUT_MS_LONG = Number(process.env.GEMINI_TIMEOUT_MS) || 90_000;
+const GEMINI_WA_TIMEOUT_MS = Number(process.env.GEMINI_WA_TIMEOUT_MS) || 25_000;
+async function callGeminiOnce(systemText, contents, withTools, apiKey, timeoutMs = GEMINI_TIMEOUT_MS_LONG) {
+  const body = JSON.stringify({
+    system_instruction: { parts: [{ text: systemText }] },
+    contents,
+    ...(withTools ? { tools: [{ google_search: {} }] } : {}),
+    generationConfig: { temperature: 0.6 }
+  });
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${apiKey}`;
+  let res;
+  try {
+    res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body, signal: AbortSignal.timeout(timeoutMs) });
+  } catch (e) {
+    const timedOut = e?.name === "TimeoutError" || e?.name === "AbortError";
+    const err = new Error(timedOut ? `Gemini tidak menjawab dalam ${Math.round(timeoutMs / 1000)} detik` : `Gemini jaringan gagal: ${e?.cause?.code || e?.message || e}`);
+    err.transient = true; // bukan soal kuota; layak dicoba di penyedia lain / Ollama
+    err.timeout = timedOut;
+    throw err;
+  }
+  if (res.ok) return res.json();
+  const errText = await res.text();
+  const err = new Error(`Gemini API error ${res.status}: ${errText}`);
+  err.status = res.status;
+  throw err;
+}
+
+// Retry ringan buat status sementara (429/503) -- beda dari versi lengkap di
+// Edge Function `chat` yang juga punya fallback ke MODEL cadangan segala,
+// di sini cukup retry model yang sama supaya kodenya tetap ringkas. CATATAN:
+// 429 di sini sengaja TETAP dianggap "retryable" (nunggu 3 detik lalu coba
+// lagi pakai key yg SAMA) -- 429 kadang cuma rate-limit PER MENIT yg
+// sembuh sendiri, bukan jatah harian yg abis total. Keputusan "key ini
+// beneran habis, pindah ke key lain" ada di generateAutoReplyWithGemini,
+// SETELAH semua jatah retry di key ini benar2 habis.
+async function callGeminiWithRetry(systemText, contents, withTools, maxAttempts, apiKey, timeoutMs = GEMINI_TIMEOUT_MS_LONG) {
+  let lastErr;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await callGeminiOnce(systemText, contents, withTools, apiKey, timeoutMs);
+    } catch (err) {
+      lastErr = err;
+      // 429 "PerDay" = jatah harian key ini habis: mengulang 3 detik kemudian percuma, langsung biarkan rotasi key.
+      const retryable = (err.status === 429 && !/PerDay/i.test(err.message)) || err.status === 503;
+      if (!retryable || attempt === maxAttempts) throw err;
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+    }
+  }
+  throw lastErr;
+}
+
+// Dispatcher: generateAutoReply dipanggil pemanggil (sendAutoReply) TANPA
+// peduli mesin apa yang lagi aktif -- tinggal arahkan ke implementasi yang
+// sesuai WA_AI_ENGINE. Ini satu-satunya tempat percabangannya, biar gampang
+// nambah mesin lain nanti kalau perlu.
+async function generateAutoReply(jid) {
+  const t = office.task(officeWho());
+  t.think(`Pesan baru di ${chatLabel(jid, waAccountContext.getStore()?.groupSubject || "")}`);
+  t.work("Menyusun balasan", 40);
+  try {
+    const r = WA_AI_ENGINE === "ollama" ? await generateAutoReplyWithOllama(jid) : await generateAutoReplyWithGemini(jid);
+    t.done("Balasan siap");
+    return r;
+  } catch (err) {
+    t.fail(aiReason(err));
+    throw err;
+  }
+}
+
+// Satu "panggilan Gemini" lengkap dgn rotasi API key -- dipakai auto-reply
+// DAN ringkasan harian. Urutan percobaan sama seperti generateChatReply() di
+// Edge Function `chat`: kalau useSearch, coba dulu DENGAN akses internet (1x
+// saja, jangan buang waktu retry di jalur ini kalau lagi padat), baru kalau
+// gagal lanjut TANPA internet dengan sisa jatah retry. Semuanya dibungkus
+// loop rotasi key: kalau key yang lagi dipakai ternyata kena kuota (429 yang
+// masih bertahan setelah retry di callGeminiWithRetry), tandai habis & coba
+// lagi dari awal pakai key berikutnya -- maksimal sebanyak jumlah key yang
+// ada, biar tidak muter selamanya kalau semua key memang habis. Error selain
+// 429 TIDAK memicu rotasi (langsung dilempar ke pemanggil).
+//
+// CATATAN Google Search: di akun gratis, tool google_search BISA ditolak 429
+// di SEMUA key walau jalur biasa (tanpa tool) normal 200 -- terbukti lewat tes
+// curl di server (4 key, 4 project beda). Maka begitu ditolak, tool itu
+// "diistirahatkan" GOOGLE_SEARCH_BLOCK_MS (tidak dicoba lagi tiap pesan -- hemat
+// 1 request & ~detik latensi), dan sebagai gantinya bot mencari sendiri lewat
+// Bing (webSearchBing) lalu menyisipkan hasilnya ke pesan terakhir -- hanya
+// kalau `webQuery` diberikan pemanggil.
+let googleSearchBlockedUntil = 0;
+const GOOGLE_SEARCH_BLOCK_MS = 30 * 60_000;
+const GEMINI_WEB_MAX_RESULTS = 5;
+
+// Kata tanya/tanda pengenal pesan yang kemungkinan butuh fakta dari internet.
+const WEB_QUESTION_WORDS =
+  /\b(apa|apakah|siapa|berapa|kapan|dimana|di mana|kemana|bagaimana|gimana|kenapa|mengapa|tarif|aturan|peraturan|harga|berita|terbaru|update|pmk|sbm|uu|perpres|jadwal|link|tautan)\b/i;
+
+// Bikin query pencarian dari pesan masuk TERAKHIR (+ pesan sebelumnya kalau
+// yang terakhir pendek, krn biasanya follow-up spt "sesuai sbm 2026?").
+// Return "" = tidak usah cari (sapaan/basa-basi/pesan sangat pendek).
+function buildWebQuery(userTexts) {
+  const clean = (s) => String(s ?? "").replace(/\s+/g, " ").trim();
+  const wordCount = (s) => (s ? s.split(" ").length : 0);
+  const looksLikeQuestion = (s) => wordCount(s) >= 3 && (s.includes("?") || WEB_QUESTION_WORDS.test(s));
+  const last = clean(userTexts[userTexts.length - 1]);
+  const prev = clean(userTexts[userTexts.length - 2]);
+  if (!last || last.startsWith("[")) return "";
+  const prevUsable = prev && !prev.startsWith("[");
+  if (!looksLikeQuestion(last)) {
+    // Jawaban/lanjutan pendek atas pertanyaan sebelumnya (mis. bot tanya
+    // "wilayah mana?" -> kontak jawab "Yogyakarta"): cari pakai pertanyaan
+    // sebelumnya + jawaban ini, bukan dilewati.
+    if (wordCount(last) <= 4 && prevUsable && looksLikeQuestion(prev)) return `${prev} ${last}`.slice(0, 200);
+    return "";
+  }
+  // Pertanyaan pendek ("sesuai sbm 2026?") biasanya lanjutan -- gabung dgn
+  // pesan sebelumnya supaya query-nya punya konteks.
+  return (wordCount(last) < 8 && prevUsable ? `${prev} ${last}` : last).slice(0, 200);
+}
+
+async function geminiGenerateWithRotation(
+  systemText,
+  contents,
+  { useSearch = true, webQuery = "", docChunks = [], pinnedDocs = false, docMiss = false, route = "", timeoutMs = GEMINI_TIMEOUT_MS_LONG } = {}
+) {
+  let attemptsLeft = Math.max(GEMINI_API_KEYS.length, 1);
+  // Dokumen "dikunci" untuk grup ini: tanpa Google Search/Bing, jawab hanya dari dokumen.
+  if (pinnedDocs) useSearch = false;
+  const hasDocs = docChunks.length > 0;
+  // Isi giliran "user" terakhir dgn KONTEKS DOKUMEN (kalau ada) -- dipakai di
+  // SEMUA jalur (dgn/tanpa Google Search). Hasil web (Bing) ditambahkan di atasnya
+  // khusus jalur tanpa Google Search (lihat getNoSearchPayload).
+  const lastUserText = contents[contents.length - 1]?.parts?.[0]?.text ?? "";
+  const withDocsContents = hasDocs
+    ? [...contents.slice(0, -1), { role: "user", parts: [{ text: buildGroundedUserMessage(lastUserText, docChunks, []) }] }]
+    : contents;
+  // Model TIDAK tahu tanggal hari ini kecuali diberi tahu -- tanpa ini ia
+  // menjawab pakai "kalender" data latihannya (mis. bilang aturan 2026 "baru
+  // terbit pertengahan 2025 nanti").
+  const nowText = new Intl.DateTimeFormat("id-ID", {
+    dateStyle: "full",
+    timeStyle: "short",
+    timeZone: WA_TIMEZONE
+  }).format(new Date());
+  const pinnedNote = pinnedDocs
+    ? hasDocs
+      ? `\n\nGRUP INI MEMAKAI DOKUMEN TERTENTU SEBAGAI ACUAN. Jawab HANYA dari KONTEKS DOKUMEN di pesan terakhir; jangan memakai pengetahuan umum, ingatan, atau internet untuk isi surat/aturan. Sebut judul dokumen dan nomor halaman bila ada. Kutipan kalimat ditulis persis dalam tanda « ». Kalau jawabannya tidak tertulis di potongan dokumen, jawab: "Informasi itu tidak ditemukan di dokumen acuan" dan jangan menebak.`
+      : docMiss
+        ? `\n\nGRUP INI MEMAKAI DOKUMEN TERTENTU SEBAGAI ACUAN, tetapi tidak ada bagian dokumen yang cocok dengan pertanyaan ini. Jawab singkat: "Informasi itu tidak ditemukan di dokumen acuan" dan sarankan menanyakan dengan kata kunci yang ada di dokumen. Jangan menjawab dari pengetahuan umum atau menebak isi dokumen.`
+        : ""
+    : "";
+  const docNote = pinnedNote || (hasDocs
+    ? `\n\nKONTEKS DOKUMEN di pesan terakhir berasal dari Dokumen Pengetahuan milik pemilik nomor ini (dokumen resmi/internal) -- itu sumber UTAMA untuk angka, tarif, dan aturan. Kalau dokumen memuat jawabannya, pakai angkanya apa adanya dan sebut judul dokumennya singkat. Hasil pencarian web (kalau ada) hanya pelengkap; kalau bertentangan dengan dokumen, utamakan dokumen dan sebut perbedaannya singkat. Kalau jawabannya tidak ada di dokumen maupun hasil web, katakan terus terang (untuk pertanyaan tentang isi dokumen: \"Informasi tidak ada di dokumen\") dan JANGAN menebak. Untuk daftar (rukun, syarat, langkah) tuliskan semua butir yang tertulis di dokumen, tidak menambah/mengurangi. Jangan mengutip dokumen panjang-panjang -- ambil bagian yang menjawab saja.`
+    : "");
+  const systemWithDate =
+    `${systemText}\n\nWaktu sekarang: ${nowText} ${WA_TIMEZONE_LABEL}. Anggap ini tanggal hari ini. Jangan mengira tahun ini masih tahun sebelumnya, dan jangan bilang aturan/peraturan tahun ini "belum terbit" atau "akan terbit" kecuali hasil pencarian memastikannya.${docNote}`;
+  // Dipakai HANYA kalau jalur dengan internet gagal & jatuh ke jalur tanpa
+  // internet: tanpa ini model menjawab angka/aturan dari ingatan lamanya
+  // dengan nada yakin (bisa salah/usang).
+  const systemNoSearch =
+    `${systemWithDate}\n\nCATATAN: untuk balasan ini akses pencarian internet SEDANG TIDAK TERSEDIA. Untuk peraturan, tarif, angka resmi, atau hal lain yang bisa sudah berubah, JANGAN menyebut angka/aturan dengan yakin dari ingatan (angka yang tertulis di KONTEKS DOKUMEN boleh dipakai) -- katakan terus terang kamu belum bisa memastikan versi terbarunya dan sarankan cek sumber resmi (mis. PMK/situs Kemenkeu).`;
+  const systemWithWeb =
+    `${systemWithDate}\n\nCATATAN: Google Search sedang tidak tersedia, jadi sistem mencarikan HASIL PENCARIAN WEB (judul + cuplikan, sebagian dengan baris "Sumber: URL") dan melampirkannya di pesan terakhir. Jadikan itu acuan utama untuk fakta/angka/aturan terbaru dan sebut sumbernya singkat (nama situs/judul) kalau relevan. Cuplikan sering terpotong: kalau belum cukup untuk memastikan angka atau aturan resmi, katakan terus terang dan sarankan cek sumber resmi. Boleh menyebut URL HANYA yang tertulis persis di baris "Sumber:"; jangan mengarang link/URL.`;
+  // Payload jalur tanpa Google Search: dihitung malas & maksimal 1x per
+  // panggilan (kalau rotasi key mengulang, Bing tidak dicari ulang).
+  let noSearchPayload = null;
+  const getNoSearchPayload = async () => {
+    if (noSearchPayload) return noSearchPayload;
+    noSearchPayload = { system: systemNoSearch, contents: withDocsContents };
+    if (!webQuery) {
+      console.log("🌐 [Web] dilewati (pesan terakhir tidak terlihat seperti pertanyaan yang butuh internet).");
+    } else {
+      const results = await webSearch.search(webQuery, GEMINI_WEB_MAX_RESULTS);
+      console.log(`🌐 [Web] ${results.length} hasil web disisipkan ke prompt Gemini (query: "${webQuery.slice(0, 80)}")`);
+      if (results.length > 0) {
+        noSearchPayload = {
+          system: systemWithWeb,
+          contents: [
+            ...contents.slice(0, -1),
+            { role: "user", parts: [{ text: buildGroundedUserMessage(lastUserText, docChunks, results) }] }
+          ]
+        };
+      }
+    }
+    return noSearchPayload;
+  };
+  const runGemini = async () => {
+  for (;;) {
+    const apiKey = pickAvailableGeminiKey();
+    if (!apiKey) {
+      if (GEMINI_API_KEYS.length > 0) notifyOwnerAllKeysExhausted().catch(() => {});
+      const err = new Error(
+        `Semua API key Gemini (${GEMINI_API_KEYS.length}) kena kuota harian, coba lagi setelah tengah malam (Pacific Time).`
+      );
+      err.allKeysExhausted = true;
+      throw err;
+    }
+    try {
+      let data;
+      if (useSearch) {
+        if (Date.now() < googleSearchBlockedUntil) {
+          // Google Search lagi "diistirahatkan" (ditolak barusan) -- langsung
+          // jalur tanpa tool + hasil Bing, tanpa buang 1 request percuma.
+          const p = await getNoSearchPayload();
+          data = await callGeminiWithRetry(p.system, p.contents, false, 2, apiKey, timeoutMs);
+        } else {
+          try {
+            data = await callGeminiWithRetry(systemWithDate, withDocsContents, true, 1, apiKey, timeoutMs);
+          } catch (err) {
+            // Jatah HARIAN key ini habis: coba lagi tanpa internet di key yang sama
+            // percuma, langsung rotasi. (429 jenis lain, mis. limit khusus jalur
+            // Google Search, tetap lanjut ke percobaan tanpa tool di bawah.)
+            if (err.status === 429 && /PerDay/i.test(err.message)) throw err;
+            if (err.timeout) throw err; // jaringan/Gemini macet: percobaan kedua di key yang sama hanya menggandakan waktu tunggu
+            if (err.status === 429) {
+              googleSearchBlockedUntil = Date.now() + GOOGLE_SEARCH_BLOCK_MS;
+              console.warn(
+                `Auto-reply WA: Google Search ditolak (${summarizeGeminiError(err.message)}) -- tool itu diistirahatkan ${GOOGLE_SEARCH_BLOCK_MS / 60_000} menit, pakai pencarian Bing.`
+              );
+            } else {
+              console.warn(`Auto-reply WA: percobaan dgn Google Search gagal (${summarizeGeminiError(err.message)}), lanjut tanpa tool...`);
+            }
+            const p = await getNoSearchPayload();
+            data = await callGeminiWithRetry(p.system, p.contents, false, 2, apiKey, timeoutMs);
+          }
+        }
+      } else {
+        data = await callGeminiWithRetry(systemWithDate, withDocsContents, false, 2, apiKey, timeoutMs);
+      }
+      reportKeyEvent(apiKey, { requestsInc: 1 });
+      return data;
+    } catch (err) {
+      attemptsLeft -= 1;
+      if (err.status !== 429) providerStats.record({ provider: "gemini", kind: "error", error: summarizeGeminiError(err.message) });
+      if (err.status === 429 && attemptsLeft > 0) {
+        markGeminiKeyExhausted(apiKey, err);
+        continue; // coba lagi dari awal pakai key berikutnya
+      }
+      if (err.status === 429) markGeminiKeyExhausted(apiKey, err); // key terakhir: tetap catat habis
+      throw err; // bukan soal kuota (atau semua key sudah dicoba) -- lempar ke pemanggil spt biasa
+    }
+  }
+  };
+
+  // Urutan penyedia. Dengan `route` ("santai"/"akurat", balasan WA & grup) mengikuti pengaturan /urutan; tanpa `route`
+  // (ringkasan harian, pantauan peraturan, dll.) tetap cara lama: Gemini dulu, lalu cadangan sesuai LLM_FALLBACK_ORDER.
+  // Ollama tidak dijalankan di sini: ia di ujung rantai & ditangani tryLocalFallbackReply (dengan prompt & riwayat sendiri).
+  const steps = route ? aiRoute.orderFor(route).filter((n) => n !== "ollama") : ["gemini", "cadangan"];
+  const chainLabel = route ? `${route}: ${steps.join(" > ")}` : "bawaan: gemini > cadangan";
+  const secs = (t0) => `${((Date.now() - t0) / 1000).toFixed(1)} dtk`;
+  let geminiErr = null;
+  let lastErr = null;
+  let attempted = 0;
+  for (const step of steps) {
+    const t0 = Date.now();
+    try {
+      if (step === "gemini") {
+        // Tanpa key Gemini: lewati bila ada penyedia lain; kalau satu-satunya, runGemini melempar error "kuota habis" seperti biasa.
+        if (GEMINI_API_KEYS.length === 0 && steps.length > 1) continue;
+        attempted += 1;
+        const data = await runGemini();
+        console.log(`⏱️ [AI] dijawab Gemini dalam ${secs(t0)} (${chainLabel})`);
+        return Object.assign(data, { _provider: "gemini" });
+      }
+      // groq / openrouter ("cadangan" = semua penyedia cadangan sesuai LLM_FALLBACK_ORDER)
+      if (!llmFallback.available() || (step !== "cadangan" && !llmFallback.has(step))) continue;
+      attempted += 1;
+      // Jalur santai: prompt biasa (tanpa catatan "internet tidak tersedia"). Selain itu: prompt tanpa Google Search + hasil Bing.
+      const p = route === "santai" && !hasDocs ? { system: systemWithDate, contents: withDocsContents } : await getNoSearchPayload();
+      const messages = p.contents
+        .map((c) => ({ role: c.role === "model" ? "assistant" : "user", content: c.parts?.map((x) => x.text ?? "").join("") ?? "" }))
+        .filter((m) => m.content);
+      const r = await llmFallback.generate({
+        system: p.system,
+        messages,
+        temperature: pinnedDocs ? 0.2 : 0.4,
+        only: step === "cadangan" ? "" : step,
+        ...(route ? { timeoutMs: 20_000, maxTries: 3 } : {})
+      });
+      console.log(`⏱️ [AI] dijawab ${r.provider}/${r.model} dalam ${secs(t0)} (${chainLabel}${geminiErr ? `; Gemini gagal: ${String(geminiErr.message || geminiErr).slice(0, 100)}` : ""})`);
+      return { candidates: [{ content: { parts: [{ text: r.text }] } }], usageMetadata: { totalTokenCount: 0 }, _provider: `${r.provider}/${r.model}` };
+    } catch (err) {
+      lastErr = err;
+      if (step === "gemini") geminiErr = err;
+      const next = steps[steps.indexOf(step) + 1];
+      console.warn(`⏭️ [AI] ${step} gagal dalam ${secs(t0)}: ${String(err?.message || err).slice(0, 140).replace(/\s+/g, " ")}${next ? ` -> lanjut ${next}` : " -> tidak ada penyedia lain"}`);
+    }
+  }
+  if (attempted === 0 && !lastErr) {
+    lastErr = Object.assign(new Error("Tidak ada penyedia AI yang aktif (isi GEMINI_API_KEYS atau GROQ_API_KEYS di .env)."), { allKeysExhausted: true });
+  }
+  // Semua penyedia internet gagal: lempar error Gemini asli bila ada (pemanggil memakai status/allKeysExhausted-nya untuk antrean ulang),
+  // dan tandai supaya Ollama (cadangan lokal) boleh dicoba untuk pertanyaan tanpa angka.
+  const out = geminiErr || lastErr;
+  if (out && typeof out === "object") {
+    out.providersFailed = true;
+    out.aiRoute = route || "akurat";
+  }
+  throw out;
+}
+
+// Minta Gemini bikinkan satu balasan buat obrolan WA tertentu, pakai
+// AUTO_REPLY_HISTORY_LIMIT pesan terakhir di obrolan itu sebagai konteks
+// (TANPA Dokumen Pengetahuan -- lihat catatan di atas). Return null kalau
+// memang tidak ada apa-apa buat dibalas (riwayat kosong) -- selain itu throw
+// error (ditangani pemanggil) kalau Gemini gagal total.
+async function generateAutoReplyWithGemini(jid) {
+  // PENTING: ascending + limit tanpa descending dulu bakal ambil N pesan
+  // PALING LAMA (bukan paling baru!) begitu percakapan sudah lebih panjang
+  // dari AUTO_REPLY_HISTORY_LIMIT -- jendela riwayatnya jadi "beku" di awal
+  // percakapan & pesan yang baru masuk barusan malah tidak ikut terkirim ke
+  // Gemini. Makanya di sini ambil TERBARU dulu (descending), baru dibalik
+  // lagi jadi urutan kronologis (lama -> baru) buat dikirim ke Gemini.
+  const { data: historyRowsDesc, error: historyErr } = await supabase
+    .from("whatsapp_messages")
+    .select("direction, content")
+    .eq("wa_jid", jid)
+    .order("created_at", { ascending: false })
+    .limit(AUTO_REPLY_HISTORY_LIMIT);
+  if (historyErr) throw new Error(`Gagal ambil riwayat: ${historyErr.message}`);
+
+  const historyRows = (historyRowsDesc ?? []).slice().reverse();
+
+  const contents = historyRows
+    .filter((row) => row.content)
+    .map((row) => ({
+      role: row.direction === "in" ? "user" : "model",
+      parts: [{ text: row.content }]
+    }));
+
+  // Pengaman tambahan: API Gemini menolak request yang giliran TERAKHIRnya
+  // "model" (balasan AI) -- harus diakhiri giliran "user". Normalnya tidak
+  // kejadian lagi setelah fix di atas (pesan yang baru masuk barusan sudah
+  // pasti paling baru = di posisi terakhir = role "user"), tapi dibuang saja
+  // kalau ada sisa giliran "model" nyangkut di ujung, drpd request ditolak
+  // total & bot diam saja.
+  while (contents.length > 0 && contents[contents.length - 1].role === "model") {
+    contents.pop();
+  }
+  if (contents.length === 0) return null;
+
+  const webQueryRaw = buildWebQuery(contents.filter((c) => c.role === "user").map((c) => stripGroupMeta(jid, c.parts?.[0]?.text ?? "")));
+  // Di grup, obrolan santai ("Mas mau mie instan?") tidak perlu cari dokumen/web --
+  // hanya dicari kalau pesannya jelas butuh data (lihat GROUP_LOOKUP_RE).
+  const pinnedTitles = docTitlesFor(jid);
+  // Grup dengan dokumen "dikunci" (WA_GROUP_DOC_TITLES): jawaban HANYA dari dokumen itu, tanpa internet.
+  const pdfAsked = Boolean(isGroupJid(jid) && waAccountContext.getStore()?.pdf); // jawab dari isi PDF saja, tanpa cari web/dokumen lain
+  const webQuery = pdfAsked || pinnedTitles ? "" : !isGroupJid(jid) || GROUP_LOOKUP_RE.test(webQueryRaw) ? webQueryRaw : "";
+  // Dokumen: di grup selalu dicari (pencarian lokal, murah) kecuali WA_GROUP_DOCS=keywords.
+  const docQuery = pdfAsked ? "" : !isGroupJid(jid) || GROUP_DOCS_ALWAYS ? webQueryRaw : webQuery;
+  // Dokumen Pengetahuan dicek untuk pertanyaan yang sama (bukan sapaan) --
+  // hasilnya dibatasi budget, bukan baca seluruh dokumen. Gagal = lanjut tanpa.
+  let docChunks = [];
+  if (docQuery) {
+    try {
+      docChunks = await fetchKnowledgeChunksForGemini(docQuery, pinnedTitles);
+    } catch (err) {
+      console.error("RAG (Gemini): gagal cari di Dokumen Pengetahuan, lanjut tanpa:", err instanceof Error ? err.message : String(err));
+    }
+    const titles = docChunks.map((c) => `"${c.title}"(skor ${c.score.toFixed(1)})`).join(", ") || "-";
+    console.log(`📚 [Dokumen] ${docChunks.length} potongan dipakai: ${titles}`);
+  }
+  // Jalur: obrolan biasa = "santai" (cepat dulu), pertanyaan angka/aturan/dokumen/internet = "akurat" (Gemini dulu). Lihat ai-route.js & /urutan.
+  const lastIncoming = stripGroupMeta(jid, contents.filter((c) => c.role === "user").at(-1)?.parts?.[0]?.text ?? "");
+  const route = classifyRoute({ text: lastIncoming, pinnedDocs: Boolean(pinnedTitles), docChunks: docChunks.length, webQuery, accurateRe: NEEDS_ACCURATE_FIGURES_RE });
+  const data = await geminiGenerateWithRotation(withGroupNote(WA_BASE_SYSTEM_PROMPT, jid), contents, {
+    webQuery,
+    docChunks,
+    pinnedDocs: Boolean(pinnedTitles),
+    docMiss: Boolean(pinnedTitles) && docChunks.length === 0 && Boolean(docQuery),
+    route,
+    timeoutMs: GEMINI_WA_TIMEOUT_MS
+  });
+
+  const rawText = extractGeminiText(data);
+  if (!rawText.trim()) {
+    const cand = data?.candidates?.[0];
+    const partsInfo = (cand?.content?.parts ?? []).map((p) => Object.keys(p ?? {}).join("+")).join(", ");
+    throw new Error(
+      `Respons Gemini tidak berisi teks (finishReason=${cand?.finishReason ?? "?"}, blockReason=${data?.promptFeedback?.blockReason ?? "-"}, parts=[${partsInfo}])`
+    );
+  }
+
+  const tokensUsed = data?.usageMetadata?.totalTokenCount ?? 0;
+  const ESTIMATED_INPUT_SHARE = 0.7;
+  const costUsd = tokensUsed > 0 ? estimateCostUsd(GEMINI_MODEL, tokensUsed * ESTIMATED_INPUT_SHARE, tokensUsed * (1 - ESTIMATED_INPUT_SHARE)) : 0;
+
+  // Kutipan «…» / nomor halaman yang tidak ada di potongan dokumen yang dikirim diberi catatan peringatan.
+  const guarded = docChunks.length > 0 ? guardDocAnswer(rawText.trim(), docChunks) : null;
+  if (guarded?.flagged) console.log(`🛡️ [Dokumen] jawaban ditandai: kutipan tak terbukti=${guarded.badQuotes.length}, halaman tak ada=${guarded.badPages.length}`);
+  return { reply: guarded ? guarded.reply : rawText.trim(), tokensUsed, costUsd };
+}
+
+// Catat token+biaya auto-reply ke tabel token_usage YANG SAMA dipakai fitur
+// Obrolan AI (lihat action "send"/"token_usage" di Edge Function `chat`) --
+// supaya angka "token terpakai hari ini" di footer aplikasi mencerminkan
+// SEMUA pemakaian Gemini (Obrolan AI + auto-reply WA), bukan cuma salah
+// satu. Kegagalan di sini sengaja tidak menggagalkan apa pun yang lain
+// (pesannya sendiri sudah terlanjur terkirim duluan).
+async function recordTokenUsage(tokensUsed, costUsd) {
+  if (!tokensUsed || tokensUsed <= 0) return;
+  try {
+    const today = new Intl.DateTimeFormat("en-CA", { timeZone: "America/Los_Angeles" }).format(new Date());
+    const { data: existing } = await supabase
+      .from("token_usage")
+      .select("total_tokens, total_cost_usd")
+      .eq("usage_date", today)
+      .maybeSingle();
+    const totalTokens = (existing?.total_tokens ?? 0) + tokensUsed;
+    const totalCost = Number(existing?.total_cost_usd ?? 0) + costUsd;
+    await supabase.from("token_usage").upsert({
+      usage_date: today,
+      total_tokens: totalTokens,
+      total_cost_usd: totalCost,
+      updated_at: new Date().toISOString()
+    });
+  } catch (err) {
+    console.error("Gagal catat token_usage dari auto-reply:", err instanceof Error ? err.message : String(err));
+  }
+}
+
+// Generate balasan AI buat jid ini & langsung kirim lewat WhatsApp (beda
+// dari processPendingOutgoing: itu buat balasan MANUAL dari aplikasi yang
+// antre dulu di status 'pending', ini langsung sinkron di tempat karena
+// socket-nya (sock) sudah ada di tangan & tidak ada yang perlu diantre).
+// Dipakai kalau generateAutoReply gagal total (mis. Gemini lagi kena
+// rate-limit/429 di kedua percobaan) -- drpd bot DIAM SAJA (kelihatan kayak
+// error/mati dari sisi kontak yang chat), minimal kasih tau pesannya
+// kebaca & bakal ditindaklanjuti manual.
+const AUTO_REPLY_FALLBACK_TEXT =
+  "Maaf, sistem balasan otomatisnya lagi ada kendala teknis. Pesannya sudah diterima kok, nanti dibalas langsung ya 🙏";
+
+// Dipakai waktu AI gagal DAN pesannya berhasil diantre buat dicoba lagi otomatis
+// (lihat wa_retry_queue & processRetryQueue) -- janji "dibalas otomatis" itu
+// BENAR karena bot memang akan mencoba lagi sendiri, bukan sekadar basa-basi.
+const AUTO_REPLY_QUEUED_TEXT =
+  "Maaf, sistem balasan otomatisnya lagi penuh/ada kendala sementara. Pesannya sudah diterima dan akan dibalas otomatis begitu sistemnya siap lagi ya 🙏";
+
+// ---------------- Template jawaban (tabel wa_quick_replies) ----------------
+// Pesan masuk yang cocok dgn kata kunci sebuah template dijawab LANGSUNG dari
+// template itu -- AI tidak dipanggil sama sekali (hemat kuota, lebih cepat,
+// jawabannya konsisten). Template dikelola dari aplikasi (Pengaturan >
+// Template Jawaban WA).
+let quickReplyCache = { at: 0, rows: [] };
+let quickReplyLoadWarned = false;
+
+async function loadQuickReplies() {
+  if (Date.now() - quickReplyCache.at < 60_000) return quickReplyCache.rows;
+  const { data, error } = await supabase
+    .from("wa_quick_replies")
+    .select("id, title, keywords, reply, use_count")
+    .eq("enabled", true);
+  if (error) {
+    if (!quickReplyLoadWarned) {
+      quickReplyLoadWarned = true;
+      console.warn(`Gagal baca template jawaban (sudah jalankan migration 0013?): ${error.message}`);
+    }
+    quickReplyCache = { at: Date.now(), rows: [] };
+    return [];
+  }
+  quickReplyCache = { at: Date.now(), rows: data ?? [] };
+  return quickReplyCache.rows;
+}
+
+// Huruf kecil, tanda baca jadi spasi, spasi dirapikan, lalu DIAPIT spasi di
+// kedua ujung -- supaya mencocokkan " jam buka " ke dalam teks pesan otomatis
+// berarti cocok sebagai kata/frasa UTUH (bukan potongan kata lain).
+function normalizeForMatch(text) {
+  const cleaned = String(text)
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s]+/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return cleaned ? ` ${cleaned} ` : "";
+}
+
+// Cari template yang kata kuncinya cocok dgn teks pesan. Kalau beberapa
+// template cocok sekaligus, menang yang kata kunci cocoknya PALING PANJANG
+// (paling spesifik). Pesan panjang (> QUICK_REPLY_MAX_WORDS kata) & placeholder
+// media seperti "[gambar] ..." tidak pernah memicu template.
+function findQuickReply(text, rows) {
+  if (!text || text.startsWith("[")) return null;
+  const normalized = normalizeForMatch(text);
+  if (!normalized) return null;
+  if (normalized.trim().split(" ").length > QUICK_REPLY_MAX_WORDS) return null;
+
+  let best = null;
+  let bestLen = 0;
+  for (const row of rows) {
+    for (const kw of row.keywords ?? []) {
+      const nk = normalizeForMatch(kw);
+      if (!nk) continue;
+      if (normalized.includes(nk) && nk.length > bestLen) {
+        best = row;
+        bestLen = nk.length;
+      }
+    }
+  }
+  return best;
+}
+
+async function sendQuickReply(sock, jid, template) {
+  const sent = await sock.sendMessage(jid, { text: template.reply });
+  await supabase.from("whatsapp_messages").insert({
+    wa_jid: jid,
+    direction: "out",
+    content: template.reply,
+    status: "sent",
+    wa_message_id: sent?.key?.id ?? null,
+    ...acctFields(currentAccountId())
+  });
+  template.use_count = (template.use_count || 0) + 1;
+  supabase
+    .from("wa_quick_replies")
+    .update({ use_count: template.use_count, last_used_at: new Date().toISOString() })
+    .eq("id", template.id)
+    .then(
+      () => {},
+      () => {}
+    );
+  console.log(`⚡ Template "${template.title}" dipakai utk ${jid} (tanpa AI).`);
+}
+
+// ---------------- Antrean retry (tabel wa_retry_queue) ----------------
+// Dipanggil waktu AI gagal membalas. Return "queued" (baru diantre),
+// "already" (kontak ini sudah punya antrean aktif -- tidak perlu kirim teks
+// permintaan maaf lagi), atau "unavailable" (tabel belum ada/error -- tetap
+// kirim teks permintaan maaf biasa).
+async function enqueueRetry(jid, errorMessage) {
+  const { error } = await supabase.from("wa_retry_queue").insert({ wa_jid: jid, last_error: String(errorMessage).slice(0, 300) });
+  if (!error) return "queued";
+  if (error.code === "23505") return "already";
+  console.warn(`Gagal antre retry utk ${jid} (sudah jalankan migration 0013?): ${error.message}`);
+  return "unavailable";
+}
+
+async function finishRetry(id, status, extra = {}) {
+  await supabase
+    .from("wa_retry_queue")
+    .update({ status, updated_at: new Date().toISOString(), ...extra })
+    .eq("id", id);
+}
+
+let retryProcessing = false;
+async function processRetryQueue(socks) {
+  if (!socks?.length || retryProcessing || !AUTO_REPLY_ACTIVE) return;
+  retryProcessing = true;
+  try {
+    const { data, error } = await supabase
+      .from("wa_retry_queue")
+      .select("id, wa_jid, attempts, created_at")
+      .eq("status", "pending")
+      .lte("next_attempt_at", new Date().toISOString())
+      .order("created_at", { ascending: true })
+      .limit(3);
+    if (error || !data || data.length === 0) return;
+
+    for (const row of data) {
+      // Balasan ulang harus lewat nomor yang sama dengan percakapannya (nomor utama atau nomor kedua).
+      const rowAcct = await accountRouter.accountOf(row.wa_jid);
+      const sock = socks.find((s) => (s.waAccount?.id || MAIN_ACCOUNT) === rowAcct);
+      if (!sock) continue; // nomor itu sedang terputus; coba lagi menit depan
+      const acctCtx = waAccountContext.getStore();
+      if (acctCtx) acctCtx.account = rowAcct;
+      const ageHours = (Date.now() - new Date(row.created_at).getTime()) / 3_600_000;
+      if (ageHours > RETRY_EXPIRE_HOURS) {
+        await finishRetry(row.id, "expired");
+        continue;
+      }
+      // Mesin Gemini: nunggu sampai ADA key yang tersedia lagi (kalau semua
+      // masih habis, berhenti di sini & coba lagi menit depan -- tanpa
+      // menambah hitungan percobaan).
+      if (WA_AI_ENGINE === "gemini" && pickAvailableGeminiKey() === null) break;
+
+      if (!(await isAutoReplyEnabledForContact(row.wa_jid))) {
+        await finishRetry(row.id, "skipped");
+        continue;
+      }
+      // Kamu sudah membalas manual -> balasan susulan dari AI tidak perlu.
+      if (aiPauseRemainingMs(jidUserKeys(row.wa_jid)) > 0) {
+        await finishRetry(row.id, "skipped");
+        continue;
+      }
+      // Sudah ada balasan lain (mis. kamu balas manual dari aplikasi/HP) sejak
+      // antrean dibuat? Kalau ya, tidak perlu balasan otomatis susulan.
+      const { data: later } = await supabase
+        .from("whatsapp_messages")
+        .select("content")
+        .eq("wa_jid", row.wa_jid)
+        .eq("direction", "out")
+        .gt("created_at", row.created_at)
+        .limit(10);
+      const alreadyHandled = (later ?? []).some(
+        (m) => m.content !== AUTO_REPLY_FALLBACK_TEXT && m.content !== AUTO_REPLY_QUEUED_TEXT
+      );
+      if (alreadyHandled) {
+        await finishRetry(row.id, "skipped");
+        continue;
+      }
+
+      sock.sendPresenceUpdate("composing", row.wa_jid).catch(() => {});
+      try {
+        const result = await generateAutoReply(row.wa_jid);
+        sock.sendPresenceUpdate("paused", row.wa_jid).catch(() => {});
+        if (!result || !result.reply) {
+          await finishRetry(row.id, "skipped");
+          continue;
+        }
+        await deliverAutoReplyText(sock, row.wa_jid, result, "🔁 Balasan ulang");
+        await finishRetry(row.id, "done");
+      } catch (err) {
+        sock.sendPresenceUpdate("paused", row.wa_jid).catch(() => {});
+        const msg = err instanceof Error ? err.message : String(err);
+        const attempts = row.attempts + 1;
+        console.error(`Retry auto-reply utk ${row.wa_jid} gagal (percobaan ${attempts}/${RETRY_MAX_ATTEMPTS}): ${msg}`);
+        if (attempts >= RETRY_MAX_ATTEMPTS) {
+          await finishRetry(row.id, "expired", { attempts, last_error: msg.slice(0, 300) });
+        } else {
+          const delayMin = Math.min(5 * 2 ** (attempts - 1), 60);
+          await supabase
+            .from("wa_retry_queue")
+            .update({
+              attempts,
+              last_error: msg.slice(0, 300),
+              next_attempt_at: new Date(Date.now() + delayMin * 60_000).toISOString(),
+              updated_at: new Date().toISOString()
+            })
+            .eq("id", row.id);
+        }
+      }
+    }
+  } catch (err) {
+    console.error("Loop retry auto-reply error:", err instanceof Error ? err.message : String(err));
+  } finally {
+    retryProcessing = false;
+  }
+}
+
+// Kirim teks balasan AI ke kontak + catat ke whatsapp_messages + catat token.
+// Dipakai balasan normal (sendAutoReply) DAN balasan ulang dari antrean.
+// Teks ASLI (markdown) balasan bot per id pesan WA -- untuk "jadikan pdf" pada balasan yang tabelnya sudah dirapikan di WhatsApp.
+const replySource = new Map();
+function rememberReplySource(id, markdown) {
+  if (!id || !markdown) return;
+  replySource.set(id, String(markdown));
+  while (replySource.size > 80) replySource.delete(replySource.keys().next().value);
+}
+
+async function deliverAutoReplyText(sock, jid, result, logLabel = "🤖 Auto-reply", { quoted = null, waName = null } = {}) {
+  // Tabel markdown -> tampilan yang terbaca di gelembung WhatsApp (jangan sampai perapian menggagalkan pengiriman).
+  let outText = result.reply;
+  try {
+    outText = formatForWhatsApp(result.reply) || result.reply;
+  } catch (e) {
+    console.error("Gagal merapikan balasan untuk WhatsApp:", e instanceof Error ? e.message : String(e));
+  }
+  try {
+    const sent = await sock.sendMessage(jid, { text: outText }, quoted ? { quoted } : undefined);
+    rememberReplySource(sent?.key?.id, result.reply);
+    await supabase.from("whatsapp_messages").insert({
+      wa_jid: jid,
+      wa_name: waName,
+      direction: "out",
+      content: outText,
+      status: "sent",
+      wa_message_id: sent?.key?.id ?? null,
+      ...acctFields(currentAccountId())
+    });
+    console.log(`${logLabel} ke ${jid}: ${outText.slice(0, 60)}`);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`Gagal kirim auto-reply ke ${jid}:`, msg);
+    await supabase.from("whatsapp_messages").insert({
+      wa_jid: jid,
+      direction: "out",
+      content: result.reply,
+      status: "failed",
+      error: msg,
+      ...acctFields(currentAccountId())
+    });
+  }
+  await recordTokenUsage(result.tokensUsed, result.costUsd);
+}
+
+// Pesan yang jawabannya harus AKURAT (angka, tarif, aturan, uang) -- JANGAN
+// dijawab model lokal 3B yang mudah mengarang; biarkan diantre buat Gemini.
+const NEEDS_ACCURATE_FIGURES_RE =
+  /\d|\b(tarif|biaya|harga|berapa|nominal|rp|rupiah|persen|pmk|sbm|sbk|uu|perpres|peraturan|aturan|honor|honorarium|gaji|tunjangan|pajak|denda|sanksi|batas|plafon|pagu|anggaran)\b|%/i;
+
+// Return { reply, tokensUsed: 0, costUsd: 0 } kalau cadangan lokal berhasil
+// menjawab, atau null (lanjut ke jalur antrean seperti biasa).
+async function tryLocalFallbackReply(sock, jid, incomingText, err) {
+  if (!WA_OLLAMA_FALLBACK_ENABLED || WA_AI_ENGINE === "ollama") return null;
+  // Hanya untuk kegagalan KUOTA/kepadatan (semua key habis, 429, 503) -- bukan
+  // error lain (mis. respons kosong) yang tidak ada hubungannya dgn kuota.
+  const quotaLike = err?.allKeysExhausted === true || err?.status === 429 || err?.status === 503 || err?.providersFailed === true || err?.transient === true;
+  if (!quotaLike) return null;
+  // Pengaturan /urutan: jalur ini sengaja tanpa Ollama.
+  if (err?.aiRoute && !aiRoute.orderFor(err.aiRoute).includes("ollama")) return null;
+  if (!incomingText || incomingText.startsWith("[") || NEEDS_ACCURATE_FIGURES_RE.test(incomingText)) return null;
+  if (ollamaQueue.pending > 0) {
+    console.log("🦙 Cadangan lokal dilewati: Ollama lagi sibuk.");
+    return null;
+  }
+  // Kontak yang sudah punya antrean aktif tidak dijawab dobel.
+  const { data: pending } = await supabase.from("wa_retry_queue").select("id").eq("wa_jid", jid).eq("status", "pending").limit(1);
+  if (pending && pending.length > 0) return null;
+  try {
+    sock.sendPresenceUpdate("composing", jid).catch(() => {});
+    const local = await generateAutoReplyWithOllama(jid, { timeoutMs: WA_OLLAMA_FALLBACK_TIMEOUT_MS });
+    sock.sendPresenceUpdate("paused", jid).catch(() => {});
+    return local && local.reply ? local : null;
+  } catch (fbErr) {
+    sock.sendPresenceUpdate("paused", jid).catch(() => {});
+    console.error(`Cadangan lokal (Ollama) gagal utk ${jid}, lanjut ke antrean:`, fbErr instanceof Error ? fbErr.message : String(fbErr));
+    return null;
+  }
+}
+
+async function sendAutoReply(sock, jid, incomingText) {
+  // 1) Template jawaban dulu -- kalau cocok, AI tidak dipanggil sama sekali.
+  try {
+    const template = findQuickReply(incomingText, await loadQuickReplies());
+    if (template) {
+      await sendQuickReply(sock, jid, template);
+      return;
+    }
+  } catch (err) {
+    console.error(`Template jawaban gagal utk ${jid}, lanjut ke AI:`, err instanceof Error ? err.message : String(err));
+  }
+
+  // Indikator "mengetik..." di WA -- murni kosmetik, tapi berguna terutama
+  // buat mesin "ollama": inferensi CPU-only di laptop tua bisa makan waktu
+  // puluhan detik (apalagi dgn konteks RAG+web search), drpd kontak nunggu
+  // diam tanpa tanda apa-apa. Dibungkus try/catch & SENGAJA tidak menunggu
+  // (tidak di-await secara blocking lewat Promise.all) -- gagal kirim
+  // presence bukan alasan buat gagalkan auto-reply itu sendiri.
+  sock.sendPresenceUpdate("composing", jid).catch(() => {});
+
+  let result;
+  try {
+    result = await generateAutoReply(jid);
+  } catch (err) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    console.error(`Gagal generate auto-reply utk ${jid}:`, errMsg);
+    sock.sendPresenceUpdate("paused", jid).catch(() => {});
+    if (aiPauseRemainingMs(jidUserKeys(jid)) > 0) return; // kamu keburu membalas manual
+
+    // Cadangan lokal: Gemini gagal karena KUOTA & pertanyaannya bukan soal
+    // angka/aturan -> coba jawab pakai Ollama (gratis, tanpa kuota) dulu.
+    const localResult = await tryLocalFallbackReply(sock, jid, incomingText, err);
+    if (localResult) {
+      await deliverAutoReplyText(sock, jid, localResult, "🦙 Auto-reply (cadangan lokal)");
+      return;
+    }
+
+    // Antre buat dicoba lagi otomatis nanti (lihat processRetryQueue). Kalau
+    // kontak ini SUDAH punya antrean aktif, permintaan maaf tidak dikirim
+    // lagi (supaya tidak spam tiap kali dia kirim pesan susulan).
+    const queued = await enqueueRetry(jid, errMsg);
+    if (queued === "already") return;
+    const fallbackText = queued === "queued" ? AUTO_REPLY_QUEUED_TEXT : AUTO_REPLY_FALLBACK_TEXT;
+    try {
+      const sent = await sock.sendMessage(jid, { text: fallbackText });
+      await supabase.from("whatsapp_messages").insert({
+        wa_jid: jid,
+        direction: "out",
+        content: fallbackText,
+        status: "sent",
+        wa_message_id: sent?.key?.id ?? null,
+        ...acctFields(currentAccountId())
+      });
+    } catch (sendErr) {
+      console.error(`Gagal kirim balasan cadangan ke ${jid}:`, sendErr instanceof Error ? sendErr.message : String(sendErr));
+    }
+    return;
+  }
+  sock.sendPresenceUpdate("paused", jid).catch(() => {});
+  if (!result || !result.reply) return;
+  // Kamu keburu membalas manual selagi AI menyusun jawaban -> jawaban AI dibuang.
+  if (aiPauseRemainingMs(jidUserKeys(jid)) > 0) {
+    console.log(`⏸️ Jawaban AI utk ${jid} dibuang: kamu sudah membalas manual.`);
+    return;
+  }
+
+  await deliverAutoReplyText(sock, jid, result);
+}
+
+// ---------------- Ringkasan percakapan harian ke nomor pemilik ----------------
+// Tiap hari setelah jam WA_DAILY_SUMMARY_HOUR (zona WA_TIMEZONE), bot merangkum
+// SEMUA percakapan WA hari itu pakai Gemini lalu mengirimnya ke OWNER_JID.
+// Sekali per hari (dicatat di bot_state, aman walau bot di-restart).
+function zonedParts(ms, timeZone) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    hourCycle: "h23",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit"
+  }).formatToParts(new Date(ms));
+  const o = {};
+  for (const p of parts) o[p.type] = p.value;
+  return {
+    dateStr: `${o.year}-${o.month}-${o.day}`,
+    year: Number(o.year),
+    month: Number(o.month),
+    day: Number(o.day),
+    hour: Number(o.hour),
+    minute: Number(o.minute),
+    second: Number(o.second)
+  };
+}
+
+// Jam 00:00 tanggal dateStr (YYYY-MM-DD) di zona timeZone, dalam ms UTC.
+function zonedStartOfDayUtcMs(dateStr, timeZone) {
+  const [y, m, d] = dateStr.split("-").map(Number);
+  const guessUtc = Date.UTC(y, m - 1, d, 0, 0, 0);
+  const p = zonedParts(guessUtc, timeZone);
+  const asLocalUtc = Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute, p.second);
+  return guessUtc - (asLocalUtc - guessUtc);
+}
+
+function describeJidForSummary(jid, name) {
+  if (name) return name;
+  const userPart = jid.split("@")[0];
+  if (jid.endsWith("@s.whatsapp.net")) return `+${userPart}`;
+  return `Kontak (ID …${userPart.slice(-4)})`;
+}
+
+const SUMMARY_SYSTEM_PROMPT = `Kamu asisten pribadi pemilik nomor WhatsApp ini. Tugasmu merangkum percakapan WhatsApp HARI INI antara kontak-kontak dan nomor ini. Baris bertanda "Balasan" dikirim oleh nomor ini (otomatis oleh bot AI/template, atau manual oleh pemilik).
+Tulis dalam Bahasa Indonesia dengan format teks WhatsApp: *tebal* pakai SATU bintang, boleh bullet "•", TANPA heading markdown (#) dan TANPA tabel.
+Struktur jawaban:
+1) Satu-dua kalimat gambaran umum hari ini.
+2) Per kontak (sebut namanya): 1-2 kalimat inti yang ditanyakan/dibicarakan dan apakah sudah terjawab.
+3) Penutup "*Perlu ditindaklanjuti:*" berisi daftar singkat hal yang butuh keputusan/jawaban manual dari pemilik (permintaan mendesak, negosiasi, hal pribadi/emosional, pertanyaan yang belum terjawab bot). Kalau tidak ada, tulis "Tidak ada".
+Aturan: JANGAN mengarang fakta, angka, atau janji yang tidak ada di percakapan. Maksimal sekitar 250 kata.`;
+
+// Batas panjang transkrip utk Ollama (karakter): ±7000 karakter Indonesia =
+// ±2000 token, + prompt sistem ±300 + jawaban hingga 700 token = masih muat di
+// jendela 4096 token.
+const OLLAMA_SUMMARY_MAX_CHARS = 7000;
+const OLLAMA_SUMMARY_MAX_TOKENS = 700;
+
+async function summarizeWithOllama(transcript) {
+  return enqueueOllamaCall(
+    () =>
+    callOllamaChat(
+      [
+        { role: "system", content: `${SUMMARY_SYSTEM_PROMPT}\n\n${currentDateLine()}` },
+        { role: "user", content: transcript }
+      ],
+      {
+        timeoutMs: WA_SUMMARY_OLLAMA_TIMEOUT_MS,
+        maxTokens: OLLAMA_SUMMARY_MAX_TOKENS,
+        numCtx: Math.max(OLLAMA_NUM_CTX, 4096)
+      }
+    ),
+    { priority: PRIORITY.BACKGROUND, label: "daily-summary" }
+  );
+}
+
+async function buildDailySummaryText(dateStr, { allowAi = true } = {}) {
+  const startMs = zonedStartOfDayUtcMs(dateStr, WA_TIMEZONE);
+  const fetchRows = (cols) =>
+    supabase
+      .from("whatsapp_messages")
+      .select(cols)
+      .gte("created_at", new Date(startMs).toISOString())
+      .order("created_at", { ascending: true })
+      .limit(1500);
+  let { data: rows, error } = await fetchRows("wa_jid, wa_name, direction, content, status, created_at, account");
+  // Kolom account belum ada (migrasi 0039 belum dijalankan) -> ambil tanpa kolom itu; semua baris dianggap nomor utama.
+  if (error && /account/i.test(error.message || "")) ({ data: rows, error } = await fetchRows("wa_jid, wa_name, direction, content, status, created_at"));
+  if (error) throw new Error(`Gagal ambil pesan hari ini: ${error.message}`);
+  // Percakapan nomor kedua (HP orang lain) tidak ikut ringkasan pemilik kecuali WA2_IN_SUMMARY=true.
+  if (!wa2Config.inSummary) rows = (rows ?? []).filter((r) => !r.account || r.account === MAIN_ACCOUNT);
+
+  const skipJids = new Set([OWNER_JID, ...(currentSock ? getOwnJids(currentSock) : [])].filter(Boolean));
+  const byJid = new Map();
+  for (const row of rows ?? []) {
+    if (skipJids.has(row.wa_jid) || !row.content) continue;
+    if (!byJid.has(row.wa_jid)) byJid.set(row.wa_jid, { name: null, messages: [] });
+    const entry = byJid.get(row.wa_jid);
+    if (row.wa_name && !entry.name) entry.name = row.wa_name;
+    entry.messages.push(row);
+  }
+
+  const dateLabel = new Intl.DateTimeFormat("id-ID", {
+    timeZone: WA_TIMEZONE,
+    weekday: "long",
+    day: "numeric",
+    month: "long",
+    year: "numeric"
+  }).format(new Date());
+  const header = `📋 *Ringkasan WhatsApp — ${dateLabel}*`;
+
+  let pendingLine = "";
+  const { count: pendingCount, error: pendingErr } = await supabase
+    .from("wa_retry_queue")
+    .select("id", { count: "exact", head: true })
+    .eq("status", "pending");
+  if (!pendingErr && pendingCount > 0) pendingLine = `\n\n⏳ ${pendingCount} pesan masih menunggu balasan otomatis ulang.`;
+
+  if (byJid.size === 0) return `${header}\n\nTidak ada percakapan WhatsApp hari ini.${pendingLine}`;
+
+  let incoming = 0;
+  let outgoing = 0;
+  for (const { messages } of byJid.values()) {
+    for (const m of messages) {
+      if (m.direction === "in") incoming += 1;
+      else if (m.status === "sent") outgoing += 1;
+    }
+  }
+  const statsLine = `${byJid.size} kontak • ${incoming} pesan masuk • ${outgoing} balasan terkirim`;
+
+  const buildTranscript = (perContactLimit) =>
+    [...byJid.entries()]
+      .map(([jid, { name, messages }]) => {
+        const lines = messages
+          .slice(-perContactLimit)
+          .map((m) => `${m.direction === "in" ? "Kontak" : "Balasan"}: ${m.content.replace(/\s+/g, " ").slice(0, 280)}`);
+        return `=== ${describeJidForSummary(jid, name)} (${messages.length} pesan) ===\n${lines.join("\n")}`;
+      })
+      .join("\n\n");
+
+  // Potong transkrip sampai muat `maxChars` (kurangi jumlah pesan per kontak,
+  // terakhir baru dipotong paksa).
+  const fitTranscript = (maxChars) => {
+    let limit = 25;
+    let t = buildTranscript(limit);
+    while (t.length > maxChars && limit > 2) {
+      limit = Math.floor(limit / 2);
+      t = buildTranscript(limit);
+    }
+    return t.length > maxChars ? `${t.slice(0, maxChars)}\n[...dipotong...]` : t;
+  };
+
+  if (allowAi) {
+    // 1) Ollama (lokal) dulu kalau WA_SUMMARY_ENGINE=ollama: isi percakapan
+    //    tidak keluar laptop & tidak makan kuota Gemini. Anggaran teks kecil
+    //    krn jendela konteks Ollama cuma OLLAMA_NUM_CTX (4096 token) &
+    //    jawabannya pun dibatasi -- prompt + transkrip + jawaban harus muat.
+    if (WA_SUMMARY_ENGINE === "ollama") {
+      try {
+        const localText = (await summarizeWithOllama(fitTranscript(OLLAMA_SUMMARY_MAX_CHARS))).trim();
+        if (!localText) throw new Error("Respons Ollama untuk ringkasan kosong.");
+        console.log("📋 Ringkasan harian dibuat model lokal (Ollama).");
+        return `${header}\n${statsLine}\n\n${localText}\n\n_(Dirangkum model lokal di laptop -- hal penting, cek langsung ya.)_${pendingLine}`;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error(`Ringkasan lokal (Ollama) gagal: ${msg}`);
+        if (!WA_SUMMARY_GEMINI_FALLBACK || (GEMINI_API_KEYS.length === 0 && !llmFallback.available())) throw err;
+        console.log("📋 Ringkasan harian: jatuh ke Gemini (WA_SUMMARY_GEMINI_FALLBACK=true).");
+      }
+    }
+
+    // 2) Gemini (mesin utama kalau WA_SUMMARY_ENGINE=gemini, atau cadangan).
+    if (GEMINI_API_KEYS.length > 0 || llmFallback.available()) {
+      const data = await geminiGenerateWithRotation(
+        SUMMARY_SYSTEM_PROMPT,
+        [{ role: "user", parts: [{ text: fitTranscript(14000) }] }],
+        { useSearch: false }
+      );
+      const aiText = extractGeminiText(data).trim();
+      if (!aiText) throw new Error("Respons Gemini untuk ringkasan kosong.");
+      const tokensUsed = data?.usageMetadata?.totalTokenCount ?? 0;
+      if (tokensUsed > 0) {
+        await recordTokenUsage(
+          tokensUsed,
+          estimateCostUsd(GEMINI_MODEL, tokensUsed * 0.7, tokensUsed * 0.3)
+        );
+      }
+      return `${header}\n${statsLine}\n\n${aiText}${pendingLine}`;
+    }
+  }
+
+  // Cadangan tanpa AI (belum ada API key / semua habis / AI gagal berkali2):
+  // daftar sederhana per kontak, supaya ringkasan harian tetap sampai.
+  const plain = [...byJid.entries()]
+    .map(([jid, { name, messages }]) => {
+      const lastIn = [...messages].reverse().find((m) => m.direction === "in");
+      const inCount = messages.filter((m) => m.direction === "in").length;
+      return `• *${describeJidForSummary(jid, name)}* — ${inCount} pesan masuk${lastIn ? `, terakhir: "${lastIn.content.replace(/\s+/g, " ").slice(0, 100)}"` : ""}`;
+    })
+    .join("\n");
+  return `${header}\n${statsLine}\n\n${plain}\n\n_(Ringkasan AI sedang tidak tersedia, ini daftar sederhana.)_${pendingLine}`;
+}
+
+let summarySentDate = null;
+let summaryRunning = false;
+let summaryLastAttemptMs = 0;
+let summaryFailures = { date: null, count: 0 };
+
+async function checkDailySummary() {
+  if (!WA_DAILY_SUMMARY_ENABLED || !currentSock || summaryRunning) return;
+  const local = zonedParts(Date.now(), WA_TIMEZONE);
+  if (local.hour < WA_DAILY_SUMMARY_HOUR) return;
+  if (summarySentDate === local.dateStr) return;
+  if (Date.now() - summaryLastAttemptMs < 10 * 60_000) return;
+
+  summaryRunning = true;
+  try {
+    const { data: state } = await supabase.from("bot_state").select("value").eq("key", "daily_summary_date").maybeSingle();
+    if (state?.value === local.dateStr) {
+      summarySentDate = local.dateStr;
+      return;
+    }
+
+    summaryLastAttemptMs = Date.now();
+    if (summaryFailures.date !== local.dateStr) summaryFailures = { date: local.dateStr, count: 0 };
+
+    let text;
+    try {
+      // Setelah 3 kali gagal di hari yang sama (mis. semua key habis), kirim
+      // versi sederhana tanpa AI daripada ringkasannya tidak sampai sama sekali.
+      text = await buildDailySummaryText(local.dateStr, { allowAi: summaryFailures.count < 3 });
+    } catch (err) {
+      summaryFailures.count += 1;
+      throw err;
+    }
+
+    await currentSock.sendMessage(OWNER_JID, { text });
+    await mirrorToTelegram(text);
+    await supabase.from("bot_state").upsert({ key: "daily_summary_date", value: local.dateStr, updated_at: new Date().toISOString() });
+    summarySentDate = local.dateStr;
+    console.log("📋 Ringkasan harian terkirim ke nomor pemilik.");
+  } catch (err) {
+    console.error("Gagal kirim ringkasan harian (dicoba lagi 10 menit lagi):", err instanceof Error ? err.message : String(err));
+  } finally {
+    summaryRunning = false;
+  }
+}
+
+// Kirim ringkasan SEKARANG (buat tes / minta manual). Beda dgn jadwal harian:
+// tidak mengecek jam, tidak menandai "sudah terkirim hari ini" (jadi ringkasan
+// terjadwal malamnya tetap jalan normal). Dipicu lewat file bendera
+// (wa-bot/kirim-ringkasan.flag) atau pesan "/ringkasan" dari nomor pemilik.
+async function sendSummaryNow(source) {
+  if (!OWNER_JID) {
+    console.error("📋 [Tes ringkasan] WA_OWNER_NUMBER belum diisi di .env, tidak ada tujuan kirim.");
+    return;
+  }
+  if (!currentSock) {
+    console.error("📋 [Tes ringkasan] WhatsApp belum tersambung, coba lagi sebentar.");
+    return;
+  }
+  if (summaryRunning) {
+    console.log("📋 [Tes ringkasan] masih ada proses ringkasan lain yang berjalan, dilewati.");
+    return;
+  }
+  summaryRunning = true;
+  const startedAt = Date.now();
+  try {
+    console.log(`📋 [Tes ringkasan] dipicu lewat ${source}, mesin: ${WA_SUMMARY_ENGINE}. Mulai membuat...`);
+    await currentSock
+      .sendMessage(OWNER_JID, {
+        text: `⏳ Membuat ringkasan hari ini (mesin: ${WA_SUMMARY_ENGINE === "ollama" ? "model lokal, bisa beberapa menit" : "Gemini"})...`
+      })
+      .catch(() => {});
+    const local = zonedParts(Date.now(), WA_TIMEZONE);
+    const text = await buildDailySummaryText(local.dateStr, { allowAi: true });
+    await currentSock.sendMessage(OWNER_JID, { text });
+    console.log(`📋 [Tes ringkasan] terkirim ke nomor pemilik (${Math.round((Date.now() - startedAt) / 1000)} detik).`);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`📋 [Tes ringkasan] gagal: ${msg}`);
+    await currentSock?.sendMessage(OWNER_JID, { text: `⚠️ Ringkasan gagal dibuat: ${msg.slice(0, 300)}` }).catch(() => {});
+  } finally {
+    summaryRunning = false;
+  }
+}
+
+const SUMMARY_FLAG_FILE = fileURLToPath(new URL("./kirim-ringkasan.flag", import.meta.url));
+async function checkSummaryFlagFile() {
+  if (!fs.existsSync(SUMMARY_FLAG_FILE)) return;
+  if (!currentSock || summaryRunning) return; // biarkan bendera, coba lagi nanti
+  try {
+    fs.unlinkSync(SUMMARY_FLAG_FILE);
+  } catch {
+    return;
+  }
+  await sendSummaryNow("file bendera");
+}
+
+// Dipakai loop pengirim (setInterval di bawah) -- selalu nunjuk ke socket
+// WhatsApp yang LAGI AKTIF, diupdate ulang tiap kali connect()/reconnect
+// bikin socket baru (lihat connection.update di bawah).
+let currentSock = null;
+let waOpen = false; // koneksi WhatsApp benar-benar terbuka (untuk halaman Status sistem)
+// Semua socket yang sedang tersambung: nomor utama (currentSock) + nomor kedua bila ada.
+function activeSocks() {
+  return [currentSock, WA2_ACCOUNT_DEF?.sock].filter(Boolean);
+}
+
+// Ambil teks dari berbagai tipe pesan WhatsApp yang umum. Tipe yang tidak
+// dikenali (voice note, lokasi, kontak dibagikan, dll) sengaja DILEWATI
+// (return null) drpd nyimpen data kosong/rusak -- cukup buat v1 fitur ini.
+function extractText(msg) {
+  const m = msg.message;
+  if (!m) return null;
+  if (m.conversation) return m.conversation;
+  if (m.extendedTextMessage?.text) return m.extendedTextMessage.text;
+  if (m.imageMessage?.caption) return `[gambar] ${m.imageMessage.caption}`;
+  if (m.videoMessage?.caption) return `[video] ${m.videoMessage.caption}`;
+  if (m.documentMessage?.fileName) return `[dokumen] ${m.documentMessage.fileName}`;
+  if (m.audioMessage) return "[pesan suara/audio -- belum didukung, buka HP buat dengar]";
+  if (m.stickerMessage) return "[stiker]";
+  return null;
+}
+
+// Normalisasi 1 JID mentah: buang akhiran ":N" (device id, mis.
+// "6285xxxx:6@s.whatsapp.net" -> "6285xxxx@s.whatsapp.net") supaya bisa
+// dibandingkan APA ADANYA dengan msg.key.remoteJid.
+function normalizeJidSuffix(raw) {
+  if (!raw) return null;
+  const [userPart, domainPart] = raw.split("@");
+  if (!domainPart) return null;
+  return `${userPart.split(":")[0]}@${domainPart}`;
+}
+
+// Semua JID yang mewakili KITA SENDIRI (pemilik bot) -- ternyata BUKAN cuma
+// satu. Baileys/WhatsApp kasih 2 identitas: sock.user.id (format nomor HP,
+// "@s.whatsapp.net") DAN sock.user.lid (format "Local ID" privasi,
+// "@lid") -- "chat ke diri sendiri" (catatan pribadi) ternyata muncul
+// pakai jid ber-AKHIRAN @lid ini, BUKAN format nomor HP seperti dugaan
+// awal (ketauan dari log debug: jid="<angka>@lid" sementara sock.user.id
+// cuma kasih tau versi "@s.whatsapp.net"-nya) -- makanya HARUS dicek
+// terhadap keduanya, persis pola yang sama dengan kenapa kontak lain juga
+// bisa muncul dengan jid @lid (lihat komentar panjang di handleIncoming
+// soal itu).
+function getOwnJids(sock) {
+  const me = sock.user;
+  if (!me) return [];
+  return [normalizeJidSuffix(me.id), normalizeJidSuffix(me.lid)].filter(Boolean);
+}
+
+// ---------------- Jeda auto-reply saat pemilik membalas MANUAL ----------------
+// Kalau kamu membalas sebuah chat sendiri (dari HP, atau dari layar obrolan WA di
+// aplikasi), bot berhenti membalas OTOMATIS di chat itu selama WA_MANUAL_PAUSE_MINUTES
+// (default 60 menit, dihitung dari balasan manual TERAKHIR). Chat dengan nomor lain
+// tidak terpengaruh. Ketik "AI On" di chat itu (atau "AI On" di chat-ke-diri-sendiri
+// untuk semua chat) supaya bot aktif lagi seketika. Status jeda disimpan di
+// ai-pause.json supaya selamat dari restart bot. 0 = fitur ini dimatikan.
+const MANUAL_PAUSE_MINUTES = Number.isFinite(Number(process.env.WA_MANUAL_PAUSE_MINUTES))
+  ? Math.max(0, Number(process.env.WA_MANUAL_PAUSE_MINUTES))
+  : 60;
+const MANUAL_PAUSE_MS = MANUAL_PAUSE_MINUTES * 60_000;
+const AI_ON_DELETE_COMMAND = (process.env.WA_AI_ON_DELETE_COMMAND || "false").toLowerCase() === "true";
+const AI_PAUSE_FILE = fileURLToPath(new URL("./ai-pause.json", import.meta.url));
+const AI_ON_RE = /^\s*ai\s*on\s*[.!]*\s*$/i;
+const AI_STATUS_RE = /^\s*ai\s*status\s*[?.!]*\s*$/i;
+
+// kunci = bagian "user" JID (nomor HP ATAU id @lid, tanpa @domain/:device) -> waktu jeda berakhir (ms).
+// Satu kontak bisa muncul sbg dua id (nomor & @lid), jadi dua-duanya disimpan.
+const aiPausedUntil = new Map();
+const contactNames = new Map(); // kunci -> nama tampilan terakhir (utk pesan konfirmasi)
+const botSentIds = new Map(); // id pesan yang DIKIRIM BOT -> waktu (ms), supaya tidak dikira balasan manual
+
+// kunci -> semua kunci lain yang diketahui milik kontak yang sama (nomor <-> @lid).
+// Diisi tiap kali ada JID + remoteJidAlt bersamaan, sehingga perintah dari aplikasi
+// (yang cuma tahu satu JID) tetap menjangkau kunci jeda yang satunya.
+const jidAliases = new Map();
+
+function jidUserKeys(...jids) {
+  const base = [...new Set(jids.filter(Boolean).map((j) => String(j).split("@")[0].split(":")[0]).filter(Boolean))];
+  if (base.length > 1) {
+    for (const a of base) {
+      let set = jidAliases.get(a);
+      if (!set) jidAliases.set(a, (set = new Set()));
+      for (const b of base) set.add(b);
+    }
+  }
+  const out = new Set(base);
+  for (const k of base) for (const x of jidAliases.get(k) ?? []) out.add(x);
+  return [...out];
+}
+
+function loadAiPause() {
+  try {
+    const raw = JSON.parse(fs.readFileSync(AI_PAUSE_FILE, "utf8"));
+    for (const [k, v] of Object.entries(raw || {})) {
+      if (Number(v) > Date.now()) aiPausedUntil.set(k, Number(v));
+    }
+  } catch {
+    /* belum ada file / rusak -> mulai kosong */
+  }
+}
+
+function saveAiPause() {
+  try {
+    fs.writeFileSync(AI_PAUSE_FILE, JSON.stringify(Object.fromEntries(aiPausedUntil)));
+  } catch (err) {
+    console.warn("Gagal simpan ai-pause.json:", err instanceof Error ? err.message : String(err));
+  }
+}
+
+function pauseAiFor(keys) {
+  if (MANUAL_PAUSE_MS <= 0 || keys.length === 0) return 0;
+  const until = Date.now() + MANUAL_PAUSE_MS;
+  for (const k of keys) aiPausedUntil.set(k, until);
+  saveAiPause();
+  return until;
+}
+
+// Sisa waktu jeda (ms) untuk salah satu kunci; 0 = tidak dijeda.
+function aiPauseRemainingMs(keys) {
+  let best = 0;
+  let expiredAny = false;
+  for (const k of keys) {
+    const until = aiPausedUntil.get(k);
+    if (!until) continue;
+    if (until <= Date.now()) {
+      aiPausedUntil.delete(k);
+      expiredAny = true;
+    } else {
+      best = Math.max(best, until - Date.now());
+    }
+  }
+  if (expiredAny) saveAiPause();
+  return best;
+}
+
+function resumeAiFor(keys) {
+  let had = false;
+  for (const k of keys) had = aiPausedUntil.delete(k) || had;
+  if (had) saveAiPause();
+  return had;
+}
+
+function rememberBotSent(id) {
+  if (!id) return;
+  botSentIds.set(id, Date.now());
+  if (botSentIds.size > 500) {
+    const cutoff = Date.now() - 10 * 60_000;
+    for (const [k, t] of botSentIds) if (t < cutoff) botSentIds.delete(k);
+  }
+}
+
+// Pesan dari kita yang "sungguhan" (teks/media/stiker/dll), BUKAN reaksi, hapus-pesan, dsb.
+function isRealOutgoingContent(message) {
+  const m = unwrapMessageContent(message);
+  if (!m) return false;
+  return [
+    "conversation",
+    "extendedTextMessage",
+    "imageMessage",
+    "videoMessage",
+    "documentMessage",
+    "audioMessage",
+    "stickerMessage",
+    "contactMessage",
+    "locationMessage",
+    "pollCreationMessage"
+  ].some((k) => m[k]);
+}
+
+function describeContact(keys) {
+  for (const k of keys) if (contactNames.has(k)) return `${contactNames.get(k)} (${k})`;
+  return keys[0] || "?";
+}
+
+async function notifyOwner(sock, text) {
+  if (!OWNER_JID) return;
+  // Nomor kedua tidak pernah mengirim pesan ke pemilik dari nomornya sendiri: notifikasi lewat nomor utama / Telegram.
+  if (sock?.waAccount?.secondary) {
+    await sendToOwner(`[${sock.waAccount.label}] ${text}`).catch(() => {});
+    return;
+  }
+  await sock.sendMessage(OWNER_JID, { text }).catch(() => {});
+}
+
+// Pesan KELUAR dari akun kita ke kontak lain (muncul lewat event pesan sbg fromMe).
+// "AI On" -> aktifkan lagi; selain itu dihitung balasan manual -> jeda auto-reply.
+async function handleOwnOutgoing(msg, sock, jid) {
+  if (MANUAL_PAUSE_MS <= 0) return;
+  if (!jid || !(jid.endsWith("@s.whatsapp.net") || jid.endsWith("@lid"))) return;
+  if (msg.key.id && botSentIds.has(msg.key.id)) return; // dikirim bot sendiri
+  if (!isRealOutgoingContent(msg.message)) return;
+
+  const keys = jidUserKeys(msg.key.remoteJid, msg.key.remoteJidAlt);
+  const text = extractText({ message: unwrapMessageContent(msg.message) });
+
+  if (text && AI_ON_RE.test(text)) {
+    const was = resumeAiFor(keys);
+    console.log(`🤖 "AI On" di chat ${describeContact(keys)} -> auto-reply aktif lagi${was ? "" : " (sebelumnya memang tidak dijeda)"}.`);
+    if (AI_ON_DELETE_COMMAND) {
+      sock.sendMessage(jid, { delete: msg.key }).catch(() => {});
+    }
+    await notifyOwner(sock, `✅ AI aktif lagi untuk ${describeContact(keys)}.`);
+    return;
+  }
+
+  const wasPaused = aiPauseRemainingMs(keys) > 0;
+  const until = pauseAiFor(keys);
+  if (until) {
+    console.log(
+      `✋ Balasan manual ke ${describeContact(keys)} -> auto-reply dijeda sampai ${new Date(until).toLocaleTimeString("id-ID", { timeZone: WA_TIMEZONE, hour: "2-digit", minute: "2-digit" })} ${WA_TIMEZONE_LABEL}${wasPaused ? " (diperpanjang)" : ""}.`
+    );
+  }
+}
+
+// Balasan manual lewat layar WA di aplikasi (antrean "pending") juga dihitung manual.
+function markManualFromApp(jid) {
+  pauseAiFor(jidUserKeys(jid));
+}
+
+// Perintah dari pemilik di chat-ke-diri-sendiri: "AI On" (semua chat) / "AI Status".
+async function handleAiPauseCommand(sock, jid, text) {
+  if (AI_ON_RE.test(text)) {
+    const n = aiPausedUntil.size;
+    aiPausedUntil.clear();
+    saveAiPause();
+    await sock.sendMessage(jid, { text: n > 0 ? "✅ AI aktif lagi untuk semua chat." : "AI sudah aktif di semua chat (tidak ada yang sedang dijeda)." }).catch(() => {});
+    return true;
+  }
+  if (AI_STATUS_RE.test(text)) {
+    const now = Date.now();
+    const seen = new Set();
+    const lines = [];
+    for (const [k, until] of aiPausedUntil) {
+      if (until <= now) continue;
+      const name = contactNames.get(k);
+      const label = name ? `${name} (${k})` : k;
+      const dupKey = `${name || k}|${until}`; // nomor & @lid kontak yang sama dijeda bersamaan -> satu baris
+      if (seen.has(dupKey)) continue;
+      seen.add(dupKey);
+      lines.push(`- ${label}: ${Math.ceil((until - now) / 60_000)} menit lagi`);
+    }
+    await sock
+      .sendMessage(jid, {
+        text: lines.length
+          ? `⏸️ Chat yang auto-replynya sedang dijeda (setelah balasan manual):\n${lines.join("\n")}\n\nKetik "AI On" di chat itu (atau di sini untuk semua) supaya aktif lagi.`
+          : "Tidak ada chat yang sedang dijeda. AI aktif di semua chat."
+      })
+      .catch(() => {});
+    return true;
+  }
+  return false;
+}
+
+loadAiPause();
+
+// Cek toggle auto-reply KHUSUS kontak ini (tabel whatsapp_contacts, diatur
+// dari tombol di layar obrolan WA kontak itu di aplikasi) -- tidak ada baris
+// = dianggap enabled=true/default ON (sama seperti sebelum fitur toggle per-
+// kontak ini ada).
+async function isAutoReplyEnabledForContact(jid) {
+  const { data, error } = await supabase
+    .from("whatsapp_contacts")
+    .select("auto_reply_enabled")
+    .eq("wa_jid", jid)
+    .maybeSingle();
+  if (error) {
+    console.error(`Gagal cek toggle auto-reply utk ${jid}, anggap ON:`, error.message);
+    return true;
+  }
+  return data?.auto_reply_enabled ?? true;
+}
+
+// ---------------- Perintah SiMAB (hanya baca, hanya dari pemilik) ----------------
+// Pesan berawalan "simab ..." dari nomor pemilik (WA_OWNER_NUMBER) atau dari chat-ke-
+// diri-sendiri dijawab dari database SiMAB (Supabase TERPISAH) lewat akun bot
+// baca-saja. Pesan & jawabannya SENGAJA tidak disimpan ke whatsapp_messages (isinya
+// data anggaran; juga supaya tidak ikut masuk ringkasan harian / dikirim ke Gemini).
+// Lihat simab.js dan simab-bot-readonly.sql.
+const OWNER_LIDS = (process.env.WA_OWNER_LIDS || "")
+  .split(",")
+  .map((x) => x.trim().split("@")[0].split(":")[0])
+  .filter(Boolean);
+
+async function parseSimabWithOllama(freeText) {
+  const raw = await enqueueOllamaCall(
+    () =>
+    callOllamaChat(
+      [
+        { role: "system", content: SIMAB_OLLAMA_SYSTEM },
+        { role: "user", content: freeText.slice(0, 300) }
+      ],
+      { timeoutMs: 180_000, maxTokens: 80, numCtx: 2048, format: "json", temperature: 0 }
+    ),
+    { priority: PRIORITY.CHAT, label: "simab-parse" }
+  );
+  const parsed = JSON.parse(raw);
+  return { aksi: String(parsed?.aksi ?? "").toLowerCase().trim(), kueri: String(parsed?.kueri ?? "") };
+}
+
+const simab = createSimab({
+  url: process.env.SIMAB_SUPABASE_URL,
+  anonKey: process.env.SIMAB_SUPABASE_ANON_KEY,
+  email: process.env.SIMAB_BOT_EMAIL,
+  password: process.env.SIMAB_BOT_PASSWORD,
+  kantorId: (process.env.SIMAB_KANTOR_ID || "538065").trim(),
+  fixedTahun: Number(process.env.SIMAB_TAHUN) || null,
+  perjadinAkun: (process.env.SIMAB_PERJADIN_AKUN || "524111,524113").split(",").map((x) => x.trim()).filter((x) => /^\d{6}$/.test(x)),
+  timeZone: WA_TIMEZONE,
+  ollamaParse: parseSimabWithOllama,
+  rekamEnabled: (process.env.SIMAB_REKAM_ENABLED || "true").toLowerCase() !== "false",
+  rekamUser: (process.env.SIMAB_REKAM_USER || "Bot WhatsApp").trim(),
+  rekamTtlMs: (Number(process.env.SIMAB_REKAM_TTL_MIN) || 10) * 60_000,
+  meteraiMak: (process.env.SIMAB_METERAI_MAK || "").split(",").map((x) => x.trim()).filter(Boolean),
+  meteraiKata: (process.env.SIMAB_METERAI_KATA || "meterai,materai").split(",").map((x) => x.trim().toLowerCase()).filter(Boolean),
+  meteraiUraian: (process.env.SIMAB_METERAI_URAIAN || "Pembelian meterai").trim()
+});
+
+// Pengirim = pemilik? Nomor bisa datang sbg "@s.whatsapp.net" ATAU "@lid"; untuk "@lid"
+// Baileys 7 menyertakan nomor aslinya di remoteJidAlt/participantAlt.
+function senderUserParts(msg) {
+  return [msg.key.remoteJid, msg.key.remoteJidAlt, msg.key.participant, msg.key.participantAlt]
+    .filter(Boolean)
+    .map((j) => j.split("@")[0].split(":")[0]);
+}
+function isOwnerSender(msg, isSelfChat) {
+  if (isSelfChat) return true;
+  const parts = senderUserParts(msg);
+  if (OWNER_NUMBER && parts.includes(OWNER_NUMBER)) return true;
+  return parts.some((p) => OWNER_LIDS.includes(p));
+}
+
+async function handleSimabMessage(sock, jid, msg, text) {
+  const send = (t) =>
+    sock.sendMessage(jid, { text: t }, { quoted: msg }).catch((err) => {
+      console.error("🏛️ [SiMAB] gagal kirim balasan:", err instanceof Error ? err.message : String(err));
+    });
+  console.log(`🏛️ [SiMAB] perintah dari pemilik: ${text.slice(0, 80)}`);
+  sock.sendPresenceUpdate("composing", jid).catch(() => {});
+  const started = Date.now();
+  try {
+    const reply = await simab.run(text, { notify: send, sessionKey: jid });
+    await send(reply);
+    console.log(`🏛️ [SiMAB] dijawab dalam ${Math.round((Date.now() - started) / 100) / 10} detik.`);
+  } catch (err) {
+    const m = err instanceof Error ? err.message : String(err);
+    console.error(`🏛️ [SiMAB] gagal: ${m}`);
+    await send(`⚠️ SiMAB: ${m.slice(0, 300)}`);
+  } finally {
+    sock.sendPresenceUpdate("paused", jid).catch(() => {});
+  }
+}
+
+// ---------------- Grup WhatsApp (dijawab hanya kalau bot di-mention) ----------------
+// Default MATI. Nyalakan dengan mengisi WA_GROUP_ALLOWED_NAMES (nama grup, pisah
+// koma; cukup potongan nama, huruf besar-kecil/emoji/tanda baca diabaikan) dan/
+// atau WA_GROUP_ALLOWED_JIDS (id grup "...@g.us"). Grup di luar daftar tidak
+// pernah dijawab maupun disimpan. Pesan grup yang TIDAK memanggil bot juga tidak
+// disimpan sama sekali (privasi anggota lain).
+function normalizeGroupName(name) {
+  return String(name ?? "").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "");
+}
+const GROUP_ALLOWED_NAMES = (process.env.WA_GROUP_ALLOWED_NAMES || "")
+  .split(",")
+  .map(normalizeGroupName)
+  .filter(Boolean);
+const GROUP_ALLOWED_JIDS = (process.env.WA_GROUP_ALLOWED_JIDS || "")
+  .split(",")
+  .map((x) => x.trim())
+  .filter(Boolean);
+const GROUP_ENABLED = GROUP_ALLOWED_NAMES.length > 0 || GROUP_ALLOWED_JIDS.length > 0;
+// Pemicu: mention nomor bot (default aktif), membalas pesan bot, atau pesan yang
+// diawali kata pemicu (WA_GROUP_KEYWORDS, mis. "bot,ai" -> "bot, jam berapa buka?").
+const GROUP_MENTION_TRIGGER = (process.env.WA_GROUP_MENTION_TRIGGER || "true").trim().toLowerCase() !== "false";
+const GROUP_KEYWORDS = (process.env.WA_GROUP_KEYWORDS || "")
+  .split(",")
+  .map((x) => x.trim().toLowerCase())
+  .filter(Boolean);
+// Jeda minimal antar pertanyaan dari ORANG YANG SAMA di grup (detik).
+const GROUP_COOLDOWN_MS = Math.max(0, Number(process.env.WA_GROUP_COOLDOWN_SEC ?? 20) || 0) * 1000;
+const GROUP_QUOTE_MAX_CHARS = 400;
+// Pesan grup baru memicu pencarian dokumen/web kalau mengandung kata yang menandakan
+// butuh data (berita, harga, aturan, dll). Selain itu dijawab langsung tanpa lookup.
+const GROUP_LOOKUP_RE =
+  /\b(berita|terbaru|terkini|hari ini|harga|kurs|cuaca|jadwal|skor|link|tarif|biaya|honor|honorarium|aturan|peraturan|pmk|sbm|sbk|perdin|anggaran|pagu|uu|perpres|alamat|jam buka|buka jam|nomor telepon)\b/i;
+// Dokumen Pengetahuan di grup: "keywords" (bawaan) = hanya bila pesan mengandung kata di GROUP_LOOKUP_RE;
+// "always" = tiap pertanyaan yang memanggil bot dicarikan di dokumen (pencarian lokal, murah).
+const GROUP_DOCS_ALWAYS = (process.env.WA_GROUP_DOCS || "keywords").trim().toLowerCase() === "always";
+// Opsional: di grup HANYA dokumen yang judulnya memuat salah satu potongan ini yang dijadikan acuan (pisah koma).
+const GROUP_DOC_TITLES = (process.env.WA_GROUP_DOC_TITLES || "").split(",").map((x) => x.trim()).filter(Boolean);
+function docTitlesFor(jid) {
+  return isGroupJid(jid) && GROUP_DOC_TITLES.length > 0 ? GROUP_DOC_TITLES : null;
+}
+// Gemini kadang 503 ("high demand") beberapa detik; di grup coba sekali lagi dulu.
+const GROUP_RETRY_503_DELAY_MS = 12_000;
+const GROUP_BUSY_TEXT = "Maaf, sistem lagi penuh. Coba tag aku lagi sebentar lagi ya 🙏";
+
+const groupSubjectCache = new Map(); // jid -> { subject, at }
+async function getGroupSubject(sock, jid) {
+  const hit = groupSubjectCache.get(jid);
+  if (hit && Date.now() - hit.at < 10 * 60_000) return hit.subject;
+  try {
+    const meta = await sock.groupMetadata(jid);
+    const subject = meta?.subject || "";
+    groupSubjectCache.set(jid, { subject, at: Date.now() });
+    return subject;
+  } catch (err) {
+    console.error(`👥 Gagal ambil nama grup ${jid}:`, err instanceof Error ? err.message : String(err));
+    return hit?.subject ?? "";
+  }
+}
+
+// Daftar grup yang boleh dijawab: nomor utama pakai WA_GROUP_ALLOWED_*, nomor kedua pakai WA2_GROUP_ALLOWED_* (kosong = tidak menjawab di grup).
+// Gabungan daftar dari .env dan tambahan lewat Telegram (/grup) -- lihat group-list.js.
+function groupRulesFor(sock) {
+  return groupList.rules(sock?.waAccount?.secondary ? SECOND_ACCOUNT : MAIN_ACCOUNT);
+}
+function isGroupAllowed(jid, subject, sock = null) {
+  const rules = groupRulesFor(sock);
+  if (rules.jids.includes(jid)) return true;
+  const norm = normalizeGroupName(subject);
+  return norm !== "" && rules.names.some((n) => norm.includes(n));
+}
+
+// Pesan di grup yang pakai "pesan sementara"/view-once dibungkus lagi -- buka dulu.
+function unwrapMessageContent(message) {
+  let m = message;
+  for (let i = 0; i < 4 && m; i += 1) {
+    const inner =
+      m.ephemeralMessage?.message ||
+      m.viewOnceMessage?.message ||
+      m.viewOnceMessageV2?.message ||
+      m.documentWithCaptionMessage?.message ||
+      m.editedMessage?.message;
+    if (!inner) break;
+    m = inner;
+  }
+  return m ?? null;
+}
+
+function getMessageContextInfo(m) {
+  if (!m) return null;
+  return (
+    m.extendedTextMessage?.contextInfo ||
+    m.imageMessage?.contextInfo ||
+    m.videoMessage?.contextInfo ||
+    m.documentMessage?.contextInfo ||
+    m.audioMessage?.contextInfo ||
+    null
+  );
+}
+
+const groupLastAskAt = new Map(); // "grup|pengirim" -> ms
+
+async function handleGroupMessage(msg, sock) {
+  if (!groupRulesFor(sock).enabled || !AUTO_REPLY_ACTIVE) return;
+  const groupJid = msg.key.remoteJid;
+  const content = unwrapMessageContent(msg.message);
+  if (!content) return;
+  // Voice note di grup tidak bisa me-mention bot; yang dihitung memanggil bot = voice note yang membalas (reply) pesan bot.
+  const groupAudio = audioOf(content);
+  if (groupAudio && !(waVoiceCfg.inGroups && transcriber.available())) return;
+  // Foto + keterangan: dulu diabaikan; sekarang hanya diproses bila keterangannya perintah EDIT FOTO ("bot, ubah jadi hitam putih").
+  const photo = groupAudio ? null : content.imageMessage || null;
+  // Dokumen + keterangan: hanya diproses bila keterangannya meminta PDF -> Excel/Word ("bot, convert ke excel").
+  const docAttached = groupAudio || photo ? null : content.documentMessage || null;
+  const rawText = groupAudio ? "" : photo ? String(photo.caption ?? "") : docAttached ? String(docAttached.caption ?? "") : extractText({ message: content });
+  if (!groupAudio && (!rawText || (!photo && !docAttached && rawText.startsWith("[")))) return;
+
+  const ctx = getMessageContextInfo(content);
+  const quotedDoc = ctx?.quotedMessage ? unwrapMessageContent(ctx.quotedMessage)?.documentMessage || null : null;
+  const ownJids = getOwnJids(sock);
+  const ownUserParts = ownJids.map((j) => j.split("@")[0]);
+
+  // --- Apakah bot dipanggil? (murni lokal & murah, belum menyentuh DB/jaringan)
+  const mentioned = (ctx?.mentionedJid ?? []).some((j) => ownJids.includes(normalizeJidSuffix(j)));
+  const mentionedInText = ownUserParts.some((u) => u && rawText.includes(`@${u}`));
+  let triggered = GROUP_MENTION_TRIGGER && (mentioned || mentionedInText);
+
+  let text = rawText;
+  for (const u of ownUserParts) {
+    if (u) text = text.split(`@${u}`).join(" ");
+  }
+  text = text.replace(/\s+/g, " ").trim();
+
+  if (!triggered && GROUP_KEYWORDS.length > 0) {
+    const lower = text.toLowerCase();
+    const kw = GROUP_KEYWORDS.find((k) => lower === k || new RegExp(`^${k.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[\\s,:!?-]`, "i").test(lower));
+    if (kw) {
+      triggered = true;
+      text = text.slice(kw.length).replace(/^[\s,:!?-]+/, "").trim();
+    }
+  }
+
+  const quotedParticipant = ctx?.participant ? normalizeJidSuffix(ctx.participant) : null;
+  const repliedToOwn = quotedParticipant !== null && ownJids.includes(quotedParticipant);
+  if (!triggered && repliedToOwn && ctx?.stanzaId) {
+    // Hanya balasan ke pesan BOT (bukan pesan manual pemilik): cek id pesannya
+    // ada di catatan balasan keluar grup ini.
+    const { data: botMsg } = await supabase
+      .from("whatsapp_messages")
+      .select("id")
+      .eq("wa_jid", groupJid)
+      .eq("direction", "out")
+      .eq("wa_message_id", ctx.stanzaId)
+      .limit(1);
+    if (botMsg && botMsg.length > 0) triggered = true;
+  }
+  if (!triggered) {
+    // Kalimat biasa yang tampak jelas seperti pengumuman jadwal ("besok rapat jam 9"): bot menawarkan mencatatnya (tanpa AI, tanpa menyimpan obrolan).
+    if (!photo && !docAttached && !groupAudio && agenda.mightOffer(rawText)) offerAgendaFromChat(sock, msg, groupJid, rawText).catch((e) => console.error("📅 Tawaran jadwal gagal:", e instanceof Error ? e.message : String(e)));
+    return;
+  }
+
+  // --- Grup ini diizinkan?
+  const subject = await getGroupSubject(sock, groupJid);
+  if (!isGroupAllowed(groupJid, subject, sock)) {
+    console.log(`👥 Bot dipanggil di grup "${subject || "?"}" (${groupJid}) tapi grup ini tidak ada di WA_GROUP_ALLOWED_NAMES/JIDS, diabaikan.`);
+    return;
+  }
+
+  const sender = msg.pushName || "Anggota grup";
+  // Edit foto: foto di pesan ini, atau foto yang DIBALAS (termasuk gambar buatan bot sendiri).
+  const quotedImage = !photo && ctx?.quotedMessage ? unwrapMessageContent(ctx.quotedMessage)?.imageMessage || null : null;
+  // Foto hidup ("bot, jadikan video dengan salju" + foto/balas foto) didahulukan: kata "jadikan" juga dikenali sebagai edit foto.
+  const animReq = videoGen.photoGroupEnabled() ? videoGen.detectPhoto(text, { hasImage: Boolean(photo || quotedImage) }) : null;
+  const editReq = !animReq && imageGen.groupEnabled() ? imageGen.detectEdit(text, { hasImage: Boolean(photo || quotedImage) }) : null;
+  if (photo && !editReq && !animReq) return; // foto dengan keterangan biasa: tetap diabaikan seperti sebelumnya
+  let quotedText = ctx?.quotedMessage ? extractText({ message: unwrapMessageContent(ctx.quotedMessage) }) : null;
+  // Mengutip GAMBAR buatan bot ini (tanpa keterangan): ambil deskripsi permintaannya dari catatan keluar, supaya AI tahu itu gambar apa.
+  if (!quotedText && repliedToOwn && ctx?.stanzaId && unwrapMessageContent(ctx.quotedMessage || {})?.imageMessage) {
+    const { data: imgRow } = await supabase
+      .from("whatsapp_messages")
+      .select("content")
+      .eq("wa_jid", groupJid)
+      .eq("direction", "out")
+      .eq("wa_message_id", ctx.stanzaId)
+      .limit(1);
+    quotedText = quotedImageNote(imgRow?.[0]?.content) || quotedText;
+  }
+  // PDF yang dilampirkan di pesan ini, atau PDF yang DIBALAS (milik siapa pun): kandidat untuk dibaca & ditanyakan isinya.
+  const pdfCandidate = !PDF_GROUP_READ || photo ? null : isPdfDoc(docAttached) ? docAttached : isPdfDoc(quotedDoc) ? quotedDoc : null;
+  if (!groupAudio && !text && !quotedText && !pdfCandidate) return;
+  if (!groupAudio && !text) text = pdfCandidate ? "(menandai PDF tanpa pertanyaan, ringkas dan jelaskan isi PDF itu)" : "(menandai tanpa pertanyaan, jawab/jelaskan pesan yang dikutip)";
+  // "jawab pakai teks" -> pesan ini dijawab teks walau /voice wag on. "dalam bentuk PDF" / "jadikan pdf" -> jawaban dikirim sebagai berkas PDF.
+  const textOnly = !groupAudio && detectTextOnlyRequest(text);
+  // Hasil berupa berkas: "dalam bentuk PDF/Excel/Word", "jadikan pdf/excel/word", "convert ke excel" (pada PDF yang dibagikan/dibalas).
+  const officeReq = groupAudio ? null : detectOfficeRequest(text);
+  const pdfReq = groupAudio || officeReq ? null : detectPdfRequest(text);
+  const fileReq = officeReq ? { format: officeReq.format, only: officeReq.only, rest: officeReq.rest } : pdfReq ? { format: "pdf", only: pdfReq.only, rest: pdfReq.rest } : null;
+  // Ubah ISI dokumen yang dibagikan/dibalas ("ganti X jadi Y", "perbaiki kalimatnya", "ringkas"): hanya untuk PDF/Word, hasilnya berkas BARU.
+  const docEditRaw = groupAudio || photo || !(docAttached || quotedDoc) || fileReq?.format === "xlsx" ? null : detectEditRequest(fileReq ? fileReq.rest : text);
+  // BACA PDF (dijawab di chat): PDF yang dilampirkan tanpa perintah ubah isi, atau PDF yang dibalas dengan pertanyaan. "ganti X jadi Y" / "perbaiki" / "ringkas jadi 1 halaman" tetap jalur ubah-isi.
+  const readPdf = shouldReadPdf({ hasPdf: Boolean(pdfCandidate), attached: Boolean(docAttached), groupAudio: Boolean(groupAudio && quotedDoc), fileReq, edit: docEditRaw, text });
+  const docEdit = readPdf ? null : docEditRaw;
+  if (docAttached && !readPdf && !docEdit && !(fileReq && fileReq.format !== "pdf")) return; // dokumen (bukan PDF yang ditanyakan) tanpa perintah Excel/Word/ubah isi: tetap diabaikan
+  const fileHint = fileReq && !fileReq.only ? fileReq.rest : "";
+  if (fileReq && !fileReq.only && fileReq.rest) text = fileReq.rest;
+
+  // --- Jeda per orang (cegah spam & hemat kuota)
+  const senderKey = `${groupJid}|${msg.key.participant || sender}`;
+  const lastAt = groupLastAskAt.get(senderKey) ?? 0;
+  if (GROUP_COOLDOWN_MS > 0 && Date.now() - lastAt < GROUP_COOLDOWN_MS) {
+    console.log(`👥 [${subject}] ${sender} terlalu cepat bertanya lagi, diabaikan.`);
+    return;
+  }
+  groupLastAskAt.set(senderKey, Date.now());
+
+  if (groupAudio) {
+    const r = await transcribeWaAudio(sock, msg, content, groupAudio);
+    if (!r.text) {
+      console.log(`👥 [${subject}] voice note ${sender} tidak bisa dibaca${r.error ? ` (${r.error})` : " (tidak terdengar jelas)"}, diabaikan.`);
+      return;
+    }
+    text = r.text;
+  }
+
+  const stored =
+    `${sender}: ${groupAudio ? "🎤 " : ""}${text}` +
+    (readPdf ? ` ${pdfAttachTag(pdfCandidate.fileName, !docAttached)}` : "") +
+    (quotedText ? `\n(mengutip: "${quotedText.replace(/\s+/g, " ").slice(0, GROUP_QUOTE_MAX_CHARS)}")` : "");
+  const { error } = await supabase.from("whatsapp_messages").insert({
+    wa_jid: groupJid,
+    wa_name: subject || null,
+    direction: "in",
+    content: stored,
+    status: "received",
+    wa_message_id: msg.key.id,
+    ...acctFields(currentAccountId())
+  });
+  if (error) {
+    if (error.code !== "23505") console.error("Gagal simpan pesan grup:", error.message);
+    return; // 23505 = event terkirim ulang, jangan dijawab dobel
+  }
+  console.log(`👥 [${subject}] ${sender} memanggil bot${groupAudio ? " (voice note)" : ""}: ${text.slice(0, 60)}`);
+
+  if (!(await isAutoReplyEnabledForContact(groupJid))) {
+    console.log(`🔕 Auto-reply dimatikan khusus utk grup ${groupJid}, dilewati.`);
+    return;
+  }
+
+  // Jadwal kantor (catat / tanya "ada jadwal apa hari ini" / hapus / pindah / jawab tawaran "mau dicatat?"): dijawab dari catatan lokal, tanpa AI.
+  if (agenda.enabled && !photo && !docAttached && !readPdf) {
+    const agendaCmd = agenda.parse(text, { quotedText: quotedText && !quotedText.startsWith("[") ? quotedText : "", offerKey: ctx?.stanzaId ? `${groupJid}|${ctx.stanzaId}` : "" });
+    if (agendaCmd) {
+      const reply = await agenda.handle(agendaCmd, { account: currentAccountId(), groupJid, groupName: subject || "", sender });
+      if (reply) {
+        await replyGroupText(sock, groupJid, msg, subject, reply);
+        return;
+      }
+    }
+  }
+
+  // Permintaan FOTO HIDUP (foto -> video + efek): ditangani pembuat video, bukan AI percakapan.
+  if (animReq && !docEdit && !readPdf) {
+    if (animReq.needsImage) {
+      await replyGroupText(sock, groupJid, msg, subject, VIDEO_NOPHOTO_TEXT);
+      return;
+    }
+    const photoSource = photo
+      ? { key: msg.key, message: content }
+      : { key: { remoteJid: groupJid, id: ctx.stanzaId, participant: ctx.participant }, message: unwrapMessageContent(ctx.quotedMessage) };
+    await handleVideoRequestWa(sock, groupJid, { prompt: animReq.text }, { kind: isOwnerSender(msg, false) ? "owner" : "group", who: msg.key.participant || sender, quoted: msg, waName: subject || null, record: true, photoSource });
+    return;
+  }
+
+  // Permintaan EDIT foto ("bot, ubah jadi hitam putih" + foto/balas foto): ditangani pembuat gambar, bukan AI percakapan.
+  if (editReq && !docEdit && !readPdf) {
+    if (editReq.needsImage) {
+      await replyGroupText(sock, groupJid, msg, subject, "Fotonya belum ada. Kirim foto dengan keterangan perintah edit (mis. \"bot, ubah jadi hitam putih\"), atau balas (reply) foto yang mau diedit dengan: bot, edit foto ini jadi ...");
+      return;
+    }
+    const source = photo
+      ? { key: msg.key, message: content }
+      : { key: { remoteJid: groupJid, id: ctx.stanzaId, participant: ctx.participant }, message: unwrapMessageContent(ctx.quotedMessage) };
+    await handleImageRequestWa(sock, groupJid, { prompt: editReq.prompt }, { kind: "group", who: msg.key.participant || sender, quoted: msg, waName: subject || null, record: true, edit: { source } });
+    return;
+  }
+
+  // Permintaan berkas (PDF/Excel/Word): jatah per orang per hari, supaya jatah AI & laptop tidak habis oleh satu orang.
+  if ((fileReq || docEdit) && !fileQuotaOk(msg.key.participant || sender)) {
+    await replyGroupText(sock, groupJid, msg, subject, `Jatah berkas (PDF/Excel/Word) untukmu hari ini sudah habis (${FILE_DAILY_MAX} berkas per hari). Besok bisa lagi ya.`);
+    return;
+  }
+  // Ubah isi PDF/Word yang dibagikan (atau dibalas): ganti kata langsung di Word, atau disunting AI -> berkas BARU (asli tidak disentuh).
+  if (docEdit) {
+    const doc = docAttached || quotedDoc;
+    const source = docAttached
+      ? { key: msg.key, message: content }
+      : { key: { remoteJid: groupJid, id: ctx.stanzaId, participant: ctx.participant }, message: unwrapMessageContent(ctx.quotedMessage) };
+    sock.sendPresenceUpdate("composing", groupJid).catch(() => {});
+    await editGroupDocument(sock, groupJid, { source, doc, req: docEdit, instruction: fileReq ? fileReq.rest : text, outFormat: fileReq ? fileReq.format : null, msg, subject });
+    sock.sendPresenceUpdate("paused", groupJid).catch(() => {});
+    return;
+  }
+  // PDF yang dibagikan (atau dibalas) + "convert ke excel/word": ubah isi PDF-nya, tanpa memanggil AI.
+  if (fileReq && fileReq.format !== "pdf" && (docAttached || quotedDoc)) {
+    const doc = docAttached || quotedDoc;
+    const source = docAttached
+      ? { key: msg.key, message: content }
+      : { key: { remoteJid: groupJid, id: ctx.stanzaId, participant: ctx.participant }, message: unwrapMessageContent(ctx.quotedMessage) };
+    sock.sendPresenceUpdate("composing", groupJid).catch(() => {});
+    await convertGroupDocument(sock, groupJid, { source, doc, format: fileReq.format, msg, subject });
+    sock.sendPresenceUpdate("paused", groupJid).catch(() => {});
+    return;
+  }
+  // "bot, jadikan pdf/excel/word" (tanpa pertanyaan baru): ubah jawaban yang DIBALAS menjadi berkas, tanpa memanggil AI.
+  if (fileReq?.only) {
+    const label = FILE_LABEL[fileReq.format];
+    const fromReply = ctx?.stanzaId ? replySource.get(ctx.stanzaId) : null;
+    const quotedPlain = quotedText && !quotedText.startsWith("[") ? quotedText : null;
+    const source = fromReply || quotedPlain;
+    if (!source) {
+      await replyGroupText(
+        sock,
+        groupJid,
+        msg,
+        subject,
+        `Balas (reply) jawaban yang mau dijadikan ${label} dengan: bot, jadikan ${label.toLowerCase()}. Atau tulis pertanyaannya sekalian, mis.: bot, buatkan tabel perbandingan ... dalam bentuk ${label}.${fileReq.format !== "pdf" ? " Untuk mengubah PDF yang dibagikan di grup: balas file PDF-nya dengan \"bot, convert ke " + label.toLowerCase() + "\"." : ""}`
+      );
+      return;
+    }
+    sock.sendPresenceUpdate("composing", groupJid).catch(() => {});
+    const ok = await deliverGroupFile(sock, groupJid, fileReq.format, source, { quoted: msg, waName: subject || null });
+    sock.sendPresenceUpdate("paused", groupJid).catch(() => {});
+    if (!ok) await replyGroupText(sock, groupJid, msg, subject, `Maaf, berkas ${label}-nya gagal dibuat. Coba lagi sebentar lagi ya.`);
+    return;
+  }
+
+  // Baca PDF yang dilampirkan / dibalas: teksnya diambil, lalu dijawab AI percakapan (jalur di bawah) berdasarkan isi PDF itu.
+  let pdfCtx = null;
+  if (readPdf) {
+    if (!pdfReadQuotaOk(msg.key.participant || sender)) {
+      await replyGroupText(sock, groupJid, msg, subject, `Jatah baca PDF untukmu hari ini sudah habis (${PDF_GROUP_DAILY_MAX} kali per hari). Besok bisa lagi ya.`);
+      return;
+    }
+    const source = docAttached
+      ? { key: msg.key, message: content }
+      : { key: { remoteJid: groupJid, id: ctx.stanzaId, participant: ctx.participant }, message: unwrapMessageContent(ctx.quotedMessage) };
+    sock.sendPresenceUpdate("composing", groupJid).catch(() => {});
+    const loaded = await readGroupPdf(sock, { source, doc: pdfCandidate, cacheKey: (docAttached ? msg.key.id : ctx.stanzaId) ? `${groupJid}|${docAttached ? msg.key.id : ctx.stanzaId}` : "" });
+    if (!loaded.ok) {
+      sock.sendPresenceUpdate("paused", groupJid).catch(() => {});
+      await replyGroupText(sock, groupJid, msg, subject, loaded.message);
+      return;
+    }
+    pdfCtx = { name: loaded.name, pages: loaded.pages, markdown: loaded.markdown, truncatedPages: loaded.truncated, fromReply: !docAttached, question: text };
+    console.log(`📄 [Baca PDF] "${loaded.name}" ${loaded.pages} hlm, ${loaded.markdown.length} huruf (${loaded.cached ? "dari simpanan" : "baru dibaca"})`);
+  }
+
+  // Permintaan membuat video ("bot, buatkan video ..."): dirakit pembuat video (gambar + suara + ffmpeg), bukan AI percakapan.
+  if (!pdfCtx && (videoGen.groupEnabled() || videoGen.storyGroupEnabled())) {
+    const videoReq = videoGen.detect(text);
+    // video gambar biasa butuh pembuat gambar; animasi karakter cukup ffmpeg (latar cadangan digambar kode)
+    if (videoReq && (videoGen.groupEnabled() || videoReq.mode === "karakter")) {
+      await handleVideoRequestWa(sock, groupJid, videoReq, { kind: isOwnerSender(msg, false) ? "owner" : "group", who: msg.key.participant || sender, quoted: msg, waName: subject || null, record: true });
+      return;
+    }
+  }
+
+  // Permintaan membuat gambar ("bot, buatkan gambar ..."): ditangani pembuat gambar, bukan AI percakapan.
+  if (!pdfCtx && imageGen.groupEnabled()) {
+    const imageReq = imageGen.detect(text);
+    if (imageReq) {
+      await handleImageRequestWa(sock, groupJid, imageReq, { kind: "group", who: msg.key.participant || sender, quoted: msg, waName: subject || null, record: true });
+      return;
+    }
+  }
+
+  sock.sendPresenceUpdate("composing", groupJid).catch(() => {});
+  {
+    const flags = waAccountContext.getStore();
+    if (flags) {
+      flags.wantFile = fileReq ? fileReq.format : "";
+      flags.textOnly = textOnly && !fileReq;
+      flags.groupSubject = subject || ""; // untuk suara khusus per grup (/suara grup ...)
+      flags.pdf = pdfCtx; // isi PDF yang dilampirkan/dibalas (null = tidak ada)
+      flags.retryNote = "";
+      // jawaban pesan ini akan dibacakan jadi voice note -> AI diberi tahu (supaya tidak bilang "aku tidak bisa menjawab dengan suara")
+      flags.voiceReply = Boolean(groupVoice.enabled() && !textOnly && !fileReq && speaker.available());
+    }
+  }
+  // Bahasa jawaban (hanya relevan bila balasan grup berupa suara): permintaan di pesan ini > pengaturan /voice wag > otomatis.
+  if (groupVoice.enabled() && !textOnly && !fileReq) {
+    const wantedLang = detectRequestedLang(text) || groupVoice.lang();
+    const acctCtx = waAccountContext.getStore();
+    if (acctCtx && wantedLang) {
+      acctCtx.replyLang = wantedLang;
+      console.log(`🔊 Bahasa balasan suara grup: ${wantedLang}`);
+    }
+  }
+  let result = null;
+  try {
+    try {
+      result = await generateAutoReply(groupJid);
+    } catch (firstErr) {
+      if (firstErr?.status !== 503 || firstErr?.allKeysExhausted === true) throw firstErr;
+      console.warn(`👥 Gemini 503 (sibuk) untuk grup ${groupJid}, coba lagi ${GROUP_RETRY_503_DELAY_MS / 1000} detik lagi...`);
+      await new Promise((resolve) => setTimeout(resolve, GROUP_RETRY_503_DELAY_MS));
+      result = await generateAutoReply(groupJid);
+    }
+  } catch (err) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    console.error(`Gagal generate balasan grup ${groupJid}:`, errMsg);
+    result = await tryLocalFallbackReply(sock, groupJid, text, err);
+    if (!result) {
+      sock.sendPresenceUpdate("paused", groupJid).catch(() => {});
+      // Di grup tidak ada antrean ulang (balasan susulan berjam-jam kemudian
+      // tidak nyambung); cukup minta mencoba lagi.
+      try {
+        const sent = await sock.sendMessage(groupJid, { text: GROUP_BUSY_TEXT }, { quoted: msg });
+        await supabase.from("whatsapp_messages").insert({
+          wa_jid: groupJid,
+          wa_name: subject || null,
+          direction: "out",
+          content: GROUP_BUSY_TEXT,
+          status: "sent",
+          wa_message_id: sent?.key?.id ?? null,
+          ...acctFields(currentAccountId())
+        });
+      } catch (sendErr) {
+        console.error(`Gagal kirim pesan sibuk ke grup ${groupJid}:`, sendErr instanceof Error ? sendErr.message : String(sendErr));
+      }
+      return;
+    }
+  }
+  sock.sendPresenceUpdate("paused", groupJid).catch(() => {});
+  if (!result || !result.reply) return;
+  // Pemeriksa kontradiksi: jawaban menyangkal kemampuan yang AKTIF ("aku tidak bisa menjawab dengan suara" padahal sedang bersuara) -> tulis ulang sekali.
+  try {
+    const caps = groupCapabilityFlags();
+    const denied = denyingCapability(result.reply, caps);
+    if (denied) {
+      console.warn(`👥 Jawaban menyangkal kemampuan "${denied}" yang sebenarnya aktif; minta AI menulis ulang sekali.`);
+      const acctCtx = waAccountContext.getStore();
+      if (acctCtx) acctCtx.retryNote = denied === "suara" ? "KOREKSI: draf jawabanmu tadi menyangkal bisa menjawab dengan suara, padahal kamu BISA (dan bila jawaban ini dibacakan, kamu sedang bersuara). Tulis ulang jawabannya tanpa menyangkal kemampuan itu." : "KOREKSI: draf jawabanmu tadi menyangkal bisa membaca PDF, padahal kamu BISA (anggota grup mengirim PDF dengan pertanyaan atau membalas PDF). Tulis ulang jawabannya tanpa menyangkal kemampuan itu.";
+      const again = await generateAutoReply(groupJid).catch(() => null);
+      if (acctCtx) acctCtx.retryNote = "";
+      if (again?.reply && !denyingCapability(again.reply, caps)) result = again;
+    }
+  } catch (e) {
+    console.error("Pemeriksa kontradiksi gagal (jawaban dikirim apa adanya):", e instanceof Error ? e.message : String(e));
+  }
+  // Diminta berkas (PDF/Excel/Word): kirim jawaban sebagai berkas. Gagal membuatnya -> tetap dikirim sebagai teks.
+  if (fileReq && (await deliverGroupFile(sock, groupJid, fileReq.format, result.reply, { quoted: msg, waName: subject || null, result, hint: fileHint }))) return;
+  // /voice wag on: balasan grup berupa voice note saja (tanpa teks). Gagal/tidak layak dibacakan -> tetap dikirim teks.
+  // Penanya minta "jawab pakai teks" -> tidak dibacakan (hanya untuk pesan ini).
+  if (groupVoice.enabled() && !textOnly && !fileReq) {
+    sock.sendPresenceUpdate("recording", groupJid).catch(() => {});
+    const voice = await groupVoice.tryVoice(result.reply);
+    sock.sendPresenceUpdate("paused", groupJid).catch(() => {});
+    if (voice && (await deliverAutoReplyVoice(sock, groupJid, result, voice, { quoted: msg, waName: subject || null }))) return;
+  }
+  await deliverAutoReplyText(sock, groupJid, result, "👥 Balasan grup", { quoted: msg, waName: subject || null });
+}
+
+/** Balas pesan di grup dengan teks biasa & catat ke riwayat. */
+async function replyGroupText(sock, groupJid, msg, subject, text) {
+  const sent = await sock.sendMessage(groupJid, { text }, { quoted: msg }).catch((e) => {
+    console.error(`Gagal kirim pesan ke ${groupJid}:`, e instanceof Error ? e.message : String(e));
+    return null;
+  });
+  const { error } = await supabase.from("whatsapp_messages").insert({ wa_jid: groupJid, wa_name: subject || null, direction: "out", content: text, status: "sent", wa_message_id: sent?.key?.id ?? null, ...acctFields(currentAccountId()) });
+  if (error) console.error("Gagal catat balasan grup:", error.message);
+  return sent;
+}
+
+/** Tawarkan mencatat jadwal dari kalimat biasa di grup (hanya grup yang diizinkan; harus dikonfirmasi dengan "ya"). */
+async function offerAgendaFromChat(sock, msg, groupJid, text) {
+  const subject = await getGroupSubject(sock, groupJid);
+  if (!isGroupAllowed(groupJid, subject, sock)) return;
+  if (!(await isAutoReplyEnabledForContact(groupJid))) return;
+  const account = currentAccountId();
+  const offer = agenda.buildOffer(text, { groupJid, account });
+  if (!offer) return;
+  const sent = await replyGroupText(sock, groupJid, msg, subject, offer.text);
+  if (sent?.key?.id) agenda.rememberOffer(`${groupJid}|${sent.key.id}`, offer.ev, { account, groupJid, groupName: subject || "" });
+}
+
+const FILE_LABEL = { pdf: "PDF", xlsx: "Excel", docx: "Word" };
+const FILE_DAILY_MAX = Math.max(0, Number(process.env.WA_GROUP_FILE_MAX_PER_DAY ?? 10) || 0);
+const fileQuota = new Map(); // "orang|tanggal" -> jumlah
+function fileQuotaOk(who) {
+  if (FILE_DAILY_MAX <= 0) return true;
+  const day = new Date().toLocaleDateString("en-CA", { timeZone: WA_TIMEZONE });
+  const key = `${who}|${day}`;
+  for (const k of fileQuota.keys()) if (!k.endsWith(`|${day}`)) fileQuota.delete(k);
+  const n = fileQuota.get(key) ?? 0;
+  if (n >= FILE_DAILY_MAX) return false;
+  fileQuota.set(key, n + 1);
+  return true;
+}
+// Pembuatan berkas dijalankan satu per satu (pdftotext & penyusunan berkas besar jangan menumpuk di laptop kantor).
+let fileJobChain = Promise.resolve();
+function runFileJob(fn) {
+  const p = fileJobChain.then(fn, fn);
+  fileJobChain = p.catch(() => {});
+  return p;
+}
+
+/**
+ * Ubah teks (markdown) menjadi berkas PDF / Word / Excel lalu kirim sebagai dokumen ke grup. true = terkirim. Tidak pernah melempar galat.
+ * result (opsional) = hasil AI: token pemakaiannya dicatat. raw = isi apa adanya (hasil konversi PDF), tanpa pembersihan jawaban AI.
+ */
+async function deliverGroupFile(sock, jid, kind, markdown, { quoted = null, waName = null, result = null, hint = "", fileTitle = "", fileBase = "", caption = "", raw = false, prebuilt = null } = {}) {
+  try {
+    const clean = raw ? String(markdown ?? "") : cleanAnswerForFile(markdown);
+    const title = fileTitle || titleForFile(clean, hint);
+    const label = FILE_LABEL[kind] || "PDF";
+    let buf;
+    let mimetype;
+    let fileName;
+    if (prebuilt) {
+      ({ buf, mimetype, fileName } = prebuilt); // berkas Word hasil ganti-kata langsung (format asli utuh)
+    } else if (kind === "xlsx") {
+      buf = buildXlsx(clean);
+      mimetype = MIME_XLSX;
+      fileName = officeFileName(fileBase || title, "xlsx");
+    } else if (kind === "docx") {
+      buf = buildDocx(clean, { title });
+      mimetype = MIME_DOCX;
+      fileName = officeFileName(fileBase || title, "docx");
+    } else {
+      const when = `${formatClockInTimezone(Date.now())} ${WA_TIMEZONE_LABEL}`;
+      buf = buildPdf(clean, { title, subtitle: `Dibuat oleh Ayyubi • ${new Date().toLocaleDateString("id-ID", { day: "numeric", month: "long", year: "numeric", timeZone: WA_TIMEZONE })} ${when}` });
+      mimetype = "application/pdf";
+      fileName = pdfFileName(fileBase || title);
+    }
+    const sent = await sock.sendMessage(jid, { document: buf, mimetype, fileName, caption: caption || title }, quoted ? { quoted } : undefined);
+    if (!prebuilt) rememberReplySource(sent?.key?.id, clean);
+    const { error } = await supabase.from("whatsapp_messages").insert({
+      wa_jid: jid,
+      wa_name: waName,
+      direction: "out",
+      content: `📄 [BOT mengirim ${label} "${title.replace(/"/g, "'")}"]\n${formatForWhatsApp(clean).slice(0, 1500)}`,
+      status: "sent",
+      wa_message_id: sent?.key?.id ?? null,
+      ...acctFields(currentAccountId())
+    });
+    if (error) console.error(`Gagal catat ${label} terkirim:`, error.message);
+    console.log(`📄 ${label} "${title}" (${Math.round(buf.length / 1024)} KB) terkirim ke ${jid}`);
+    if (result) await recordTokenUsage(result.tokensUsed, result.costUsd);
+    return true;
+  } catch (e) {
+    console.error(`📄 Gagal membuat/mengirim berkas ${kind} ke ${jid}:`, e instanceof Error ? e.message : String(e));
+    return false;
+  }
+}
+
+/** PDF yang dibagikan di grup -> Excel / Word (tanpa AI). Selalu menjawab: berkasnya, atau alasan kenapa tidak bisa. */
+// Jatah baca PDF per orang per hari (supaya komputer bot & kuota AI tidak habis oleh satu orang).
+const pdfReadQuota = new Map(); // "orang|tanggal" -> jumlah
+function pdfReadQuotaOk(who) {
+  if (PDF_GROUP_DAILY_MAX <= 0) return true;
+  const day = new Date().toLocaleDateString("en-CA", { timeZone: WA_TIMEZONE });
+  const key = `${who}|${day}`;
+  for (const k of pdfReadQuota.keys()) if (!k.endsWith(`|${day}`)) pdfReadQuota.delete(k);
+  const n = pdfReadQuota.get(key) ?? 0;
+  if (n >= PDF_GROUP_DAILY_MAX) return false;
+  pdfReadQuota.set(key, n + 1);
+  return true;
+}
+
+// Teks PDF yang sudah dibaca disimpan sebentar (per pesan PDF) supaya pertanyaan susulan pada PDF yang sama tidak mengunduh ulang.
+const PDF_CACHE_TTL_MS = 30 * 60 * 1000;
+const PDF_CACHE_MAX = 12;
+const pdfTextCache = new Map(); // "grup|idPesan" -> { at, name, pages, markdown, truncated }
+
+/**
+ * Unduh PDF dari WhatsApp lalu ambil teksnya (pdftotext). -> { ok: true, name, pages, markdown, truncated, cached } atau { ok: false, message }.
+ * Tidak pernah melempar galat; pesan gagal sudah jujur & siap dikirim ke grup. Dijalankan satu per satu (runFileJob).
+ */
+async function readGroupPdf(sock, { source, doc, cacheKey }) {
+  const name = String(doc?.fileName || "dokumen.pdf");
+  const hit = cacheKey ? pdfTextCache.get(cacheKey) : null;
+  if (hit && Date.now() - hit.at < PDF_CACHE_TTL_MS) return { ok: true, name: hit.name, pages: hit.pages, markdown: hit.markdown, truncated: hit.truncated, cached: true };
+  if (pdfToolMissing) return { ok: false, message: pdfReadMessage("notool") };
+  if (Number(doc?.fileLength) > PDF_MAX_BYTES) return { ok: false, message: `PDF-nya terlalu besar (maks ${Math.round(PDF_MAX_BYTES / 1024 / 1024)} MB). Kirim versi yang lebih kecil atau pisahkan per bagian.` };
+  return runFileJob(async () => {
+    let buffer = null;
+    let lastErr = null;
+    for (let attempt = 0; attempt < 2 && !buffer; attempt++) {
+      try {
+        buffer = await downloadMediaMessage(source, "buffer", {}, { logger: pino({ level: "silent" }), reuploadRequest: sock.updateMediaMessage });
+      } catch (e) {
+        lastErr = e;
+        await new Promise((r) => setTimeout(r, 700));
+      }
+    }
+    if (!buffer) {
+      console.error(`📄 [Baca PDF] gagal mengunduh "${name}": ${describeError(lastErr)}`);
+      return { ok: false, message: pdfReadMessage("download") };
+    }
+    let r;
+    try {
+      r = await pdfBufferToMarkdown(buffer);
+    } catch (e) {
+      console.error(`📄 [Baca PDF] ${name}: ${e instanceof Error ? e.message : String(e)}`);
+      if (e?.kind === "notool") pdfToolMissing = true;
+      return { ok: false, message: pdfReadMessage(e?.kind) };
+    }
+    if (r.scanned) return { ok: false, message: pdfReadMessage("scanned") };
+    if (!r.markdown) return { ok: false, message: pdfReadMessage("empty") };
+    const entry = { at: Date.now(), name, pages: r.pages, markdown: r.markdown, truncated: r.truncated };
+    if (cacheKey) {
+      pdfTextCache.set(cacheKey, entry);
+      while (pdfTextCache.size > PDF_CACHE_MAX) pdfTextCache.delete(pdfTextCache.keys().next().value);
+    }
+    return { ok: true, ...entry, cached: false };
+  });
+}
+
+async function convertGroupDocument(sock, groupJid, { source, doc, format, msg, subject }) {
+  const say = (t) => replyGroupText(sock, groupJid, msg, subject, t);
+  const label = FILE_LABEL[format];
+  const name = String(doc?.fileName || "dokumen");
+  const isPdf = /pdf/i.test(String(doc?.mimetype || "")) || /\.pdf$/i.test(name);
+  if (!isPdf) {
+    await say(`Baru file PDF yang bisa diubah ke ${label}. "${name}" bukan PDF.`);
+    return;
+  }
+  if (Number(doc?.fileLength) > PDF_MAX_BYTES) {
+    await say(`PDF-nya terlalu besar (maks ${Math.round(PDF_MAX_BYTES / 1024 / 1024)} MB). Kirim versi yang lebih kecil atau pisahkan per bagian.`);
+    return;
+  }
+  await runFileJob(async () => {
+    let buffer = null;
+    let lastErr = null;
+    for (let attempt = 0; attempt < 2 && !buffer; attempt++) {
+      try {
+        buffer = await downloadMediaMessage(source, "buffer", {}, { logger: pino({ level: "silent" }), reuploadRequest: sock.updateMediaMessage });
+      } catch (e) {
+        lastErr = e;
+        await new Promise((r) => setTimeout(r, 700));
+      }
+    }
+    if (!buffer) {
+      console.error(`📄 [Konversi] gagal mengunduh PDF: ${describeError(lastErr)}`);
+      await say("PDF-nya gagal diunduh (mungkin sudah kedaluwarsa). Kirim ulang filenya, lalu minta lagi.");
+      return;
+    }
+    let r;
+    try {
+      r = await pdfBufferToMarkdown(buffer);
+    } catch (e) {
+      console.error(`📄 [Konversi] ${name}: ${e instanceof Error ? e.message : String(e)}`);
+      const msgByKind = {
+        notool: "Bot belum bisa membaca PDF karena alat pdftotext belum terpasang di laptop kantor (pemilik bot perlu memasang poppler-utils).",
+        toobig: "PDF-nya terlalu besar.",
+        timeout: "PDF-nya terlalu rumit/lama diproses. Coba kirim sebagian halamannya saja.",
+        badpdf: "File ini tidak bisa dibaca sebagai PDF (rusak atau terkunci kata sandi)."
+      };
+      await say(msgByKind[e?.kind] || "PDF-nya gagal dibaca. Coba lagi sebentar lagi ya.");
+      return;
+    }
+    if (r.scanned || !r.markdown) {
+      await say("PDF ini tampaknya hasil scan (berupa gambar), jadi tidak ada teks yang bisa diambil. Kirim PDF aslinya (yang teksnya bisa diseleksi), ya.");
+      return;
+    }
+    const base = name.replace(/\.pdf$/i, "").replace(/[_-]+/g, " ").replace(/\s+/g, " ").trim() || "Hasil konversi";
+    const parts = [`Hasil konversi dari "${name}" ke ${label}`, `${r.pages} halaman`];
+    if (format === "xlsx") parts.push(r.tables > 0 ? `${r.tables} tabel (tiap tabel satu lembar)` : "tidak ada tabel terdeteksi: isi disalin per baris di lembar \"Teks\"");
+    else if (r.tables > 0) parts.push(`${r.tables} tabel`);
+    if (r.truncated) parts.push(`hanya ${r.pages > 60 ? 60 : r.pages} halaman pertama yang diproses`);
+    const caption = `${parts.join(" • ")}. Mohon dicek ulang, terutama kolom tabel.`;
+    const ok = await deliverGroupFile(sock, groupJid, format, r.markdown, { quoted: msg, waName: subject || null, fileTitle: base.slice(0, 70), caption, raw: true });
+    if (!ok) await say(`Maaf, berkas ${label}-nya gagal dibuat. Coba lagi sebentar lagi ya.`);
+  });
+}
+
+const DOC_EDIT_MAX_BYTES = 15 * 1024 * 1024;
+const PDF_READ_ERR = {
+  notool: "Bot belum bisa membaca PDF karena alat pdftotext belum terpasang di laptop kantor (pemilik bot perlu memasang poppler-utils).",
+  toobig: "PDF-nya terlalu besar.",
+  timeout: "PDF-nya terlalu rumit/lama diproses. Coba kirim sebagian halamannya saja.",
+  badpdf: "File ini tidak bisa dibaca sebagai PDF (rusak atau terkunci kata sandi)."
+};
+
+/** Suntingan AI atas isi dokumen (markdown). Melempar galat bila AI gagal/kosong. */
+async function aiEditMarkdown(instruction, markdown) {
+  const data = await geminiGenerateWithRotation(buildEditPrompt(), [{ role: "user", parts: [{ text: buildEditUserMessage(instruction, markdown) }] }], { useSearch: false });
+  const out = unwrapFence(extractGeminiText(data));
+  if (!out) throw new Error("AI mengembalikan hasil kosong");
+  const tokensUsed = data?.usageMetadata?.totalTokenCount ?? 0;
+  if (tokensUsed > 0) await recordTokenUsage(tokensUsed, estimateCostUsd(GEMINI_MODEL, tokensUsed * 0.5, tokensUsed * 0.5));
+  return out;
+}
+
+const E_SIGN_WARN = "⚠️ Dokumen asli memuat tanda tangan elektronik. Hasil suntingan ini BUKAN dokumen bertanda tangan elektronik yang sah (tanda tangan, QR code, dan sertifikatnya tidak berlaku lagi); jangan dipakai sebagai pengganti dokumen asli.";
+const shortQ = (s, n = 40) => `"${String(s).length > n ? String(s).slice(0, n - 1) + "…" : s}"`;
+
+const OVERLAY_ERR_NOTE = {
+  encrypted: "PDF-nya terkunci/terenkripsi, jadi tidak bisa ditimpa langsung.",
+  unsupported: "Struktur PDF-nya belum bisa ditimpa langsung.",
+  badpdf: "Struktur PDF-nya tidak terbaca untuk ditimpa langsung.",
+  toobig: "PDF-nya terlalu besar untuk ditimpa langsung.",
+  timeout: "Pembacaan posisi tulisan kelamaan.",
+  notool: "Alat pembaca posisi tulisan (poppler) belum terpasang."
+};
+
+/**
+ * Coba ganti kata langsung di PDF (kotak putih + tulisan baru). -> { result } bila berhasil,
+ * { note } bila harus pakai cara buat-ulang, { stop } (pesan) bila kata berkutip memang tidak ada.
+ */
+async function tryPdfOverlay(buffer, pairs, name) {
+  let r;
+  try {
+    r = await overlayReplacePdf(buffer, pairs);
+  } catch (e) {
+    console.error(`📝 [Ubah isi] timpa PDF gagal untuk ${name}: ${e instanceof Error ? e.message : String(e)}`);
+    return { note: `${OVERLAY_ERR_NOTE[e?.kind] || "PDF-nya gagal ditimpa langsung."} Sebagai gantinya dibuat berkas baru dari isinya.` };
+  }
+  if (r.buf) return { result: r };
+  if (r.multiline.length) return { note: `Kata ${r.multiline.map((s) => shortQ(s)).join(", ")} terbagi di dua baris atau lebih, jadi tidak bisa ditimpa langsung. Sebagai gantinya dibuat berkas baru dari isinya.` };
+  if (r.notes.length) return { note: `${r.notes[0]} Sebagai gantinya dibuat berkas baru dari isinya.` };
+  return {}; // tidak ketemu di PDF: biarkan jalur lama (teks hasil ekstraksi, atau AI) yang memutuskan
+}
+
+/**
+ * Ubah isi PDF / Word yang dibagikan di grup. Selalu menjawab: berkas BARU "<nama>-revisi", atau alasan kenapa tidak bisa. Berkas asli tidak disentuh.
+ *  - Word + ganti kata: dilakukan langsung di dalam berkas (format asli utuh).
+ *  - PDF + ganti kata: kata lama ditutup kotak putih dan kata baru ditulis di atasnya (tampilan asli utuh; cap "REVISI" bila bertanda tangan elektronik).
+ *  - PDF yang tak bisa ditimpa, atau permintaan AI ("perbaiki", "ringkas"): isi dibaca -> disunting -> dibuat ulang (tata letak asli tidak ikut).
+ */
+async function editGroupDocument(sock, groupJid, { source, doc, req, instruction, outFormat, msg, subject }) {
+  const say = (t) => replyGroupText(sock, groupJid, msg, subject, t);
+  const name = String(doc?.fileName || "dokumen");
+  const mime = String(doc?.mimetype || "");
+  const isPdf = /pdf/i.test(mime) || /\.pdf$/i.test(name);
+  const isDocx = /wordprocessingml/i.test(mime) || /\.docx$/i.test(name);
+  if (!isPdf && !isDocx) {
+    await say(`Baru file PDF dan Word (.docx) yang bisa diubah isinya. "${name}" bukan keduanya${/\.doc$/i.test(name) ? " (simpan ulang sebagai .docx dulu)" : ""}.`);
+    return;
+  }
+  const maxBytes = isPdf ? PDF_MAX_BYTES : DOC_EDIT_MAX_BYTES;
+  if (Number(doc?.fileLength) > maxBytes) {
+    await say(`Filenya terlalu besar (maks ${Math.round(maxBytes / 1024 / 1024)} MB). Kirim versi yang lebih kecil atau pisahkan per bagian.`);
+    return;
+  }
+  const base = name.replace(/(?:\.(?:pdf|docx))+$/i, "").replace(/[_-]+/g, " ").replace(/\s+/g, " ").trim() || "Dokumen";
+  const fileBase = `${base.slice(0, 60)} revisi`;
+  const kind = outFormat === "pdf" || outFormat === "docx" ? outFormat : isPdf ? "pdf" : "docx";
+  const aiReady = GEMINI_API_KEYS.length > 0 || llmFallback.available();
+
+  await runFileJob(async () => {
+    let buffer = null;
+    let lastErr = null;
+    for (let attempt = 0; attempt < 2 && !buffer; attempt++) {
+      try {
+        buffer = await downloadMediaMessage(source, "buffer", {}, { logger: pino({ level: "silent" }), reuploadRequest: sock.updateMediaMessage });
+      } catch (e) {
+        lastErr = e;
+        await new Promise((r) => setTimeout(r, 700));
+      }
+    }
+    if (!buffer) {
+      console.error(`📝 [Ubah isi] gagal mengunduh ${name}: ${describeError(lastErr)}`);
+      await say("Filenya gagal diunduh (mungkin sudah kedaluwarsa). Kirim ulang filenya, lalu minta lagi.");
+      return;
+    }
+    const countsText = (pairs, counts) => pairs.map((p, i) => (counts[i] > 0 ? `${shortQ(p.from)} → ${shortQ(p.to)} (${counts[i]}x)` : `${shortQ(p.from)} tidak ditemukan`)).join("; ");
+    let useAi = req.kind === "ai";
+    let overlayNote = "";
+
+    // 1) Ganti kata. Word tanpa ganti format: langsung di dalam berkas.
+    if (req.kind === "replace") {
+      try {
+        if (isPdf && kind === "pdf") {
+          // Ganti kata PDF: tutup kata lama dengan kotak putih, tulis kata baru di atasnya (tampilan asli utuh).
+          const ov = await tryPdfOverlay(buffer, req.pairs, name);
+          if (ov.result?.buf) {
+            const r = ov.result;
+            const parts = [`Sudah diganti: ${countsText(req.pairs, r.counts)}.`, "Tampilan PDF aslinya (logo, QR code, tata letak) tetap utuh; file asli tidak diubah."];
+            parts.push(...r.notes.slice(0, 3));
+            parts.push("Kata lama hanya tertutup kotak putih (masih bisa ditemukan lewat pencarian/salin teks), jadi jangan dipakai untuk menyembunyikan data rahasia; hurufnya juga hanya mirip dengan aslinya.");
+            if (r.signed) parts.push(`${E_SIGN_WARN} Setiap halaman diberi cap merah "REVISI - bukan dokumen asli".`);
+            parts.push("Mohon dicek ulang sebelum dipakai.");
+            const ok = await deliverGroupFile(sock, groupJid, "pdf", `(${name} diedit langsung)`, { quoted: msg, waName: subject || null, fileTitle: base.slice(0, 70), caption: parts.join(" "), raw: true, prebuilt: { buf: r.buf, mimetype: "application/pdf", fileName: pdfFileName(fileBase) } });
+            if (!ok) await say("Maaf, berkas PDF-nya gagal dibuat. Coba lagi sebentar lagi ya.");
+            return;
+          }
+          overlayNote = ov.note;
+          if (ov.stop) {
+            await say(ov.stop);
+            return;
+          }
+        }
+        if (isDocx && kind === "docx") {
+          const r = replaceInDocx(buffer, req.pairs);
+          if (r.counts.some((c) => c > 0)) {
+            const sigWarn = hasESignature(docxToMarkdown(buffer)) ? ` ${E_SIGN_WARN}` : "";
+            const caption = `Sudah diganti: ${countsText(req.pairs, r.counts)}. Format Word aslinya tetap utuh; file asli tidak diubah.${sigWarn}`;
+            const ok = await deliverGroupFile(sock, groupJid, "docx", `(${name} diedit langsung)`, { quoted: msg, waName: subject || null, fileTitle: base.slice(0, 70), caption, raw: true, prebuilt: { buf: r.buf, mimetype: MIME_DOCX, fileName: officeFileName(fileBase, "docx") } });
+            if (!ok) await say("Maaf, berkas Word-nya gagal dibuat. Coba lagi sebentar lagi ya.");
+            return;
+          }
+        }
+      } catch (e) {
+        console.error(`📝 [Ubah isi] ${name}: ${e instanceof Error ? e.message : String(e)}`);
+        await say(e?.kind === "baddocx" ? "File ini tidak bisa dibaca sebagai Word (.docx) yang sah." : "Filenya gagal diproses. Coba lagi sebentar lagi ya.");
+        return;
+      }
+    }
+
+    // 2) Baca isi dokumen -> markdown
+    let md;
+    let scanned = false;
+    try {
+      if (isPdf) {
+        const r = await pdfBufferToMarkdown(buffer);
+        md = r.markdown;
+        scanned = r.scanned;
+      } else {
+        md = docxToMarkdown(buffer);
+      }
+    } catch (e) {
+      console.error(`📝 [Ubah isi] ${name}: ${e instanceof Error ? e.message : String(e)}`);
+      await say(isPdf ? PDF_READ_ERR[e?.kind] || "PDF-nya gagal dibaca. Coba lagi sebentar lagi ya." : "File ini tidak bisa dibaca sebagai Word (.docx) yang sah.");
+      return;
+    }
+    if (scanned || !md) {
+      await say(isPdf ? "PDF ini tampaknya hasil scan (berupa gambar), jadi tidak ada teks yang bisa diubah. Kirim PDF aslinya (yang teksnya bisa diseleksi), ya." : "Dokumen Word ini tidak punya teks yang bisa diubah.");
+      return;
+    }
+
+    let outMd = md;
+    const notes = [];
+    if (req.kind === "replace") {
+      const r = replaceInText(md, req.pairs);
+      if (r.counts.some((c) => c > 0)) {
+        outMd = r.text;
+        notes.push(`Sudah diganti: ${countsText(req.pairs, r.counts)}.`);
+      } else if (req.quoted) {
+        await say(`Kata ${req.pairs.map((p) => shortQ(p.from)).join(", ")} tidak ditemukan di "${name}". Cek tulisannya (huruf besar/kecil tidak masalah, tapi ejaan harus sama).`);
+        return;
+      } else {
+        useAi = true; // "ganti judul jadi lebih menarik": bukan kata persis -> serahkan ke AI
+      }
+    }
+
+    // 3) Suntingan AI
+    if (useAi) {
+      if (!aiReady) {
+        await say("Penyuntingan dengan AI sedang tidak tersedia (kunci AI belum terpasang). Ganti kata persis masih bisa: bot, ganti \"kata lama\" jadi \"kata baru\".");
+        return;
+      }
+      if (md.length > AI_EDIT_MAX_CHARS) {
+        await say(`Isi dokumennya terlalu panjang untuk disunting AI sekaligus (${md.length.toLocaleString("id-ID")} karakter, maks ${AI_EDIT_MAX_CHARS.toLocaleString("id-ID")}). Kirim bagian yang mau diubah saja, atau pakai ganti kata persis: bot, ganti "kata lama" jadi "kata baru".`);
+        return;
+      }
+      let edited;
+      try {
+        edited = await aiEditMarkdown(instruction || req.instruction || "", md);
+      } catch (e) {
+        console.error(`📝 [Ubah isi] AI gagal untuk ${name}: ${describeError(e)}`);
+        await say("Maaf, AI-nya lagi tidak bisa menyunting dokumen ini. Coba lagi sebentar lagi ya.");
+        return;
+      }
+      outMd = edited;
+      const summarize = req.kind === "ai" ? req.summarize : false;
+      const diff = numberDiff(md, edited);
+      const list = (a) => [...new Set(a)].slice(0, 6).join(", ") + (new Set(a).size > 6 ? ", …" : "");
+      if (diff.added.length) notes.push(`⚠️ Ada angka baru yang tidak ada di aslinya: ${list(diff.added)}.`);
+      if (diff.removed.length && !summarize) notes.push(`⚠️ Angka di aslinya yang hilang: ${list(diff.removed)}.`);
+      if (!summarize && edited.length < md.length * 0.5) notes.push("⚠️ Hasilnya jauh lebih pendek dari aslinya.");
+      notes.unshift("Disunting oleh AI sesuai permintaanmu.");
+    }
+    if (isPdf) notes.push(`${overlayNote ? `${overlayNote} ` : ""}Tata letak PDF asli tidak ikut (logo, gambar, dan QR code juga tidak terbawa); ini berkas baru dari isinya.`);
+    if (hasESignature(md)) notes.push(E_SIGN_WARN);
+    notes.push("Mohon dicek ulang sebelum dipakai; file asli tidak diubah.");
+
+    const heading = /^#\s+(.+)$/m.exec(outMd)?.[1]?.replace(/[*_`]/g, "").trim().slice(0, 70);
+    const ok = await deliverGroupFile(sock, groupJid, kind, outMd, { quoted: msg, waName: subject || null, fileTitle: heading || base.slice(0, 70), fileBase, caption: notes.join(" "), raw: true });
+    if (!ok) await say(`Maaf, berkas ${FILE_LABEL[kind]}-nya gagal dibuat. Coba lagi sebentar lagi ya.`);
+  });
+}
+
+// ---------------- Pembuat gambar di WhatsApp ----------------
+const imageNoticeAt = new Map(); // jenis galat -> waktu pemberitahuan terakhir ke pemilik
+async function tellOwnerImageProblem(kind, text, detail = "") {
+  if (!["billing", "auth", "nokey", "quota", "noffmpeg", "noedit"].includes(kind)) return;
+  if (Date.now() - (imageNoticeAt.get(kind) || 0) < 6 * 3600_000) return;
+  imageNoticeAt.set(kind, Date.now());
+  if (kind === "noffmpeg" || kind === "noedit") {
+    await sendToOwner(`🖼️ Edit foto belum bisa dipakai: ${text}${detail ? `\n\nRincian:\n${detail}` : ""}`).catch(() => {});
+    return;
+  }
+  await sendToOwner(`🖼️ Pembuat gambar bermasalah: ${text}${detail ? `\n\nRincian:\n${detail}` : ""}\n\nSolusi gratis: isi token Cloudflare lewat /env (CLOUDFLARE_ACCOUNT_ID dan CLOUDFLARE_API_TOKEN), lalu tes /gambar kucing lucu. Alternatif berbayar: saldo OpenRouter minimal $1. Kunci Gemini gratis memang tidak punya jatah untuk model gambar.`).catch(() => {});
+}
+
+/** Unduh foto yang mau diedit & perkecil (ffmpeg). -> { prepared } atau { error, kind } siap tampil. */
+/** Unduh foto WhatsApp. -> { buffer } atau { error, kind } siap tampil. */
+async function downloadWaPhoto(sock, source, label = "Edit") {
+  const img = source?.message?.imageMessage;
+  if (!img) return { error: IMAGE_KIND_TEXT.badimage, kind: "badimage" };
+  if (Number(img.fileLength) > 12 * 1024 * 1024) return { error: "Fotonya terlalu besar (maks 12 MB). Kirim versi yang lebih kecil.", kind: "badimage" };
+  let buffer = null;
+  let lastErr = null;
+  for (let attempt = 0; attempt < 2 && !buffer; attempt++) {
+    try {
+      buffer = await downloadMediaMessage(source, "buffer", {}, { logger: pino({ level: "silent" }), reuploadRequest: sock.updateMediaMessage });
+    } catch (e) {
+      lastErr = e;
+      await new Promise((r) => setTimeout(r, 700));
+    }
+  }
+  if (!buffer) {
+    console.error(`🖼️ [${label}] gagal mengunduh foto: ${describeError(lastErr)}`);
+    return { error: "Fotonya gagal diunduh (mungkin sudah kedaluwarsa). Kirim ulang fotonya, lalu minta lagi.", kind: "badimage" };
+  }
+  return { buffer };
+}
+
+async function loadEditSource(sock, source) {
+  try {
+    const dl = await downloadWaPhoto(sock, source, "Edit");
+    if (dl.error) return dl;
+    const buffer = dl.buffer;
+    return { prepared: await prepareEditInput(buffer) };
+  } catch (e) {
+    const kind = e?.kind === "noffmpeg" ? "noffmpeg" : "badimage";
+    console.error(`🖼️ [Edit] foto tidak bisa disiapkan (${kind}): ${e instanceof Error ? e.message : String(e)}`);
+    return { error: IMAGE_KIND_TEXT[kind], kind, detail: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+/**
+ * Buat gambar lalu kirim ke chat WA (tanpa keterangan, supaya tidak terbaca sebagai pesan teks saat bot membaca chatnya sendiri).
+ * kind: "owner" | "group". Dimintakan jatah dulu; gagal -> pesan alasan. group: hasil dicatat ke whatsapp_messages.
+ */
+async function handleImageRequestWa(sock, jid, req, { kind = "owner", who = "", quoted = null, waName = null, record = false, edit = null } = {}) {
+  const send = async (content) => {
+    const sent = await sock.sendMessage(jid, content, quoted ? { quoted } : undefined).catch((e) => {
+      console.error(`🖼️ Gagal kirim ke ${jid}:`, e instanceof Error ? e.message : String(e));
+      return null;
+    });
+    return sent;
+  };
+  const note = async (contentText, sent) => {
+    if (!record) return;
+    const { error } = await supabase.from("whatsapp_messages").insert({
+      wa_jid: jid,
+      wa_name: waName,
+      direction: "out",
+      content: contentText,
+      status: "sent",
+      wa_message_id: sent?.key?.id ?? null,
+      ...acctFields(currentAccountId())
+    });
+    if (error) console.error("Gagal catat balasan gambar:", error.message);
+  };
+  const tick = () => sock.sendPresenceUpdate("composing", jid).catch(() => {});
+  tick();
+  const timer = setInterval(tick, 4500);
+  const boss = office.task(officeWho());
+  const studio = office.task("gambar");
+  boss.think(`${edit ? "Permintaan edit foto" : "Permintaan gambar"} di ${chatLabel(jid, waName || "")}`);
+  boss.handoff("gambar", "pesan", "Menyerahkan permintaan ke studio gambar");
+  studio.work(edit ? "Mengedit foto" : "Menggambar", 40);
+  let out;
+  try {
+    if (edit) {
+      const src = await loadEditSource(sock, edit.source);
+      out = src.error ? src : await imageGen.makeEdit(req.prompt, src.prepared, kind, who);
+    } else {
+      out = await imageGen.make(req.prompt, kind, who);
+    }
+  } finally {
+    clearInterval(timer);
+    sock.sendPresenceUpdate("paused", jid).catch(() => {});
+  }
+  if (out.error) {
+    console.log(`🖼️ [${kind}] ${jid}: ${out.kind} — ${out.error.slice(0, 80)}`);
+    studio.fail(reasonText(out.kind));
+    boss.fail("Gambar tidak jadi");
+    await tellOwnerImageProblem(out.kind, out.error, out.detail);
+    const sent = await send({ text: out.error });
+    await note(out.error, sent);
+    return;
+  }
+  studio.handoff(officeWho(), "gambar", "Gambar jadi");
+  studio.done("Gambar diserahkan");
+  boss.work("Mengirim gambar", 85);
+  const { buffer, mime, model } = out.image;
+  const sent = await send({ image: buffer, mimetype: mime || "image/png" });
+  boss.done("Gambar terkirim");
+  console.log(`🖼️ Gambar dibuat (${model}, ${Math.round(buffer.length / 1024)} KB) untuk ${jid}: ${String(req.prompt).slice(0, 60)}`);
+  await note(imageSentNote(req.prompt, { edit: Boolean(edit) }), sent);
+}
+
+const videoNoticeAt = new Map(); // jenis galat -> waktu pemberitahuan terakhir ke pemilik
+async function tellOwnerVideoProblem(kind, text, detail = "") {
+  if (kind === "noffmpeg" || kind === "render") {
+    if (Date.now() - (videoNoticeAt.get(kind) || 0) < 6 * 3600_000) return;
+    videoNoticeAt.set(kind, Date.now());
+    await sendToOwner(`🎬 Pembuat video bermasalah: ${text}${detail ? `\n\nRincian:\n${detail}` : ""}`).catch(() => {});
+    return;
+  }
+  await tellOwnerImageProblem(kind, text, detail);
+}
+
+/**
+ * Buat video lalu kirim ke chat WA. kind: "owner" | "group". Satu pesan pemberitahuan dikirim lebih dulu (perakitan butuh 1-3 menit);
+ * gagal -> pesan alasan. group: hasil dicatat ke whatsapp_messages.
+ */
+async function handleVideoRequestWa(sock, jid, req, { kind = "owner", who = "", quoted = null, waName = null, record = false, photoSource = null } = {}) {
+  const send = async (content) =>
+    sock.sendMessage(jid, content, quoted ? { quoted } : undefined).catch((e) => {
+      console.error(`🎬 Gagal kirim ke ${jid}:`, e instanceof Error ? e.message : String(e));
+      return null;
+    });
+  const note = async (contentText, sent) => {
+    if (!record) return;
+    const { error } = await supabase.from("whatsapp_messages").insert({
+      wa_jid: jid,
+      wa_name: waName,
+      direction: "out",
+      content: contentText,
+      status: "sent",
+      wa_message_id: sent?.key?.id ?? null,
+      ...acctFields(currentAccountId())
+    });
+    if (error) console.error("Gagal catat balasan video:", error.message);
+  };
+  if (!photoSource && !req.prompt) {
+    const sent = await send({ text: "Mau dibuatkan video tentang apa? Contoh: bot, buatkan video kancil dan buaya (atau tambah durasi: bot, buatkan video 30 detik tentang siklus air)." });
+    await note("Mau dibuatkan video tentang apa?", sent);
+    return;
+  }
+  let announced = false;
+  const tick = () => sock.sendPresenceUpdate("composing", jid).catch(() => {});
+  tick();
+  const timer = setInterval(tick, 4500);
+  const boss = office.task(officeWho());
+  const ov = officeVideoStages(office, boss, chatLabel(jid, waName || ""), { photo: Boolean(photoSource) && !req.morph, morph: Boolean(photoSource && req.morph) });
+  let out;
+  try {
+    if (photoSource && req.morph) {
+      // MORF FOTO (percobaan, pemilik): foto diedit AI bertahap lalu disambung jadi video
+      const dl = await downloadWaPhoto(sock, photoSource, "Morf");
+      out = dl.error
+        ? dl
+        : await videoGen.makeMorph(dl.buffer, req.prompt || "", kind, who, {
+            onStage: (stage, i, n) => {
+              ov.stage(stage, i, n);
+              if (announced || stage !== "edit") return;
+              announced = true;
+              send({ text: `🧬 Oke, fotonya diubah bertahap (${n} edit AI lalu disambung jadi video). Biasanya 3–8 menit; kukirim ke sini begitu selesai.` })
+                .then((s) => note("🧬 [BOT sedang membuat morf foto permintaan ini]", s))
+                .catch(() => {});
+            }
+          });
+    } else if (photoSource) {
+      // FOTO HIDUP: foto -> video dengan gerak kamera + efek (tanpa AI, hanya ffmpeg)
+      const dl = await downloadWaPhoto(sock, photoSource, "FotoHidup");
+      out = dl.error
+        ? dl
+        : await videoGen.makeFromPhoto(dl.buffer, req.prompt || "", kind, who, {
+            onStage: (stage) => {
+              ov.stage(stage);
+              if (announced || stage !== "render") return;
+              announced = true;
+              send({ text: "🎞️ Oke, fotonya sedang dihidupkan (gerak kamera + efek). Biasanya setengah sampai dua menit; kukirim ke sini begitu selesai." })
+                .then((s) => note("🎞️ [BOT sedang menghidupkan foto permintaan ini]", s))
+                .catch(() => {});
+            }
+          });
+    } else {
+      const story = req.mode === "karakter";
+      out = await videoGen.make(req.prompt, kind, who, {
+        seconds: req.seconds || 0,
+        mode: story ? "karakter" : undefined,
+        style: story ? req.style || "" : "",
+        onStage: (stage) => {
+          ov.stage(stage);
+          if (announced || stage !== "images") return;
+          announced = true;
+          const mins = req.seconds > 45 ? "3–6 menit" : "2–4 menit";
+          const text = story
+            ? `🎭 Oke, animasinya${req.style === "stopmotion" ? " (gaya stop motion potongan kertas)" : ""} sedang dibuat (naskah → latar → suara → menggambar tokoh bergerak). Biasanya ${mins}; kukirim ke sini begitu selesai.`
+            : `🎬 Oke, videonya sedang dibuat (naskah → gambar → suara → rakit). Biasanya ${req.seconds > 45 ? "2–4 menit" : "1–3 menit"}; kukirim ke sini begitu selesai.`;
+          send({ text })
+            .then((s) => note(story ? "🎭 [BOT sedang membuat animasi permintaan ini]" : "🎬 [BOT sedang membuat video permintaan ini]", s))
+            .catch(() => {});
+        }
+      });
+    }
+  } finally {
+    clearInterval(timer);
+    sock.sendPresenceUpdate("paused", jid).catch(() => {});
+  }
+  if (out.error) {
+    console.log(`🎬 [${kind}] ${jid}: ${out.kind} — ${out.error.slice(0, 80)}`);
+    ov.video.fail(reasonText(out.kind));
+    boss.fail("Video tidak jadi");
+    await tellOwnerVideoProblem(out.kind, out.error, out.detail);
+    const sent = await send({ text: out.error });
+    await note(out.error, sent);
+    return;
+  }
+  const v = out.video;
+  ov.video.handoff(officeWho(), "video", "Video jadi");
+  ov.video.done("Video diserahkan");
+  boss.work("Mengirim video", 85);
+  const sent = await send({ video: v.buffer, mimetype: v.mime || "video/mp4", ...(v.music ? { caption: `🎵 ${v.music}` } : {}) });
+  boss.done("Video terkirim");
+  console.log(`🎬 Video dibuat (${v.seconds} dtk, ${v.scenes} adegan, ${Math.round(v.buffer.length / 1024)} KB${v.silent ? ", tanpa suara" : ""}) untuk ${jid}: ${String(req.prompt).slice(0, 60)}`);
+  await note(photoSource && req.morph ? morphSentNote(req.prompt) : photoSource ? photoVideoSentNote(req.prompt, v) : req.mode === "karakter" ? storySentNote(req.prompt) : videoSentNote(req.prompt), sent);
+}
+
+/** Pemilik meminta video di chat pribadi ("buatkan video ..." / "/video ..."). true = ditangani. */
+async function handleWaVideoCommand(sock, jid, msg, text) {
+  // Foto + keterangan (atau membalas foto) -> FOTO HIDUP
+  try {
+    const content = unwrapMessageContent(msg.message) || {};
+    const ctx = content.imageMessage?.contextInfo || content.extendedTextMessage?.contextInfo || null;
+    const own = content.imageMessage || null;
+    const quotedImg = !own && ctx?.quotedMessage ? unwrapMessageContent(ctx.quotedMessage)?.imageMessage || null : null;
+    const caption = own ? String(own.caption ?? "") : String(text ?? "").replace(/^\[gambar\]\s*/i, "");
+    if (own || quotedImg) {
+      const morph = videoGen.detectMorph(caption, { hasImage: true });
+      if (morph) {
+        const photoSource = own ? { key: msg.key, message: content } : { key: { remoteJid: jid, id: ctx.stanzaId, participant: ctx.participant }, message: unwrapMessageContent(ctx.quotedMessage) };
+        await handleVideoRequestWa(sock, jid, { prompt: morph.text, morph: true }, { kind: "owner", quoted: msg, photoSource });
+        return true;
+      }
+      const anim = videoGen.photoAvailable() ? videoGen.detectPhoto(caption, { hasImage: true }) : null;
+      if (anim) {
+        const photoSource = own ? { key: msg.key, message: content } : { key: { remoteJid: jid, id: ctx.stanzaId, participant: ctx.participant }, message: unwrapMessageContent(ctx.quotedMessage) };
+        await handleVideoRequestWa(sock, jid, { prompt: anim.text }, { kind: "owner", quoted: msg, photoSource });
+        return true;
+      }
+    } else if (videoGen.detectMorph(caption, { hasImage: false })) {
+      await sock.sendMessage(jid, { text: "Fotonya belum ada. Kirim foto dengan keterangan, mis. \"morf siang jadi malam bersalju\", atau balas (reply) foto yang mau diubah dengan: morf siang jadi malam." }, { quoted: msg }).catch(() => {});
+      return true;
+    } else if (videoGen.photoAvailable()) {
+      const anim = videoGen.detectPhoto(caption, { hasImage: false });
+      if (anim?.needsImage) {
+        await sock.sendMessage(jid, { text: "Fotonya belum ada. Kirim foto dengan keterangan, mis. \"jadikan video dengan salju turun\", atau balas (reply) foto yang mau dihidupkan dengan: jadikan video." }, { quoted: msg }).catch(() => {});
+        return true;
+      }
+    }
+  } catch (e) {
+    console.error("🎞️ [FotoHidup] gagal membaca foto:", e instanceof Error ? e.message : String(e));
+  }
+  const req = videoGen.detect(text);
+  if (!req) return false;
+  if (!videoGen.available() && req.mode !== "karakter") return false;
+  await handleVideoRequestWa(sock, jid, req, { kind: "owner", quoted: msg });
+  return true;
+}
+
+/** Pemilik meminta gambar di chat pribadi ("buatkan gambar ..." / "/gambar ..."). true = ditangani. */
+async function handleWaImageCommand(sock, jid, msg, text) {
+  if (!imageGen.available()) return false;
+  const req = imageGen.detect(text);
+  if (!req) return false;
+  await handleImageRequestWa(sock, jid, req, { kind: "owner", quoted: msg });
+  return true;
+}
+
+/** Kirim balasan grup sebagai voice note. true = terkirim (dan tercatat); false = gagal kirim, pemanggil mengirim teks. */
+async function deliverAutoReplyVoice(sock, jid, result, voice, { quoted = null, waName = null } = {}) {
+  try {
+    const sent = await sock.sendMessage(jid, { audio: voice.ogg, mimetype: "audio/ogg; codecs=opus", ptt: true }, quoted ? { quoted } : undefined);
+    rememberReplySource(sent?.key?.id, result.reply);
+    // Yang dicatat tetap TEKS jawabannya: konteks percakapan grup untuk AI tidak boleh kosong, dan id pesan suara dipakai
+    // untuk mengenali balasan-ke-bot (voice note itu bisa di-reply).
+    await supabase.from("whatsapp_messages").insert({
+      wa_jid: jid,
+      wa_name: waName,
+      direction: "out",
+      content: result.reply,
+      status: "sent",
+      wa_message_id: sent?.key?.id ?? null,
+      ...acctFields(currentAccountId())
+    });
+    console.log(`🔊 Balasan grup (suara) ke ${jid}: ${result.reply.slice(0, 60)}`);
+    await recordTokenUsage(result.tokensUsed, result.costUsd);
+    return true;
+  } catch (err) {
+    console.error(`Gagal kirim voice note ke ${jid}, kirim teks:`, err instanceof Error ? err.message : String(err));
+    return false;
+  }
+}
+
+// ---------------- Suara di WhatsApp ----------------
+// Voice note PEMILIK -> teks (lalu diperlakukan seperti ketikan: SiMAB, /speak, dst.). Voice note KONTAK LAIN di chat pribadi
+// (WA_VOICE_FROM_OTHERS) dan balasan-ke-bot di grup (WA_VOICE_IN_GROUPS) diubah jadi teks lalu masuk jalur auto-reply biasa.
+// Logika tutor ada di wa-voice.js.
+const waVoiceCfg = readWaVoiceConfig(process.env);
+
+/** Unduh voice note lalu ubah jadi teks. -> { text } atau { error } (pesan siap tampil). */
+async function transcribeWaAudio(sock, msg, content, audio, sttOpts = {}) {
+  if (!transcriber.available()) return { error: "Pesan suara belum aktif: isi GROQ_API_KEYS (atau GEMINI_API_KEYS) di .env bot lalu restart." };
+  if (audio.seconds > sttConfig.maxSeconds) return { error: `Pesan suaranya terlalu panjang (${audio.seconds} dtk). Maksimal ${sttConfig.maxSeconds} detik; pecah jadi beberapa pesan.` };
+  if (audio.bytes > 19 * 1024 * 1024) return { error: "Berkas suaranya terlalu besar (maks 20 MB)." };
+  try {
+    let buffer = null;
+    let lastErr = null;
+    for (let attempt = 0; attempt < 2 && !buffer; attempt++) {
+      try {
+        buffer = await downloadMediaMessage({ key: msg.key, message: content }, "buffer", {}, { logger: pino({ level: "silent" }), reuploadRequest: sock.updateMediaMessage });
+      } catch (e) {
+        lastErr = e;
+        await new Promise((r) => setTimeout(r, 700));
+      }
+    }
+    if (!buffer) throw new Error(`gagal mengunduh voice note: ${describeError(lastErr)}`);
+    const out = await transcriber.transcribe(buffer, { mime: audio.mime, ...sttOpts });
+    return { text: String(out?.text ?? "").trim() };
+  } catch (e) {
+    console.error(`🎤 [WA] suara gagal diubah jadi teks: ${e instanceof Error ? e.message : String(e)}`);
+    return { error: String(e instanceof Error ? e.message : e).slice(0, 300) };
+  }
+}
+
+/** Jembatan tutor -> WhatsApp: kirim teks, kirim voice note (PTT), dan indikator "mengetik/merekam". */
+function waTutorIo(sock, jid) {
+  return {
+    send: (t) => sock.sendMessage(jid, { text: t }),
+    voice: (ogg) => sock.sendMessage(jid, { audio: ogg, mimetype: "audio/ogg; codecs=opus", ptt: true }),
+    busy: (kind) => {
+      const state = kind === "voice" ? "recording" : "composing";
+      const tick = () => sock.sendPresenceUpdate(state, jid).catch(() => {});
+      tick();
+      const timer = setInterval(tick, 4500);
+      return () => {
+        clearInterval(timer);
+        sock.sendPresenceUpdate("paused", jid).catch(() => {});
+      };
+    }
+  };
+}
+
+async function handleIncoming(msg, sock) {
+  const jid = msg.key.remoteJid;
+  // Pesan dari/ke Meta AI (bot bawaan WhatsApp): hanya dicatat untuk uji /metaai, TIDAK PERNAH diteruskan ke auto-reply.
+  if (metaAi.observe(msg)) return;
+  // "Chat ke diri sendiri" (catatan pribadi) di WhatsApp -- remoteJid-nya
+  // salah satu dari JID KITA SENDIRI (lihat getOwnJids -- BISA jid format
+  // nomor HP ATAU format @lid, sudah ketauan dari debugging kalau WhatsApp
+  // ternyata pakai yang @lid buat ini). Baileys selalu menandai ini
+  // fromMe=true (kita "pengirim"-nya, tidak ada lawan bicara lain), BEDA
+  // dari balasan yang kita kirim ke KONTAK LAIN (yang juga fromMe=true tapi
+  // sudah dicatat duluan waktu diproses dari antrian "pending", lihat
+  // processPendingOutgoing) -- makanya guard di bawah ini KECUALIKAN kasus
+  // chat-ke-diri-sendiri secara eksplisit, supaya catatan pribadi ini ikut
+  // tersimpan & tampil di aplikasi juga (TANPA memicu auto-reply -- lihat
+  // bagian bawah fungsi ini).
+  const isSelfChat = getOwnJids(sock).includes(jid);
+  // Nomor kedua: HP-nya dipegang orang lain, jadi chat-ke-diri-sendiri di sana TIDAK dianggap perintah pemilik -- diabaikan sama sekali.
+  if (isSelfChat && sock.waAccount?.secondary) return;
+
+  // Pesan yang KITA kirim sendiri (fromMe) KE KONTAK LAIN juga muncul lewat
+  // event ini -- sudah dicatat duluan waktu diproses dari antrian "pending"
+  // (lihat processPendingOutgoing), jadi di sini cukup dilewati supaya tidak
+  // dobel. Chat-ke-diri-sendiri DIKECUALIKAN (lihat komentar isSelfChat).
+  if (msg.key.fromMe && !isSelfChat) {
+    await handleOwnOutgoing(msg, sock, jid);
+    return;
+  }
+
+  // Grup: jalur terpisah (hanya dijawab kalau bot dipanggil & grupnya diizinkan).
+  if (isGroupJid(jid)) {
+    await handleGroupMessage(msg, sock);
+    return;
+  }
+
+  // v1 cuma dukung chat PERSONAL (bukan grup/status/broadcast) -- biar
+  // scope-nya jelas dulu, grup bisa menyusul kalau memang dibutuhkan nanti.
+  // Terima jid format lama (@s.whatsapp.net, berbasis nomor HP) MAUPUN
+  // format baru (@lid -- "Local ID", sistem identitas privasi yang belakangan
+  // dipakai WhatsApp buat sebagian chat personal, menggantikan nomor HP
+  // mentah). Tanpa ini, pesan dari kontak yang jid-nya sudah migrasi ke @lid
+  // bakal kebuang diam-diam di sini (ketauan waktu debugging: event-nya
+  // beneran nyampe & kebaca teksnya, tapi filter ini yang mendrop duluan).
+  if (!jid || !(jid.endsWith("@s.whatsapp.net") || jid.endsWith("@lid"))) return;
+
+  let text = extractText(msg);
+  let viaVoice = false;
+  const audio = audioOf(unwrapMessageContent(msg.message));
+  if (audio && transcriber.available()) {
+    const owner = isOwnerSender(msg, isSelfChat);
+    let eligible = owner;
+    if (!owner && waVoiceCfg.fromOthers && AUTO_REPLY_ACTIVE) {
+      // Hemat kuota suara->teks: hanya kontak yang memang akan dijawab AI (tidak dijeda, tidak dimatikan).
+      eligible = aiPauseRemainingMs(jidUserKeys(jid, msg.key.remoteJidAlt)) === 0 && (await isAutoReplyEnabledForContact(jid));
+    }
+    if (eligible) {
+      const r = await transcribeWaAudio(sock, msg, unwrapMessageContent(msg.message), audio, owner ? waTutor.sttOptions(jid) || {} : {});
+      if (owner) {
+        const reply = (t) => sock.sendMessage(jid, { text: t }, { quoted: msg }).catch(() => {});
+        if (r.error) return void (await reply(`⚠️ ${r.error}`));
+        if (!r.text) return void (await reply("🎤 Suaranya tidak terdengar jelas. Coba rekam lagi lebih dekat ke mikrofon."));
+        if (waTutor.active(jid)) {
+          if (waTutor.showText(jid)) await reply(`🎤 “${r.text}”`);
+          text = r.text;
+        } else {
+          const cmd = voiceToCommand(r.text, { inSession: simab.enabled && simab.hasSession(jid) });
+          await reply(cmd.changed && cmd.text ? `🎤 “${r.text}”\n➡️ ${cmd.text.replace(/\n/g, " ⏎ ")}` : `🎤 “${r.text}”`);
+          if (!cmd.text) return;
+          text = cmd.text;
+        }
+        viaVoice = true;
+      } else if (r.text) {
+        text = r.text;
+        viaVoice = true;
+      } else if (r.error) {
+        console.log(`🎤 [WA] voice note dari ${jid} tidak bisa dibaca (${r.error}); diperlakukan sebagai pesan suara biasa.`);
+      }
+    }
+  }
+  if (!text) return;
+
+  if (msg.pushName && !isSelfChat) {
+    for (const k of jidUserKeys(jid, msg.key.remoteJidAlt)) contactNames.set(k, msg.pushName);
+  }
+
+  // "AI On" / "AI Status" dari pemilik di chat-ke-diri-sendiri (lihat Jeda auto-reply).
+  if (isSelfChat && (await handleAiPauseCommand(sock, jid, text))) return;
+
+  // Perintah SiMAB dari pemilik: dijawab dari database SiMAB, TIDAK disimpan & TIDAK
+  // diteruskan ke auto-reply AI. Dari orang lain, pesan "simab ..." diperlakukan biasa.
+  // Selagi sesi "simab rekam" aktif, balasan pemilik (angka / 3 baris data / ya / batal)
+  // juga milik SiMAB -- bukan chat biasa.
+  const inRekamSession = simab.enabled && simab.hasSession(jid) && isOwnerSender(msg, isSelfChat);
+  if (/^\s*simab\b/i.test(text) || inRekamSession) {
+    if (!simab.enabled) {
+      if (isOwnerSender(msg, isSelfChat)) {
+        await sock.sendMessage(jid, { text: "Fitur SiMAB belum aktif: isi SIMAB_SUPABASE_URL, SIMAB_SUPABASE_ANON_KEY, SIMAB_BOT_EMAIL, SIMAB_BOT_PASSWORD di .env lalu restart bot." }).catch(() => {});
+        return;
+      }
+    } else if (isOwnerSender(msg, isSelfChat)) {
+      await handleSimabMessage(sock, jid, msg, text);
+      return;
+    } else {
+      console.log(
+        `🏛️ [SiMAB] perintah ditolak: pengirim bukan pemilik (id: ${senderUserParts(msg).join(", ")}). Kalau ini nomormu tapi tampil sbg id @lid, isi WA_OWNER_LIDS=<id lid itu> di .env.`
+      );
+    }
+  }
+
+  // /dokumen <pertanyaan> (hanya pemilik, bukan di grup): jawab dari dokumen lokal lewat Ollama; tidak disimpan & tidak memicu auto-reply.
+  if (isOwnerSender(msg, isSelfChat) && !isGroupJid(jid) && (await handleWaDokumenCommand(sock, jid, text))) return;
+  // /ingat /catatan /lupa /penyedia (hanya pemilik, bukan di grup): lihat owner-memory.js dan provider-stats.js.
+  if (isOwnerSender(msg, isSelfChat) && !isGroupJid(jid) && (await handleWaOwnerLocalCommands(sock, jid, text))) return;
+  if (isOwnerSender(msg, isSelfChat) && !isGroupJid(jid) && (await handleWaSkillCommand(sock, jid, text))) return;
+  if (isOwnerSender(msg, isSelfChat) && !isGroupJid(jid) && (await handleWaLocalChatCommand(sock, jid, text))) return;
+  if (isOwnerSender(msg, isSelfChat) && !isGroupJid(jid) && (await handleWaMarketCommand(sock, jid, text))) return;
+  if (isOwnerSender(msg, isSelfChat) && !isGroupJid(jid) && (await handleWaReminderBackupCommand(sock, jid, text))) return;
+  if (isOwnerSender(msg, isSelfChat) && !isGroupJid(jid) && (await handleWaRouteCommand(sock, jid, text))) return;
+  if (isOwnerSender(msg, isSelfChat) && !isGroupJid(jid) && (await handleWaNodinCommand(sock, jid, text))) return;
+  if (isOwnerSender(msg, isSelfChat) && !isGroupJid(jid) && (await handleWaKasCommand(sock, jid, text))) return;
+  if (isOwnerSender(msg, isSelfChat) && !isGroupJid(jid) && (await handleWaVideoCommand(sock, jid, msg, text))) return;
+  if (isOwnerSender(msg, isSelfChat) && !isGroupJid(jid) && (await handleWaImageCommand(sock, jid, msg, text))) return;
+
+  // Tutor suara (/speak, /selesai) hanya untuk pemilik; selama sesi, teks/voice note pemilik = ucapan untuk tutor
+  // (tidak disimpan ke riwayat chat dan tidak memicu auto-reply).
+  if (isOwnerSender(msg, isSelfChat) && (await waTutor.handle(jid, text, waTutorIo(sock, jid)))) return;
+
+  const { error } = await supabase.from("whatsapp_messages").insert({
+    wa_jid: jid,
+    wa_name: msg.pushName || null,
+    direction: "in",
+    content: viaVoice ? `🎤 ${text}` : text,
+    status: "received",
+    wa_message_id: msg.key.id,
+    ...acctFields(currentAccountId())
+  });
+  if (error) {
+    // Kode 23505 = unique violation (wa_message_id sudah ada) -- ini AMAN
+    // diabaikan, biasa terjadi kalau bot sempat reconnect dan WhatsApp
+    // mengirim ulang event pesan yang sama. PENTING: di sini juga return
+    // lebih awal (jangan lanjut ke auto-reply) -- kalau tidak, pesan yang
+    // sama bisa kepicu auto-reply DUA KALI waktu event-nya terkirim ulang.
+    if (error.code !== "23505") {
+      console.error("Gagal simpan pesan masuk:", error.message);
+    }
+    return;
+  }
+  console.log(`📩 Pesan masuk dari ${jid}${msg.pushName ? ` (${msg.pushName})` : ""}: ${text.slice(0, 60)}`);
+
+  // Perintah pemilik: "/ringkasan" (dari chat-ke-diri-sendiri atau dari nomor
+  // WA_OWNER_NUMBER) = kirim ringkasan hari ini sekarang juga.
+  if (isOwnerSender(msg, isSelfChat) && text.trim().toLowerCase() === "/ringkasan") {
+    sendSummaryNow("perintah /ringkasan").catch(() => {});
+    return;
+  }
+  // "/peraturan" = jalankan pantauan peraturan sekarang (hanya yang belum pernah dilaporkan);
+  // "/peraturan semua" = tampilkan semua hasil terbaru lagi (buat tes, tidak mengubah riwayat).
+  if (isOwnerSender(msg, isSelfChat) && /^\/peraturan(\s+semua)?$/i.test(text.trim())) {
+    regMonitor.runNow({ all: /semua/i.test(text) }).catch(() => {});
+    return;
+  }
+
+  // Chat-ke-diri-sendiri TIDAK PERNAH memicu auto-reply (tidak masuk akal
+  // bot membalas catatan kita sendiri) -- baru lanjut cek toggle AKTIF/MATI
+  // global & per-kontak kalau ini beneran pesan dari kontak lain.
+  if (!isSelfChat && AUTO_REPLY_ACTIVE) {
+    // Kamu baru membalas chat ini manual -> bot diam dulu (pesannya tetap disimpan).
+    const pausedMs = aiPauseRemainingMs(jidUserKeys(jid, msg.key.remoteJidAlt));
+    if (pausedMs > 0) {
+      console.log(`⏸️ Auto-reply dijeda utk ${jid} (balasan manual), ${Math.ceil(pausedMs / 60_000)} menit lagi. Ketik "AI On" di chat itu untuk mengaktifkan.`);
+      return;
+    }
+    const contactEnabled = await isAutoReplyEnabledForContact(jid);
+    if (contactEnabled) {
+      await sendAutoReply(sock, jid, text);
+    } else {
+      console.log(`🔕 Auto-reply dimatikan khusus utk ${jid}, dilewati.`);
+    }
+  }
+}
+
+async function processPendingOutgoing(sock) {
+  const { data, error } = await supabase
+    .from("whatsapp_messages")
+    .select("id, wa_jid, content")
+    .eq("status", "pending")
+    .order("created_at", { ascending: true })
+    .limit(20);
+  if (error) {
+    console.error("Gagal ambil antrian pesan keluar:", error.message);
+    return;
+  }
+
+  for (const row of data ?? []) {
+    // Pesan dari aplikasi tidak tahu nomor mana: kirim lewat nomor yang menangani percakapan itu (pesan terakhir di jid tsb).
+    if ((await accountRouter.accountOf(row.wa_jid)) !== (sock.waAccount?.id || MAIN_ACCOUNT)) continue;
+    try {
+      // "AI On" yang diketik dari layar WA di aplikasi = PERINTAH, bukan pesan untuk kontak:
+      // aktifkan lagi auto-reply di chat ini, JANGAN dikirim ke kontak, dan JANGAN memicu jeda.
+      if (typeof row.content === "string" && AI_ON_RE.test(row.content)) {
+        const keys = jidUserKeys(row.wa_jid);
+        const was = resumeAiFor(keys);
+        await supabase
+          .from("whatsapp_messages")
+          .update({ status: "sent", wa_message_id: null, error: null })
+          .eq("id", row.id);
+        console.log(
+          `🤖 "AI On" dari aplikasi untuk ${describeContact(keys)} -> auto-reply aktif lagi${was ? "" : " (sebelumnya memang tidak dijeda)"}. (tidak dikirim ke kontak)`
+        );
+        await notifyOwner(sock, `✅ AI aktif lagi untuk ${describeContact(keys)}.`);
+        continue;
+      }
+      const sent = await sock.sendMessage(row.wa_jid, { text: row.content });
+      rememberBotSent(sent?.key?.id);
+      await supabase
+        .from("whatsapp_messages")
+        .update({ status: "sent", wa_message_id: sent?.key?.id ?? null, error: null })
+        .eq("id", row.id);
+      console.log(`📤 Terkirim ke ${row.wa_jid}: ${row.content.slice(0, 60)}`);
+      markManualFromApp(row.wa_jid);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`Gagal kirim ke ${row.wa_jid}:`, msg);
+      await supabase.from("whatsapp_messages").update({ status: "failed", error: msg }).eq("id", row.id);
+    }
+  }
+}
+
+// Minta KODE TAUTAN (8 huruf) untuk nomor kedua dan kirim ke pemilik (WhatsApp utama + Telegram). Dipakai otomatis saat sesi
+// nomor kedua belum pernah ditautkan, dan lewat perintah /wa2 kode. Pemegang HP nomor itu memasukkan kode di
+// WhatsApp > Perangkat Tertaut > Tautkan dengan nomor telepon (tanpa scan QR).
+async function requestWa2PairingCode({ force = false, notify = true } = {}) {
+  const acct = WA2_ACCOUNT_DEF;
+  if (!acct) throw new Error("Nomor kedua belum dinyalakan (isi WA2_NUMBER di .env).");
+  if (!wa2Config.number) throw new Error("WA2_NUMBER belum diisi di .env, jadi kode tautan tidak bisa dibuat (pakai scan QR di log: pm2 logs).");
+  if (!acct.sock) {
+    // Sesi berhenti (kode sebelumnya tidak dipakai / logout). Mulai sesi baru; kodenya dikirim otomatis begitu siap.
+    if (acct.connecting) throw new Error("Sesi nomor kedua sedang disiapkan; tunggu sebentar, kodenya dikirim otomatis.");
+    acct.idle = false;
+    acct.mode = "code";
+    acct.autoCodes = 1; // tepat satu kode untuk permintaan ini
+    connect(acct).catch((err) => console.error(`Gagal memulai ${acct.label}:`, err instanceof Error ? err.message : String(err)));
+    return null;
+  }
+  if (isPairedCreds(acct.sock.authState?.creds)) throw new Error(`${acct.label} sudah tertaut.`);
+  if (acct.pairing && !force) throw new Error("Permintaan kode sedang berjalan.");
+  acct.pairing = true;
+  acct.mode = "code";
+  acct.sock.pairCodeAsked = true;
+  try {
+    const code = await acct.sock.requestPairingCode(wa2Config.number);
+    console.log(`🔗 [${acct.label}] kode tautan: ${code}`);
+    if (notify) await sendToOwner(pairingInstructions({ label: acct.label, code, number: wa2Config.number, clock: formatClockInTimezone(Date.now()) }));
+    return code;
+  } finally {
+    setTimeout(() => {
+      acct.pairing = false;
+    }, 30_000); // jangan minta kode berulang-ulang (WhatsApp bisa membatasi)
+  }
+}
+
+// Gambar QR penautan nomor kedua (untuk dipindai dari HP lain, mis. layar HP/laptop kamu dipindai pemegang HP nomor 2).
+// QR berlaku sekitar 1 menit lalu diganti; sambungan menunggu sekitar 2,5 menit sebelum menyerah.
+async function wa2QrImage() {
+  const acct = WA2_ACCOUNT_DEF;
+  if (!acct) throw new Error("Nomor kedua belum dinyalakan (isi WA2_NUMBER di .env).");
+  if (acct.sock && isPairedCreds(acct.sock.authState?.creds)) throw new Error(`${acct.label} sudah tertaut.`);
+  if (!acct.sock) {
+    if (acct.connecting) throw new Error("Sesi nomor kedua sedang disiapkan; coba lagi beberapa detik lagi.");
+    acct.idle = false;
+    acct.mode = "qr";
+    acct.autoCodes = 2; // tidak ada kode otomatis di mode QR
+    acct.lastQr = null;
+    connect(acct).catch((err) => console.error(`Gagal memulai ${acct.label}:`, err instanceof Error ? err.message : String(err)));
+  } else {
+    acct.mode = "qr";
+  }
+  for (let i = 0; i < 40 && !(acct.lastQr && Date.now() - acct.lastQr.at < 15_000); i += 1) await new Promise((r) => setTimeout(r, 500));
+  if (!acct.lastQr) throw new Error("QR belum muncul dari WhatsApp (koneksi internet laptop mungkin lambat). Coba /wa2 qr lagi.");
+  return qrToPng(acct.lastQr.qr);
+}
+
+function wipeAuthDir(dir) {
+  fs.rmSync(path.resolve(dir), { recursive: true, force: true });
+}
+
+async function connect(acct = MAIN_ACCOUNT_DEF) {
+  if (acct.secondary) {
+    if (acct.connecting) return;
+    acct.connecting = true;
+  }
+  let loaded;
+  let version;
+  try {
+    loaded = await useMultiFileAuthState(acct.authDir);
+    // Sisa tautan yang tidak selesai (kode tidak dimasukkan di HP) membuat WhatsApp menjawab 401 terus-menerus: buang, mulai bersih.
+    if (acct.secondary && isStalePairing(loaded.state.creds)) {
+      console.warn(`🔗 [${acct.label}] sisa tautan yang belum selesai ditemukan; sesi dibersihkan dan dimulai dari awal.`);
+      wipeAuthDir(acct.authDir);
+      loaded = await useMultiFileAuthState(acct.authDir);
+    }
+    ({ version } = await fetchLatestBaileysVersion());
+  } finally {
+    acct.connecting = false;
+  }
+  const { state, saveCreds } = loaded;
+
+  const sock = makeWASocket({
+    version,
+    auth: state,
+    // "silent" -- Baileys defaultnya CEREWET BANGET kalau logger-nya aktif
+    // (nge-log tiap paket protokol WhatsApp). Ganti ke level "info" cuma
+    // kalau lagi debug masalah koneksi.
+    logger: pino({ level: "silent" }),
+    browser: ["Ayyubi", "Chrome", "1.0.0"]
+  });
+
+  sock.waAccount = acct;
+  if (acct.secondary) acct.sock = sock;
+  else currentSock = sock;
+
+  // Catat id tiap pesan yang dikirim BOT supaya tidak pernah dikira balasan manual.
+  const origSendMessage = sock.sendMessage.bind(sock);
+  sock.sendMessage = async (...args) => {
+    const res = await origSendMessage(...args);
+    rememberBotSent(res?.key?.id);
+    return res;
+  };
+
+  sock.ev.on("creds.update", saveCreds);
+
+  sock.ev.on("connection.update", (update) => {
+    const { connection, lastDisconnect, qr } = update;
+
+    if (qr && acct.secondary) acct.lastQr = { qr, at: Date.now() };
+    if (qr) {
+      if (acct.secondary && acct.mode === "qr") {
+        // Mode QR (/wa2 qr): gambarnya dikirim ke Telegram saat diminta; tidak membuat kode tautan.
+      } else if (acct.secondary && wa2Config.number) {
+        // Nomor kedua dipegang orang lain: kirim KODE TAUTAN ke pemilik (bisa diteruskan), bukan QR di layar laptop.
+        // SATU kode per koneksi. WhatsApp mengirim ulang event QR tiap ~20 detik; meminta kode lagi di tiap event membuat kode
+        // sebelumnya langsung tidak berlaku (itulah yang membuat "Gagal menautkan perangkat"). Kode berikutnya hanya lewat /wa2 kode.
+        if (!sock.pairCodeAsked && !acct.pairing && (acct.autoCodes || 0) < 2) {
+          sock.pairCodeAsked = true;
+          acct.autoCodes = (acct.autoCodes || 0) + 1;
+          requestWa2PairingCode().catch((err) => {
+            console.error(`🔗 [${acct.label}] gagal membuat kode tautan:`, err instanceof Error ? err.message : String(err));
+          });
+        }
+      } else {
+        console.log(`\n=== Scan QR code ini pakai HP${acct.secondary ? ` (${acct.label})` : ""} ===`);
+        console.log("WhatsApp di HP > Perangkat Tertaut > Tautkan Perangkat\n");
+        qrcode.generate(qr, { small: true });
+      }
+    }
+
+    if (connection === "close") {
+      const statusCode = lastDisconnect?.error?.output?.statusCode;
+      const loggedOut = statusCode === DisconnectReason.loggedOut;
+      if (acct.secondary) {
+        // Catat penyebab putus (kode status + pesan) -- penting untuk melacak kegagalan menautkan.
+        const reason = lastDisconnect?.error instanceof Error ? lastDisconnect.error.message : String(lastDisconnect?.error ?? "");
+        acct.lastClose = { code: statusCode ?? "?", reason: reason.slice(0, 120), at: Date.now() };
+        acct.lastQr = null;
+        console.warn(`🔗 [${acct.label}] koneksi ditutup: kode ${statusCode ?? "?"}${reason ? ` (${reason.slice(0, 120)})` : ""}, tertaut: ${isPairedCreds(sock.authState?.creds) ? "ya" : "belum"}`);
+      }
+      if (acct.secondary) {
+        acct.sock = null;
+        acct.open = false;
+      } else {
+        currentSock = null;
+        waOpen = false;
+      }
+      const paired = isPairedCreds(sock.authState?.creds);
+      if (acct.secondary && !paired) {
+        // Belum pernah tertaut: kode kedaluwarsa / belum dimasukkan -- bukan logout. Selama jatah kode otomatis belum habis, coba lagi
+        // (sesi dibersihkan di connect()); setelah itu berhenti dan menunggu /wa2 kode supaya tidak membanjiri WhatsApp & kamu.
+        if ((acct.autoCodes || 0) >= 1 || loggedOut) {
+          acct.idle = true;
+          wipeAuthDir(acct.authDir);
+          console.warn(`🔗 [${acct.label}] belum tertaut; berhenti menyambung. Kirim /wa2 kode untuk memulai lagi.`);
+          if (!acct.idleNotified) {
+            acct.idleNotified = true;
+            sendToOwner(`ℹ️ ${acct.label} belum tertaut (kode tautan kedaluwarsa atau belum dimasukkan). Kirim /wa2 kode untuk minta kode baru.`).catch(() => {});
+          }
+        } else {
+          console.warn(`🔗 [${acct.label}] koneksi putus sebelum tertaut, coba lagi dalam 5 detik...`);
+          setTimeout(() => connect(acct).catch((err) => console.error(`Gagal menyambung ulang ${acct.label}:`, err instanceof Error ? err.message : String(err))), 5000);
+        }
+      } else if (loggedOut) {
+        console.error(
+          `\n❌ Sesi WhatsApp${acct.secondary ? ` (${acct.label})` : ""} logout/dicabut dari HP (atau sesi tidak valid lagi).\n` +
+            `   Hapus folder wa-bot/${acct.authDir}/ lalu jalankan ulang bot ini untuk menautkan ulang.\n`
+        );
+        if (acct.secondary) {
+          // Sesi sudah tidak berlaku: buang otomatis, berhenti menyambung, dan kabari SEKALI. Tautkan ulang dengan /wa2 kode.
+          acct.idle = true;
+          acct.idleNotified = true;
+          wipeAuthDir(acct.authDir);
+          sendToOwner(`⚠️ ${acct.label} keluar (logout) dari WhatsApp. Sesi lamanya sudah dibersihkan; kirim /wa2 kode untuk menautkan ulang.`).catch(() => {});
+        }
+      } else {
+        console.warn(`⚠️  Koneksi WhatsApp${acct.secondary ? ` (${acct.label})` : ""} putus, coba sambung ulang dalam 5 detik...`);
+        setTimeout(() => connect(acct).catch((err) => console.error(`Gagal menyambung ulang ${acct.label}:`, err instanceof Error ? err.message : String(err))), 5000);
+      }
+    } else if (connection === "open") {
+      if (acct.secondary) acct.open = true;
+      else waOpen = true;
+      acct.pairing = false;
+      acct.idle = false;
+      acct.idleNotified = false;
+      console.log(`\n✅ WhatsApp${acct.secondary ? ` ${acct.label}` : ""} tersambung (${sock.user?.id || "?"}). Bot siap jalan.\n`);
+      if (acct.secondary) sendToOwner(`✅ ${acct.label} tersambung (${(sock.user?.id || "?").split(":")[0].split("@")[0]}).`).catch(() => {});
+    }
+  });
+
+  sock.ev.on("messages.upsert", async ({ messages, type }) => {
+    // type "notify" = pesan baru beneran masuk (bukan hasil sinkronisasi
+    // riwayat lama waktu pertama kali login).
+    if (type !== "notify") return;
+    for (const msg of messages) {
+      try {
+        accountRouter.remember(msg.key.remoteJid, acct.id);
+        if (msg.key.remoteJidAlt) accountRouter.remember(msg.key.remoteJidAlt, acct.id);
+        await waAccountContext.run({ account: acct.id }, () => handleIncoming(msg, sock));
+      } catch (err) {
+        console.error("Gagal proses satu pesan masuk:", err instanceof Error ? err.message : String(err));
+      }
+    }
+  });
+}
+
+// ----------------------------------------------------------------
+// Pemantau perubahan peraturan (mingguan, ke WhatsApp pemilik). Logika ada di reg-monitor.js; di sini hanya
+// penyambung: AI (Ollama/Gemini seperti ringkasan harian), penyimpanan (tabel bot_state), dan pengiriman.
+// ----------------------------------------------------------------
+async function regMonitorAi(system, user) {
+  if (WA_SUMMARY_ENGINE === "ollama") {
+    try {
+      const out = await enqueueOllamaCall(
+        () =>
+          callOllamaChat(
+            [
+              { role: "system", content: system },
+              { role: "user", content: user.slice(0, 9000) }
+            ],
+            { timeoutMs: WA_SUMMARY_OLLAMA_TIMEOUT_MS, maxTokens: 900, numCtx: Math.max(OLLAMA_NUM_CTX, 4096), format: "json", temperature: 0.1 }
+          ),
+        { priority: PRIORITY.BACKGROUND, label: "reg-monitor" }
+      );
+      if (String(out || "").trim()) return out;
+      throw new Error("balasan Ollama kosong");
+    } catch (err) {
+      if (!WA_SUMMARY_GEMINI_FALLBACK || (GEMINI_API_KEYS.length === 0 && !llmFallback.available())) throw err;
+      console.log("📜 Pantauan peraturan: Ollama gagal, jatuh ke Gemini/cadangan.");
+    }
+  }
+  const data = await geminiGenerateWithRotation(system, [{ role: "user", parts: [{ text: user.slice(0, 14000) }] }], { useSearch: false });
+  return extractGeminiText(data);
+}
+const regMonitor = createRegMonitor({
+  config: { ...readRegMonitorConfig(process.env), enabled: readRegMonitorConfig(process.env).enabled && OWNER_JID !== null },
+  search: (q, max, opts) => webSearch.search(q, max, opts),
+  searchAvailable: () => webSearch.available(),
+  ai: regMonitorAi,
+  state: {
+    get: async (key) => {
+      const { data } = await supabase.from("bot_state").select("value").eq("key", key).maybeSingle();
+      return data?.value ?? null;
+    },
+    set: async (key, value) => {
+      const { error } = await supabase.from("bot_state").upsert({ key, value, updated_at: new Date().toISOString() });
+      if (error) throw new Error(`gagal simpan ${key}: ${error.message}`);
+    }
+  },
+  send: async (text) => {
+    // WhatsApp dulu (perilaku lama); Telegram ikut bila aktif. Gagal hanya bila KEDUA saluran tidak bisa menerima.
+    let delivered = 0;
+    let waError = null;
+    if (OWNER_JID && currentSock) {
+      try {
+        await currentSock.sendMessage(OWNER_JID, { text });
+        delivered += 1;
+      } catch (err) {
+        waError = err;
+      }
+    }
+    if (await mirrorToTelegram(text)) delivered += 1;
+    if (delivered === 0) throw waError || new Error("WhatsApp belum tersambung / WA_OWNER_NUMBER kosong (dan Telegram tidak aktif)");
+  },
+  timeZone: WA_TIMEZONE
+});
+
+// ---------------- Telegram (tambahan; mati selama TELEGRAM_BOT_TOKEN kosong) ----------------
+// Pemilik bisa memakai perintah (simab, /ringkasan, /peraturan) dan ngobrol dengan AI lewat Telegram, dan notifikasi
+// (ringkasan harian, pantauan peraturan, peringatan key habis) ikut dikirim ke sana. Lihat telegram.js.
+const TELEGRAM_SYSTEM_PROMPT = `Kamu adalah Ayyubi, asisten AI pribadi milik pemilik bot ini. Kamu sedang mengobrol LANGSUNG dengan pemilik lewat Telegram (bukan dengan orang lain), jadi tidak perlu aturan "membalas atas nama pemilik" atau menolak berbagi informasi dengannya.
+
+Jawab pertanyaan, bantu menulis/coding/debugging, atau ajak diskusi dengan jelas dan seringkas mungkin tanpa kehilangan inti jawaban. Kamu punya akses pencarian web bila tersedia -- pakai untuk info/berita/aturan terbaru dan tuliskan link yang relevan. Kalau memakai KONTEKS DOKUMEN, utamakan isinya untuk angka/aturan dan sebut judul dokumennya singkat; kalau jawabannya tidak ada, katakan terus terang dan jangan menebak.
+
+Gunakan Bahasa Indonesia kecuali pemilik menulis/meminta bahasa lain. Format yang tampil rapi di Telegram: *tebal*, _miring_, ~coret~, \`kode\`, dan blok kode \`\`\`...\`\`\`. JANGAN pakai heading (#), tabel, atau markdown lain.`;
+
+async function generateTelegramReply(history) {
+  if (GEMINI_API_KEYS.length === 0 && !llmFallback.available()) {
+    throw new Error("AI belum diatur: isi GEMINI_API_KEYS di .env bot lalu restart.");
+  }
+  const contents = history.map((h) => ({ role: h.role === "model" ? "model" : "user", parts: [{ text: h.text }] }));
+  while (contents.length > 0 && contents[contents.length - 1].role === "model") contents.pop();
+  if (contents.length === 0) throw new Error("tidak ada pesan untuk dijawab");
+  const query = buildWebQuery(contents.filter((c) => c.role === "user").map((c) => c.parts[0].text));
+  let docChunks = [];
+  if (query) {
+    try {
+      docChunks = await fetchKnowledgeChunksForGemini(query, null);
+    } catch (err) {
+      console.error("✈️ [Telegram] gagal cari di Dokumen Pengetahuan, lanjut tanpa:", err instanceof Error ? err.message : String(err));
+    }
+  }
+  const data = await geminiGenerateWithRotation(TELEGRAM_SYSTEM_PROMPT, contents, { webQuery: query, docChunks });
+  const raw = extractGeminiText(data).trim();
+  if (!raw) throw new Error("Respons AI tidak berisi teks.");
+  const guarded = docChunks.length > 0 ? guardDocAnswer(raw, docChunks) : null;
+  return guarded ? guarded.reply : raw;
+}
+
+// Teks /status di Telegram: kondisi bot sekilas (tanpa membuka rahasia: key hanya dihitung, tidak ditampilkan).
+function fmtDuration(ms) {
+  const m = Math.max(0, Math.floor(ms / 60_000));
+  const d = Math.floor(m / 1440);
+  const h = Math.floor((m % 1440) / 60);
+  return d > 0 ? `${d} hari ${h} jam` : h > 0 ? `${h} jam ${m % 60} mnt` : `${m} mnt`;
+}
+function wa2StatusWord() {
+  const a = WA2_ACCOUNT_DEF;
+  if (!a) return "tidak dipakai";
+  if (a.sock && a.open) return `tersambung (${(a.sock.user?.id || "?").split(":")[0].split("@")[0]})`;
+  if (a.idle || (a.sock && !isPairedCreds(a.sock.authState?.creds))) return "⚠️ belum tertaut (kirim /wa2 kode)";
+  return "⚠️ terputus (menyambung ulang...)";
+}
+function describeWa2() {
+  const a = WA2_ACCOUNT_DEF;
+  if (!a) return "Nomor kedua belum dinyalakan. Isi WA2_NUMBER di .env lalu /restart (lihat bagian 25 .env.example).";
+  const r2 = groupList.rules(SECOND_ACCOUNT);
+  const groups = r2.names.length + r2.jids.length;
+  return [
+    `📱 *${a.label}*`,
+    `• Status: ${wa2StatusWord()}`,
+    `• Nomor: ${wa2Config.number ? `+${wa2Config.number}` : "(WA2_NUMBER belum diisi)"} (HP yang memasukkan kode harus nomor ini)`,
+    ...(a.lastClose ? [`• Putus terakhir: kode ${a.lastClose.code}${a.lastClose.reason ? ` (${a.lastClose.reason})` : ""} pukul ${formatClockInTimezone(a.lastClose.at)}`] : []),
+    `• Grup: ${groups > 0 ? `${groups} aturan grup diizinkan (/grup wa2)` : "tidak menjawab di grup (tambah lewat /grup tambah wa2 <nama>)"}`,
+    `• Ringkasan harian pemilik: ${wa2Config.inSummary ? "ikut" : "tidak ikut"}`,
+    `• Perintah pemilik hanya dari nomor ${OWNER_NUMBER || "pemilik"} (chat-ke-diri-sendiri di nomor ini diabaikan)`,
+    "",
+    "/wa2 kode — minta kode tautan baru"
+  ].join("\n");
+}
+async function buildBotStatusText() {
+  const now = Date.now();
+  const lines = [`📊 *Status Ayyubi*`, `Bot hidup: ${fmtDuration(process.uptime() * 1000)}`, ""];
+
+  lines.push(`💬 WhatsApp: ${currentSock ? "tersambung" : "⚠️ terputus (menyambung ulang...)"}`);
+  if (WA2_ACCOUNT_DEF) lines.push(`📱 ${WA2_ACCOUNT_DEF.label}: ${wa2StatusWord()}`);
+  lines.push(
+    `🤖 Auto-reply: ${AUTO_REPLY_ACTIVE ? `aktif (mesin ${WA_AI_ENGINE})` : "mati"}`
+  );
+
+  if (GEMINI_API_KEYS.length > 0) {
+    const waiting = GEMINI_API_KEYS.map((k) => geminiKeyExhaustedUntil.get(k) || 0).filter((t) => t > now);
+    const ready = GEMINI_API_KEYS.length - waiting.length;
+    lines.push(
+      `🔑 Gemini: ${ready} dari ${GEMINI_API_KEYS.length} key siap` +
+        (waiting.length > 0 ? ` • ${waiting.length} kena batas, terdekat pulih ${formatClockInTimezone(Math.min(...waiting))} ${WA_TIMEZONE_LABEL}` : "")
+    );
+  } else {
+    lines.push("🔑 Gemini: belum ada key (isi GEMINI_API_KEYS)");
+  }
+  lines.push(`🛟 Cadangan: ${llmFallback.available() ? llmFallback.describe() : "tidak diatur"}`);
+
+  try {
+    const { data } = await supabase.from("token_usage").select("total_tokens, total_cost_usd").eq("usage_date", pacificDateString()).maybeSingle();
+    lines.push(
+      data
+        ? `📈 Token hari ini: ${Number(data.total_tokens || 0).toLocaleString("id-ID")} • $${Number(data.total_cost_usd || 0).toFixed(4)} (hari Pasifik, sama dgn layar Status di aplikasi)`
+        : "📈 Token hari ini: belum ada pemakaian"
+    );
+  } catch {
+    lines.push("📈 Token hari ini: gagal dibaca");
+  }
+
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 3000);
+    const res = await fetch(`${OLLAMA_BASE_URL}/api/tags`, { signal: ctrl.signal }).finally(() => clearTimeout(timer));
+    lines.push(`🦙 Ollama: ${res.ok ? `menjawab (model ${OLLAMA_MODEL}${ollamaQueue.pending ? `, antrean ${ollamaQueue.pending}` : ""})` : `HTTP ${res.status}`}`);
+  } catch {
+    lines.push("🦙 Ollama: tidak menjawab");
+  }
+
+  const kb = kbIndex?.stats?.();
+  lines.push(`📚 Dokumen: ${kb ? `${kb.docs} dokumen, ${kb.chunks} potongan (indeks laptop)` : "indeks laptop belum aktif"}`);
+  {
+    const df = typeof docFolder !== "undefined" && docFolder ? docFolder.status() : null;
+    lines.push(`📂 Dokumen lokal (khusus Ollama): ${df ? `${df.docs} dokumen .md di ${df.mdDir}${df.current ? ` • memproses ${df.current.file}` : ""}${df.lastError ? ` • error terakhir: ${df.lastError}` : ""}` : "mati"}`);
+  }
+  lines.push(`🖼️ Pembuat gambar: ${imageGen.monitorText((ms) => `${formatClockInTimezone(ms)} ${WA_TIMEZONE_LABEL}`)}`);
+  try {
+    lines.push(`🎬 Pembuat video: ${videoGen.available() ? videoGen.describe().split("\n").slice(-1)[0] : "belum aktif"}`);
+  } catch {
+    /* belum siap */
+  }
+  lines.push(`🏛️ SiMAB: ${simab.enabled ? "aktif" : "mati"}`);
+  lines.push(`📋 Ringkasan harian: ${WA_DAILY_SUMMARY_ENABLED ? `aktif (setelah ${String(WA_DAILY_SUMMARY_HOUR).padStart(2, "0")}:00 ${WA_TIMEZONE_LABEL}${summarySentDate ? `, terakhir terkirim ${summarySentDate}` : ""})` : "mati"}`);
+  lines.push(`📜 Pantauan peraturan: ${regMonitor.describe()}`);
+  lines.push(`📈 Pasar pagi (IHSG, emas): ${marketBrief.describe()}`);
+  lines.push(`⏰ Pengingat: ${reminders.describe()}`);
+  lines.push(`📅 Agenda grup: ${agenda.describe()}`);
+  lines.push(`💾 Cadangan: ${backup.describe()}`);
+  lines.push(`🩺 Kesehatan: ${health.describe()}`);
+  lines.push(`✈️ Telegram: ${telegram.describe()}`);
+  lines.push(`🎤 Pesan suara Telegram: ${transcriber.available() ? `aktif (${sttConfig.groqKeys.length ? `Groq Whisper ${sttConfig.groqModel}` : ""}${sttConfig.groqKeys.length && sttConfig.geminiKeys.length ? " + " : ""}${sttConfig.geminiKeys.length ? "cadangan Gemini" : ""})` : "mati (isi GROQ_API_KEYS atau GEMINI_API_KEYS)"}`);
+  {
+    const vo = await checkVoiceOutput().catch(() => ({ ok: false, reason: "pengecekan gagal" }));
+    lines.push(`🔊 Balasan suara & /speak (Telegram + WhatsApp pemilik): ${vo.ok ? `aktif (Gemini TTS, suara ${ttsConfig.voice}, ffmpeg ok)` : `belum bisa (${vo.reason})`}`);
+  }
+  return lines.join("\n");
+}
+
+const sttConfig = readSttConfig(process.env);
+const transcriber = createTranscriber({ config: sttConfig });
+// Balasan suara (Gemini TTS -> OGG/Opus via ffmpeg) & tutor Inggris untuk /speak di Telegram
+const ttsConfig = readTtsConfig(process.env);
+const speaker = createSpeaker({ config: ttsConfig });
+async function generateTutorTurn({ topic, lang = "en", history, userText, farewell }) {
+  if (GEMINI_API_KEYS.length === 0 && !llmFallback.available()) throw new Error("AI belum diatur: isi GEMINI_API_KEYS di .env bot lalu restart.");
+  const prompt = buildTutorUserPrompt(history, userText, farewell, lang);
+  const system = buildTutorSystemPrompt({ topic, lang });
+  // Bawaan: Groq/OpenRouter DULU (cepat, kuota besar), Gemini jadi cadangan. TUTOR_AI_ORDER=gemini-first membalik urutan.
+  const groqFirst = llmFallback.available() && String(process.env.TUTOR_AI_ORDER || "fallback-first").trim().toLowerCase() !== "gemini-first";
+  const viaFallback = async () => (await llmFallback.generate({ system, messages: [{ role: "user", content: prompt }], temperature: 0.6 })).text;
+  const viaGemini = async () => extractGeminiText(await geminiGenerateWithRotation(system, [{ role: "user", parts: [{ text: prompt }] }], { useSearch: false }));
+  const order = groqFirst ? [viaFallback, GEMINI_API_KEYS.length ? viaGemini : null] : [GEMINI_API_KEYS.length ? viaGemini : null, llmFallback.available() ? viaFallback : null];
+  let raw = "";
+  let lastErr = null;
+  for (const fn of order.filter(Boolean)) {
+    try {
+      raw = String(await fn()).trim();
+      if (raw) break;
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  if (!raw) throw lastErr || new Error("Tutor tidak menghasilkan balasan.");
+  const parsed = parseTutorReply(raw, userText || "");
+  if (!parsed) throw new Error("Tutor tidak menghasilkan balasan.");
+  return lang === "id" ? { reply: parsed.reply, correction: "", tip: "" } : parsed;
+}
+async function checkVoiceOutput() {
+  if (!speaker.available()) return { ok: false, reason: "GEMINI_API_KEYS belum diisi di .env bot" };
+  const st = await speaker.checkFfmpeg();
+  if (st === "ok") return { ok: true };
+  return { ok: false, reason: st === "noopus" ? "ffmpeg terpasang tapi tanpa libopus (pasang ffmpeg versi lengkap)" : "ffmpeg belum terpasang (sudo apt install ffmpeg)" };
+}
+const waTutor = createWaTutor({
+  tutor: GEMINI_API_KEYS.length > 0 || llmFallback.available() ? generateTutorTurn : null,
+  speak: speaker.available() ? (text) => speaker.speak(text) : null,
+  voiceCheck: checkVoiceOutput,
+  hasTranscriber: transcriber.available(),
+  config: waVoiceCfg
+});
+// Catatan pribadi pemilik (/ingat /catatan /lupa): SQLite lokal, hanya disisipkan ke prompt Ollama milik pemilik
+// (chat aplikasi + /dokumen). Tidak pernah ke Gemini/Groq/OpenRouter dan tidak ke balasan otomatis untuk kontak. Lihat owner-memory.js.
+const OWNER_MEMORY_FILE = process.env.OWNER_MEMORY_FILE?.trim() || fileURLToPath(new URL("./memori.sqlite", import.meta.url));
+const OWNER_MEMORY_BUDGET_CHARS = Math.max(300, Math.min(4000, Number(process.env.OWNER_MEMORY_BUDGET_CHARS) || 1200));
+let ownerMemory = null;
+if (!["0", "false", "off", "tidak", "no"].includes(String(process.env.OWNER_MEMORY_ENABLED ?? "true").trim().toLowerCase())) {
+  try {
+    ownerMemory = await openOwnerMemory({
+      file: OWNER_MEMORY_FILE,
+      maxNotes: Number(process.env.OWNER_MEMORY_MAX) || 50
+    });
+    if (ownerMemory) console.log(`🧠 Catatan pribadi: AKTIF (${ownerMemory.count()} catatan; hanya dibaca Ollama lokal)`);
+  } catch (err) {
+    console.warn(`🧠 Catatan pribadi tidak aktif: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+const ownerMemoryBlock = () => ownerMemory?.promptBlock(OWNER_MEMORY_BUDGET_CHARS) ?? "";
+
+// Teks /penyedia: status tiap penyedia AI sejak bot dihidupkan.
+function buildProviderReport({ reset = false } = {}) {
+  if (reset) {
+    providerStats.reset();
+    return "🔄 Statistik penyedia dihitung ulang dari nol.";
+  }
+  const configured = [];
+  if (GEMINI_API_KEYS.length > 0) configured.push("gemini");
+  for (const n of ["groq", "openrouter"]) if (llmFallback.has(n)) configured.push(n);
+  configured.push("ollama");
+  return providerStats.format({ configured, formatClock: (ms) => `${formatClockInTimezone(ms)} ${WA_TIMEZONE_LABEL}` });
+}
+
+// /dokumen <pertanyaan>: tanya-jawab dari dokumen lokal, khusus pemilik, dijawab Ollama (prioritas sama dgn chat aplikasi).
+const localDocs = createLocalDocs({
+  getIndex: () => kbIndex,
+  getMemory: ownerMemoryBlock, // kbIndex baru terisi setelah start; jangan ditangkap sekarang (sempat null -> "indeks belum aktif")
+  budgetChars: DOC_LOCAL_BUDGET_CHARS,
+  temperature: OLLAMA_DOC_TEMPERATURE,
+  callModel: (messages, opts) => enqueueOllamaCall(() => callOllamaChat(messages, opts), { priority: PRIORITY.CHAT, label: "owner-docs" })
+});
+
+// /skill <nama> <teks>: resep tugas (file .md di wa-bot/skills), khusus pemilik, dijawab Ollama lokal. Lihat skills.js.
+const skills = createSkills({
+  dir: fileURLToPath(new URL("./skills", import.meta.url)),
+  getMemory: ownerMemoryBlock,
+  searchDocs: (q) => (kbIndex ? kbIndex.search(q, { budgetChars: DOC_LOCAL_BUDGET_CHARS, maxChunks: 8, onlyLocal: true }) : []),
+  callModel: (messages, opts) => enqueueOllamaCall(() => callOllamaChat(messages, opts), { priority: PRIORITY.CHAT, label: "owner-skill" })
+});
+
+// /lokal <pesan>: ngobrol dengan Ollama lokal (privat, memakai catatan pribadi), khusus pemilik. Lihat local-chat.js.
+const localChat = createLocalChat({
+  getMemory: ownerMemoryBlock,
+  callModel: (messages, opts) => enqueueOllamaCall(() => callOllamaChat(messages, opts), { priority: PRIORITY.CHAT, label: "owner-lokal" })
+});
+
+// Perintah laptop dari Telegram (/sistem /log /restart /deploy /migrasi), mati kecuali OPS_ENABLED=true. Lihat ops.js.
+const botStateStore = {
+  get: async (key) => {
+    const { data } = await supabase.from("bot_state").select("value").eq("key", key).maybeSingle();
+    return data?.value ?? null;
+  },
+  set: async (key, value) => {
+    const { error } = await supabase.from("bot_state").upsert({ key, value, updated_at: new Date().toISOString() });
+    if (error) throw new Error(error.message);
+  }
+};
+// Urutan penyedia AI untuk balasan WA/grup (2 jalur: santai & akurat), bisa diubah lewat /urutan. Lihat ai-route.js.
+const aiRoute = createAiRoute({
+  state: botStateStore,
+  available: (name) => (name === "gemini" ? GEMINI_API_KEYS.length > 0 : name === "ollama" ? WA_OLLAMA_FALLBACK_ENABLED && WA_AI_ENGINE !== "ollama" : llmFallback.has(name))
+});
+aiRoute.load().then(() => console.log(`🔀 Urutan AI balasan WA: ${aiRoute.describe()}`)).catch(() => {});
+
+// Suara per bot (Ayyubi / bot nomor kedua): /suara daftar|coba|pakai dari Telegram, tersimpan di bot_state. Lihat persona-voice.js.
+const personaVoice = createPersonaVoice({ state: botStateStore, env: process.env, secondName: wa2Config.enabled ? wa2Config.botName || wa2Config.label || "Nomor 2" : "", secondEnabled: wa2Config.enabled });
+personaVoice.load().catch(() => {});
+
+// Balasan SUARA di grup WhatsApp (/voice wag on|off dari Telegram; tersimpan di bot_state). Lihat group-voice.js.
+const groupVoice = createGroupVoice({
+  state: botStateStore,
+  // suara & gaya mengikuti bot yang sedang menjawab (nomor utama = Ayyubi, nomor kedua = mis. Wongsobot)
+  speak: speaker.available()
+    ? async (text) => {
+        const boss = office.task(officeWho());
+        const mic = office.task("suara");
+        boss.handoff("suara", "pesan", "Minta dibacakan jadi voice note");
+        mic.work("Membuat suara", 60);
+        try {
+          const v = await speaker.speak(text, personaVoice.get(currentAccountId(), waAccountContext.getStore()?.groupSubject || ""));
+          mic.handoff(officeWho(), "suara", "Voice note jadi");
+          mic.done("Voice note diserahkan");
+          return v;
+        } catch (e) {
+          mic.fail("Gagal membuat suara");
+          throw e;
+        }
+      }
+    : null,
+  check: checkVoiceOutput,
+  notify: (text) => sendToOwner(text),
+  config: readGroupVoiceConfig(process.env, ttsConfig.maxChars)
+});
+groupVoice
+  .load()
+  .then(() => console.log(`🔊 Balasan grup WhatsApp: ${groupVoice.describe()} (ubah: /voice wag on|off di Telegram)`))
+  .catch(() => {});
+
+// Baca PDF di grup butuh alat pdftotext (poppler-utils). Cek sekali saat start: kalau tidak ada, AI tidak dijanjikan "bisa baca PDF".
+if (PDF_GROUP_READ) {
+  execFile("pdftotext", ["-v"], { timeout: 8000 }, (err) => {
+    if (err && err.code === "ENOENT") {
+      pdfToolMissing = true;
+      console.warn("📄 Baca PDF di grup NONAKTIF: alat pdftotext tidak ditemukan (pasang: sudo apt install poppler-utils).");
+    } else console.log(`📄 Baca PDF di grup: aktif (batas ${PDF_GROUP_MAX_CHARS} huruf/PDF; model lokal ${PDF_GROUP_LOCAL_MAX_CHARS}; ${PDF_GROUP_DAILY_MAX || "tanpa"} batas/orang/hari)`);
+  });
+}
+
+// PERCOBAAN: ngobrol dengan Meta AI lewat nomor utama (hanya uji dari Telegram: /metaai). Lihat meta-ai.js.
+const metaAi = createMetaAi({ config: readMetaAiConfig(process.env) });
+
+// Pembuat GAMBAR (Gemini): grup WA, chat pemilik di WA, dan /gambar di Telegram. Lihat image-gen.js.
+const imageGen = createImageGen({
+  state: botStateStore,
+  config: readImageConfig(process.env),
+  // FLUX (Cloudflare) jauh lebih paham bahasa Inggris: deskripsi diterjemahkan dulu lewat penyedia cadangan teks (Groq/OpenRouter).
+  translate: llmFallback.available()
+    ? async (text) =>
+        (
+          await llmFallback.generate({
+            system: "Translate the user's image description into concise, vivid English for an image generator. Output ONLY the English description, no quotes, no commentary. Keep names and any text meant to appear in the image unchanged.",
+            messages: [{ role: "user", content: text }],
+            temperature: 0.2,
+            timeoutMs: 8000,
+            maxTries: 2
+          })
+        ).text
+    : null
+});
+// Pembuat VIDEO gratis: naskah AI -> gambar per adegan (pembuat gambar di atas) -> suara (Gemini TTS) -> ffmpeg. Lihat video-gen.js.
+async function generateVideoScript({ system, user }) {
+  if (GEMINI_API_KEYS.length === 0 && !llmFallback.available()) throw new Error("AI teks belum diatur.");
+  const viaFallback = async () => (await llmFallback.generate({ system, messages: [{ role: "user", content: user }], temperature: 0.7, timeoutMs: 40_000, maxTries: 3 })).text;
+  const viaGemini = async () => extractGeminiText(await geminiGenerateWithRotation(system, [{ role: "user", parts: [{ text: user }] }], { useSearch: false }));
+  const order = [llmFallback.available() ? viaFallback : null, GEMINI_API_KEYS.length ? viaGemini : null].filter(Boolean);
+  let lastErr = null;
+  for (const fn of order) {
+    try {
+      const t = String(await fn()).trim();
+      if (t) return t;
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw lastErr || new Error("Naskah video kosong.");
+}
+const videoGen = createVideoGen({
+  imageGen,
+  speaker,
+  writeScript: generateVideoScript,
+  // Morf foto: satu edit foto AI (Cloudflare) dari foto asli -> Buffer gambar hasil
+  editImage: async (instruction, buffer) => (await imageGen.editImage(instruction, await prepareEditInput(buffer))).buffer,
+  state: botStateStore,
+  config: readVideoConfig(process.env)
+});
+videoGen
+  .load()
+  .then(() => console.log(`🎬 Pembuat video: ${videoGen.available() ? "aktif (gratis: gambar + suara + ffmpeg)" : "video gambar mati (butuh pembuat gambar aktif; VIDEO_ENABLED=0 mematikan)"}; animasi karakter tanpa wajah: ${videoGen.storyAvailable() ? "aktif" : "mati"} (ubah: /video grup on|off di Telegram)`))
+  .catch(() => {});
+
+// /env di Telegram: ubah kunci pembuat gambar (token Cloudflare, jatah harian, dll.) tanpa membuka laptop. Lihat env-edit.js.
+const envEditor = createEnvEditor({
+  envPath: fileURLToPath(new URL("./.env", import.meta.url)),
+  onChange: () => {
+    imageGen.reconfigure(readImageConfig(process.env));
+    videoGen.reconfigure(readVideoConfig(process.env));
+  }
+});
+imageGen
+  .load()
+  .then(() => console.log(`🖼️ Pembuat gambar: ${imageGen.available() ? imageGen.describe().replace(/\n/g, " | ") : "mati (isi CLOUDFLARE_ACCOUNT_ID+CLOUDFLARE_API_TOKEN atau GEMINI_API_KEYS)"} (ubah: /gambar grup on|off di Telegram)`))
+  .catch(() => {});
+
+const ops = createOps({
+  config: readOpsConfig(process.env, fileURLToPath(new URL(".", import.meta.url))),
+  deps: {
+    state: botStateStore,
+    memInfo: readMemInfo,
+    ollama: async () => {
+      const res = await fetch(`${OLLAMA_BASE_URL}/api/ps`, { signal: AbortSignal.timeout(5000) });
+      if (!res.ok) return { ok: false, error: `HTTP ${res.status}` };
+      const j = await res.json().catch(() => ({}));
+      return { ok: true, models: (j.models || []).map((m) => m.name) };
+    }
+  }
+});
+
+/** Kirim ke pemilik: WhatsApp dulu, Telegram ikut; gagal hanya bila KEDUANYA tidak bisa menerima. Dipakai pasar pagi, pengingat, dan cadangan. */
+async function sendToOwner(text) {
+  let delivered = 0;
+  let waError = null;
+  if (OWNER_JID && currentSock) {
+    try {
+      await currentSock.sendMessage(OWNER_JID, { text });
+      delivered += 1;
+    } catch (err) {
+      waError = err;
+    }
+  }
+  if (await mirrorToTelegram(text)) delivered += 1;
+  if (delivered === 0) throw waError || new Error("WhatsApp belum tersambung / WA_OWNER_NUMBER kosong (dan Telegram tidak aktif)");
+}
+
+// Pemeriksaan pasar tiap pagi (IHSG, emas dunia, kurs) + /pasar. Sumber ganda (xaus.com, ExchangeRate-API, Yahoo, Stooq), tanpa API key. Lihat market-brief.js.
+const marketBrief = createMarketBrief({
+  config: readMarketBriefConfig(process.env),
+  data: createMarketData({ config: readMarketBriefConfig(process.env) }),
+  state: botStateStore,
+  send: sendToOwner,
+  timeZone: WA_TIMEZONE
+});
+setInterval(() => {
+  marketBrief.check().catch(() => {});
+}, 60_000);
+console.log(`📈 Pasar pagi (IHSG, emas): ${marketBrief.describe()}`);
+
+// Pengingat pribadi (/ingatkan, /pengingat): SQLite lokal, dikirim ke WhatsApp + Telegram pemilik. Lihat reminders.js.
+const REMINDERS_FILE = process.env.REMINDERS_FILE?.trim() || fileURLToPath(new URL("./pengingat.sqlite", import.meta.url));
+let reminderStore = null;
+if (!["0", "false", "off", "tidak", "no"].includes(String(process.env.REMINDERS_ENABLED ?? "true").trim().toLowerCase())) {
+  try {
+    reminderStore = await openReminderStore({ file: REMINDERS_FILE });
+  } catch (err) {
+    console.warn(`⏰ Pengingat tidak aktif: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+// Pengingat ibadah (ibadah.js): juz harian, hadits, ayat. Teks Arab/arti/tafsir dari berkas data (ibadah-data/); AI hanya untuk penjelasan hadits.
+const IBADAH_FILE = process.env.IBADAH_FILE?.trim() || fileURLToPath(new URL("./ibadah.sqlite", import.meta.url));
+let ibadahStore = null;
+if (!["0", "false", "off", "tidak", "no"].includes(String(process.env.IBADAH_ENABLED ?? "true").trim().toLowerCase())) {
+  try {
+    ibadahStore = await openIbadahStore({ file: IBADAH_FILE });
+  } catch (err) {
+    console.warn(`🕌 Pengingat ibadah tidak aktif: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+async function aiExplainHadith(h) {
+  if (GEMINI_API_KEYS.length === 0) throw new Error("kunci AI belum terpasang");
+  const data = await geminiGenerateWithRotation("Kamu menjelaskan hadits dengan ringkas, hati-hati, dan jujur. Jangan mengarang rujukan.", [{ role: "user", parts: [{ text: buildExplainPrompt(h) }] }], { useSearch: false });
+  const out = extractGeminiText(data)?.trim();
+  if (!out) throw new Error("AI mengembalikan hasil kosong");
+  const tokensUsed = data?.usageMetadata?.totalTokenCount ?? 0;
+  if (tokensUsed > 0) await recordTokenUsage(tokensUsed, estimateCostUsd(GEMINI_MODEL, tokensUsed * 0.5, tokensUsed * 0.5));
+  return out;
+}
+const ibadah = createIbadah({ store: ibadahStore, send: sendToOwner, explain: aiExplainHadith, timeZone: WA_TIMEZONE, tzLabel: WA_TIMEZONE_LABEL });
+const reminders = createReminders({ store: reminderStore, send: sendToOwner, timeZone: WA_TIMEZONE, tzLabel: WA_TIMEZONE_LABEL, ibadah });
+setInterval(() => {
+  reminders.check().catch(() => {});
+}, 30_000);
+setInterval(() => {
+  ibadah.check().catch(() => {});
+}, 30_000);
+console.log(`⏰ Pengingat: ${reminders.describe()}`);
+console.log(`🕌 Pengingat ibadah: ${ibadah.describe()}`);
+
+// Agenda/jadwal kantor di grup (agenda.js): SQLite lokal, rekap pagi + pengingat sebelum acara, dikirim dari nomor yang mencatatnya.
+const AGENDA_FILE = process.env.AGENDA_FILE?.trim() || fileURLToPath(new URL("./agenda.sqlite", import.meta.url));
+let agendaStore = null;
+if (!["0", "false", "off", "tidak", "no"].includes(String(process.env.AGENDA_ENABLED ?? "true").trim().toLowerCase())) {
+  try {
+    agendaStore = await openAgendaStore({ file: AGENDA_FILE, maxPerGroup: Number(process.env.AGENDA_MAX_PER_GROUP) || 200 });
+  } catch (e) {
+    console.error("📅 Agenda grup tidak bisa dibuka:", e instanceof Error ? e.message : String(e));
+  }
+}
+async function sendAgendaGroupText(account, jid, text) {
+  const sk = account === SECOND_ACCOUNT ? WA2_ACCOUNT_DEF?.sock : currentSock;
+  if (!sk) throw new Error("WhatsApp belum tersambung");
+  const subject = await getGroupSubject(sk, jid);
+  if (!AUTO_REPLY_ACTIVE || !groupRulesFor(sk).enabled || !isGroupAllowed(jid, subject, sk)) return; // grup sudah tidak diizinkan: jangan kirim
+  await waAccountContext.run({ account }, async () => {
+    const sent = await sk.sendMessage(jid, { text });
+    const { error } = await supabase.from("whatsapp_messages").insert({ wa_jid: jid, wa_name: subject || null, direction: "out", content: text, status: "sent", wa_message_id: sent?.key?.id ?? null, ...acctFields(currentAccountId()) });
+    if (error) console.error("Gagal catat pesan agenda:", error.message);
+  });
+}
+const agenda = createAgenda({
+  store: agendaStore,
+  sendGroup: sendAgendaGroupText,
+  timeZone: WA_TIMEZONE,
+  tzLabel: WA_TIMEZONE_LABEL,
+  morningTime: process.env.AGENDA_MORNING_TIME || "07:30",
+  remindBeforeMin: process.env.AGENDA_REMIND_BEFORE_MIN === undefined || process.env.AGENDA_REMIND_BEFORE_MIN === "" ? 30 : Number(process.env.AGENDA_REMIND_BEFORE_MIN),
+  suggest: !["0", "false", "off", "tidak", "no"].includes(String(process.env.AGENDA_SUGGEST ?? "true").trim().toLowerCase())
+});
+setInterval(() => {
+  agenda.check().catch((e) => console.error("📅 Pemeriksaan agenda error:", e instanceof Error ? e.message : String(e)));
+}, 60_000);
+console.log(`📅 Agenda grup: ${agenda.describe()}`);
+
+// Cadangan otomatis tiap malam (catatan, pengingat, skill, sesi WhatsApp) ke folder bertanggal di laptop. Lihat backup.js.
+const BOT_DIR = fileURLToPath(new URL(".", import.meta.url));
+const backupConfig = readBackupConfig(process.env);
+const backup = createBackup({
+  config: backupConfig,
+  sources: [
+    { name: "catatan", kind: "sqlite", path: OWNER_MEMORY_FILE },
+    { name: "pengingat", kind: "sqlite", path: REMINDERS_FILE },
+    ...(ibadahStore ? [{ name: "pengingat ibadah", kind: "sqlite", path: IBADAH_FILE }] : []),
+    ...(agendaStore ? [{ name: "agenda grup", kind: "sqlite", path: AGENDA_FILE }] : []),
+    { name: "skill", kind: "dir", path: fileURLToPath(new URL("./skills", import.meta.url)) },
+    { name: "sesi WhatsApp", kind: "auth", path: path.resolve("auth_session") }, // sama dengan useMultiFileAuthState("auth_session")
+    ...(WA2_ACCOUNT_DEF ? [{ name: "sesi WhatsApp nomor 2", kind: "auth", path: path.resolve(WA2_ACCOUNT_DEF.authDir) }] : []),
+    ...(backupConfig.includeEnv ? [{ name: ".env", kind: "file", path: path.resolve(".env") }] : [])
+  ],
+  timeZone: WA_TIMEZONE,
+  tzLabel: WA_TIMEZONE_LABEL,
+  notify: sendToOwner,
+  projectDir: path.resolve(BOT_DIR, "..")
+});
+setInterval(() => {
+  backup.check().catch(() => {});
+}, 60_000);
+console.log(`💾 Cadangan otomatis: ${backup.describe()}`);
+
+/** Kirim berkas ke pemilik: WhatsApp (dokumen) dulu, Telegram ikut; gagal hanya bila KEDUANYA tidak bisa menerima. */
+async function sendFilesToOwner(files, caption = "") {
+  let delivered = 0;
+  let waError = null;
+  if (OWNER_JID && currentSock) {
+    try {
+      await sendWaDocuments(currentSock, OWNER_JID, files, caption);
+      delivered += 1;
+    } catch (err) {
+      waError = err;
+    }
+  }
+  if (telegramCanNotify()) {
+    try {
+      if ((await telegram.sendOwnerFiles(files, caption)) > 0) delivered += 1;
+    } catch {
+      /* dihitung lewat delivered */
+    }
+  }
+  if (delivered === 0) throw waError || new Error("WhatsApp belum tersambung / WA_OWNER_NUMBER kosong (dan Telegram tidak aktif)");
+}
+
+/** Berkas ke satu chat WhatsApp (dokumen; video asli bila f.video); keterangan menempel di berkas pertama. */
+async function sendWaDocuments(sock, jid, files, caption = "") {
+  let i = 0;
+  for (const f of files) {
+    if (f.video) await sock.sendMessage(jid, { video: f.data, mimetype: f.mime || "video/mp4", ...(i === 0 && caption ? { caption } : {}) });
+    else await sock.sendMessage(jid, { document: f.data, mimetype: f.mime || "application/octet-stream", fileName: f.name, ...(i === 0 && caption ? { caption } : {}) });
+    i += 1;
+  }
+}
+
+// Konsep Nota Dinas LPJ Bendahara Pengeluaran: dibuat dari templat Word, dikirim otomatis tiap tanggal 1 (PDF + Word) dan lewat /nodin. Lihat nodin.js.
+// Versi "ketat" botStateStore: galat basis data DILEMPAR (bukan dianggap kosong), supaya nota dinas/laporan kas tidak mengirim ganda
+// atau menimpa data hanya karena basis data sedang terganggu sebentar.
+const strictStateStore = {
+  get: async (key) => {
+    const { data, error } = await supabase.from("bot_state").select("value").eq("key", key).maybeSingle();
+    if (error) throw new Error(error.message);
+    return data?.value ?? null;
+  },
+  set: botStateStore.set
+};
+
+// Daftar grup yang dijawab: .env + tambahan lewat /grup di Telegram (tersimpan di bot_state, langsung berlaku). Lihat group-list.js.
+const groupList = createGroupList({
+  state: strictStateStore,
+  env: {
+    [MAIN_ACCOUNT]: { names: GROUP_ALLOWED_NAMES, jids: GROUP_ALLOWED_JIDS },
+    [SECOND_ACCOUNT]: { names: wa2Config.groupNames, jids: wa2Config.groupJids }
+  },
+  labels: { [MAIN_ACCOUNT]: "Nomor utama", [SECOND_ACCOUNT]: WA2_ACCOUNT_DEF?.label || "Nomor 2" },
+  secondEnabled: Boolean(WA2_ACCOUNT_DEF),
+  listGroups: async (accountId) => {
+    const sk = accountId === SECOND_ACCOUNT ? WA2_ACCOUNT_DEF?.sock : currentSock;
+    if (!sk) return null;
+    const all = await sk.groupFetchAllParticipating();
+    return Object.values(all || {}).map((g) => ({ id: g.id, subject: g.subject || "" }));
+  }
+});
+groupList.load().catch(() => {});
+const nodin = createNodin({
+  config: readNodinConfig(process.env, BOT_DIR),
+  state: strictStateStore,
+  sendFiles: sendFilesToOwner,
+  send: sendToOwner,
+  timeZone: WA_TIMEZONE,
+  tzLabel: WA_TIMEZONE_LABEL
+});
+nodin
+  .detect()
+  .catch(() => {})
+  .finally(() => console.log(`📄 Konsep nota dinas: ${nodin.describe()}`));
+setInterval(() => {
+  nodin.check().catch(() => {});
+}, 60_000);
+
+/** /nodin dari WhatsApp (hanya pemilik, bukan grup). true = pesan sudah ditangani. */
+async function handleWaNodinCommand(sock, jid, text) {
+  const cmd = parseNodinCommand(text);
+  if (!cmd) return false;
+  const send = (t) => sock.sendMessage(jid, { text: t }).catch((e) => console.error("💬 [WA/Nodin] gagal kirim:", e instanceof Error ? e.message : String(e)));
+  try {
+    const r = await nodin.compose(cmd.arg);
+    if (!r.ok || !r.files?.length) await send(r.text);
+    else await sendWaDocuments(sock, jid, r.files, r.caption);
+  } catch (e) {
+    console.error("💬 [WA/Nodin] gagal:", e instanceof Error ? e.message : String(e));
+    await send(`⚠️ Konsep nota dinas gagal dibuat: ${String(e instanceof Error ? e.message : e).slice(0, 200)}`);
+  }
+  return true;
+}
+
+// Laporan kas bulanan (Laporan Saldo Rekening + Register Penutupan Kas): tiap awal bulan bot menyiapkan rancangan dari data bulan lalu,
+// kamu konfirmasi angkanya lewat /kas, lalu /kas submit menyimpan data (bot_state) dan membuat PDF + Word. Lihat kas.js.
+const kas = createKas({
+  config: readKasConfig(process.env),
+  state: strictStateStore,
+  send: sendToOwner,
+  convert: (docx) => nodin.toPdf(docx),
+  timeZone: WA_TIMEZONE,
+  tzLabel: WA_TIMEZONE_LABEL
+});
+setInterval(() => {
+  kas.check().catch(() => {});
+}, 60_000);
+console.log(`🧾 Laporan kas bulanan: ${kas.describe()}`);
+
+/** /kas dari WhatsApp (hanya pemilik, bukan grup). true = pesan sudah ditangani. */
+async function handleWaKasCommand(sock, jid, text) {
+  const cmd = parseKasCommand(text);
+  if (!cmd) return false;
+  const send = (t) => sock.sendMessage(jid, { text: t }).catch((e) => console.error("💬 [WA/Kas] gagal kirim:", e instanceof Error ? e.message : String(e)));
+  try {
+    const r = await kas.handle(cmd.arg);
+    if (r.text) await send(r.text);
+    if (r.files?.length) await sendWaDocuments(sock, jid, r.files, r.caption);
+  } catch (e) {
+    console.error("💬 [WA/Kas] gagal:", e instanceof Error ? e.message : String(e));
+    await send(`⚠️ Perintah kas gagal diproses: ${String(e instanceof Error ? e.message : e).slice(0, 200)}`);
+  }
+  return true;
+}
+
+// Penjaga kesehatan: Ollama, disk, memori, WhatsApp, basis data, restart berulang, cadangan. Mengabari pemilik saat bermasalah
+// dan saat pulih (sekali per masalah). /kesehatan = papan status sekarang. Lihat health.js.
+const healthConfig = readHealthConfig(process.env);
+const restartTracker = createRestartTracker({ file: fileURLToPath(new URL("./.health-starts.json", import.meta.url)), max: healthConfig.restarts });
+restartTracker.recordStart();
+const BOT_STARTED_AT = Date.now();
+const health = createHealth({
+  config: healthConfig,
+  checks: [
+    ...(healthConfig.ollama ? [ollamaCheck({ baseUrl: OLLAMA_BASE_URL })] : []),
+    diskCheck({ paths: [BOT_DIR, backupConfig.dir], minGb: healthConfig.diskMinGb }),
+    memoryCheck({ read: readMemInfo, minMb: healthConfig.memMinMb }),
+    whatsappCheck({ isConnected: () => waOpen, downMin: healthConfig.waDownMin }),
+    databaseCheck({ ping: () => botStateStore.get("health_ping") }),
+    restartTracker.check,
+    backupCheck({ enabled: backupConfig.enabled, latest: () => backup.list()[0]?.createdAt ?? 0, startedAt: BOT_STARTED_AT })
+  ],
+  notify: sendToOwner
+});
+setTimeout(() => {
+  health.tick().catch(() => {});
+  setInterval(() => {
+    health.tick().catch(() => {});
+  }, healthConfig.intervalMin * 60_000);
+}, 90_000); // beri waktu WhatsApp/Telegram tersambung dulu sebelum pemeriksaan pertama
+console.log(`🩺 Penjaga kesehatan: ${health.describe()}`);
+
+// /skill baru|lihat|hapus dari Telegram: perubahan minta konfirmasi "/ya <kode>" lewat ops (butuh OPS_ENABLED=true). Lihat skills.js.
+const skillAdmin = createSkillAdmin({ skills, confirm: (chatId, o) => ops.confirmAction(chatId, o) });
+
+/** /ingat /catatan /lupa dan /penyedia dari WhatsApp (hanya pemilik, bukan grup). true = pesan sudah ditangani. */
+async function handleWaOwnerLocalCommands(sock, jid, text) {
+  const mem = parseMemoryCommand(text);
+  const prov = mem ? null : parseProviderCommand(text);
+  if (!mem && !prov) return false;
+  const reply = mem ? handleMemoryCommand(ownerMemory, mem) : buildProviderReport({ reset: prov.reset });
+  await sock.sendMessage(jid, { text: reply }).catch((e) => console.error("💬 [WA/Lokal] gagal kirim:", e instanceof Error ? e.message : String(e)));
+  return true;
+}
+
+/** /pasar (alias /emas, /ihsg) dari WhatsApp (hanya pemilik, bukan grup). true = pesan sudah ditangani. */
+async function handleWaMarketCommand(sock, jid, text) {
+  const mcmd = parseMarketCommand(text);
+  if (!mcmd) return false;
+  const send = (t) => sock.sendMessage(jid, { text: t }).catch((e) => console.error("💬 [WA/Pasar] gagal kirim:", e instanceof Error ? e.message : String(e)));
+  const stop = waTutorIo(sock, jid).busy("text");
+  try {
+    await send(mcmd.diagnose ? await marketBrief.diagnose() : (await marketBrief.report()).text);
+  } catch (e) {
+    console.error("💬 [WA/Pasar] gagal:", e instanceof Error ? e.message : String(e));
+    await send(`⚠️ Gagal mengambil data pasar: ${String(e instanceof Error ? e.message : e).slice(0, 200)}`);
+  } finally {
+    stop();
+  }
+  return true;
+}
+
+/** /ingatkan /pengingat /cadangan /kesehatan dari WhatsApp (hanya pemilik, bukan grup). true = pesan sudah ditangani. */
+async function handleWaReminderBackupCommand(sock, jid, text) {
+  const rem = parseReminderCommand(text);
+  const bak = rem ? null : parseBackupCommand(text);
+  const hel = rem || bak ? null : parseHealthCommand(text);
+  if (!rem && !bak && !hel) return false;
+  const send = (t) => sock.sendMessage(jid, { text: t }).catch((e) => console.error("💬 [WA/Pengingat] gagal kirim:", e instanceof Error ? e.message : String(e)));
+  try {
+    await send(rem ? reminders.handle(rem) : hel ? await health.report() : bak.now ? await backup.runAndFormat() : backup.status());
+  } catch (e) {
+    console.error("💬 [WA/Pengingat] gagal:", e instanceof Error ? e.message : String(e));
+    await send(`⚠️ Perintah gagal diproses: ${String(e instanceof Error ? e.message : e).slice(0, 200)}`);
+  }
+  return true;
+}
+
+/** /urutan dari WhatsApp (hanya pemilik, bukan grup). true = pesan sudah ditangani. */
+async function handleWaRouteCommand(sock, jid, text) {
+  const cmd = parseRouteCommand(text);
+  if (!cmd) return false;
+  const send = (t) => sock.sendMessage(jid, { text: t }).catch((e) => console.error("💬 [WA/Urutan] gagal kirim:", e instanceof Error ? e.message : String(e)));
+  try {
+    await send(await aiRoute.handle(cmd.arg));
+  } catch (e) {
+    console.error("💬 [WA/Urutan] gagal:", e instanceof Error ? e.message : String(e));
+    await send(`⚠️ Urutan AI gagal diproses: ${String(e instanceof Error ? e.message : e).slice(0, 200)}`);
+  }
+  return true;
+}
+
+/** /lokal (alias /tanya) dari WhatsApp (hanya pemilik, bukan grup). true = pesan sudah ditangani. */
+async function handleWaLocalChatCommand(sock, jid, text) {
+  const cmd = parseLocalChatCommand(text);
+  if (!cmd) return false;
+  const send = (t) => sock.sendMessage(jid, { text: t }).catch((e) => console.error("💬 [WA/Lokal] gagal kirim:", e instanceof Error ? e.message : String(e)));
+  const stop = waTutorIo(sock, jid).busy("text");
+  try {
+    await send(await localChat.handle(`wa:${jid}`, cmd.text));
+  } catch (e) {
+    console.error("💬 [WA/Lokal] gagal:", e instanceof Error ? e.message : String(e));
+    await send(`⚠️ Ollama lokal gagal menjawab: ${String(e instanceof Error ? e.message : e).slice(0, 200)}\nPastikan Ollama berjalan di laptop.`);
+  } finally {
+    stop();
+  }
+  return true;
+}
+
+/** /skill dari WhatsApp (hanya pemilik, bukan grup). true = pesan sudah ditangani. */
+async function handleWaSkillCommand(sock, jid, text) {
+  const cmd = parseSkillCommand(text);
+  if (!cmd) return false;
+  const send = (t) => sock.sendMessage(jid, { text: t }).catch((e) => console.error("💬 [WA/Skill] gagal kirim:", e instanceof Error ? e.message : String(e)));
+  if (cmd.list) {
+    await send(skills.list());
+    return true;
+  }
+  if (/^(baru|tambah|buat|hapus)$/.test(cmd.name)) {
+    await send("Membuat atau menghapus skill hanya bisa dari Telegram (butuh konfirmasi /ya <kode>). Di sini: /skill (daftar), /skill lihat <nama>, /skill <nama> <teks>.");
+    return true;
+  }
+  if (cmd.name === "lihat") {
+    await send(skillAdmin.handle("lihat", cmd.input, {}));
+    return true;
+  }
+  const stop = waTutorIo(sock, jid).busy("text");
+  try {
+    await send((await skills.ask(cmd.name, cmd.input)).reply);
+  } catch (e) {
+    console.error("💬 [WA/Skill] gagal:", e instanceof Error ? e.message : String(e));
+    await send(`⚠️ Skill gagal dijalankan: ${String(e instanceof Error ? e.message : e).slice(0, 200)}\nPastikan Ollama berjalan di laptop.`);
+  } finally {
+    stop();
+  }
+  return true;
+}
+
+/** Jalankan /dokumen dari WhatsApp. true = pesan sudah ditangani. */
+async function handleWaDokumenCommand(sock, jid, text) {
+  const cmd = parseDokumenCommand(text);
+  if (!cmd) return false;
+  const io = waTutorIo(sock, jid);
+  const send = (t) => sock.sendMessage(jid, { text: t }).catch((e) => console.error("💬 [WA/Dokumen] gagal kirim:", e instanceof Error ? e.message : String(e)));
+  if (cmd.list) {
+    await send(localDocs.list());
+    return true;
+  }
+  const stop = io.busy("text");
+  try {
+    const out = await localDocs.ask(cmd.question);
+    await send(out.reply);
+  } catch (e) {
+    console.error("💬 [WA/Dokumen] gagal:", e instanceof Error ? e.message : String(e));
+    await send(`⚠️ Gagal menjawab dari dokumen lokal: ${String(e instanceof Error ? e.message : e).slice(0, 200)}\nPastikan Ollama berjalan di laptop.`);
+  } finally {
+    stop();
+  }
+  return true;
+}
+
+const telegram = createTelegram({
+  config: readTelegramConfig(process.env),
+  deps: {
+    chat: (history) => generateTelegramReply(history),
+    transcribe: transcriber.available() ? (buffer, opts) => transcriber.transcribe(buffer, opts) : null,
+    tutor: GEMINI_API_KEYS.length > 0 || llmFallback.available() ? generateTutorTurn : null,
+    speak: speaker.available() ? (text, opts) => speaker.speak(text, opts) : null,
+    personaVoice,
+    voiceCheck: checkVoiceOutput,
+    simab,
+    summary: () => buildDailySummaryText(zonedParts(Date.now(), WA_TIMEZONE).dateStr, { allowAi: true }),
+    regNow: (opts) => regMonitor.runNow(opts),
+    status: () => buildBotStatusText(),
+    localDocs,
+    ops,
+    memory: { handle: (cmd) => handleMemoryCommand(ownerMemory, cmd) },
+    skills,
+    skillAdmin,
+    market: { report: async () => (await marketBrief.report()).text, diagnose: () => marketBrief.diagnose() },
+    reminders,
+    backup: { status: () => backup.status(), run: () => backup.runAndFormat() },
+    health,
+    aiRoute: { handle: (arg) => aiRoute.handle(arg) },
+    groupVoice,
+    env: { handle: (arg) => envEditor.handle(arg) },
+    metaAi: {
+      handle: async (arg) => {
+        const cmd = parseMetaAiArg(arg);
+        if (cmd.kind === "help") {
+          return (
+            "🤖 Uji Meta AI (percobaan, nomor utama saja)\n" +
+            "/metaai tes — kirim SATU pesan \"buatkan gambar kucing lucu\" ke Meta AI dan laporkan balasannya (gambar ikut dikirim ke sini)\n" +
+            "/metaai tes <alamat> [pesan] — pakai alamat/pesan lain\n" +
+            "/metaai video [pesan] — minta VIDEO (bawaan \"buatkan video kucing berlari di taman\"), tunggu sampai ±3 menit; video yang diterima dikirim ke sini\n" +
+            "/metaai cari — dengarkan 90 detik; ketik pesan ke Meta AI dari HP-mu supaya bot menangkap alamat aslinya\n\n" +
+            "Belum terhubung ke grup: ini hanya untuk memastikan jalurnya bisa."
+          );
+        }
+        if (!currentSock) return "WhatsApp nomor utama belum tersambung, coba lagi sebentar lagi.";
+        if (cmd.kind === "tes" || cmd.kind === "video") {
+          const warn = unsafeTarget(cmd.jid, { force: cmd.force, known: metaAi.known() });
+          if (warn) return warn;
+        }
+        const sock = currentSock;
+        const r =
+          cmd.kind === "cari"
+            ? await metaAi.run({})
+            : await metaAi.run({
+                send: (jid, text) => sock.sendMessage(jid, { text }),
+                jids: cmd.jid ? [cmd.jid] : null,
+                prompt: cmd.prompt,
+                ...(cmd.kind === "video" ? { wantVideo: true, waitMs: 240_000, quietMs: 20_000 } : {})
+              });
+        let extra = "";
+        for (const raw of (r.videos || []).slice(0, 2)) {
+          try {
+            const buf = await downloadMediaMessage(raw, "buffer", {}, { logger: pino({ level: "silent" }), reuploadRequest: sock.updateMediaMessage });
+            await sendFilesToOwner([{ data: buf, name: "meta-ai.mp4", mime: "video/mp4", video: true }], "Video dari Meta AI");
+          } catch (e) {
+            extra += `\n⚠️ Gagal mengunduh/mengirim video: ${e instanceof Error ? e.message : e}`;
+          }
+        }
+        for (const raw of r.images.slice(0, 3)) {
+          try {
+            const buf = await downloadMediaMessage(raw, "buffer", {}, { logger: pino({ level: "silent" }), reuploadRequest: sock.updateMediaMessage });
+            await sendFilesToOwner([{ data: buf, name: "meta-ai.jpg", mime: "image/jpeg", photo: true }], "Gambar dari Meta AI");
+          } catch (e) {
+            extra += `\n⚠️ Gagal mengunduh gambar: ${e instanceof Error ? e.message : e}`;
+          }
+        }
+        return r.text + extra;
+      }
+    },
+    image: {
+      available: () => imageGen.available(),
+      describe: () => imageGen.describe(),
+      parseCommand: (arg) => imageGen.parseCommand(arg),
+      setGroup: (v) => imageGen.setGroup(v),
+      detectEdit: (text, opts) => imageGen.detectEdit(text, opts),
+      canEdit: () => imageGen.canEdit(),
+      // EDIT FOTO dari Telegram: foto (Buffer) + instruksi -> { image } atau { error }
+      editPhoto: async (buffer, prompt) => {
+        let prepared;
+        try {
+          prepared = await prepareEditInput(buffer);
+        } catch (e) {
+          const kind = e?.kind === "noffmpeg" ? "noffmpeg" : "badimage";
+          await tellOwnerImageProblem(kind, IMAGE_KIND_TEXT[kind], e instanceof Error ? e.message : String(e));
+          return { error: IMAGE_KIND_TEXT[kind], kind };
+        }
+        const out = await imageGen.makeEdit(prompt, prepared, "owner");
+        if (out.error) await tellOwnerImageProblem(out.kind, out.error, out.detail);
+        return out;
+      },
+      make: async (prompt) => {
+        const out = await imageGen.make(prompt, "owner");
+        if (out.error) await tellOwnerImageProblem(out.kind, out.error, out.detail);
+        return out;
+      }
+    },
+    video: {
+      available: () => videoGen.available(),
+      storyAvailable: () => videoGen.storyAvailable(),
+      describe: () => videoGen.describe(),
+      parseCommand: (arg) => videoGen.parseCommand(arg),
+      setGroup: (v) => videoGen.setGroup(v),
+      make: async (prompt, opts = {}) => {
+        const out = await videoGen.make(prompt, "owner", "", opts);
+        if (out.error) await tellOwnerVideoProblem(out.kind, out.error, out.detail);
+        return out;
+      },
+      photoAvailable: () => videoGen.photoAvailable(),
+      morphAvailable: () => videoGen.morphAvailable(),
+      detectMorph: (text, opts) => videoGen.detectMorph(text, opts),
+      makeMorph: async (buffer, text, opts = {}) => {
+        const out = await videoGen.makeMorph(buffer, text, "owner", "", opts);
+        if (out.error) await tellOwnerVideoProblem(out.kind, out.error, out.detail);
+        return out;
+      },
+      stopLimits: () => videoGen.stopLimits(),
+      musicInfo: () => videoGen.musicInfo(),
+      makeStopMotion: async (buffers, text, opts = {}) => {
+        const out = await videoGen.makeStopMotion(buffers, text, "owner", "", opts);
+        if (out.error) await tellOwnerVideoProblem(out.kind, out.error, out.detail);
+        return out;
+      },
+      detectPhoto: (text, opts) => videoGen.detectPhoto(text, opts),
+      makeFromPhoto: async (buffer, text) => {
+        const out = await videoGen.makeFromPhoto(buffer, text, "owner", "");
+        if (out.error) await tellOwnerVideoProblem(out.kind, out.error, out.detail);
+        return out;
+      }
+    },
+    groups: { handle: (arg) => groupList.handle(arg, { secondAliases: [String(wa2Config.botName || "").trim().split(/\s+/)[0]] }) },
+    wa2: {
+      describe: () => describeWa2(),
+      qr: async () => ({ data: await wa2QrImage(), name: "qr-nomor-2.png", mime: "image/png", photo: true }),
+      code: async () => {
+        const code = await requestWa2PairingCode({ force: true, notify: false });
+        if (!code) return "⏳ Menyiapkan sesi baru untuk nomor kedua. Kode tautan akan dikirim ke sini dalam beberapa detik.";
+        return pairingInstructions({ label: WA2_ACCOUNT_DEF.label, code, number: wa2Config.number, clock: formatClockInTimezone(Date.now()) });
+      }
+    },
+    nodin,
+    kas,
+    localChat,
+    providers: { report: (opts) => buildProviderReport(opts) },
+    state: {
+      get: async (key) => {
+        const { data } = await supabase.from("bot_state").select("value").eq("key", key).maybeSingle();
+        return data?.value ?? null;
+      },
+      set: async (key, value) => {
+        const { error } = await supabase.from("bot_state").upsert({ key, value, updated_at: new Date().toISOString() });
+        if (error) throw new Error(error.message);
+      }
+    }
+  }
+});
+function telegramCanNotify() {
+  return telegram.enabled && telegram.mirror && telegram.hasOwners();
+}
+/** Salin notifikasi ke Telegram (best effort). true = sampai ke minimal satu pemilik. */
+async function mirrorToTelegram(text) {
+  if (!telegramCanNotify()) return false;
+  try {
+    return (await telegram.sendOwner(text)) > 0;
+  } catch {
+    return false;
+  }
+}
+telegram
+  .start()
+  .then((connected) => (connected ? ops.announceStartup((chatId, text) => telegram.send(chatId, text)) : false))
+  .catch((err) => console.error("✈️ [Telegram] gagal mulai:", err instanceof Error ? err.message : String(err)));
+if (ops.enabled()) console.log("🛠️ Perintah laptop dari Telegram: AKTIF (/sistem /log /restart /deploy /migrasi, dengan konfirmasi)");
+console.log(`✈️ Telegram untuk pemilik: ${telegram.describe()}`);
+
+connect().catch((err) => {
+  console.error("Gagal mulai koneksi WhatsApp:", err);
+  process.exit(1);
+});
+office.start();
+if (office.enabled) console.log("🏢 Kantor AI: kejadian kerja dipancarkan ke aplikasi (halaman Kantor). Matikan: OFFICE_FEED=0 di .env.");
+if (WA2_ACCOUNT_DEF) {
+  console.log(`📱 Nomor kedua: AKTIF (${WA2_ACCOUNT_DEF.label}, sesi ${WA2_ACCOUNT_DEF.authDir}/, grup: ${wa2Config.groupNames.length + wa2Config.groupJids.length > 0 ? "diizinkan sebagian" : "tidak menjawab di grup"}, ringkasan harian: ${wa2Config.inSummary ? "ikut" : "tidak ikut"})`);
+  connect(WA2_ACCOUNT_DEF).catch((err) => {
+    // Kegagalan nomor kedua tidak boleh mematikan nomor utama.
+    console.error(`Gagal mulai koneksi ${WA2_ACCOUNT_DEF.label}:`, err instanceof Error ? err.message : String(err));
+  });
+}
+
+setInterval(() => {
+  for (const sk of activeSocks()) {
+    waAccountContext
+      .run({ account: sk.waAccount?.id || MAIN_ACCOUNT }, () => processPendingOutgoing(sk))
+      .catch((err) => {
+        console.error("Loop kirim pesan error:", err instanceof Error ? err.message : String(err));
+      });
+  }
+}, POLL_INTERVAL_MS);
+
+// Retry pesan yang gagal dibalas AI + ringkasan harian + ingat key yang sudah
+// habis hari ini (lihat processRetryQueue, checkDailySummary,
+// primeExhaustedKeysFromDb).
+setInterval(() => {
+  waAccountContext.run({ account: MAIN_ACCOUNT }, () => processRetryQueue(activeSocks())).catch(() => {});
+}, RETRY_CHECK_INTERVAL_MS);
+setInterval(() => {
+  checkDailySummary().catch(() => {});
+}, 60_000);
+setInterval(() => {
+  checkSummaryFlagFile().catch(() => {});
+}, 5_000);
+setInterval(() => {
+  if (currentSock) regMonitor.check().catch(() => {});
+}, 60_000);
+primeExhaustedKeysFromDb().catch(() => {});
+console.log(
+  `📋 Ringkasan harian ke pemilik: ${WA_DAILY_SUMMARY_ENABLED ? `AKTIF (tiap hari setelah ${String(WA_DAILY_SUMMARY_HOUR).padStart(2, "0")}:00 ${WA_TIMEZONE_LABEL}, mesin: ${WA_SUMMARY_ENGINE}${WA_SUMMARY_ENGINE === "ollama" ? `, cadangan Gemini: ${WA_SUMMARY_GEMINI_FALLBACK ? "ya" : "tidak"}` : ""})` : "mati (isi WA_OWNER_NUMBER di .env buat menyalakan)"}`
+);
+console.log(
+  `📜 Pantauan peraturan mingguan ke pemilik: ${regMonitor.describe()}${regMonitor.describe() !== "mati" && !webSearch.available() ? " -- TAPI belum ada key API pencarian (TAVILY_API_KEYS dst.), jadi dilewati" : ""}. Perintah: /peraturan (atau "/peraturan semua").`
+);
+console.log(
+  `🏛️ SiMAB lewat WhatsApp (hanya baca): ${simab.enabled && OWNER_NUMBER ? `AKTIF (satker ${(process.env.SIMAB_KANTOR_ID || "538065").trim()}, awali pesan dengan "simab")` : "mati (isi SIMAB_* di .env buat menyalakan)"}`
+);
+console.log(
+  `👥 Grup WhatsApp: ${(GROUP_ENABLED || groupList.rules(MAIN_ACCOUNT).enabled) && AUTO_REPLY_ACTIVE ? `AKTIF (grup diizinkan dari .env: ${[...(process.env.WA_GROUP_ALLOWED_NAMES || "").split(",").map((x) => x.trim()).filter(Boolean), ...GROUP_ALLOWED_JIDS].join(" | ") || "-"}; tambahan lewat /grup dibaca setelah bot menyala; pemicu: ${[GROUP_MENTION_TRIGGER ? "mention" : null, "balas pesan bot", GROUP_KEYWORDS.length ? `kata "${GROUP_KEYWORDS.join(",")}"` : null].filter(Boolean).join(", ")})` : "mati (tambah grup lewat /grup tambah <nama> di Telegram, atau isi WA_GROUP_ALLOWED_NAMES di .env)"}`
+);
+console.log(
+  `🦙 Cadangan lokal auto-reply (Ollama, saat kuota Gemini habis): ${AUTO_REPLY_ACTIVE && WA_AI_ENGINE === "gemini" && WA_OLLAMA_FALLBACK_ENABLED ? `AKTIF (model ${OLLAMA_MODEL}, hanya pertanyaan non-angka)` : "mati"}`
+);
+
+// Agen Ollama untuk chat di APLIKASI (pilihan agen di halaman chat): mengambil
+// antrean `agent_jobs` dari Supabase & menjawab pakai Ollama lokal. Tidak
+// butuh koneksi WhatsApp & tidak mengirim pesan WA apa pun -- lihat app-agent.js.
+// Push notifikasi ke HP lewat Edge Function send-push (memakai CRON_SECRET yang sama
+// dengan di Supabase). Tanpa CRON_SECRET di .env, push dimatikan (fitur lain tetap jalan).
+const CRON_SECRET = process.env.CRON_SECRET || "";
+let warnedNoPush = false;
+async function sendPush({ title, body, url, tag }) {
+  if (!CRON_SECRET) {
+    if (!warnedNoPush) {
+      warnedNoPush = true;
+      console.warn("🔔 Push notifikasi dimatikan: isi CRON_SECRET di wa-bot/.env (sama dengan secret Supabase).");
+    }
+    return;
+  }
+  const res = await fetch(`${SUPABASE_URL}/functions/v1/send-push`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${SERVICE_ROLE_KEY}`, "x-cron-secret": CRON_SECRET },
+    body: JSON.stringify({ title, body, url, tag })
+  });
+  if (!res.ok) throw new Error(`send-push HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`);
+}
+
+const kbCfg = readKbConfig(process.env, fileURLToPath(new URL(".", import.meta.url)));
+let kbIngest = null;
+if (kbCfg.enabled) {
+  try {
+    kbIndex = await openKbIndex({ file: kbCfg.indexFile, chunkChars: kbCfg.chunkChars, overlapChars: kbCfg.chunkOverlap, reindex: kbCfg.reindex });
+    kbIngest = createKbIngestWorker({
+      supabase,
+      index: kbIndex,
+      notify: sendPush,
+      env: process.env,
+      baseDir: fileURLToPath(new URL(".", import.meta.url)),
+      // Pekerjaan berat di latar (OCR) menunggu Ollama selesai supaya tidak berebut CPU.
+      isBusy: () => !ollamaQueue.isIdle(),
+      waitForIdle: () => ollamaQueue.waitForIdle()
+    });
+  } catch (err) {
+    console.error("📚 Indeks dokumen tidak aktif:", err instanceof Error ? err.message : String(err));
+    kbIndex = null;
+  }
+}
+
+// Gemini (chat aplikasi) membaca dokumen lewat indeks laptop ini: Edge Function menaruh pertanyaan di
+// kb_retrievals, worker ini menjawab dengan potongan teks (lihat kb-retrieval.js, migrations/0019).
+const kbRetrieval = kbIndex ? createKbRetrievalWorker({ supabase, index: kbIndex, env: process.env }) : null;
+
+// Folder dokumen lokal (dokumen/peraturan-pdf -> dokumen/peraturan-md) + antrean "PDF → MD" dari aplikasi.
+// Isinya diindeks dengan id 'local:' dan HANYA bisa dijawab Ollama (lihat doc-folder.js / excludeLocal di kb-index.js).
+const docFolder = kbIndex
+  ? createDocFolderWorker({
+      supabase,
+      index: kbIndex,
+      notify: sendPush,
+      env: process.env,
+      baseDir: fileURLToPath(new URL(".", import.meta.url)),
+      isBusy: () => !ollamaQueue.isIdle(),
+      waitForIdle: () => ollamaQueue.waitForIdle()
+    })
+  : null;
+
+const appAgent = createAppAgentWorker({
+  supabase,
+  kbIndex,
+  callOllamaChat,
+  enqueueOllamaCall,
+  // Chat aplikasi = pemilik sendiri -> dokumen lokal boleh ikut (hanya jalur Ollama).
+  fetchRelevantKnowledgeChunks: (question, budgetChars, titles) => fetchRelevantKnowledgeChunks(question, budgetChars, titles, { includeLocal: true }),
+  rankKnowledgeChunks,
+  chunkDocumentText,
+  currentDateLine,
+  getOwnerMemory: ownerMemoryBlock,
+  ollamaBaseUrl: OLLAMA_BASE_URL,
+  ollamaModel: OLLAMA_MODEL,
+  notify: sendPush,
+  getExtra: () => ({
+    waConnected: waOpen,
+    extra: {
+      pausedChats: aiPausedUntil.size,
+      engine: WA_AI_ENGINE,
+      autoReply: AUTO_REPLY_ACTIVE,
+      queue: ollamaQueue.stats(),
+      mem: readMemInfo(),
+      keepAlive: OLLAMA_KEEP_ALIVE,
+      image: (() => {
+        try {
+          return imageGen.monitor();
+        } catch {
+          return null;
+        }
+      })(),
+      kb: kbIngest
+        ? (() => {
+            const st = kbIngest.status();
+            return {
+              docs: st.docs,
+              chunks: st.chunks,
+              pdftotext: !!st.tools?.pdftotext,
+              ocr: !!(st.tools?.tesseract && st.tools?.pdftoppm),
+              processing: st.current ? st.current.title : null,
+              lastError: st.lastError
+            };
+          })()
+        : null
+    }
+  })
+});
+
+// Pengingat harian target khatam Al-Qur'an (push). Jam: KHATAM_REMINDER_TIME (default 20:30, zona WA_TIMEZONE).
+const khatamReminder = createKhatamReminder({
+  supabase,
+  notify: sendPush,
+  timeZone: WA_TIMEZONE,
+  stateFile: fileURLToPath(new URL("./khatam-state.json", import.meta.url)),
+  reminderTime: process.env.KHATAM_REMINDER_TIME || "20:30"
+});
+setInterval(() => {
+  khatamReminder.check().catch((err) => console.error("📖 Pengingat khatam error:", err instanceof Error ? err.message : String(err)));
+}, 60_000);
+appAgent.start().catch((err) => {
+  console.error("Agen Ollama aplikasi gagal start:", err instanceof Error ? err.message : String(err));
+});
+kbRetrieval?.start();
+docFolder?.start().catch((err) => {
+  console.error("Dokumen lokal gagal start:", err instanceof Error ? err.message : String(err));
+});
+if (kbIngest) {
+  kbIngest.start().catch((err) => {
+    console.error("Ingest dokumen gagal start:", err instanceof Error ? err.message : String(err));
+  });
+}
+for (const sig of ["SIGINT", "SIGTERM"]) {
+  process.on(sig, () => {
+    kbIngest?.stop();
+    docFolder?.stop();
+    kbRetrieval?.stop();
+    appAgent
+      .stop()
+      .catch(() => {})
+      .finally(() => process.exit(0));
+  });
+}
+
+// Jaga-jaga: bot ini harus jalan LAMA tanpa diawasi -- jangan sampai mati
+// total cuma gara-gara satu error tak terduga yang tidak ketangkep try/catch
+// di atas. Dicatat ke log biar ketahuan, tapi proses dibiarkan tetap hidup.
+process.on("unhandledRejection", (err) => {
+  console.error("Unhandled rejection (bot tetap jalan):", err);
+});
+process.on("uncaughtException", (err) => {
+  console.error("Uncaught exception (bot tetap jalan):", err);
+});
