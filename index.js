@@ -75,7 +75,7 @@ import { formatForWhatsApp, detectPdfRequest, detectOfficeRequest, cleanAnswerFo
 import { buildDocx, buildXlsx, officeFileName, MIME_DOCX, MIME_XLSX } from "./office-doc.js";
 import { pdfBufferToMarkdown, PDF_MAX_BYTES } from "./pdf-extract.js";
 import { PDF_QA_DEFAULT_MAX_CHARS, PDF_QA_LOCAL_MAX_CHARS, buildPdfContext, isPdfDoc, isReadQuestion, pdfAttachTag, pdfContextNote, pdfReadMessage, shouldReadPdf } from "./pdf-qa.js";
-import { buildCapabilityNote, buildVoiceReplyNote, denyingCapability } from "./capabilities.js";
+import { buildCapabilityNote, buildVoiceReplyNote, correctionAnswer, denyingCapability, detectVoiceQuestion, voiceCapabilityAnswer } from "./capabilities.js";
 import { detectEditRequest, replaceInText, replaceInDocx, docxToMarkdown, numberDiff, buildEditPrompt, buildEditUserMessage, unwrapFence, hasESignature, AI_EDIT_MAX_CHARS } from "./doc-edit.js";
 import { createPersonaVoice } from "./persona-voice.js";
 import { buildPdf, titleFromText, pdfFileName } from "./pdf-doc.js";
@@ -3228,15 +3228,20 @@ async function handleGroupMessage(msg, sock) {
       console.log(`🔊 Bahasa balasan suara grup: ${wantedLang}`);
     }
   }
-  let result = null;
+  // "Kamu bisa balas pakai suara?" = fakta tentang bot: dijawab langsung dari status fitur (tanpa AI), supaya tidak pernah salah/menyangkal.
+  const voiceFact = !fileReq && !pdfCtx && !textOnly && detectVoiceQuestion(text) ? voiceCapabilityAnswer(groupCapabilityFlags()) : null;
+  let result = voiceFact ? { reply: voiceFact, tokensUsed: 0, costUsd: 0 } : null;
+  if (voiceFact) console.log("👥 Pertanyaan kemampuan suara: dijawab langsung dari status fitur.");
   try {
-    try {
-      result = await generateAutoReply(groupJid);
-    } catch (firstErr) {
-      if (firstErr?.status !== 503 || firstErr?.allKeysExhausted === true) throw firstErr;
-      console.warn(`👥 Gemini 503 (sibuk) untuk grup ${groupJid}, coba lagi ${GROUP_RETRY_503_DELAY_MS / 1000} detik lagi...`);
-      await new Promise((resolve) => setTimeout(resolve, GROUP_RETRY_503_DELAY_MS));
-      result = await generateAutoReply(groupJid);
+    if (!result) {
+      try {
+        result = await generateAutoReply(groupJid);
+      } catch (firstErr) {
+        if (firstErr?.status !== 503 || firstErr?.allKeysExhausted === true) throw firstErr;
+        console.warn(`👥 Gemini 503 (sibuk) untuk grup ${groupJid}, coba lagi ${GROUP_RETRY_503_DELAY_MS / 1000} detik lagi...`);
+        await new Promise((resolve) => setTimeout(resolve, GROUP_RETRY_503_DELAY_MS));
+        result = await generateAutoReply(groupJid);
+      }
     }
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
@@ -3276,6 +3281,7 @@ async function handleGroupMessage(msg, sock) {
       const again = await generateAutoReply(groupJid).catch(() => null);
       if (acctCtx) acctCtx.retryNote = "";
       if (again?.reply && !denyingCapability(again.reply, caps)) result = again;
+      else result = { ...result, reply: correctionAnswer(denied, caps) }; // tetap menyangkal: jangan kirim kalimat yang salah, ganti dengan fakta
     }
   } catch (e) {
     console.error("Pemeriksa kontradiksi gagal (jawaban dikirim apa adanya):", e instanceof Error ? e.message : String(e));

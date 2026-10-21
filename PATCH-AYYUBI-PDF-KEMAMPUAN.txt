@@ -18,3 +18,6 @@ WA_GROUP_PDF_LOCAL_MAX_CHARS=12000, WA_GROUP_PDF_NUM_CTX=8192
 
 FILE BARU: capabilities.js, pdf-qa.js, test-pdf-qa.mjs
 FILE DIUBAH: index.js, package.json, README.md, .env.example, test-agenda.mjs, test-doc-edit.mjs, test-image-gen.mjs, test-pdf-extract.mjs
+
+CATATAN: pertanyaan "kamu bisa balas pakai suara?" sekarang dijawab langsung dari status fitur (tanpa AI); jawaban AI yang masih menyangkal kemampuan aktif diganti jawaban fakta.
+FILE tambahan diubah: capabilities.js

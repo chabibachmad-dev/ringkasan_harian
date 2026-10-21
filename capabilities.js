@@ -87,3 +87,32 @@ export function denyingCapability(reply, f = {}) {
   if ((f.voice === "on" || f.voice === "off") && DENY_VOICE_RE.test(t)) return "suara";
   return null;
 }
+
+// ---------------------------------------------------------------- pertanyaan "kamu bisa balas pakai suara?"
+// Model kecil (mis. 3B lokal) sering mengabaikan catatan prompt dan tetap menjawab "tidak bisa". Pertanyaan semacam ini
+// jawabannya FAKTA tentang bot, jadi dijawab langsung dari status fitur (tanpa AI) -- selalu benar dan sinkron dengan /voice wag.
+const VOICE_WORD = /\b(?:suara|voice|vn|voice\s*note|audio|bersuara|bicara|berbicara|ngomong|vois)\b/i;
+const ASK_WORD = /\b(?:bisa|bs|bisakah|mampu|dapat|boleh|support)\b/i;
+const NOT_ABOUT_ABILITY = /\b(?:cara|bikin|buatkan|buat|edit|aplikasi|rekam|merekam|transkrip|terjemah\w*|artinya|lagu|musik|nyanyi|ubah|jadikan|convert|konversi|kirim|kirimkan|download|unduh|putar|dengar|dengarkan)\b/i;
+
+/** Pesan pendek yang menanyakan apakah bot bisa menjawab/berbicara dengan suara -> true. */
+export function detectVoiceQuestion(text) {
+  const t = String(text ?? "").replace(/\s+/g, " ").trim();
+  if (!t || t.length > 110 || t.split(" ").length > 10) return false;
+  if (/^\//.test(t)) return false;
+  return VOICE_WORD.test(t) && ASK_WORD.test(t) && !NOT_ABOUT_ABILITY.test(t);
+}
+
+/** Jawaban tetap tentang kemampuan suara sesuai status sekarang. Ditulis enak dibacakan (tanpa emoji/simbol). */
+export function voiceCapabilityAnswer(f = {}) {
+  if (f.voice === "on") return 'Bisa. Ini aku sedang menjawab dengan suara. Kalau kamu lebih suka jawaban tertulis, tambahkan "jawab pakai teks" di pesanmu.';
+  if (f.voice === "off") return "Bisa, tapi fitur suara di grup sedang dimatikan oleh pemilik bot, jadi sekarang aku menjawab dengan teks. Pemilik bot bisa menyalakannya lewat perintah /voice wag on di Telegram.";
+  return "Belum bisa. Fitur jawaban suara belum diaktifkan oleh pemilik bot, jadi sementara aku menjawab dengan teks.";
+}
+
+/** Jawaban pengganti bila AI tetap menyangkal kemampuan yang aktif setelah dikoreksi. */
+export function correctionAnswer(kind, f = {}) {
+  if (kind === "suara") return voiceCapabilityAnswer(f);
+  if (kind === "pdf") return 'Bisa. Kirim PDF dengan keterangan "bot, ringkas" atau pertanyaanmu, atau balas (reply) PDF yang sudah ada di grup dengan pertanyaanmu, nanti kubaca isinya. PDF hasil scan (gambar) belum bisa.';
+  return "";
+}

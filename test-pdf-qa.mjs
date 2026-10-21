@@ -1,7 +1,7 @@
 // Tes tanya-jawab PDF di grup + daftar kemampuan bot. Jalankan: node test-pdf-qa.mjs
 import assert from "node:assert/strict";
 import { isPdfDoc, isReadQuestion, buildPdfContext, pdfContextNote, pdfAttachTag, sanitizePdfText, pdfReadMessage, shouldReadPdf } from "./pdf-qa.js";
-import { buildCapabilityNote, buildVoiceReplyNote, denyingCapability } from "./capabilities.js";
+import { buildCapabilityNote, buildVoiceReplyNote, correctionAnswer, denyingCapability, detectVoiceQuestion, voiceCapabilityAnswer } from "./capabilities.js";
 import { detectEditRequest } from "./doc-edit.js";
 
 let n = 0;
@@ -126,6 +126,19 @@ assert.match(vn, /DIBACAKAN/);
 assert.match(vn, /JANGAN menulis "aku tidak bisa menjawab dengan suara"/);
 assert.match(vn, /600/);
 ok("catatan jawaban-akan-dibacakan");
+
+// --- pertanyaan kemampuan suara dijawab dari fakta, bukan AI
+for (const t of ["Kamu bs balas pakai suara?", "apakah kamuu bisa voice?", "bisa jawab pakai voice note?", "kamu bisa ngomong ga?", "bot bisa bersuara?", "apakah bisa balas dengan suara"])
+  assert.equal(detectVoiceQuestion(t), true, `harus terdeteksi: ${t}`);
+for (const t of ["gimana cara bikin voice over di capcut?", "tolong buatkan lagu dengan suara merdu", "transkrip voice note tadi dong", "apa itu suara bass?", "suara", "", "/voice wag on", "ringkas pdf ini lalu jelaskan kenapa suara mesin genset bisa berisik sekali di ruangan itu"])
+  assert.equal(detectVoiceQuestion(t), false, `jangan terdeteksi: ${t}`);
+assert.match(voiceCapabilityAnswer({ voice: "on" }), /^Bisa\. Ini aku sedang menjawab dengan suara/);
+assert.match(voiceCapabilityAnswer({ voice: "off" }), /\/voice wag on/);
+assert.match(voiceCapabilityAnswer({ voice: "none" }), /^Belum bisa/);
+assert.equal(denyingCapability(voiceCapabilityAnswer({ voice: "on" }), { voice: "on" }), null, "jawaban tetap tidak memicu pemeriksa");
+assert.match(correctionAnswer("pdf"), /^Bisa/);
+assert.equal(denyingCapability("untuk saat ini aku tdk bisa menjawab dengan suara", { voice: "on" }), "suara");
+ok("pertanyaan kemampuan suara: dijawab dari status fitur");
 
 // --- deteksi jawaban yang menyangkal kemampuan
 const vf = { voice: "on", pdfRead: true };
