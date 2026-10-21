@@ -156,15 +156,16 @@ const HELP = [
   "/voice wag on|off|id|eng|kor|arb|jawa  — balasan grup WA berupa suara/teks + bahasa suara",
   "/wa2  — nomor WhatsApp kedua (status, kode, qr)",
   "/grup  — grup WA yang dijawab bot: lihat, semua, tambah, hapus",
+  "/humor  — humor per grup WA: pantun harian, roasting ringan",
   "/gambar <deskripsi>  — buat gambar; /gambar grup on|off = izinkan di grup WA\n/video <deskripsi>  — video bernarasi; kirim FOTO + keterangan \"jadikan video salju\" = foto hidup\n/env  — ubah kunci gambar (token Cloudflare, jatah) dari sini",
   "/kas  — laporan kas bulanan: konfirmasi angka, submit, simpan (/kas bantuan)",
   "/nodin  — konsep Nota Dinas LPJ (PDF + Word), otomatis tiap tanggal 1 (/nodin cek)",
   "/urutan  — lihat/ubah urutan AI balasan WhatsApp & grup (contoh: /urutan santai groq,gemini,ollama;  /urutan reset)",
   "/cadangan  — status cadangan otomatis (memori, pengingat, skill, sesi WhatsApp);  /cadangan sekarang  — buat sekarang",
   "/lokal <pesan>  — ngobrol dengan Ollama LOKAL (alias /tanya), tidak keluar dari laptop;  /lokal baru  — lupakan percakapan",
-  "/skill  — daftar skill (resep tugas buatanmu);  /skill <nama> <teks>  — jalankan, dijawab Ollama lokal;  /skill baru <nama> …  — buat skill dari sini;  /skill lihat|hapus <nama>",
+  "/skill  — daftar skill buatanmu;  /skill <nama> <teks>  — jalankan (Ollama lokal);  /skill baru|lihat|hapus <nama>",
   "/penyedia  — status tiap penyedia AI (Gemini, Groq, OpenRouter, Ollama): berhasil/gagal, key yang istirahat",
-  "/ingat <teks>  — simpan catatan pribadi (hanya di laptop, hanya dibaca Ollama lokal);  /catatan  — daftar;  /catatan <kata>  — cari;  /lupa <nomor|semua>  — hapus",
+  "/ingat <teks>  — simpan catatan pribadi (hanya di laptop);  /catatan [kata]  — daftar/cari;  /lupa <nomor|semua>  — hapus",
   "/sistem  — kondisi laptop bot (pm2, disk, RAM, Ollama); /log /restart /deploy /migrasi: lihat /ops (OPS_ENABLED=true)",
   "/baru  — mulai obrolan baru (lupakan konteks sebelumnya)",
   "/speak [topik]  — latihan Inggris dengan tutor (suara);  /speak id [topik]  — santai berbahasa Indonesia;  /selesai  — akhiri",
@@ -189,6 +190,7 @@ const HELP = [
  *   image?: { available(), describe(), parseCommand(arg), setGroup(bool) -> Promise<{on,saved}>, make(prompt) -> Promise<{image:{buffer,mime}}|{error}> }   pembuat gambar (image-gen.js, /gambar)
  *   groupVoice?: { enabled(), set(bool) -> Promise<{on,saved,warning}>, describe() }   balasan suara di grup WhatsApp (group-voice.js, /voice wag)
  *   groups?: { handle(arg) -> Promise<string> }   daftar grup yang dijawab (/grup)
+ *   humor?: { handle(arg) -> Promise<string> }   mode humor per grup WhatsApp: pantun harian, roasting ringan (humor.js, /humor)
  *   wa2?: { describe() -> string, code() -> Promise<string>, qr() -> Promise<{data,name,mime,photo}> }   nomor WhatsApp kedua (/wa2, /wa2 kode)
  *   kas?: { handle(arg) -> Promise<{ok,text,files?,caption?}> }   laporan kas bulanan (kas.js, /kas)
  *   nodin?: { compose(arg) -> Promise<{ok,text,caption?,files?}> }   konsep nota dinas bulanan (nodin.js, /nodin)
@@ -1052,6 +1054,10 @@ Suara khusus satu grup: /suara grup wanita <nama grup> • /suara grup (daftar) 
       if (out.error) return void (await reply(`⚠️ ${out.error}`));
       return void (await sendFiles(chatId, [{ data: out.video.buffer, name: "video.mp4", mime: "video/mp4", video: true }], musicCaption(out.video)));
     }
+    if (name === "humor" || name === "lucu") {
+      if (!deps.humor) return void (await reply("Mode humor tidak tersedia di versi bot ini."));
+      return void (await reply(await withAction(chatId, "typing", () => deps.humor.handle(arg))));
+    }
     if (name === "grup" || name === "group") {
       if (!deps.groups) return void (await reply("Pengaturan grup tidak tersedia di versi bot ini."));
       return void (await reply(await withAction(chatId, "typing", () => deps.groups.handle(arg))));
@@ -1474,6 +1480,7 @@ Suara khusus satu grup: /suara grup wanita <nama grup> • /suara grup (daftar) 
           { command: "kesehatan", description: "Periksa kesehatan bot: Ollama, disk, memori, WhatsApp, cadangan" },
           { command: "voice", description: "Balasan grup WhatsApp: suara (on) atau teks (off)" },
           { command: "grup", description: "Grup WhatsApp yang dijawab bot: lihat, tambah, hapus" },
+          { command: "humor", description: "Mode humor grup WA: pantun harian, roasting ringan, gaya jenaka" },
           { command: "gambar", description: "Buat gambar dari deskripsi (Gemini); /gambar grup on|off" },
           { command: "video", description: "Buat video bernarasi dari deskripsi (gratis); /video grup on|off" },
           { command: "stopmotion", description: "Foto-foto berurutan jadi video stop motion" },

@@ -129,7 +129,7 @@ ok("PDF sungguhan 2 halaman (pdftotext): tabel 70 baris utuh, satu tabel, bisa d
   assert.match(src, /const docAttached = groupAudio \|\| photo \? null : content\.documentMessage/);
   assert.match(src, /const officeReq = groupAudio \? null : detectOfficeRequest\(text\)/);
   assert.match(src, /const pdfReq = groupAudio \|\| officeReq \? null : detectPdfRequest\(text\)/);
-  assert.match(src, /if \(docAttached && !docEdit && !\(fileReq && fileReq\.format !== "pdf"\)\) return;/, "dokumen tanpa perintah Excel/Word/ubah isi diabaikan");
+  assert.match(src, /if \(docAttached && !readPdf && !docEdit && !\(fileReq && fileReq\.format !== "pdf"\)\) return;/, "dokumen (selain PDF yang ditanyakan) tanpa perintah Excel/Word/ubah isi diabaikan");
   const iDoc = src.indexOf('if (fileReq && fileReq.format !== "pdf" && (docAttached || quotedDoc))');
   const iOnly = src.indexOf("if (fileReq?.only)");
   const iImg = src.indexOf("const imageReq = imageGen.detect(text)");

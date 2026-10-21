@@ -264,7 +264,7 @@ const say = async (t, g = G, c = {}) => { const cmd = agenda.parse(t, c); assert
   assert.match(src, /async function offerAgendaFromChat[\s\S]*?isGroupAllowed[\s\S]*?isAutoReplyEnabledForContact[\s\S]*?buildOffer/, "tawaran: grup diizinkan & izin kontak dicek sebelum menawarkan");
   assert.ok(at2("agenda.parse(") > at2("isAutoReplyEnabledForContact(groupJid)"), "perintah agenda setelah cek izin kontak");
   assert.ok(at2("agenda.parse(") < at2("generateAutoReply(groupJid)"), "agenda dijawab sebelum AI percakapan");
-  assert.ok(at2("agenda.parse(") < at2("if (editReq && !docEdit)"), "agenda sebelum edit foto");
+  assert.ok(at2("agenda.parse(") < at2("if (editReq && !docEdit && !readPdf)"), "agenda sebelum edit foto");
   assert.match(src, /setInterval\(\(\) => \{\s*agenda\.check\(\)/, "pemeriksaan tiap menit");
   assert.match(src, /AGENDA_MORNING_TIME/);
   assert.match(src, /kind: "sqlite", path: AGENDA_FILE/, "agenda ikut dicadangkan");

@@ -952,6 +952,33 @@ Satu bot bisa memegang **dua nomor WhatsApp**. Nomor utama jalan seperti biasa; 
 - Riwayat kedua nomor tampil di aplikasi Ayyubi milikmu; pemegang HP nomor kedua sebaiknya tahu bahwa bot membaca dan membalas chat di nomornya.
 - `/voice wag on|off`, daftar dokumen pengetahuan, dan pengaturan AI berlaku sama untuk kedua nomor.
 
+## Mode humor grup (`/humor`): pantun harian, roasting ringan, gaya jenaka
+
+Bawaan **MATI** di semua grup. Nyalakan per grup dari Telegram (hanya grup yang sudah diizinkan lewat `/grup`):
+
+```
+/humor                         lihat grup + status humornya (bernomor)
+/humor on 2                    nyalakan semuanya untuk grup nomor 2 (atau /humor on keluarga)
+/humor off 2                   matikan semuanya
+/humor pantun on 2             hanya pantun harian   (juga: roast, gaya)
+/humor semua on                semua grup yang dijawab bot
+/humor jam 09:00-17:00 2       rentang jam acak pantun untuk grup itu (/humor jam reset 2 = bawaan)
+/humor tes 2                   kirim satu pantun percobaan sekarang
+/humor on wa2 kantor           untuk nomor kedua tambahkan kata wa2
+```
+
+Tiga hal yang bisa dinyalakan terpisah:
+
+- **Gaya jawaban**: jawaban bot ikut santai, kadang diselipi satu candaan/pantun pendek. Jawaban teknis (aturan, angka, prosedur, tanggal, kode) tetap harus akurat; candaan hanya bumbu. Dimatikan otomatis untuk topik duka/sakit/musibah/komplain/resmi, untuk jawaban berupa berkas (PDF/Word/Excel), dan untuk jawaban dari isi PDF. Catatan: model kecil (mis. qwen2.5:3b) kadang mengabaikan arahan gaya; Gemini/Groq lebih patuh.
+- **Pantun harian**: sehari sekali per grup, di **jam acak** (dipilih ulang tiap hari, berbeda tiap grup) di dalam `WA_HUMOR_PANTUN_WINDOW`. Jam hari ini disimpan, jadi restart bot tidak membuat pantun terkirim dua kali; bila bot mati melewati rentang jam, pantun hari itu dilewati (tidak dikirim larut malam). Pantun dibuat AI lalu **diperiksa kode** (4 baris, rima a-b-a-b, tanpa kata terlarang); kalau gagal dua kali, dipakai pantun cadangan bawaan (13 buah, bergiliran), jadi grup tidak pernah menerima pantun rusak.
+- **Roasting spontan** (ringan & aman): saat obrolan grup **ramai dan santai**, bot kadang menggoda satu orang, maksimal `WA_HUMOR_ROAST_MAX_PER_DAY` kali sehari per grup (bawaan 5), dengan jeda `WA_HUMOR_ROAST_COOLDOWN_MIN` menit, hanya di jam aktif, dan dibalas ke pesan orang itu.
+
+**Batas aman roasting.** Hanya perilaku di chat (typo, telat balas, ketawa terus, lagi lapar/ngantuk); tidak pernah fisik, agama, suku, keluarga, pasangan, uang/gaji, kesehatan, politik, kecerdasan, dan tanpa kata kasar. Ini dijaga dua lapis: perintah ke AI **dan** penyaring kata di kode (hasil yang memuat kata terlarang dibuang, AI diberi satu kesempatan lagi, lalu bot diam). Roasting dilewati bila: ada kata duka/sakit/musibah/komplain/"tolong"/"mohon"/"Bapak/Ibu"/tautan di 6 pesan terakhir, ada pesan panjang (pengumuman), belum ada tanda obrolan santai (wkwk, haha, ngopi, lapar, dst.), hanya satu orang yang bicara, obrolan sudah basi, bot baru saja dipanggil, atau AI menjawab `SKIP`. Pemilik nomor **tidak** diroasting (kecuali `WA_HUMOR_ROAST_OWNER=true`).
+
+**Menolak roasting.** Siapa pun bisa menulis di grup "bot jangan roasting aku" (tidak perlu men-tag bot); bot menjawab sekali dan tidak pernah menjadikan orang itu sasaran lagi di grup tersebut. Mencabut: "bot boleh roasting aku lagi". Daftar penolak tersimpan di bot_state per grup.
+
+**Privasi.** Untuk membaca obrolan santai, grup yang roasting-nya menyala disimpan ±10 pesan terakhirnya **hanya di memori** bot: tidak ditulis ke database/berkas, hilang saat bot restart, dibuang bila sudah lewat 10 menit atau bot dipanggil. Grup yang roasting-nya mati sama sekali tidak dibaca. Yang tercatat di database hanya pesan yang BOT kirim (pantun/roasting), seperti balasan bot lainnya.
+
 ## Mengatur grup yang dijawab dari Telegram (`/grup`)
 
 Tidak perlu membuka `.env` di laptop untuk menambah grup. Perubahan tersimpan di database dan **langsung berlaku tanpa restart**.
@@ -1005,6 +1032,20 @@ Judul `## ...` menjadi *tebal*, `**x**` menjadi `*x*`, garis `---` dibuang, `[te
 - Dibaca dengan `pdftotext` (sudah dipakai Dokumen Pengetahuan; di Ubuntu: `sudo apt install poppler-utils`). Tidak memakai AI, jadi isi tidak diubah-ubah; tabel dikenali dari kolom yang rata, tabel yang terpotong antar halaman digabung, nomor halaman/judul berulang dibuang.
 - Batas: PDF **berisi teks** (bukan hasil scan/foto), maksimal 15 MB, 60 halaman pertama. PDF hasil scan dijawab dengan penjelasan (belum ada OCR). Tabel tanpa garis dengan kolom sangat rapat atau sel yang bergabung bisa meleset: bot selalu menulis di keterangan "Mohon dicek ulang". Satu konversi diproses satu per satu agar laptop tidak berat.
 - Hanya file PDF yang bisa dikonversi; file lain dijawab "baru PDF yang bisa".
+
+**Tanya isi PDF di grup (baca PDF).** Bot bisa membaca PDF yang dibagikan di grup dan menjawab pertanyaan tentang isinya, baik PDF yang **dilampirkan penanya** maupun PDF **orang lain yang dibalas (reply)**:
+- Kirim PDF dengan keterangan `@bot ringkas`, `@bot apa isi PDF ini?`, `@bot berapa total anggarannya?`; atau balas (reply) PDF siapa pun di grup dengan `bot, siapa yang tanda tangan?` / `bot, ringkas`. PDF tanpa pertanyaan (hanya menandai bot) diringkas.
+- Teks PDF diambil dengan `pdftotext` (sama dengan fitur convert), lalu dikirim ke AI sebagai blok data. PDF pendek dikirim utuh; PDF panjang: pertanyaan spesifik → bagian yang paling cocok dengan kata kuncinya + pembuka, pertanyaan umum ("ringkas") → cuplikan merata. AI diberi tahu kalau hanya sebagian yang terbaca, jadi jawabannya jujur soal cakupan.
+- Isi PDF diperlakukan sebagai **data, bukan perintah**: kalimat di dalam PDF yang menyuruh bot mengubah aturan/membocorkan sesuatu diabaikan.
+- PDF hasil scan (gambar) tidak punya teks → bot menjelaskan terus terang (belum ada OCR). PDF rusak/terkunci/terlalu besar (maks 15 MB, 60 halaman pertama) juga dijawab dengan alasan.
+- Perintah lama tidak berubah: `ganti "A" jadi "B"`, `perbaiki`, `terjemahkan`, `ringkas jadi satu halaman`, `convert ke excel/word`, `dalam bentuk PDF` tetap membuat berkas baru. Kata `ringkas`/`apa isinya`/pertanyaan biasa → dijawab di chat.
+- Teks PDF disimpan 30 menit (per pesan PDF) supaya pertanyaan lanjutan pada PDF yang sama (reply PDF-nya lagi) tidak mengunduh ulang. Pertanyaan lanjutan tanpa me-reply PDF hanya bisa memakai jawaban bot sebelumnya di riwayat.
+- Jatah: `WA_GROUP_PDF_READ_MAX_PER_DAY` per orang per hari (bawaan 15). Matikan fitur: `WA_GROUP_PDF_READ=off`. Batas isi ke AI: `WA_GROUP_PDF_MAX_CHARS` (bawaan 36000 huruf; Gemini/API) dan `WA_GROUP_PDF_LOCAL_MAX_CHARS` (bawaan 12000; Ollama lokal, yang juga otomatis memakai jendela konteks `WA_GROUP_PDF_NUM_CTX`=8192 khusus pertanyaan PDF). Model lokal kecil (3B) bisa kurang teliti untuk PDF panjang. Tes: `node test-pdf-qa.mjs`.
+
+**Bot mengenal kemampuannya sendiri.** Di grup, prompt AI otomatis memuat daftar "BISA / TIDAK BISA" yang disusun dari fitur yang benar-benar aktif saat itu (suara, baca PDF, convert, gambar, video, dengar voice note). Saat `/voice wag on`, AI juga diberi tahu bahwa jawaban pesan itu akan **dibacakan** (dengan petunjuk gaya lisan), sehingga tidak lagi menulis "aku tidak bisa menjawab dengan suara" padahal jawabannya berupa voice note. Bila `/voice wag off`, AI menjawab bahwa bot bisa bersuara tetapi sedang dimatikan oleh pemilik (`/voice wag on` di Telegram). Sebagai pengaman, jawaban yang menyangkal kemampuan aktif ("tidak bisa menjawab dengan suara", "tidak bisa membaca PDF") ditulis ulang otomatis satu kali sebelum dikirim.
+
+**Bot mengenali pemilik nomor (grup dan chat pribadi).** Bila yang bertanya adalah nomor `WA_OWNER_NUMBER` (atau id `@lid` di `WA_OWNER_LIDS`), AI diberi tahu bahwa lawan bicaranya PEMILIK, jadi tidak lagi menjawab "pesan diterima dan akan disampaikan ke pemilik nomor"; aturan pengaman untuk orang asing tidak berlaku padanya. Pengenalan memakai id pengirim dari WhatsApp (tidak bisa dipalsukan dengan menulis "aku pemilik"); orang lain yang mengaku pemilik tidak dipercaya. Di riwayat grup, ucapan pemilik ditandai `Nama (pemilik):`. Sebagai pengaman, jawaban yang masih melempar ke "pemilik" ditulis ulang otomatis sekali.
+- Log tiap kali bot dipanggil di grup: `pengirim: <nama> (id: ...) pemilik: ya/tidak`. Bila nomormu tertulis **tidak**, salin angka id (yang berakhiran lid) ke `.env` sebagai `WA_OWNER_LIDS=<angka itu>` lalu restart. Pastikan juga `WA_OWNER_NUMBER` terisi (mis. `0857xxxxxxx`). Tes: `node test-owner.mjs`.
 
 **Ubah ISI PDF/Word yang dibagikan di grup.** Balas (reply) file Word atau PDF-nya (atau kirim file dengan keterangan) dengan perintah:
 - **Ganti kata:** `bot, ganti "PT Maju" jadi "PT Makmur"` (boleh beberapa: `ganti "A" jadi "B" dan ganti "C" jadi "D"`). Untuk **Word (.docx)** kata diganti **langsung di dalam berkas**, jadi huruf, tabel, header/footer, dan format aslinya utuh; kata yang terbelah beda gaya tetap ketemu. Huruf besar/kecil tidak dipedulikan. Kalau kata tidak ditemukan, bot memberi tahu dan tidak mengirim apa-apa.

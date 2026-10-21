@@ -45,8 +45,8 @@ ok("kalimat biasa / pertanyaan tentang gambar tidak dianggap permintaan");
 
 // --- filter
 // isi gambar (termasuk dewasa) bukan urusan filter bot: diserahkan ke penyedia
-//assert.equal(promptProblem("gambar wanita telanjang"), null);
-//assert.equal(promptProblem("foto bugil artis"), null);
+assert.equal(promptProblem("gambar wanita telanjang"), null);
+assert.equal(promptProblem("foto bugil artis"), null);
 assert.ok(promptProblem("buat kwitansi palsu 5 juta"));
 assert.ok(promptProblem("stempel instansi palsu"));
 assert.ok(promptProblem("ktp palsu"));
@@ -799,9 +799,9 @@ ok("Telegram edit foto: foto+keterangan, /edit, balas foto, perintah tanpa foto/
   assert.match(grp, /const photo = groupAudio \? null : content\.imageMessage/, "foto + keterangan dibaca");
   assert.match(grp, /if \(photo && !editReq && !animReq\) return;/, "foto dengan keterangan biasa tetap diabaikan");
   assert.match(grp, /imageGen\.groupEnabled\(\) \? imageGen\.detectEdit\(text, \{ hasImage: Boolean\(photo \|\| quotedImage\) \}\)/, "edit hanya bila fitur gambar grup aktif");
-  assert.ok(grp.indexOf("isAutoReplyEnabledForContact") < grp.indexOf("if (editReq && !docEdit) {"), "edit setelah cek izin kontak");
-  assert.ok(grp.indexOf("if (editReq && !docEdit) {") < grp.indexOf("imageGen.detect(text)"), "edit dicek sebelum pembuatan gambar & AI");
-  assert.ok(grp.indexOf("if (editReq && !docEdit) {") < grp.indexOf("generateAutoReply(groupJid)"));
+  assert.ok(grp.indexOf("isAutoReplyEnabledForContact") < grp.indexOf("if (editReq && !docEdit && !readPdf) {"), "edit setelah cek izin kontak");
+  assert.ok(grp.indexOf("if (editReq && !docEdit && !readPdf) {") < grp.indexOf("imageGen.detect(text)"), "edit dicek sebelum pembuatan gambar & AI");
+  assert.ok(grp.indexOf("if (editReq && !docEdit && !readPdf) {") < grp.indexOf("generateAutoReply(groupJid)"));
   assert.match(grp, /edit: \{ source \}/);
   assert.match(grp, /ctx\.stanzaId/, "membalas foto: unduh foto yang dikutip");
   assert.match(idx, /prepareEditInput\(buffer\)/);

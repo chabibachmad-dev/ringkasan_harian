@@ -28,6 +28,7 @@
 // HP), karena begitu sesi dipegang Baileys, pemakaian manual bersamaan di
 // app WhatsApp biasa bisa bikin salah satu sisi ke-logout/bentrok.
 
+import { execFile } from "node:child_process";
 import "dotenv/config";
 import dns from "node:dns";
 import net from "node:net";
@@ -69,10 +70,13 @@ import { createFallbackChain, readFallbackConfig } from "./llm-fallback.js";
 import { classifyRoute, createAiRoute, parseRouteCommand } from "./ai-route.js";
 import { createNodin, parseNodinCommand, readNodinConfig } from "./nodin.js";
 import { createKas, parseKasCommand, readKasConfig } from "./kas.js";
-import { createGroupVoice, detectRequestedLang, detectTextOnlyRequest, langInstruction, readGroupVoiceConfig } from "./group-voice.js";
+import { VOICE_LANGS, createGroupVoice, detectRequestedLang, detectTextOnlyRequest, langInstruction, readGroupVoiceConfig } from "./group-voice.js";
 import { formatForWhatsApp, detectPdfRequest, detectOfficeRequest, cleanAnswerForFile, titleForFile } from "./wa-format.js";
 import { buildDocx, buildXlsx, officeFileName, MIME_DOCX, MIME_XLSX } from "./office-doc.js";
 import { pdfBufferToMarkdown, PDF_MAX_BYTES } from "./pdf-extract.js";
+import { PDF_QA_DEFAULT_MAX_CHARS, PDF_QA_LOCAL_MAX_CHARS, buildPdfContext, isPdfDoc, isReadQuestion, pdfAttachTag, pdfContextNote, pdfReadMessage, shouldReadPdf } from "./pdf-qa.js";
+import { createHumor, readHumorConfig } from "./humor.js";
+import { OWNER_ASKER_NOTE, OWNER_CLAIM_NOTE, OWNER_DEFLECT_FALLBACK, OWNER_DEFLECT_FIX, buildCapabilityNote, buildVoiceReplyNote, correctionAnswer, deflectsToOwner, denyingCapability, detectVoiceQuestion, senderLabel, voiceCapabilityAnswer } from "./capabilities.js";
 import { detectEditRequest, replaceInText, replaceInDocx, docxToMarkdown, numberDiff, buildEditPrompt, buildEditUserMessage, unwrapFence, hasESignature, AI_EDIT_MAX_CHARS } from "./doc-edit.js";
 import { createPersonaVoice } from "./persona-voice.js";
 import { buildPdf, titleFromText, pdfFileName } from "./pdf-doc.js";
@@ -378,14 +382,55 @@ const TEXT_PROMPT_NOTE = `
 
 PERMINTAAN TEKS: penanya minta jawaban TERTULIS (bukan suara). Tulis jawaban lengkap sebagai teks biasa yang enak dibaca/disalin (boleh memakai daftar atau tabel); tidak perlu disesuaikan untuk dibacakan.`;
 
+// ---- Baca PDF di grup (lihat pdf-qa.js) ----
+const PDF_GROUP_READ = !/^(0|off|false|no|mati)$/i.test(String(process.env.WA_GROUP_PDF_READ ?? "on").trim());
+const PDF_GROUP_MAX_CHARS = Math.max(2000, Number(process.env.WA_GROUP_PDF_MAX_CHARS) || PDF_QA_DEFAULT_MAX_CHARS);
+const PDF_GROUP_LOCAL_MAX_CHARS = Math.max(2000, Number(process.env.WA_GROUP_PDF_LOCAL_MAX_CHARS) || PDF_QA_LOCAL_MAX_CHARS + 3000);
+const PDF_GROUP_NUM_CTX = Math.max(4096, Number(process.env.WA_GROUP_PDF_NUM_CTX) || 8192); // jendela konteks Ollama khusus pertanyaan PDF
+const PDF_GROUP_DAILY_MAX = Math.max(0, Number(process.env.WA_GROUP_PDF_READ_MAX_PER_DAY ?? 15) || 0);
+let pdfToolMissing = false; // diisi saat start bila pdftotext tidak ada
+
+/** Kemampuan bot di grup SAAT INI, dari fitur yang benar-benar aktif (dipakai capabilities.js untuk prompt AI). */
+function groupCapabilityFlags() {
+  let voice = "none";
+  try {
+    if (speaker.available()) voice = groupVoice.enabled() ? "on" : "off";
+  } catch {
+    /* suara belum siap */
+  }
+  const safe = (fn) => {
+    try {
+      return Boolean(fn());
+    } catch {
+      return false;
+    }
+  };
+  return {
+    voice,
+    voiceLangs: Object.values(VOICE_LANGS).map((l) => l.name),
+    voiceMaxChars: voice === "none" ? 0 : readGroupVoiceConfig(process.env, ttsConfig.maxChars).maxChars,
+    hearVoice: safe(() => waVoiceCfg.inGroups && transcriber.available()),
+    pdfRead: PDF_GROUP_READ && !pdfToolMissing,
+    pdfConvert: !pdfToolMissing,
+    pdfMaxMb: Math.round(PDF_MAX_BYTES / 1024 / 1024),
+    image: safe(() => imageGen.available() && imageGen.groupEnabled()),
+    imageEdit: safe(() => imageGen.groupEnabled()),
+    video: safe(() => videoGen.groupEnabled()),
+    photoVideo: safe(() => videoGen.photoGroupEnabled()),
+    story: safe(() => videoGen.storyGroupEnabled())
+  };
+}
+
 function isGroupJid(jid) {
   return typeof jid === "string" && jid.endsWith("@g.us");
 }
 
-function withGroupNote(basePrompt, jid) {
+function withGroupNote(basePrompt, jid, { local = false } = {}) {
   // Nomor kedua boleh punya nama bot sendiri (WA2_NAME): AI memperkenalkan diri dengan nama itu.
   const base = currentAccountId() === MAIN_ACCOUNT ? basePrompt : personaPrompt(basePrompt, wa2Config.botName);
-  if (!isGroupJid(jid)) return base;
+  // Pengirim pesan terakhir = pemilik nomor (dikenali dari id pengirim, bukan dari isi pesan): AI tidak boleh menjawab "akan disampaikan ke pemilik".
+  const ownerNote = waAccountContext.getStore()?.ownerAsker ? OWNER_ASKER_NOTE : "";
+  if (!isGroupJid(jid)) return `${base}${ownerNote}`;
   // Balasan grup berupa suara: bahasa jawaban dipaksa (/voice wag kor ...) atau diminta anggota grup ("jawab pakai bahasa Korea").
   const replyLang = waAccountContext.getStore()?.replyLang;
   const ctxFlags = waAccountContext.getStore();
@@ -402,7 +447,22 @@ function withGroupNote(basePrompt, jid) {
   } catch {
     /* pembuat video belum siap: tanpa catatan */
   }
-  return `${base}${GROUP_PROMPT_NOTE}${imageNote}${videoNote}${fileNote}${replyLang ? langInstruction(replyLang) : ""}`;
+  // Daftar kemampuan bot (dari fitur yang benar-benar aktif) + catatan "jawaban ini akan dibacakan" + isi PDF yang dilampirkan/dibalas.
+  let capNote = "";
+  let voiceNote = "";
+  try {
+    const caps = groupCapabilityFlags();
+    capNote = buildCapabilityNote(caps);
+    if (ctxFlags?.voiceReply) voiceNote = buildVoiceReplyNote(caps);
+  } catch (e) {
+    console.error("Catatan kemampuan grup gagal disusun:", e instanceof Error ? e.message : String(e));
+  }
+  let pdfNote = "";
+  if (ctxFlags?.pdf) {
+    const maxChars = local ? PDF_GROUP_LOCAL_MAX_CHARS : PDF_GROUP_MAX_CHARS;
+    pdfNote = pdfContextNote({ name: ctxFlags.pdf.name, pages: ctxFlags.pdf.pages, truncatedPages: ctxFlags.pdf.truncatedPages, fromReply: ctxFlags.pdf.fromReply, ctx: buildPdfContext(ctxFlags.pdf.markdown, ctxFlags.pdf.question, { maxChars }) });
+  }
+  return `${base}${GROUP_PROMPT_NOTE}${ownerNote || OWNER_CLAIM_NOTE}${capNote}${imageNote}${videoNote}${fileNote}${voiceNote}${pdfNote}${ctxFlags?.humorNote || ""}${ctxFlags?.retryNote ? `\n\n${ctxFlags.retryNote}` : ""}${replyLang ? langInstruction(replyLang) : ""}`;
 }
 
 // Buang awalan "Nama: " & baris "(mengutip: ...)" supaya pencarian dokumen/web
@@ -1031,8 +1091,10 @@ async function generateAutoReplyWithOllama(jid, { timeoutMs } = {}) {
 
   // Grup: obrolan santai tidak perlu dokumen/web (lihat GROUP_LOOKUP_RE).
   // Dokumen (pencarian lokal, murah) boleh selalu dicari di grup (WA_GROUP_DOCS); web (Bing) tetap hanya bila ada kata kunci.
-  const lookupAllowed = !isGroupJid(jid) || GROUP_LOOKUP_RE.test(searchQuestion);
-  const docsAllowed = lookupAllowed || (GROUP_DOCS_ALWAYS && searchQuestion.trim().split(/\s+/).length >= 3);
+  // Pertanyaan tentang PDF yang dilampirkan/dibalas: jawab dari isi PDF saja (tanpa cari web/dokumen lain yang tidak nyambung).
+  const pdfAsked = Boolean(isGroupJid(jid) && waAccountContext.getStore()?.pdf);
+  const lookupAllowed = !pdfAsked && (!isGroupJid(jid) || GROUP_LOOKUP_RE.test(searchQuestion));
+  const docsAllowed = !pdfAsked && (lookupAllowed || (GROUP_DOCS_ALWAYS && searchQuestion.trim().split(/\s+/).length >= 3));
   const pinnedTitles = docTitlesFor(jid);
   const docChunks = docsAllowed ? await fetchRelevantKnowledgeChunks(searchQuestion, RAG_CONTEXT_BUDGET_CHARS, pinnedTitles, { includeLocal: DOC_LOCAL_WA_CONTACTS }) : [];
   const topScore = docChunks[0]?.score ?? 0;
@@ -1061,8 +1123,8 @@ async function generateAutoReplyWithOllama(jid, { timeoutMs } = {}) {
   const replyText = await enqueueOllamaCall(
     () =>
       callOllamaChat(
-        [{ role: "system", content: `${withGroupNote(WA_OLLAMA_SYSTEM_PROMPT, jid)}\n\n${currentDateLine()}` }, ...messages],
-        { ...(timeoutMs ? { timeoutMs } : {}), ...(docChunks.length > 0 ? { temperature: OLLAMA_DOC_TEMPERATURE } : {}) }
+        [{ role: "system", content: `${withGroupNote(WA_OLLAMA_SYSTEM_PROMPT, jid, { local: true })}\n\n${currentDateLine()}` }, ...messages],
+        { ...(timeoutMs ? { timeoutMs } : {}), ...(docChunks.length > 0 || pdfAsked ? { temperature: OLLAMA_DOC_TEMPERATURE } : {}), ...(pdfAsked ? { numCtx: Math.max(OLLAMA_NUM_CTX, PDF_GROUP_NUM_CTX) } : {}) }
       ),
     { priority: PRIORITY.WA, label: "wa-reply" }
   );
@@ -1675,9 +1737,10 @@ async function generateAutoReplyWithGemini(jid) {
   // hanya dicari kalau pesannya jelas butuh data (lihat GROUP_LOOKUP_RE).
   const pinnedTitles = docTitlesFor(jid);
   // Grup dengan dokumen "dikunci" (WA_GROUP_DOC_TITLES): jawaban HANYA dari dokumen itu, tanpa internet.
-  const webQuery = pinnedTitles ? "" : !isGroupJid(jid) || GROUP_LOOKUP_RE.test(webQueryRaw) ? webQueryRaw : "";
+  const pdfAsked = Boolean(isGroupJid(jid) && waAccountContext.getStore()?.pdf); // jawab dari isi PDF saja, tanpa cari web/dokumen lain
+  const webQuery = pdfAsked || pinnedTitles ? "" : !isGroupJid(jid) || GROUP_LOOKUP_RE.test(webQueryRaw) ? webQueryRaw : "";
   // Dokumen: di grup selalu dicari (pencarian lokal, murah) kecuali WA_GROUP_DOCS=keywords.
-  const docQuery = !isGroupJid(jid) || GROUP_DOCS_ALWAYS ? webQueryRaw : webQuery;
+  const docQuery = pdfAsked ? "" : !isGroupJid(jid) || GROUP_DOCS_ALWAYS ? webQueryRaw : webQuery;
   // Dokumen Pengetahuan dicek untuk pertanyaan yang sama (bukan sapaan) --
   // hasilnya dibatasi budget, bukan baca seluruh dokumen. Gagal = lanjut tanpa.
   let docChunks = [];
@@ -2887,6 +2950,7 @@ async function handleGroupMessage(msg, sock) {
   if (!groupAudio && (!rawText || (!photo && !docAttached && rawText.startsWith("[")))) return;
 
   const ctx = getMessageContextInfo(content);
+  const quotedDoc = ctx?.quotedMessage ? unwrapMessageContent(ctx.quotedMessage)?.documentMessage || null : null;
   const ownJids = getOwnJids(sock);
   const ownUserParts = ownJids.map((j) => j.split("@")[0]);
 
@@ -2924,6 +2988,22 @@ async function handleGroupMessage(msg, sock) {
       .limit(1);
     if (botMsg && botMsg.length > 0) triggered = true;
   }
+  // Mode humor (/humor): hanya di grup yang menyalakannya. (1) "bot jangan roasting aku" dihormati, dipanggil atau tidak;
+  // (2) obrolan yang TIDAK memanggil bot dibaca sebentar di memori untuk roasting spontan (tidak disimpan ke database).
+  const humorAcct = currentAccountId();
+  if (!msg.key.fromMe && !photo && !docAttached && !groupAudio && humor.settings(humorAcct, groupJid)) {
+    const humorSubject = await getGroupSubject(sock, groupJid);
+    if (isGroupAllowed(groupJid, humorSubject, sock)) {
+      const humorIds = [msg.key.participant, msg.key.participantAlt].filter(Boolean).map((j) => j.split("@")[0].split(":")[0]);
+      const pref = await humor.handlePreference(humorAcct, groupJid, { name: msg.pushName || "", ids: humorIds, text: rawText }).catch(() => null);
+      if (pref) {
+        console.log(`😄 [${humorSubject || "?"}] ${msg.pushName || "?"} ${pref.pref === "out" ? "menolak" : "mengizinkan lagi"} roasting.`);
+        await sendHumorGroupText(humorAcct, groupJid, pref.reply, { quoted: msg }).catch((e) => console.error("😄 Balasan preferensi roasting gagal:", e instanceof Error ? e.message : String(e)));
+        return;
+      }
+      if (!triggered) humor.observe(humorAcct, groupJid, { name: msg.pushName || "", ids: humorIds, text: rawText, isOwner: isOwnerSender(msg, false), msg });
+    }
+  }
   if (!triggered) {
     // Kalimat biasa yang tampak jelas seperti pengumuman jadwal ("besok rapat jam 9"): bot menawarkan mencatatnya (tanpa AI, tanpa menyimpan obrolan).
     if (!photo && !docAttached && !groupAudio && agenda.mightOffer(rawText)) offerAgendaFromChat(sock, msg, groupJid, rawText).catch((e) => console.error("📅 Tawaran jadwal gagal:", e instanceof Error ? e.message : String(e)));
@@ -2936,8 +3016,11 @@ async function handleGroupMessage(msg, sock) {
     console.log(`👥 Bot dipanggil di grup "${subject || "?"}" (${groupJid}) tapi grup ini tidak ada di WA_GROUP_ALLOWED_NAMES/JIDS, diabaikan.`);
     return;
   }
+  humor.noteTriggered(currentAccountId(), groupJid); // habis dipanggil: jangan langsung bercanda/roasting
 
   const sender = msg.pushName || "Anggota grup";
+  const ownerAsker = isOwnerSender(msg, false); // pemilik nomor yang bertanya di grup
+  console.log(`👥 [${subject || "?"}] pengirim: ${sender} (id: ${senderUserParts(msg).slice(2).join(", ") || "?"}) pemilik: ${ownerAsker ? "ya" : "tidak"}${ownerAsker || !OWNER_NUMBER ? "" : " -- kalau ini nomormu tapi tertulis tidak, isi WA_OWNER_LIDS=<id di atas> di .env"}`);
   // Edit foto: foto di pesan ini, atau foto yang DIBALAS (termasuk gambar buatan bot sendiri).
   const quotedImage = !photo && ctx?.quotedMessage ? unwrapMessageContent(ctx.quotedMessage)?.imageMessage || null : null;
   // Foto hidup ("bot, jadikan video dengan salju" + foto/balas foto) didahulukan: kata "jadikan" juga dikenali sebagai edit foto.
@@ -2956,18 +3039,22 @@ async function handleGroupMessage(msg, sock) {
       .limit(1);
     quotedText = quotedImageNote(imgRow?.[0]?.content) || quotedText;
   }
-  if (!groupAudio && !text && !quotedText) return;
-  if (!groupAudio && !text) text = "(menandai tanpa pertanyaan, jawab/jelaskan pesan yang dikutip)";
+  // PDF yang dilampirkan di pesan ini, atau PDF yang DIBALAS (milik siapa pun): kandidat untuk dibaca & ditanyakan isinya.
+  const pdfCandidate = !PDF_GROUP_READ || photo ? null : isPdfDoc(docAttached) ? docAttached : isPdfDoc(quotedDoc) ? quotedDoc : null;
+  if (!groupAudio && !text && !quotedText && !pdfCandidate) return;
+  if (!groupAudio && !text) text = pdfCandidate ? "(menandai PDF tanpa pertanyaan, ringkas dan jelaskan isi PDF itu)" : "(menandai tanpa pertanyaan, jawab/jelaskan pesan yang dikutip)";
   // "jawab pakai teks" -> pesan ini dijawab teks walau /voice wag on. "dalam bentuk PDF" / "jadikan pdf" -> jawaban dikirim sebagai berkas PDF.
   const textOnly = !groupAudio && detectTextOnlyRequest(text);
   // Hasil berupa berkas: "dalam bentuk PDF/Excel/Word", "jadikan pdf/excel/word", "convert ke excel" (pada PDF yang dibagikan/dibalas).
   const officeReq = groupAudio ? null : detectOfficeRequest(text);
   const pdfReq = groupAudio || officeReq ? null : detectPdfRequest(text);
   const fileReq = officeReq ? { format: officeReq.format, only: officeReq.only, rest: officeReq.rest } : pdfReq ? { format: "pdf", only: pdfReq.only, rest: pdfReq.rest } : null;
-  const quotedDoc = ctx?.quotedMessage ? unwrapMessageContent(ctx.quotedMessage)?.documentMessage || null : null;
   // Ubah ISI dokumen yang dibagikan/dibalas ("ganti X jadi Y", "perbaiki kalimatnya", "ringkas"): hanya untuk PDF/Word, hasilnya berkas BARU.
-  const docEdit = groupAudio || photo || !(docAttached || quotedDoc) || fileReq?.format === "xlsx" ? null : detectEditRequest(fileReq ? fileReq.rest : text);
-  if (docAttached && !docEdit && !(fileReq && fileReq.format !== "pdf")) return; // dokumen tanpa perintah Excel/Word/ubah isi: tetap diabaikan
+  const docEditRaw = groupAudio || photo || !(docAttached || quotedDoc) || fileReq?.format === "xlsx" ? null : detectEditRequest(fileReq ? fileReq.rest : text);
+  // BACA PDF (dijawab di chat): PDF yang dilampirkan tanpa perintah ubah isi, atau PDF yang dibalas dengan pertanyaan. "ganti X jadi Y" / "perbaiki" / "ringkas jadi 1 halaman" tetap jalur ubah-isi.
+  const readPdf = shouldReadPdf({ hasPdf: Boolean(pdfCandidate), attached: Boolean(docAttached), groupAudio: Boolean(groupAudio && quotedDoc), fileReq, edit: docEditRaw, text });
+  const docEdit = readPdf ? null : docEditRaw;
+  if (docAttached && !readPdf && !docEdit && !(fileReq && fileReq.format !== "pdf")) return; // dokumen (bukan PDF yang ditanyakan) tanpa perintah Excel/Word/ubah isi: tetap diabaikan
   const fileHint = fileReq && !fileReq.only ? fileReq.rest : "";
   if (fileReq && !fileReq.only && fileReq.rest) text = fileReq.rest;
 
@@ -2990,7 +3077,8 @@ async function handleGroupMessage(msg, sock) {
   }
 
   const stored =
-    `${sender}: ${groupAudio ? "🎤 " : ""}${text}` +
+    `${senderLabel(sender, ownerAsker)}: ${groupAudio ? "🎤 " : ""}${text}` +
+    (readPdf ? ` ${pdfAttachTag(pdfCandidate.fileName, !docAttached)}` : "") +
     (quotedText ? `\n(mengutip: "${quotedText.replace(/\s+/g, " ").slice(0, GROUP_QUOTE_MAX_CHARS)}")` : "");
   const { error } = await supabase.from("whatsapp_messages").insert({
     wa_jid: groupJid,
@@ -3013,7 +3101,7 @@ async function handleGroupMessage(msg, sock) {
   }
 
   // Jadwal kantor (catat / tanya "ada jadwal apa hari ini" / hapus / pindah / jawab tawaran "mau dicatat?"): dijawab dari catatan lokal, tanpa AI.
-  if (agenda.enabled && !photo && !docAttached) {
+  if (agenda.enabled && !photo && !docAttached && !readPdf) {
     const agendaCmd = agenda.parse(text, { quotedText: quotedText && !quotedText.startsWith("[") ? quotedText : "", offerKey: ctx?.stanzaId ? `${groupJid}|${ctx.stanzaId}` : "" });
     if (agendaCmd) {
       const reply = await agenda.handle(agendaCmd, { account: currentAccountId(), groupJid, groupName: subject || "", sender });
@@ -3025,7 +3113,7 @@ async function handleGroupMessage(msg, sock) {
   }
 
   // Permintaan FOTO HIDUP (foto -> video + efek): ditangani pembuat video, bukan AI percakapan.
-  if (animReq && !docEdit) {
+  if (animReq && !docEdit && !readPdf) {
     if (animReq.needsImage) {
       await replyGroupText(sock, groupJid, msg, subject, VIDEO_NOPHOTO_TEXT);
       return;
@@ -3038,7 +3126,7 @@ async function handleGroupMessage(msg, sock) {
   }
 
   // Permintaan EDIT foto ("bot, ubah jadi hitam putih" + foto/balas foto): ditangani pembuat gambar, bukan AI percakapan.
-  if (editReq && !docEdit) {
+  if (editReq && !docEdit && !readPdf) {
     if (editReq.needsImage) {
       await replyGroupText(sock, groupJid, msg, subject, "Fotonya belum ada. Kirim foto dengan keterangan perintah edit (mis. \"bot, ubah jadi hitam putih\"), atau balas (reply) foto yang mau diedit dengan: bot, edit foto ini jadi ...");
       return;
@@ -3100,8 +3188,29 @@ async function handleGroupMessage(msg, sock) {
     return;
   }
 
+  // Baca PDF yang dilampirkan / dibalas: teksnya diambil, lalu dijawab AI percakapan (jalur di bawah) berdasarkan isi PDF itu.
+  let pdfCtx = null;
+  if (readPdf) {
+    if (!pdfReadQuotaOk(msg.key.participant || sender)) {
+      await replyGroupText(sock, groupJid, msg, subject, `Jatah baca PDF untukmu hari ini sudah habis (${PDF_GROUP_DAILY_MAX} kali per hari). Besok bisa lagi ya.`);
+      return;
+    }
+    const source = docAttached
+      ? { key: msg.key, message: content }
+      : { key: { remoteJid: groupJid, id: ctx.stanzaId, participant: ctx.participant }, message: unwrapMessageContent(ctx.quotedMessage) };
+    sock.sendPresenceUpdate("composing", groupJid).catch(() => {});
+    const loaded = await readGroupPdf(sock, { source, doc: pdfCandidate, cacheKey: (docAttached ? msg.key.id : ctx.stanzaId) ? `${groupJid}|${docAttached ? msg.key.id : ctx.stanzaId}` : "" });
+    if (!loaded.ok) {
+      sock.sendPresenceUpdate("paused", groupJid).catch(() => {});
+      await replyGroupText(sock, groupJid, msg, subject, loaded.message);
+      return;
+    }
+    pdfCtx = { name: loaded.name, pages: loaded.pages, markdown: loaded.markdown, truncatedPages: loaded.truncated, fromReply: !docAttached, question: text };
+    console.log(`📄 [Baca PDF] "${loaded.name}" ${loaded.pages} hlm, ${loaded.markdown.length} huruf (${loaded.cached ? "dari simpanan" : "baru dibaca"})`);
+  }
+
   // Permintaan membuat video ("bot, buatkan video ..."): dirakit pembuat video (gambar + suara + ffmpeg), bukan AI percakapan.
-  if (videoGen.groupEnabled() || videoGen.storyGroupEnabled()) {
+  if (!pdfCtx && (videoGen.groupEnabled() || videoGen.storyGroupEnabled())) {
     const videoReq = videoGen.detect(text);
     // video gambar biasa butuh pembuat gambar; animasi karakter cukup ffmpeg (latar cadangan digambar kode)
     if (videoReq && (videoGen.groupEnabled() || videoReq.mode === "karakter")) {
@@ -3111,7 +3220,7 @@ async function handleGroupMessage(msg, sock) {
   }
 
   // Permintaan membuat gambar ("bot, buatkan gambar ..."): ditangani pembuat gambar, bukan AI percakapan.
-  if (imageGen.groupEnabled()) {
+  if (!pdfCtx && imageGen.groupEnabled()) {
     const imageReq = imageGen.detect(text);
     if (imageReq) {
       await handleImageRequestWa(sock, groupJid, imageReq, { kind: "group", who: msg.key.participant || sender, quoted: msg, waName: subject || null, record: true });
@@ -3126,6 +3235,13 @@ async function handleGroupMessage(msg, sock) {
       flags.wantFile = fileReq ? fileReq.format : "";
       flags.textOnly = textOnly && !fileReq;
       flags.groupSubject = subject || ""; // untuk suara khusus per grup (/suara grup ...)
+      flags.ownerAsker = ownerAsker; // pengirim = pemilik nomor -> AI tidak menjawab "disampaikan ke pemilik"
+      flags.pdf = pdfCtx; // isi PDF yang dilampirkan/dibalas (null = tidak ada)
+      flags.retryNote = "";
+      // gaya humoris (/humor): hanya untuk jawaban biasa di grup yang menyalakannya (bukan berkas/PDF, bukan topik duka/serius)
+      flags.humorNote = fileReq || pdfCtx ? "" : humor.chatNote(currentAccountId(), groupJid, { text });
+      // jawaban pesan ini akan dibacakan jadi voice note -> AI diberi tahu (supaya tidak bilang "aku tidak bisa menjawab dengan suara")
+      flags.voiceReply = Boolean(groupVoice.enabled() && !textOnly && !fileReq && speaker.available());
     }
   }
   // Bahasa jawaban (hanya relevan bila balasan grup berupa suara): permintaan di pesan ini > pengaturan /voice wag > otomatis.
@@ -3137,15 +3253,20 @@ async function handleGroupMessage(msg, sock) {
       console.log(`🔊 Bahasa balasan suara grup: ${wantedLang}`);
     }
   }
-  let result = null;
+  // "Kamu bisa balas pakai suara?" = fakta tentang bot: dijawab langsung dari status fitur (tanpa AI), supaya tidak pernah salah/menyangkal.
+  const voiceFact = !fileReq && !pdfCtx && !textOnly && detectVoiceQuestion(text) ? voiceCapabilityAnswer(groupCapabilityFlags()) : null;
+  let result = voiceFact ? { reply: voiceFact, tokensUsed: 0, costUsd: 0 } : null;
+  if (voiceFact) console.log("👥 Pertanyaan kemampuan suara: dijawab langsung dari status fitur.");
   try {
-    try {
-      result = await generateAutoReply(groupJid);
-    } catch (firstErr) {
-      if (firstErr?.status !== 503 || firstErr?.allKeysExhausted === true) throw firstErr;
-      console.warn(`👥 Gemini 503 (sibuk) untuk grup ${groupJid}, coba lagi ${GROUP_RETRY_503_DELAY_MS / 1000} detik lagi...`);
-      await new Promise((resolve) => setTimeout(resolve, GROUP_RETRY_503_DELAY_MS));
-      result = await generateAutoReply(groupJid);
+    if (!result) {
+      try {
+        result = await generateAutoReply(groupJid);
+      } catch (firstErr) {
+        if (firstErr?.status !== 503 || firstErr?.allKeysExhausted === true) throw firstErr;
+        console.warn(`👥 Gemini 503 (sibuk) untuk grup ${groupJid}, coba lagi ${GROUP_RETRY_503_DELAY_MS / 1000} detik lagi...`);
+        await new Promise((resolve) => setTimeout(resolve, GROUP_RETRY_503_DELAY_MS));
+        result = await generateAutoReply(groupJid);
+      }
     }
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
@@ -3174,6 +3295,31 @@ async function handleGroupMessage(msg, sock) {
   }
   sock.sendPresenceUpdate("paused", groupJid).catch(() => {});
   if (!result || !result.reply) return;
+  // Pemeriksa kontradiksi: jawaban menyangkal kemampuan yang AKTIF ("aku tidak bisa menjawab dengan suara" padahal sedang bersuara) -> tulis ulang sekali.
+  try {
+    const caps = groupCapabilityFlags();
+    const denied = denyingCapability(result.reply, caps);
+    if (denied) {
+      console.warn(`👥 Jawaban menyangkal kemampuan "${denied}" yang sebenarnya aktif; minta AI menulis ulang sekali.`);
+      const acctCtx = waAccountContext.getStore();
+      if (acctCtx) acctCtx.retryNote = denied === "suara" ? "KOREKSI: draf jawabanmu tadi menyangkal bisa menjawab dengan suara, padahal kamu BISA (dan bila jawaban ini dibacakan, kamu sedang bersuara). Tulis ulang jawabannya tanpa menyangkal kemampuan itu." : "KOREKSI: draf jawabanmu tadi menyangkal bisa membaca PDF, padahal kamu BISA (anggota grup mengirim PDF dengan pertanyaan atau membalas PDF). Tulis ulang jawabannya tanpa menyangkal kemampuan itu.";
+      const again = await generateAutoReply(groupJid).catch(() => null);
+      if (acctCtx) acctCtx.retryNote = "";
+      if (again?.reply && !denyingCapability(again.reply, caps)) result = again;
+      else result = { ...result, reply: correctionAnswer(denied, caps) }; // tetap menyangkal: jangan kirim kalimat yang salah, ganti dengan fakta
+    }
+  } catch (e) {
+    console.error("Pemeriksa kontradiksi gagal (jawaban dikirim apa adanya):", e instanceof Error ? e.message : String(e));
+  }
+  // Pemilik nomor yang bertanya tidak boleh dijawab "akan disampaikan ke pemilik": tulis ulang sekali, bila masih begitu pakai jawaban netral.
+  if (ownerAsker && deflectsToOwner(result.reply)) {
+    console.warn("👥 Jawaban melempar urusan ke 'pemilik' padahal penanyanya pemilik; minta AI menulis ulang sekali.");
+    const acctCtx = waAccountContext.getStore();
+    if (acctCtx) acctCtx.retryNote = OWNER_DEFLECT_FIX;
+    const again = await generateAutoReply(groupJid).catch(() => null);
+    if (acctCtx) acctCtx.retryNote = "";
+    result = again?.reply && !deflectsToOwner(again.reply) ? again : { ...result, reply: OWNER_DEFLECT_FALLBACK };
+  }
   // Diminta berkas (PDF/Excel/Word): kirim jawaban sebagai berkas. Gagal membuatnya -> tetap dikirim sebagai teks.
   if (fileReq && (await deliverGroupFile(sock, groupJid, fileReq.format, result.reply, { quoted: msg, waName: subject || null, result, hint: fileHint }))) return;
   // /voice wag on: balasan grup berupa voice note saja (tanpa teks). Gagal/tidak layak dibacakan -> tetap dikirim teks.
@@ -3281,6 +3427,68 @@ async function deliverGroupFile(sock, jid, kind, markdown, { quoted = null, waNa
 }
 
 /** PDF yang dibagikan di grup -> Excel / Word (tanpa AI). Selalu menjawab: berkasnya, atau alasan kenapa tidak bisa. */
+// Jatah baca PDF per orang per hari (supaya komputer bot & kuota AI tidak habis oleh satu orang).
+const pdfReadQuota = new Map(); // "orang|tanggal" -> jumlah
+function pdfReadQuotaOk(who) {
+  if (PDF_GROUP_DAILY_MAX <= 0) return true;
+  const day = new Date().toLocaleDateString("en-CA", { timeZone: WA_TIMEZONE });
+  const key = `${who}|${day}`;
+  for (const k of pdfReadQuota.keys()) if (!k.endsWith(`|${day}`)) pdfReadQuota.delete(k);
+  const n = pdfReadQuota.get(key) ?? 0;
+  if (n >= PDF_GROUP_DAILY_MAX) return false;
+  pdfReadQuota.set(key, n + 1);
+  return true;
+}
+
+// Teks PDF yang sudah dibaca disimpan sebentar (per pesan PDF) supaya pertanyaan susulan pada PDF yang sama tidak mengunduh ulang.
+const PDF_CACHE_TTL_MS = 30 * 60 * 1000;
+const PDF_CACHE_MAX = 12;
+const pdfTextCache = new Map(); // "grup|idPesan" -> { at, name, pages, markdown, truncated }
+
+/**
+ * Unduh PDF dari WhatsApp lalu ambil teksnya (pdftotext). -> { ok: true, name, pages, markdown, truncated, cached } atau { ok: false, message }.
+ * Tidak pernah melempar galat; pesan gagal sudah jujur & siap dikirim ke grup. Dijalankan satu per satu (runFileJob).
+ */
+async function readGroupPdf(sock, { source, doc, cacheKey }) {
+  const name = String(doc?.fileName || "dokumen.pdf");
+  const hit = cacheKey ? pdfTextCache.get(cacheKey) : null;
+  if (hit && Date.now() - hit.at < PDF_CACHE_TTL_MS) return { ok: true, name: hit.name, pages: hit.pages, markdown: hit.markdown, truncated: hit.truncated, cached: true };
+  if (pdfToolMissing) return { ok: false, message: pdfReadMessage("notool") };
+  if (Number(doc?.fileLength) > PDF_MAX_BYTES) return { ok: false, message: `PDF-nya terlalu besar (maks ${Math.round(PDF_MAX_BYTES / 1024 / 1024)} MB). Kirim versi yang lebih kecil atau pisahkan per bagian.` };
+  return runFileJob(async () => {
+    let buffer = null;
+    let lastErr = null;
+    for (let attempt = 0; attempt < 2 && !buffer; attempt++) {
+      try {
+        buffer = await downloadMediaMessage(source, "buffer", {}, { logger: pino({ level: "silent" }), reuploadRequest: sock.updateMediaMessage });
+      } catch (e) {
+        lastErr = e;
+        await new Promise((r) => setTimeout(r, 700));
+      }
+    }
+    if (!buffer) {
+      console.error(`📄 [Baca PDF] gagal mengunduh "${name}": ${describeError(lastErr)}`);
+      return { ok: false, message: pdfReadMessage("download") };
+    }
+    let r;
+    try {
+      r = await pdfBufferToMarkdown(buffer);
+    } catch (e) {
+      console.error(`📄 [Baca PDF] ${name}: ${e instanceof Error ? e.message : String(e)}`);
+      if (e?.kind === "notool") pdfToolMissing = true;
+      return { ok: false, message: pdfReadMessage(e?.kind) };
+    }
+    if (r.scanned) return { ok: false, message: pdfReadMessage("scanned") };
+    if (!r.markdown) return { ok: false, message: pdfReadMessage("empty") };
+    const entry = { at: Date.now(), name, pages: r.pages, markdown: r.markdown, truncated: r.truncated };
+    if (cacheKey) {
+      pdfTextCache.set(cacheKey, entry);
+      while (pdfTextCache.size > PDF_CACHE_MAX) pdfTextCache.delete(pdfTextCache.keys().next().value);
+    }
+    return { ok: true, ...entry, cached: false };
+  });
+}
+
 async function convertGroupDocument(sock, groupJid, { source, doc, format, msg, subject }) {
   const say = (t) => replyGroupText(sock, groupJid, msg, subject, t);
   const label = FILE_LABEL[format];
@@ -3920,6 +4128,10 @@ async function handleIncoming(msg, sock) {
   // tersimpan & tampil di aplikasi juga (TANPA memicu auto-reply -- lihat
   // bagian bawah fungsi ini).
   const isSelfChat = getOwnJids(sock).includes(jid);
+  {
+    const st = waAccountContext.getStore();
+    if (st) st.ownerAsker = isOwnerSender(msg, isSelfChat); // chat pribadi dari pemilik: AI tahu lawan bicaranya pemilik
+  }
   // Nomor kedua: HP-nya dipegang orang lain, jadi chat-ke-diri-sendiri di sana TIDAK dianggap perintah pemilik -- diabaikan sama sekali.
   if (isSelfChat && sock.waAccount?.secondary) return;
 
@@ -4678,6 +4890,16 @@ groupVoice
   .then(() => console.log(`🔊 Balasan grup WhatsApp: ${groupVoice.describe()} (ubah: /voice wag on|off di Telegram)`))
   .catch(() => {});
 
+// Baca PDF di grup butuh alat pdftotext (poppler-utils). Cek sekali saat start: kalau tidak ada, AI tidak dijanjikan "bisa baca PDF".
+if (PDF_GROUP_READ) {
+  execFile("pdftotext", ["-v"], { timeout: 8000 }, (err) => {
+    if (err && err.code === "ENOENT") {
+      pdfToolMissing = true;
+      console.warn("📄 Baca PDF di grup NONAKTIF: alat pdftotext tidak ditemukan (pasang: sudo apt install poppler-utils).");
+    } else console.log(`📄 Baca PDF di grup: aktif (batas ${PDF_GROUP_MAX_CHARS} huruf/PDF; model lokal ${PDF_GROUP_LOCAL_MAX_CHARS}; ${PDF_GROUP_DAILY_MAX || "tanpa"} batas/orang/hari)`);
+  });
+}
+
 // PERCOBAAN: ngobrol dengan Meta AI lewat nomor utama (hanya uji dari Telegram: /metaai). Lihat meta-ai.js.
 const metaAi = createMetaAi({ config: readMetaAiConfig(process.env) });
 
@@ -4947,6 +5169,64 @@ const groupList = createGroupList({
   }
 });
 groupList.load().catch(() => {});
+
+// Mode humor grup (/humor di Telegram, bawaan MATI): gaya jawaban jenaka, pantun harian di jam acak, roasting ringan saat obrolan santai. Lihat humor.js.
+async function humorAi({ system, user, temperature = 0.9, maxTokens = 160 }) {
+  const viaOllama = async () => {
+    const out = await enqueueOllamaCall(
+      () => callOllamaChat([{ role: "system", content: system }, { role: "user", content: user }], { timeoutMs: 120_000, maxTokens, numCtx: Math.max(OLLAMA_NUM_CTX, 2048), temperature }),
+      { priority: PRIORITY.BACKGROUND, label: "humor" }
+    );
+    if (!String(out || "").trim()) throw new Error("balasan Ollama kosong");
+    return out;
+  };
+  const viaFallback = async () => (await llmFallback.generate({ system, messages: [{ role: "user", content: user }], temperature })).text;
+  const viaGemini = async () => extractGeminiText(await geminiGenerateWithRotation(system, [{ role: "user", parts: [{ text: user }] }], { useSearch: false }));
+  const order = WA_AI_ENGINE === "ollama" ? [viaOllama, llmFallback.available() ? viaFallback : null, GEMINI_API_KEYS.length ? viaGemini : null] : [llmFallback.available() ? viaFallback : null, GEMINI_API_KEYS.length ? viaGemini : null, WA_OLLAMA_FALLBACK_ENABLED ? viaOllama : null];
+  let lastErr = null;
+  for (const fn of order.filter(Boolean)) {
+    try {
+      const out = String(await fn()).trim();
+      if (out) return out;
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw lastErr || new Error("AI belum diatur");
+}
+async function sendHumorGroupText(account, jid, text, { quoted = null } = {}) {
+  const sk = account === SECOND_ACCOUNT ? WA2_ACCOUNT_DEF?.sock : currentSock;
+  if (!sk) throw new Error("WhatsApp belum tersambung");
+  const subject = await getGroupSubject(sk, jid);
+  if (!AUTO_REPLY_ACTIVE || !groupRulesFor(sk).enabled || !isGroupAllowed(jid, subject, sk)) throw new Error("grup sudah tidak diizinkan"); // jangan kirim ke grup yang sudah dicabut
+  await waAccountContext.run({ account }, async () => {
+    const sent = await sk.sendMessage(jid, { text }, quoted ? { quoted } : undefined);
+    const { error } = await supabase.from("whatsapp_messages").insert({ wa_jid: jid, wa_name: subject || null, direction: "out", content: text, status: "sent", wa_message_id: sent?.key?.id ?? null, ...acctFields(currentAccountId()) });
+    if (error) console.error("Gagal catat pesan humor:", error.message);
+  });
+}
+const humor = createHumor({
+  state: strictStateStore,
+  ai: AUTO_REPLY_ACTIVE ? humorAi : null,
+  send: sendHumorGroupText,
+  listGroups: async (accountId) => {
+    const sk = accountId === SECOND_ACCOUNT ? WA2_ACCOUNT_DEF?.sock : currentSock;
+    if (!sk) return null;
+    const all = await sk.groupFetchAllParticipating();
+    return Object.values(all || {}).map((g) => ({ id: g.id, subject: g.subject || "", allowed: isGroupAllowed(g.id, g.subject || "", sk) }));
+  },
+  labels: { [MAIN_ACCOUNT]: "Nomor utama", [SECOND_ACCOUNT]: WA2_ACCOUNT_DEF?.label || "Nomor 2" },
+  secondEnabled: Boolean(WA2_ACCOUNT_DEF),
+  timeZone: WA_TIMEZONE,
+  config: readHumorConfig(process.env)
+});
+humor
+  .load()
+  .then(() => console.log(`😄 Mode humor grup: ${humor.describe()} (atur: /humor di Telegram)`))
+  .catch(() => {});
+setInterval(() => {
+  humor.check().catch((e) => console.error("🎋 Pemeriksaan pantun error:", e instanceof Error ? e.message : String(e)));
+}, 60_000);
 const nodin = createNodin({
   config: readNodinConfig(process.env, BOT_DIR),
   state: strictStateStore,
@@ -5300,6 +5580,7 @@ const telegram = createTelegram({
       }
     },
     groups: { handle: (arg) => groupList.handle(arg, { secondAliases: [String(wa2Config.botName || "").trim().split(/\s+/)[0]] }) },
+    humor: { handle: (arg) => humor.handle(arg, { secondAliases: [String(wa2Config.botName || "").trim().split(/\s+/)[0]] }) },
     wa2: {
       describe: () => describeWa2(),
       qr: async () => ({ data: await wa2QrImage(), name: "qr-nomor-2.png", mime: "image/png", photo: true }),

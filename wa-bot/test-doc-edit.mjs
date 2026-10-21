@@ -149,8 +149,8 @@ print("|".join(p.text for p in d.paragraphs)); print("|".join(c.text for row in 
 {
   const src = fs.readFileSync(new URL("./index.js", import.meta.url), "utf8");
   const at = (s) => { const i = src.indexOf(s); assert.ok(i >= 0, `index.js tidak memuat: ${s}`); return i; };
-  assert.ok(at("const docEdit = ") < at("if (docAttached && !docEdit"), "docEdit dihitung sebelum dokumen diabaikan");
-  assert.ok(at("if (editReq && !docEdit)") > 0, "edit foto tidak merebut permintaan ubah dokumen");
+  assert.ok(at("const docEdit = readPdf ? null : docEditRaw") < at("if (docAttached && !readPdf && !docEdit"), "docEdit dihitung sebelum dokumen diabaikan");
+  assert.ok(at("if (editReq && !docEdit && !readPdf)") > 0, "edit foto tidak merebut permintaan ubah dokumen");
   assert.ok(at("(fileReq || docEdit) && !fileQuotaOk") < at("await editGroupDocument(sock"), "jatah berkas dicek sebelum menyunting");
   assert.ok(at("await editGroupDocument(sock") < at("await convertGroupDocument(sock"), "ubah isi dicek sebelum konversi");
   assert.ok(/fileReq\?\.format === "xlsx" \? null/.test(src), "permintaan Excel tidak dianggap ubah isi");
