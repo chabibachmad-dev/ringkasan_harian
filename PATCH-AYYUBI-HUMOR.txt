@@ -1,0 +1,42 @@
+PATCH AYYUBI v4: MODE HUMOR grup WhatsApp (pantun harian di jam acak, roasting ringan, gaya jenaka)
+(Zip ini KUMULATIF: sudah memuat patch sebelumnya -- baca PDF, kenal kemampuan, kenal pemilik. Cukup pasang yang ini.)
+
+PASANG
+1. Cadangkan:  cp index.js index.js.bak && cp telegram.js telegram.js.bak
+2. Ekstrak DI DALAM folder wa-bot (timpa file yang sama):  unzip -o patch-ayyubi-humor.zip
+3. (Opsional) tes:  node test-humor.mjs
+4. Restart bot. Saat start muncul baris:  "😄 Mode humor grup: mati di semua grup (atur: /humor di Telegram)"
+   Tidak ada migrasi database: pengaturan memakai tabel bot_state yang sudah ada.
+
+PAKAI (dari Telegram, bawaan MATI di semua grup)
+/humor                    lihat grup yang dijawab bot + status humornya (bernomor)
+/humor on 2               nyalakan semuanya untuk grup nomor 2 (atau  /humor on keluarga)
+/humor off 2              matikan
+/humor pantun on 2        sebagian saja: pantun | roast | gaya  + on|off
+/humor semua on           semua grup yang dijawab bot
+/humor jam 09:00-17:00 2  rentang jam acak pantun khusus grup itu  (/humor jam reset 2 = bawaan)
+/humor tes 2              kirim satu pantun percobaan sekarang
+Nomor kedua: tambahkan kata wa2, mis.  /humor on wa2 kantor
+
+APA YANG TERJADI
+- Pantun: sehari sekali per grup, jam ACAK (dipilih ulang tiap hari, beda tiap grup) dalam WA_HUMOR_PANTUN_WINDOW (bawaan 08:00-20:00).
+  Dibuat AI lalu diperiksa kode (4 baris, rima a-b-a-b, tanpa kata terlarang); gagal -> pantun cadangan bawaan. Tidak terkirim dua kali walau bot restart.
+- Roasting: saat obrolan ramai & santai, maks 5x/hari/grup, jeda 45 menit, jam 08-21, dibalas ke pesan orangnya. Hanya menggoda perilaku chat;
+  tidak pernah fisik/agama/suku/keluarga/uang/kesehatan/politik (dijaga di prompt DAN penyaring kata di kode). Dilewati saat obrolan serius/sedih/resmi.
+- Menolak: anggota menulis "bot jangan roasting aku" -> tidak pernah jadi sasaran lagi di grup itu. Mencabut: "bot boleh roasting aku lagi".
+- Pemilik nomor tidak diroasting (kecuali WA_HUMOR_ROAST_OWNER=true).
+- Gaya jawaban: jawaban bot ikut santai, jawaban teknis tetap akurat; otomatis mati untuk topik duka/serius, berkas PDF/Word/Excel, dan jawaban dari isi PDF.
+- Privasi: ±10 pesan terakhir grup (hanya yang roast-nya menyala) disimpan DI MEMORI saja; tidak ke database/berkas; hilang saat restart.
+
+PENGATURAN .env (semua opsional, lihat .env.example)
+WA_HUMOR_PANTUN_WINDOW=08:00-20:00, WA_HUMOR_ROAST_MAX_PER_DAY=5, WA_HUMOR_ROAST_COOLDOWN_MIN=45, WA_HUMOR_ROAST_CHANCE=0.15,
+WA_HUMOR_ROAST_WINDOW=08:00-21:00, WA_HUMOR_ROAST_OWNER=false
+
+FILE BARU: humor.js, test-humor.mjs
+FILE DIUBAH: index.js, telegram.js, package.json, README.md, .env.example (+ file patch sebelumnya: capabilities.js, pdf-qa.js, test-pdf-qa.mjs, test-owner.mjs, test-agenda.mjs, test-doc-edit.mjs, test-image-gen.mjs, test-pdf-extract.mjs)
+
+CATATAN JUJUR
+- Logika (jam acak, jatah, penyaring, penolakan, perintah) sudah dites otomatis; belum dicoba di WhatsApp sungguhan.
+- Model lokal kecil (qwen2.5:3b) kurang lucu dan sering gagal membuat pantun/roasting yang lolos pemeriksaan -> pantun jatuh ke daftar cadangan,
+  roasting memilih diam. Hasil terbaik: urutkan AI ke Gemini/Groq lewat /urutan, atau WA_AI_ENGINE=gemini.
+- Mulai pelan: nyalakan di satu grup dulu (/humor on 2), lihat hasilnya beberapa hari, baru tambah grup.

@@ -952,6 +952,33 @@ Satu bot bisa memegang **dua nomor WhatsApp**. Nomor utama jalan seperti biasa; 
 - Riwayat kedua nomor tampil di aplikasi Ayyubi milikmu; pemegang HP nomor kedua sebaiknya tahu bahwa bot membaca dan membalas chat di nomornya.
 - `/voice wag on|off`, daftar dokumen pengetahuan, dan pengaturan AI berlaku sama untuk kedua nomor.
 
+## Mode humor grup (`/humor`): pantun harian, roasting ringan, gaya jenaka
+
+Bawaan **MATI** di semua grup. Nyalakan per grup dari Telegram (hanya grup yang sudah diizinkan lewat `/grup`):
+
+```
+/humor                         lihat grup + status humornya (bernomor)
+/humor on 2                    nyalakan semuanya untuk grup nomor 2 (atau /humor on keluarga)
+/humor off 2                   matikan semuanya
+/humor pantun on 2             hanya pantun harian   (juga: roast, gaya)
+/humor semua on                semua grup yang dijawab bot
+/humor jam 09:00-17:00 2       rentang jam acak pantun untuk grup itu (/humor jam reset 2 = bawaan)
+/humor tes 2                   kirim satu pantun percobaan sekarang
+/humor on wa2 kantor           untuk nomor kedua tambahkan kata wa2
+```
+
+Tiga hal yang bisa dinyalakan terpisah:
+
+- **Gaya jawaban**: jawaban bot ikut santai, kadang diselipi satu candaan/pantun pendek. Jawaban teknis (aturan, angka, prosedur, tanggal, kode) tetap harus akurat; candaan hanya bumbu. Dimatikan otomatis untuk topik duka/sakit/musibah/komplain/resmi, untuk jawaban berupa berkas (PDF/Word/Excel), dan untuk jawaban dari isi PDF. Catatan: model kecil (mis. qwen2.5:3b) kadang mengabaikan arahan gaya; Gemini/Groq lebih patuh.
+- **Pantun harian**: sehari sekali per grup, di **jam acak** (dipilih ulang tiap hari, berbeda tiap grup) di dalam `WA_HUMOR_PANTUN_WINDOW`. Jam hari ini disimpan, jadi restart bot tidak membuat pantun terkirim dua kali; bila bot mati melewati rentang jam, pantun hari itu dilewati (tidak dikirim larut malam). Pantun dibuat AI lalu **diperiksa kode** (4 baris, rima a-b-a-b, tanpa kata terlarang); kalau gagal dua kali, dipakai pantun cadangan bawaan (13 buah, bergiliran), jadi grup tidak pernah menerima pantun rusak.
+- **Roasting spontan** (ringan & aman): saat obrolan grup **ramai dan santai**, bot kadang menggoda satu orang, maksimal `WA_HUMOR_ROAST_MAX_PER_DAY` kali sehari per grup (bawaan 5), dengan jeda `WA_HUMOR_ROAST_COOLDOWN_MIN` menit, hanya di jam aktif, dan dibalas ke pesan orang itu.
+
+**Batas aman roasting.** Hanya perilaku di chat (typo, telat balas, ketawa terus, lagi lapar/ngantuk); tidak pernah fisik, agama, suku, keluarga, pasangan, uang/gaji, kesehatan, politik, kecerdasan, dan tanpa kata kasar. Ini dijaga dua lapis: perintah ke AI **dan** penyaring kata di kode (hasil yang memuat kata terlarang dibuang, AI diberi satu kesempatan lagi, lalu bot diam). Roasting dilewati bila: ada kata duka/sakit/musibah/komplain/"tolong"/"mohon"/"Bapak/Ibu"/tautan di 6 pesan terakhir, ada pesan panjang (pengumuman), belum ada tanda obrolan santai (wkwk, haha, ngopi, lapar, dst.), hanya satu orang yang bicara, obrolan sudah basi, bot baru saja dipanggil, atau AI menjawab `SKIP`. Pemilik nomor **tidak** diroasting (kecuali `WA_HUMOR_ROAST_OWNER=true`).
+
+**Menolak roasting.** Siapa pun bisa menulis di grup "bot jangan roasting aku" (tidak perlu men-tag bot); bot menjawab sekali dan tidak pernah menjadikan orang itu sasaran lagi di grup tersebut. Mencabut: "bot boleh roasting aku lagi". Daftar penolak tersimpan di bot_state per grup.
+
+**Privasi.** Untuk membaca obrolan santai, grup yang roasting-nya menyala disimpan ±10 pesan terakhirnya **hanya di memori** bot: tidak ditulis ke database/berkas, hilang saat bot restart, dibuang bila sudah lewat 10 menit atau bot dipanggil. Grup yang roasting-nya mati sama sekali tidak dibaca. Yang tercatat di database hanya pesan yang BOT kirim (pantun/roasting), seperti balasan bot lainnya.
+
 ## Mengatur grup yang dijawab dari Telegram (`/grup`)
 
 Tidak perlu membuka `.env` di laptop untuk menambah grup. Perubahan tersimpan di database dan **langsung berlaku tanpa restart**.

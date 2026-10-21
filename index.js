@@ -75,6 +75,7 @@ import { formatForWhatsApp, detectPdfRequest, detectOfficeRequest, cleanAnswerFo
 import { buildDocx, buildXlsx, officeFileName, MIME_DOCX, MIME_XLSX } from "./office-doc.js";
 import { pdfBufferToMarkdown, PDF_MAX_BYTES } from "./pdf-extract.js";
 import { PDF_QA_DEFAULT_MAX_CHARS, PDF_QA_LOCAL_MAX_CHARS, buildPdfContext, isPdfDoc, isReadQuestion, pdfAttachTag, pdfContextNote, pdfReadMessage, shouldReadPdf } from "./pdf-qa.js";
+import { createHumor, readHumorConfig } from "./humor.js";
 import { OWNER_ASKER_NOTE, OWNER_CLAIM_NOTE, OWNER_DEFLECT_FALLBACK, OWNER_DEFLECT_FIX, buildCapabilityNote, buildVoiceReplyNote, correctionAnswer, deflectsToOwner, denyingCapability, detectVoiceQuestion, senderLabel, voiceCapabilityAnswer } from "./capabilities.js";
 import { detectEditRequest, replaceInText, replaceInDocx, docxToMarkdown, numberDiff, buildEditPrompt, buildEditUserMessage, unwrapFence, hasESignature, AI_EDIT_MAX_CHARS } from "./doc-edit.js";
 import { createPersonaVoice } from "./persona-voice.js";
@@ -461,7 +462,7 @@ function withGroupNote(basePrompt, jid, { local = false } = {}) {
     const maxChars = local ? PDF_GROUP_LOCAL_MAX_CHARS : PDF_GROUP_MAX_CHARS;
     pdfNote = pdfContextNote({ name: ctxFlags.pdf.name, pages: ctxFlags.pdf.pages, truncatedPages: ctxFlags.pdf.truncatedPages, fromReply: ctxFlags.pdf.fromReply, ctx: buildPdfContext(ctxFlags.pdf.markdown, ctxFlags.pdf.question, { maxChars }) });
   }
-  return `${base}${GROUP_PROMPT_NOTE}${ownerNote || OWNER_CLAIM_NOTE}${capNote}${imageNote}${videoNote}${fileNote}${voiceNote}${pdfNote}${ctxFlags?.retryNote ? `\n\n${ctxFlags.retryNote}` : ""}${replyLang ? langInstruction(replyLang) : ""}`;
+  return `${base}${GROUP_PROMPT_NOTE}${ownerNote || OWNER_CLAIM_NOTE}${capNote}${imageNote}${videoNote}${fileNote}${voiceNote}${pdfNote}${ctxFlags?.humorNote || ""}${ctxFlags?.retryNote ? `\n\n${ctxFlags.retryNote}` : ""}${replyLang ? langInstruction(replyLang) : ""}`;
 }
 
 // Buang awalan "Nama: " & baris "(mengutip: ...)" supaya pencarian dokumen/web
@@ -2987,6 +2988,22 @@ async function handleGroupMessage(msg, sock) {
       .limit(1);
     if (botMsg && botMsg.length > 0) triggered = true;
   }
+  // Mode humor (/humor): hanya di grup yang menyalakannya. (1) "bot jangan roasting aku" dihormati, dipanggil atau tidak;
+  // (2) obrolan yang TIDAK memanggil bot dibaca sebentar di memori untuk roasting spontan (tidak disimpan ke database).
+  const humorAcct = currentAccountId();
+  if (!msg.key.fromMe && !photo && !docAttached && !groupAudio && humor.settings(humorAcct, groupJid)) {
+    const humorSubject = await getGroupSubject(sock, groupJid);
+    if (isGroupAllowed(groupJid, humorSubject, sock)) {
+      const humorIds = [msg.key.participant, msg.key.participantAlt].filter(Boolean).map((j) => j.split("@")[0].split(":")[0]);
+      const pref = await humor.handlePreference(humorAcct, groupJid, { name: msg.pushName || "", ids: humorIds, text: rawText }).catch(() => null);
+      if (pref) {
+        console.log(`😄 [${humorSubject || "?"}] ${msg.pushName || "?"} ${pref.pref === "out" ? "menolak" : "mengizinkan lagi"} roasting.`);
+        await sendHumorGroupText(humorAcct, groupJid, pref.reply, { quoted: msg }).catch((e) => console.error("😄 Balasan preferensi roasting gagal:", e instanceof Error ? e.message : String(e)));
+        return;
+      }
+      if (!triggered) humor.observe(humorAcct, groupJid, { name: msg.pushName || "", ids: humorIds, text: rawText, isOwner: isOwnerSender(msg, false), msg });
+    }
+  }
   if (!triggered) {
     // Kalimat biasa yang tampak jelas seperti pengumuman jadwal ("besok rapat jam 9"): bot menawarkan mencatatnya (tanpa AI, tanpa menyimpan obrolan).
     if (!photo && !docAttached && !groupAudio && agenda.mightOffer(rawText)) offerAgendaFromChat(sock, msg, groupJid, rawText).catch((e) => console.error("📅 Tawaran jadwal gagal:", e instanceof Error ? e.message : String(e)));
@@ -2999,6 +3016,7 @@ async function handleGroupMessage(msg, sock) {
     console.log(`👥 Bot dipanggil di grup "${subject || "?"}" (${groupJid}) tapi grup ini tidak ada di WA_GROUP_ALLOWED_NAMES/JIDS, diabaikan.`);
     return;
   }
+  humor.noteTriggered(currentAccountId(), groupJid); // habis dipanggil: jangan langsung bercanda/roasting
 
   const sender = msg.pushName || "Anggota grup";
   const ownerAsker = isOwnerSender(msg, false); // pemilik nomor yang bertanya di grup
@@ -3220,6 +3238,8 @@ async function handleGroupMessage(msg, sock) {
       flags.ownerAsker = ownerAsker; // pengirim = pemilik nomor -> AI tidak menjawab "disampaikan ke pemilik"
       flags.pdf = pdfCtx; // isi PDF yang dilampirkan/dibalas (null = tidak ada)
       flags.retryNote = "";
+      // gaya humoris (/humor): hanya untuk jawaban biasa di grup yang menyalakannya (bukan berkas/PDF, bukan topik duka/serius)
+      flags.humorNote = fileReq || pdfCtx ? "" : humor.chatNote(currentAccountId(), groupJid, { text });
       // jawaban pesan ini akan dibacakan jadi voice note -> AI diberi tahu (supaya tidak bilang "aku tidak bisa menjawab dengan suara")
       flags.voiceReply = Boolean(groupVoice.enabled() && !textOnly && !fileReq && speaker.available());
     }
@@ -5149,6 +5169,64 @@ const groupList = createGroupList({
   }
 });
 groupList.load().catch(() => {});
+
+// Mode humor grup (/humor di Telegram, bawaan MATI): gaya jawaban jenaka, pantun harian di jam acak, roasting ringan saat obrolan santai. Lihat humor.js.
+async function humorAi({ system, user, temperature = 0.9, maxTokens = 160 }) {
+  const viaOllama = async () => {
+    const out = await enqueueOllamaCall(
+      () => callOllamaChat([{ role: "system", content: system }, { role: "user", content: user }], { timeoutMs: 120_000, maxTokens, numCtx: Math.max(OLLAMA_NUM_CTX, 2048), temperature }),
+      { priority: PRIORITY.BACKGROUND, label: "humor" }
+    );
+    if (!String(out || "").trim()) throw new Error("balasan Ollama kosong");
+    return out;
+  };
+  const viaFallback = async () => (await llmFallback.generate({ system, messages: [{ role: "user", content: user }], temperature })).text;
+  const viaGemini = async () => extractGeminiText(await geminiGenerateWithRotation(system, [{ role: "user", parts: [{ text: user }] }], { useSearch: false }));
+  const order = WA_AI_ENGINE === "ollama" ? [viaOllama, llmFallback.available() ? viaFallback : null, GEMINI_API_KEYS.length ? viaGemini : null] : [llmFallback.available() ? viaFallback : null, GEMINI_API_KEYS.length ? viaGemini : null, WA_OLLAMA_FALLBACK_ENABLED ? viaOllama : null];
+  let lastErr = null;
+  for (const fn of order.filter(Boolean)) {
+    try {
+      const out = String(await fn()).trim();
+      if (out) return out;
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw lastErr || new Error("AI belum diatur");
+}
+async function sendHumorGroupText(account, jid, text, { quoted = null } = {}) {
+  const sk = account === SECOND_ACCOUNT ? WA2_ACCOUNT_DEF?.sock : currentSock;
+  if (!sk) throw new Error("WhatsApp belum tersambung");
+  const subject = await getGroupSubject(sk, jid);
+  if (!AUTO_REPLY_ACTIVE || !groupRulesFor(sk).enabled || !isGroupAllowed(jid, subject, sk)) throw new Error("grup sudah tidak diizinkan"); // jangan kirim ke grup yang sudah dicabut
+  await waAccountContext.run({ account }, async () => {
+    const sent = await sk.sendMessage(jid, { text }, quoted ? { quoted } : undefined);
+    const { error } = await supabase.from("whatsapp_messages").insert({ wa_jid: jid, wa_name: subject || null, direction: "out", content: text, status: "sent", wa_message_id: sent?.key?.id ?? null, ...acctFields(currentAccountId()) });
+    if (error) console.error("Gagal catat pesan humor:", error.message);
+  });
+}
+const humor = createHumor({
+  state: strictStateStore,
+  ai: AUTO_REPLY_ACTIVE ? humorAi : null,
+  send: sendHumorGroupText,
+  listGroups: async (accountId) => {
+    const sk = accountId === SECOND_ACCOUNT ? WA2_ACCOUNT_DEF?.sock : currentSock;
+    if (!sk) return null;
+    const all = await sk.groupFetchAllParticipating();
+    return Object.values(all || {}).map((g) => ({ id: g.id, subject: g.subject || "", allowed: isGroupAllowed(g.id, g.subject || "", sk) }));
+  },
+  labels: { [MAIN_ACCOUNT]: "Nomor utama", [SECOND_ACCOUNT]: WA2_ACCOUNT_DEF?.label || "Nomor 2" },
+  secondEnabled: Boolean(WA2_ACCOUNT_DEF),
+  timeZone: WA_TIMEZONE,
+  config: readHumorConfig(process.env)
+});
+humor
+  .load()
+  .then(() => console.log(`😄 Mode humor grup: ${humor.describe()} (atur: /humor di Telegram)`))
+  .catch(() => {});
+setInterval(() => {
+  humor.check().catch((e) => console.error("🎋 Pemeriksaan pantun error:", e instanceof Error ? e.message : String(e)));
+}, 60_000);
 const nodin = createNodin({
   config: readNodinConfig(process.env, BOT_DIR),
   state: strictStateStore,
@@ -5502,6 +5580,7 @@ const telegram = createTelegram({
       }
     },
     groups: { handle: (arg) => groupList.handle(arg, { secondAliases: [String(wa2Config.botName || "").trim().split(/\s+/)[0]] }) },
+    humor: { handle: (arg) => humor.handle(arg, { secondAliases: [String(wa2Config.botName || "").trim().split(/\s+/)[0]] }) },
     wa2: {
       describe: () => describeWa2(),
       qr: async () => ({ data: await wa2QrImage(), name: "qr-nomor-2.png", mime: "image/png", photo: true }),
