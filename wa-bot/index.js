@@ -3001,7 +3001,7 @@ async function handleGroupMessage(msg, sock) {
         await sendHumorGroupText(humorAcct, groupJid, pref.reply, { quoted: msg }).catch((e) => console.error("😄 Balasan preferensi roasting gagal:", e instanceof Error ? e.message : String(e)));
         return;
       }
-      humor.observe(humorAcct, groupJid, { name: msg.pushName || "", ids: humorIds, text: rawText, isOwner: isOwnerSender(msg, false), msg, triggered });
+      humor.observe(humorAcct, groupJid, { name: msg.pushName || "", ids: humorIds, text: rawText, isOwner: isOwnerSender(msg, false), msg, triggered, repliedToBot: repliedToOwn });
     }
   }
   if (!triggered) {
@@ -5214,10 +5214,28 @@ async function sendHumorGroupText(account, jid, text, { quoted = null } = {}) {
     if (error) console.error("Gagal catat pesan humor:", error.message);
   });
 }
+// Reaksi emoji pada pesan anggota (tanpa teks). Aturan yang sama dengan pengiriman humor: hanya di grup yang masih diizinkan.
+async function reactHumorGroup(account, jid, msg, emoji) {
+  const sk = account === SECOND_ACCOUNT ? WA2_ACCOUNT_DEF?.sock : currentSock;
+  if (!sk) throw new Error("WhatsApp belum tersambung");
+  const subject = await getGroupSubject(sk, jid);
+  if (!AUTO_REPLY_ACTIVE || !groupRulesFor(sk).enabled || !isGroupAllowed(jid, subject, sk)) throw new Error("grup sudah tidak diizinkan");
+  if (!msg?.key) throw new Error("pesan yang direaksi tidak tersedia");
+  await sk.sendMessage(jid, { react: { text: emoji, key: msg.key } });
+}
+// Mode latihan: draf balasan/chat otomatis dikirim ke pemilik di Telegram (tombol Kirim/Buang) sebelum ke grup.
+async function reviewHumorDraft({ id, group, kind, targetName, targetText, text }) {
+  const head = kind === "balas" ? `membalas ${targetName || "seseorang"}${targetText ? `: "${String(targetText).slice(0, 120)}"` : ""}` : "membuka obrolan sendiri";
+  const body = `📝 Draf Ayyubi untuk grup "${group}" (${head})\n\n${text}\n\nKirim ke grup?`;
+  const sent = await telegram.sendOwner(body, { markup: [[{ text: "✅ Kirim", callback_data: `hr:ok:${id}` }, { text: "❌ Buang", callback_data: `hr:no:${id}` }]] });
+  if (!sent) throw new Error("Telegram pemilik tidak tersedia untuk meninjau draf");
+}
 const humor = createHumor({
   state: strictStateStore,
   ai: AUTO_REPLY_ACTIVE ? humorAi : null,
   send: sendHumorGroupText,
+  react: reactHumorGroup,
+  review: reviewHumorDraft,
   listGroups: async (accountId) => {
     const sk = accountId === SECOND_ACCOUNT ? WA2_ACCOUNT_DEF?.sock : currentSock;
     if (!sk) return null;
@@ -5589,6 +5607,7 @@ const telegram = createTelegram({
       }
     },
     groups: { handle: (arg) => groupList.handle(arg, { secondAliases: [String(wa2Config.botName || "").trim().split(/\s+/)[0]] }) },
+    humorReview: { decide: (arg) => humor.decide(arg) },
     humor: { handle: (arg) => humor.handle(arg, { secondAliases: [String(wa2Config.botName || "").trim().split(/\s+/)[0]] }) },
     wa2: {
       describe: () => describeWa2(),

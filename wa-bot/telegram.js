@@ -156,7 +156,7 @@ const HELP = [
   "/voice wag on|off|id|eng|kor|arb|jawa  — balasan grup WA berupa suara/teks + bahasa suara",
   "/wa2  — nomor WhatsApp kedua (status, kode, qr)",
   "/grup  — grup WA yang dijawab bot: lihat, semua, tambah, hapus",
-  "/humor  — humor per grup WA: pantun harian, roasting ringan, balas chat acak, chat otomatis",
+  "/humor  — humor per grup WA: pantun harian, roasting ringan, balas chat acak, chat otomatis, mode latihan",
   "/gambar <deskripsi>  — buat gambar; /gambar grup on|off = izinkan di grup WA\n/video <deskripsi>  — video bernarasi; kirim FOTO + keterangan \"jadikan video salju\" = foto hidup\n/env  — ubah kunci gambar (token Cloudflare, jatah) dari sini",
   "/kas  — laporan kas bulanan: konfirmasi angka, submit, simpan (/kas bantuan)",
   "/nodin  — konsep Nota Dinas LPJ (PDF + Word), otomatis tiap tanggal 1 (/nodin cek)",
@@ -438,12 +438,12 @@ export function createTelegram({ config, deps = {}, fetchImpl = globalThis.fetch
   }
 
   /** Kirim ke semua pemilik. Mengembalikan jumlah pemilik yang berhasil menerima (0 = tidak ada / semua gagal). */
-  async function sendOwner(text) {
+  async function sendOwner(text, { markup = null } = {}) {
     if (!enabled || owners.size === 0) return 0;
     let ok = 0;
     for (const id of owners) {
       try {
-        await send(id, text);
+        await send(id, text, markup ? { markup } : {});
         ok += 1;
       } catch (e) {
         log.error?.(`✈️ [Telegram] gagal kirim ke ${id}: ${e?.message || e}`);
@@ -817,6 +817,18 @@ Suara khusus satu grup: /suara grup wanita <nama grup> • /suara grup (daftar) 
     const chatId = chat ? String(chat.id) : "";
     if (owners.size === 0 || !chat || chat.type !== "private" || !owners.has(chatId) || !owners.has(String(cb.from?.id))) return;
     const data = String(cb.data || "");
+    if (data.startsWith("hr:") && deps.humorReview) {
+      // tombol draf mode latihan (humor.js): hr:ok:<id> kirim / hr:no:<id> buang
+      await clearKeyboard(chatId, cb.message.message_id);
+      let out;
+      try {
+        out = await deps.humorReview.decide(data.slice(3));
+      } catch (e) {
+        out = `⚠️ ${String(e?.message || e).slice(0, 300)}`;
+      }
+      if (out) await send(chatId, out).catch(() => {});
+      return;
+    }
     if (!data.startsWith("sm:")) return;
     await clearKeyboard(chatId, cb.message.message_id);
     const simab = deps.simab;

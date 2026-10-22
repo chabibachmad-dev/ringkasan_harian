@@ -38,6 +38,9 @@ function rig(over = {}) {
     },
     listGroups: async () => [{ id: JID, subject: "Keluarga Besar", allowed: true }, { id: "222@g.us", subject: "Arisan RT 05", allowed: true }],
     secondEnabled: false,
+    sleep: async () => {},
+    react: over.react,
+    review: over.review,
     timeZone: "Asia/Makassar",
     config: readHumorConfig({ WA_BALAS_CHANCE: "0.5", ...(over.env || {}) }),
     now: () => t,
@@ -137,7 +140,7 @@ await ok("balas: membaca 15 chat sebelumnya lalu membalas (reply) pesan orang, t
   assert.equal(res.scheduled, true);
   assert.equal(r.timers.length >= 1, true);
   const last = r.timers.at(-1);
-  assert.ok(last.ms >= 6000 && last.ms <= 25_000, "jeda alami 6-25 detik");
+  assert.ok(last.ms >= 2500 && last.ms <= 21_000, "jeda manusiawi 2,5-21 detik");
   assert.equal(r.sent.length, 0, "belum terkirim sebelum jeda habis");
   await last.fn();
   await new Promise((x) => setImmediate(x));
@@ -425,7 +428,7 @@ await ok("roast tidak menyusul pesan spontan bot yang baru saja terkirim", async
 await ok("terintegrasi di index.js, telegram/dokumentasi, .env.example, package.json", () => {
   const read = (f) => fs.readFileSync(new URL(f, import.meta.url), "utf8");
   const idx = read("./index.js");
-  assert.match(idx, /humor\.observe\(humorAcct, groupJid, \{[^}]*triggered \}\)/, "semua pesan grup (termasuk yang memanggil bot) jadi konteks");
+  assert.match(idx, /humor\.observe\(humorAcct, groupJid, \{[^}]*triggered, repliedToBot: repliedToOwn \}\)/, "semua pesan grup (termasuk yang memanggil bot) jadi konteks");
   assert.match(idx, /humor\.noteBotSaid\(/, "jawaban bot ikut jadi konteks");
   assert.ok(idx.indexOf("humor.observe(") < idx.indexOf("offerAgendaFromChat(sock, msg, groupJid, rawText)"));
   assert.match(read("./README.md"), /Balas chat acak/);

@@ -30,7 +30,12 @@ export function readNgobrolConfig(env = process.env) {
     balasWindow: windowOrDefault(env.WA_BALAS_WINDOW, ALL_DAY),
     sapaPerDay: Math.floor(num(env.WA_SAPA_PER_DAY, 10, 10, 48)), // minimal 10
     sapaMinGapMs: Math.floor(num(env.WA_SAPA_MIN_GAP_MIN, 10, 1, 24 * 60)) * 60_000,
-    sapaWindow: windowOrDefault(env.WA_SAPA_WINDOW, ALL_DAY)
+    sapaWindow: windowOrDefault(env.WA_SAPA_WINDOW, ALL_DAY),
+    reaksiChance: num(env.WA_REAKSI_CHANCE, 0.25, 0, 1), // peluang pesan bernuansa (lucu/kabar baik/terima kasih) diberi reaksi emoji
+    reaksiGapMs: Math.floor(num(env.WA_REAKSI_GAP_SEC, 45, 5, 3600)) * 1000,
+    reaksiMaxPerDay: Math.floor(num(env.WA_REAKSI_MAX_PER_DAY, 30, 0, 500)),
+    hariKhusus: String(env.WA_HARI_KHUSUS || ""), // "MM-DD=Teks;MM-DD=Teks" hari khusus tambahan (mis. hari raya setempat)
+    reviewTtlMs: 45 * 60_000 // draf mode latihan kedaluwarsa setelah ini
   };
 }
 
@@ -70,14 +75,15 @@ export function isReplyWorthy(text) {
 // ---------------------------------------------------------------- prompt & penyaring: BALAS
 export function cleanChat(raw) {
   let t = String(raw ?? "").replace(/```[a-z]*/gi, "").trim();
-  t = t.split(/\r?\n/).map((l) => l.trim()).filter(Boolean).slice(0, 2).join(" ");
+  t = t.split(/\r?\n/).map((l) => l.trim()).filter(Boolean).slice(0, 2).join("\n"); // dua baris = dua gelembung pesan
   t = t.replace(/^(?:ayyubi|bot|balasan|jawaban|saya|aku)\s*:\s*/i, "").replace(/^["“”'`]+|["“”'`]+$/g, "").trim();
   return t;
 }
 
 /** Balasan valid = pendek, nyambung, tanpa tautan/mention, tanpa kata terlarang. SKIP = AI memilih diam. -> { ok, text?, reason? } */
 export function validateChat(raw, { maxLen = 260, recent = [] } = {}) {
-  const t = cleanChat(raw);
+  const multi = cleanChat(raw);
+  const t = multi.replace(/\n+/g, " ");
   if (!t) return { ok: false, reason: "kosong" };
   if (/^skip\b/i.test(t)) return { ok: false, reason: "AI memilih SKIP" };
   if (t.length < 4 || t.length > maxLen) return { ok: false, reason: "panjang tidak wajar" };
@@ -86,22 +92,24 @@ export function validateChat(raw, { maxLen = 260, recent = [] } = {}) {
   if (hasBannedWord(t)) return { ok: false, reason: "memuat kata terlarang" };
   if (/\b(?:sebagai (?:ai|model|asisten)|saya adalah (?:ai|model)|large language model|chatgpt|gemini|claude|openai)\b/i.test(t)) return { ok: false, reason: "membocorkan identitas model" };
   const norm = (s) => s.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "");
-  if (recent.some((r) => norm(r) === norm(t))) return { ok: false, reason: "sama dengan yang baru dikirim" };
-  return { ok: true, text: t };
+  if (recent.some((r) => norm(r) === norm(t) || norm(r) === norm(multi))) return { ok: false, reason: "sama dengan yang baru dikirim" };
+  return { ok: true, text: multi };
 }
 
-const PERSONA = `Kamu Ayyubi, bot yang ikut nimbrung di grup WhatsApp seperti anggota grup yang ramah, santai, dan jenaka. Bahasa Indonesia sehari-hari yang mengikuti gaya grup (boleh singkatan umum), bukan bahasa baku kaku.`;
+export const PERSONA_BASE = `Kamu Ayyubi, bot yang ikut nimbrung di grup WhatsApp seperti anggota grup yang ramah, peka, santai, dan jenaka. Bahasa Indonesia sehari-hari yang mengikuti gaya grup (boleh singkatan umum), bukan bahasa baku kaku. Kamu bot yang tahu dirimu bot: bila ada yang bertanya "kamu bot ya?", akui dengan santai (mis. "iya, aku Ayyubi, bot grup ini 😄") tanpa canggung, dan jangan pernah berpura-pura manusia.`;
+const personaExtra = () => (process.env.WA_PERSONA_NOTE ? `\nCiri tambahan dari pemilik: ${String(process.env.WA_PERSONA_NOTE).slice(0, 400)}` : "");
+const persona = () => `${PERSONA_BASE}${personaExtra()}`;
 
 const SAFETY = `ATURAN KERAS: tanpa SARA, politik, ejekan fisik, keluarga, pasangan, uang/gaji, kesehatan; tanpa kata kasar; jangan menyudutkan atau menggurui siapa pun; jangan mengarang fakta, angka, atau aturan; jangan mengaku punya pengalaman fisik (makan, tidur, bepergian) atau tubuh; jangan menyebut dirimu AI/model/nama produk kecuali ditanya; jangan memakai tautan, mention (@), atau tagar.`;
 
-export function buildReplyPrompt({ target, context = [], botName = "Ayyubi" }) {
-  const system = `${PERSONA}
+export function buildReplyPrompt({ target, context = [], botName = "Ayyubi", styleNote = "", memberNote = "", fewShot = "", moodHint = "", allowReaction = true }) {
+  const system = `${persona()}
 Tugas: baca obrolan sebelumnya, lalu balas SATU pesan terakhir dengan nyambung ke konteksnya, seperti teman yang kebetulan lewat dan ikut menimpali.
 ${SAFETY}
-Gaya balasan: 1-2 kalimat pendek (maksimal 35 kata), boleh satu emoji, boleh bercanda ringan atau menimpali/bertanya balik. Untuk pertanyaan teknis/hukum/keuangan yang butuh jawaban pasti dan kamu tidak yakin, jangan menebak: balas singkat dan ajak "panggil namaku ya kalau mau jawaban lengkap".
-Jawab persis SKIP bila: obrolan serius/sedih/resmi/pertengkaran, bahasan agama atau politik, pesan itu ditujukan khusus ke orang lain, atau kamu tidak punya tambahan yang wajar. Keluarkan HANYA teks balasan (atau SKIP), tanpa tanda kutip dan tanpa penjelasan.`;
+Gaya balasan: 1-2 kalimat pendek (maksimal 35 kata), boleh satu emoji, boleh bercanda ringan atau menimpali/bertanya balik. Kalau perlu dua gelembung pesan (mis. menimpali lalu bertanya), tulis di dua baris terpisah. Untuk pertanyaan teknis/hukum/keuangan yang butuh jawaban pasti dan kamu tidak yakin, jangan menebak: balas singkat dan ajak "panggil namaku ya kalau mau jawaban lengkap".
+${allowReaction ? "Bila cukup memberi reaksi saja (pesan lucu, kabar baik, ucapan terima kasih), jawab persis: REAKSI: <satu emoji dari 👍 😂 🙏 🎉 👏 💪 ❤️ 😮 🔥>.\n" : ""}Jawab persis SKIP bila: obrolan serius/sedih/resmi/pertengkaran, bahasan agama atau politik, pesan itu ditujukan khusus ke orang lain, atau kamu tidak punya tambahan yang wajar. Keluarkan HANYA teks balasan (atau REAKSI/SKIP), tanpa tanda kutip dan tanpa penjelasan.${styleNote ? `\n${styleNote}` : ""}${fewShot ? `\n${fewShot}` : ""}`;
   const lines = context.map((m) => `${m.isBot ? `${botName} (kamu)` : m.name || "?"}: ${String(m.text).slice(0, 220)}`).join("\n");
-  const user = `${context.length ? `Obrolan sebelumnya (${context.length} chat terakhir):\n${lines}\n\n` : ""}Pesan yang dibalas -- ${target.name || "seseorang"}: ${String(target.text).slice(0, 300)}`;
+  const user = `${context.length ? `Obrolan sebelumnya (${context.length} chat terakhir):\n${lines}\n\n` : ""}Pesan yang dibalas -- ${target.name || "seseorang"}: ${String(target.text).slice(0, 300)}${moodHint ? `\n\nCatatan suasana: ${moodHint}` : ""}${memberNote ? `\n\n${memberNote}` : ""}`;
   return { system, user };
 }
 
@@ -113,22 +121,33 @@ export const SAPA_KINDS = [
   { id: "receh", prompt: "satu lelucon receh atau permainan kata yang lucu ringan" },
   { id: "semangat", prompt: "satu kalimat penyemangat ringan sesuai hari/waktu, tidak menggurui" },
   { id: "tip", prompt: "satu tips kecil sehari-hari yang aman (produktivitas, merapikan kerja, kebiasaan baik) dalam satu-dua kalimat" },
-  { id: "lanjut", prompt: "melanjutkan atau menimpali topik yang terakhir dibahas anggota grup (lihat obrolan terakhir); bila tidak ada topik yang pas, jawab persis SKIP", needsContext: true }
+  { id: "lanjut", prompt: "melanjutkan atau menimpali topik yang terakhir dibahas anggota grup (lihat obrolan terakhir); bila tidak ada topik yang pas, jawab persis SKIP", needsContext: true },
+  { id: "momen", prompt: "menyinggung momen hari ini (lihat 'Momen hari ini') dengan hangat dan tidak menggurui, lalu ajak anggota menanggapi", needsOccasion: true },
+  { id: "ingat", prompt: "menyapa satu anggota dengan ramah dengan merujuk hal ringan yang IA SENDIRI minta kamu ingat (lihat 'Yang kamu ingat'), seperti teman yang perhatian; jangan terdengar mengawasi", needsMember: true }
 ];
 
-export function pickSapaKind(random = Math.random, { hasContext = false, avoid = [] } = {}) {
-  const pool = SAPA_KINDS.filter((k) => (!k.needsContext || hasContext) && !avoid.includes(k.id));
-  const list = pool.length ? pool : SAPA_KINDS.filter((k) => !k.needsContext);
-  return list[Math.floor(random() * list.length)];
+export function pickSapaKind(random = Math.random, { hasContext = false, hasOccasion = false, hasMember = false, avoid = [], weights = null } = {}) {
+  const ok = (k) => (!k.needsContext || hasContext) && (!k.needsOccasion || hasOccasion) && (!k.needsMember || hasMember);
+  const pool = SAPA_KINDS.filter((k) => ok(k) && !avoid.includes(k.id));
+  const list = pool.length ? pool : SAPA_KINDS.filter((k) => !k.needsContext && !k.needsOccasion && !k.needsMember);
+  // momen hari ini & ingatan anggota dibuat lebih sering terpilih saat tersedia (mereka yang paling terasa "manusiawi")
+  const w = (k) => (weights?.[k.id] ?? 0.5) * (k.needsOccasion ? 3 : k.needsMember ? 2 : 1);
+  const total = list.reduce((a, k) => a + w(k), 0);
+  let r = random() * total;
+  for (const k of list) {
+    r -= w(k);
+    if (r < 0) return k;
+  }
+  return list[list.length - 1];
 }
 
-export function buildSapaPrompt({ kind, weekday, part, context = [], avoid = [], botName = "Ayyubi" }) {
-  const system = `${PERSONA}
+export function buildSapaPrompt({ kind, weekday, part, context = [], avoid = [], botName = "Ayyubi", occasions = [], memberNote = "", styleNote = "", fewShot = "" }) {
+  const system = `${persona()}
 Tugas: kamu memulai obrolan sendiri di grup (tidak ada yang bertanya padamu). Tulis SATU pesan pembuka yang natural, ${kind.prompt}.
 ${SAFETY}
-Panjang 1-3 kalimat pendek (maksimal 45 kata), boleh satu-dua emoji, jangan terdengar seperti iklan atau pengumuman, jangan memakai "Selamat pagi semuanya" berulang-ulang. Keluarkan HANYA teks pesannya, tanpa tanda kutip dan tanpa penjelasan.`;
+Panjang 1-3 kalimat pendek (maksimal 45 kata), boleh satu-dua emoji, jangan terdengar seperti iklan atau pengumuman, jangan memakai "Selamat pagi semuanya" berulang-ulang. Boleh dua baris bila ingin dua gelembung pesan. Keluarkan HANYA teks pesannya (atau SKIP bila diminta), tanpa tanda kutip dan tanpa penjelasan.${styleNote ? `\n${styleNote}` : ""}${fewShot ? `\n${fewShot}` : ""}`;
   const lines = context.map((m) => `${m.isBot ? `${botName} (kamu)` : m.name || "?"}: ${String(m.text).slice(0, 200)}`).join("\n");
-  const user = `Hari ${weekday}, waktu ${part}.${context.length ? `\n\nObrolan terakhir di grup:\n${lines}` : ""}${avoid.length ? `\n\nJangan mirip dengan pesanmu sebelumnya:\n${avoid.slice(0, 5).map((x) => `- ${String(x).slice(0, 120)}`).join("\n")}` : ""}`;
+  const user = `Hari ${weekday}, waktu ${part}.${occasions.length ? `\nMomen hari ini: ${occasions.join("; ")}.` : ""}${memberNote ? `\n${memberNote}` : ""}${context.length ? `\n\nObrolan terakhir di grup:\n${lines}` : ""}${avoid.length ? `\n\nJangan mirip dengan pesanmu sebelumnya:\n${avoid.slice(0, 5).map((x) => `- ${String(x).slice(0, 120)}`).join("\n")}` : ""}`;
   return { system, user };
 }
 

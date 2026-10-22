@@ -1,0 +1,52 @@
+PATCH AYYUBI MANUSIAWI
+======================
+Isi: Ayyubi lebih peka, lebih bisa berbaur, dan bisa dilatih lewat Telegram.
+Patch ini KUMULATIF (sudah termasuk patch humor dan ngobrol sebelumnya).
+
+PASANG
+1. Backup folder wa-bot lama.
+2. Ekstrak zip ini, timpa isi folder wa-bot (ada file baru: manusiawi.js).
+3. npm test   (atau: node test-manusiawi.mjs)
+4. Restart bot.
+
+FITUR (semua per grup, aktif lewat /humor di Telegram)
+- Reaksi emoji: kadang cukup kasih reaksi, tidak selalu membalas teks.
+- Ritme natural: balasan panjang dipecah jadi 2 gelembung, jeda mengetik bervariasi.
+- Meniru gaya grup: panjang chat, emoji, singkatan dipelajari (hanya hitungan, isi chat tidak disimpan).
+- Peka suasana: kalau ada yang sedih/kesal, Ayyubi diam atau lembut, tidak melucu.
+  Ulang tahun, lelah, senang, terima kasih, bingung, tawa juga dikenali.
+- Hari khusus & momen: hari nasional, Jumat, awal bulan, dsb. Tambahan sendiri: WA_HARI_KHUSUS di .env.
+- Ingatan anggota (opt-in): anggota yang minta sendiri.
+    bot ingat aku ...        (simpan fakta ringan)
+    bot panggil aku ...      (nama panggilan)
+    bot ingat ulang tahunku ...
+    bot lupakan aku          (hapus semua)
+  Fakta sensitif (kesehatan, uang, agama, dll) otomatis ditolak.
+- Belajar dari respons grup: jenis sapaan yang ditanggapi lebih sering dipilih lebih sering.
+- Mode latihan: draf dikirim ke Telegram dulu dengan tombol ✅ / ❌.
+  Yang ✅ jadi contoh gaya (few-shot) berikutnya.
+- Rem darurat: bisa dibungkam sementara.
+
+PERINTAH TELEGRAM (pemilik)
+  /humor latihan on <grup>     nyalakan mode latihan  (off untuk mematikan)
+  /humor diam <jam 1-168> <grup|semua>   bungkam sementara
+  /humor lanjut <grup>         akhiri bungkam
+  /humor profil <grup>         lihat gaya grup, anggota diingat, contoh latihan
+  /humor tes [pantun|sapa|balas] <grup>
+  /humor on / semua            tidak menyalakan latihan (itu terpisah)
+
+ENV BARU (opsional, lihat .env.example)
+  WA_REAKSI_CHANCE (0.25)  WA_REAKSI_GAP_SEC (45)  WA_REAKSI_MAX_PER_DAY (30)
+  WA_HARI_KHUSUS           WA_PERSONA_NOTE
+
+PRINSIP
+Ayyubi natural, bukan menyamar jadi manusia: kalau ditanya dia bot, dia mengaku;
+tidak mengarang pengalaman fisik.
+
+CATATAN JUJUR
+- Diuji dengan simulasi (68+ kelompok tes), BELUM di WhatsApp sungguhan.
+- Bot di grup selalu berisiko kena pembatasan WhatsApp (Baileys tidak resmi).
+  Saran: mulai dengan 1 grup kecil, nyalakan latihan dulu.
+- Mutu balasan tergantung model AI yang dipakai.
+- Deteksi suasana berbasis kata kunci, jadi bisa meleset (sarkasme, bahasa daerah).
+- Ukuran "respons grup" hanya perkiraan.

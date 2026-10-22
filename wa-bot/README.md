@@ -964,6 +964,8 @@ Bawaan **MATI** di semua grup. Nyalakan per grup dari Telegram (hanya grup yang 
 /humor semua on                semua grup yang dijawab bot
 /humor jam 09:00-17:00 2       rentang jam acak pantun untuk grup itu (/humor jam reset 2 = bawaan)
 /humor tes 2                   kirim satu pantun percobaan sekarang  (juga: /humor tes sapa 2, /humor tes balas 2)
+/humor latihan on 2            draf balasan/chat otomatis ke Telegram dulu (✅/❌)   • /humor profil 2   yang sudah dipelajari
+/humor diam 3 2                diamkan 3 jam   • /humor lanjut 2   • /humor diam 3 semua
 /humor on wa2 kantor           untuk nomor kedua tambahkan kata wa2
 ```
 
@@ -978,6 +980,21 @@ Lima hal yang bisa dinyalakan terpisah (`/humor on` menyalakan kelima-limanya; g
 - **Menolak dibalas.** Siapa pun bisa menulis "bot jangan balas chatku" (cabut: "bot boleh balas chatku lagi"); orang itu tidak pernah dibalas acak lagi di grup tersebut.
 
 **Catatan penting soal frekuensi.** Pesan otomatis dari nomor WhatsApp yang dijalankan lewat Baileys (bukan API resmi) menambah risiko nomor ditandai spam, makin besar bila banyak grup dinyalakan dan anggotanya jarang membalas. Mulailah dengan **satu grup** yang anggotanya senang diajak ngobrol, lihat beberapa hari, baru tambah. Bila terasa mengganggu: `/humor sapa off <grup>` atau `/humor balas off <grup>`, atau persempit jam lewat `WA_SAPA_WINDOW`.
+
+### Ayyubi lebih manusiawi (peka, berbaur, bisa dilatih)
+
+Natural, **bukan menyamar**: Ayyubi tidak mengaku manusia (kalau ditanya "kamu bot ya?" ia mengaku santai) dan tidak mengarang pengalaman fisik. Yang ditambah:
+
+- **Ritme seperti orang.** Jeda sebelum membalas bergantung panjang pesan yang dibaca (lebih cepat saat grup ramai) plus efek "sedang mengetik". Kadang cukup **reaksi emoji** tanpa teks: pesan lucu 😂, kabar baik 👏, terima kasih 🙏, capek 💪, ulang tahun 🎉 (peluang `WA_REAKSI_CHANCE`=0.25, jeda `WA_REAKSI_GAP_SEC`=45, maks `WA_REAKSI_MAX_PER_DAY`=30; AI juga boleh memilih reaksi alih-alih menulis). Dua baris dari AI atau teks panjang dikirim sebagai **dua gelembung**, yang pertama me-reply.
+- **Kepekaan.** Ayyubi membaca suasana: **sedih/kesal → diam** (tidak bercanda, tidak bereaksi ceria, tidak membuka obrolan 30 menit sesudahnya); **capek → empati singkat**; kabar baik → ikut senang; terima kasih → balas singkat. Ia tidak menyela **dua orang yang sedang ngobrol berdua** (peluang turun, kecuali pesannya menyapa "kalian/ada yang") dan tidak menyambar pesan yang **ditujukan ke orang lain** ("Budi, udah makan?").
+- **Gaya grup.** Dari obrolan grup ia mempelajari panjang chat, emoji favorit, tawa khas ("wkwk"/"haha"), kata khas (nih/dong/sih), sapaan (kak/mas/bu), tingkat formalitas, lalu meniru nadanya. Yang tersimpan **hanya angka hitungan**, bukan isi chat. Lihat hasil belajar: `/humor profil <grup>`.
+- **Mode latihan** (`/humor latihan on <grup>`). Draf balasan dan chat otomatis dikirim **dulu ke Telegram-mu** dengan tombol **✅ Kirim / ❌ Buang** (berlaku ±45 menit). Yang kamu setujui menjadi *contoh disukai*, yang kamu buang menjadi *contoh ditolak*; keduanya disisipkan ke perintah AI berikutnya untuk grup itu. Cara kerja yang disarankan: nyalakan seminggu, tinjau, lalu matikan (`/humor latihan off <grup>`) saat hasilnya sudah sesuai. `/humor tes ...` selalu mengirim langsung.
+- **Belajar dari tanggapan grup.** Bot mencatat apakah pesannya ditanggapi (di-reply = 1, chat lain dalam 2 menit = 0,5). Jenis chat otomatis yang sering ditanggapi lebih sering dipilih (yang sepi tetap kadang dicoba), dan bila balasan acak jarang ditanggapi (≥ 15 balasan) peluangnya turun sampai separuh; bila sering ditanggapi naik sampai 1,5×. Terlihat di `/humor profil`.
+- **Ingatan anggota (opt-in).** Hanya yang diminta orangnya sendiri: "bot ingat aku suka kopi hitam", "bot panggil aku Bro Budi", "bot ingat ulang tahunku 6 Oktober" (tanpa tahun lahir), "bot kamu ingat apa tentang aku", "bot lupakan aku" (hapus semua). Maks 5 hal ringan per orang; yang menyangkut kesehatan, uang, keluarga, agama, politik, alamat, nomor/rekening, dll. **ditolak**. Dipakai bila nyambung (balasan dan chat otomatis yang personal, panggilan favorit) dan **ucapan ulang tahun** sekali setahun mulai pukul 06:00 untuk yang meminta.
+- **Momen.** Chat otomatis kadang menyinggung hari ini: hari nasional (Kartini, Kemerdekaan, Sumpah Pemuda, Hari Batik, Hari Guru, Hari Ibu, dll.), ritme pekan (Senin, Jumat, akhir pekan), awal/akhir bulan. Tambahkan hari khusus lokal lewat `.env`: `WA_HARI_KHUSUS="03-19=Hari Raya Nyepi;12-25=Natal"`. Ciri kepribadian tambahan: `WA_PERSONA_NOTE`.
+- **Rem darurat.** `/humor diam 3 keluarga` (atau `... semua`) = tidak bicara sendiri/tidak membalas acak/tidak pantun selama 3 jam (maks 168); `/humor lanjut keluarga` mengakhiri. Kalau dipanggil langsung, bot tetap menjawab.
+
+**Privasi (lapisan manusiawi).** Di database (bot_state) hanya ada: pengaturan, jadwal, **hitungan gaya**, **contoh pesan buatan bot** yang kamu setujui/tolak, tingkat tanggapan per jenis pesan, dan **ingatan yang diminta anggota sendiri**. Isi chat anggota tetap hanya di memori (±23 chat terakhir) dan hilang saat restart.
 
 **Batas aman roasting.** Hanya perilaku di chat (typo, telat balas, ketawa terus, lagi lapar/ngantuk); tidak pernah fisik, agama, suku, keluarga, pasangan, uang/gaji, kesehatan, politik, kecerdasan, dan tanpa kata kasar. Ini dijaga dua lapis: perintah ke AI **dan** penyaring kata di kode (hasil yang memuat kata terlarang dibuang, AI diberi satu kesempatan lagi, lalu bot diam). Roasting dilewati bila: ada kata duka/sakit/musibah/komplain/"tolong"/"mohon"/"Bapak/Ibu"/tautan di 6 pesan terakhir, ada pesan panjang (pengumuman), belum ada tanda obrolan santai (wkwk, haha, ngopi, lapar, dst.), hanya satu orang yang bicara, obrolan sudah basi, bot baru saja dipanggil, atau AI menjawab `SKIP`. Pemilik nomor **tidak** diroasting (kecuali `WA_HUMOR_ROAST_OWNER=true`).
 
