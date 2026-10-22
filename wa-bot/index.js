@@ -2989,7 +2989,7 @@ async function handleGroupMessage(msg, sock) {
     if (botMsg && botMsg.length > 0) triggered = true;
   }
   // Mode humor (/humor): hanya di grup yang menyalakannya. (1) "bot jangan roasting aku" dihormati, dipanggil atau tidak;
-  // (2) obrolan yang TIDAK memanggil bot dibaca sebentar di memori untuk roasting spontan (tidak disimpan ke database).
+  // (2) obrolan grup dibaca sebentar di memori (roasting spontan, balasan acak, konteks 15 chat; tidak disimpan ke database).
   const humorAcct = currentAccountId();
   if (!msg.key.fromMe && !photo && !docAttached && !groupAudio && humor.settings(humorAcct, groupJid)) {
     const humorSubject = await getGroupSubject(sock, groupJid);
@@ -3001,7 +3001,7 @@ async function handleGroupMessage(msg, sock) {
         await sendHumorGroupText(humorAcct, groupJid, pref.reply, { quoted: msg }).catch((e) => console.error("😄 Balasan preferensi roasting gagal:", e instanceof Error ? e.message : String(e)));
         return;
       }
-      if (!triggered) humor.observe(humorAcct, groupJid, { name: msg.pushName || "", ids: humorIds, text: rawText, isOwner: isOwnerSender(msg, false), msg });
+      humor.observe(humorAcct, groupJid, { name: msg.pushName || "", ids: humorIds, text: rawText, isOwner: isOwnerSender(msg, false), msg, triggered });
     }
   }
   if (!triggered) {
@@ -3295,6 +3295,7 @@ async function handleGroupMessage(msg, sock) {
   }
   sock.sendPresenceUpdate("paused", groupJid).catch(() => {});
   if (!result || !result.reply) return;
+  humor.noteBotSaid(currentAccountId(), groupJid, result.reply); // jawaban ini ikut jadi konteks untuk balasan/sapa berikutnya (hanya di memori)
   // Pemeriksa kontradiksi: jawaban menyangkal kemampuan yang AKTIF ("aku tidak bisa menjawab dengan suara" padahal sedang bersuara) -> tulis ulang sekali.
   try {
     const caps = groupCapabilityFlags();
@@ -5200,6 +5201,14 @@ async function sendHumorGroupText(account, jid, text, { quoted = null } = {}) {
   const subject = await getGroupSubject(sk, jid);
   if (!AUTO_REPLY_ACTIVE || !groupRulesFor(sk).enabled || !isGroupAllowed(jid, subject, sk)) throw new Error("grup sudah tidak diizinkan"); // jangan kirim ke grup yang sudah dicabut
   await waAccountContext.run({ account }, async () => {
+    // tampak "sedang mengetik" sebentar (seperti orang) sebelum pesan spontan terkirim
+    try {
+      await sk.sendPresenceUpdate("composing", jid);
+      await new Promise((r) => setTimeout(r, Math.min(4000, 800 + String(text).length * 25)));
+      await sk.sendPresenceUpdate("paused", jid);
+    } catch {
+      /* presence gagal tidak boleh menggagalkan pesan */
+    }
     const sent = await sk.sendMessage(jid, { text }, quoted ? { quoted } : undefined);
     const { error } = await supabase.from("whatsapp_messages").insert({ wa_jid: jid, wa_name: subject || null, direction: "out", content: text, status: "sent", wa_message_id: sent?.key?.id ?? null, ...acctFields(currentAccountId()) });
     if (error) console.error("Gagal catat pesan humor:", error.message);

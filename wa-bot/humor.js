@@ -4,6 +4,8 @@
 //   gaya   -> jawaban bot ikut santai & jenaka (jawaban teknis tetap akurat; candaan hanya bumbu, bukan pengganti isi)
 //   pantun -> SEHARI SEKALI bot mengirim satu pantun jenaka ke grup, di jam ACAK (dipilih ulang tiap hari, beda tiap grup)
 //   roast  -> di obrolan santai, bot kadang tiba-tiba menggoda satu orang (maks N kali sehari per grup, ada jeda)
+//   balas  -> bot sesekali nimbrung MEMBALAS (reply) chat acak anggota, setelah membaca 15 chat sebelumnya; tanpa batas jam
+//   sapa   -> bot mengobrol sendiri di grup minimal 10 kali sehari (jam menyebar sepanjang hari, isi bervariasi)
 //
 // Batas aman roasting ("ringan & aman"):
 //   - hanya menggoda PERILAKU di chat (typo, telat balas, kebanyakan emoji, ...), tidak pernah fisik, agama, suku, keluarga,
@@ -27,6 +29,8 @@
 //   WA_HUMOR_ROAST_CHANCE=0.15           peluang tiap pesan "layak" memicu roast (0-1)
 //   WA_HUMOR_ROAST_WINDOW=08:00-21:00    roast hanya di rentang jam ini
 //   WA_HUMOR_ROAST_OWNER=false           true = pemilik nomor boleh ikut diroasting
+
+import { buildReplyPrompt, buildSapaPrompt, detectReplyPref, isReplyWorthy, pickFallbackSapa, pickSapaKind, readNgobrolConfig, validateChat } from "./ngobrol.js";
 
 export const STATE_KEY = "wa_group_humor";
 export const SCHED_KEY = "wa_group_humor_sched";
@@ -64,7 +68,9 @@ export function readHumorConfig(env = process.env) {
     minMessages: 4,
     bufferMaxAgeMs: 10 * 60_000,
     freshMs: 2 * 60_000,
-    afterTriggerMs: 5 * 60_000
+    afterTriggerMs: 5 * 60_000,
+    afterSpontMs: 90_000, // roast tidak menyusul pesan spontan bot lain dalam jeda ini
+    ...readNgobrolConfig(env)
   };
 }
 
@@ -278,8 +284,10 @@ GAYA HUMORIS (grup ini): kamu asisten yang santai dan jenaka. Boleh menyelipkan 
 // ---------------------------------------------------------------- perintah /humor
 const ON_RE = /^(on|aktif|nyala|hidup|ya|1)$/i;
 const OFF_RE = /^(off|mati|matikan|tidak|0)$/i;
-const FLAG_WORDS = { gaya: "chat", jawaban: "chat", chat: "chat", pantun: "pantun", roast: "roast", roasting: "roast", godaan: "roast", ledek: "roast" };
-export const FLAG_LABEL = { chat: "gaya jawaban", pantun: "pantun harian", roast: "roasting ringan" };
+const FLAG_WORDS = { gaya: "chat", jawaban: "chat", chat: "chat", pantun: "pantun", roast: "roast", roasting: "roast", godaan: "roast", ledek: "roast", balas: "balas", nimbrung: "balas", sapa: "sapa", ngobrol: "sapa" };
+export const FLAG_LABEL = { chat: "gaya jawaban", pantun: "pantun harian", roast: "roasting ringan", balas: "balas chat acak", sapa: "chat otomatis harian" };
+export const ALL_FLAGS = ["chat", "pantun", "roast", "balas", "sapa"];
+const anyFlag = (g) => Boolean(g && (g.chat || g.pantun || g.roast || g.balas || g.sapa));
 
 /** "/humor ..." -> { kind, ... } */
 export function parseHumorArg(arg, { secondAliases = [] } = {}) {
@@ -296,19 +304,19 @@ export function parseHumorArg(arg, { secondAliases = [] } = {}) {
     }
   };
   const need = (what) => ({ kind: "error", error: what });
-  const USAGE = "Pakai: /humor • /humor on <grup> • /humor off <grup> • /humor pantun|roast|gaya on|off <grup> • /humor semua on|off • /humor jam 09:00-17:00 <grup> • /humor tes <grup>";
+  const USAGE = "Pakai: /humor • /humor on <grup> • /humor off <grup> • /humor pantun|roast|gaya|balas|sapa on|off <grup> • /humor semua on|off • /humor jam 09:00-17:00 <grup> • /humor tes [pantun|sapa|balas] <grup>";
   if (aliases.has(verb) && words.length === 1) return { kind: "status", account: SECOND };
   if (ON_RE.test(verb) || OFF_RE.test(verb)) {
     takeAccount();
     const target = rest.join(" ").trim();
     if (!target) return need("Sebutkan grupnya (nama atau nomor dari /humor). Contoh: /humor on 2");
-    return { kind: "set", flags: ["chat", "pantun", "roast"], value: ON_RE.test(verb), target, account };
+    return { kind: "set", flags: [...ALL_FLAGS], value: ON_RE.test(verb), target, account };
   }
   if (/^(semua|all)$/.test(verb)) {
     const v = (rest.shift() || "").toLowerCase();
     if (!ON_RE.test(v) && !OFF_RE.test(v)) return need("Pakai: /humor semua on  atau  /humor semua off");
     takeAccount();
-    return { kind: "set", flags: ["chat", "pantun", "roast"], value: ON_RE.test(v), target: "*", account };
+    return { kind: "set", flags: [...ALL_FLAGS], value: ON_RE.test(v), target: "*", account };
   }
   if (FLAG_WORDS[verb]) {
     const v = (rest.shift() || "").toLowerCase();
@@ -332,10 +340,15 @@ export function parseHumorArg(arg, { secondAliases = [] } = {}) {
     return { kind: "window", window, target, account };
   }
   if (/^(tes|test|coba|sekarang)$/.test(verb)) {
+    let what = "pantun";
+    if (rest.length >= 1 && /^(pantun|sapa|ngobrol|balas)$/i.test(rest[0])) {
+      const w = rest.shift().toLowerCase();
+      what = w === "ngobrol" ? "sapa" : w;
+    }
     takeAccount();
     const target = rest.join(" ").trim();
-    if (!target) return need("Sebutkan grupnya: /humor tes <nama atau nomor>");
-    return { kind: "test", target, account };
+    if (!target) return need("Sebutkan grupnya: /humor tes <nama atau nomor>  (atau /humor tes sapa <grup>)");
+    return { kind: "test", target, account, what };
   }
   return need(`"${words[0]}" tidak dikenali. ${USAGE}`);
 }
@@ -350,11 +363,13 @@ export function parseHumorArg(arg, { secondAliases = [] } = {}) {
  *   labels, secondEnabled, timeZone, config, now, random, log, timer(fn, ms)
  */
 export function createHumor({ state = null, ai = null, send = null, listGroups = null, labels = {}, secondEnabled = false, timeZone = "Asia/Makassar", config = readHumorConfig({}), now = () => Date.now(), random = Math.random, log = console, timer = (fn, ms) => setTimeout(fn, ms) } = {}) {
-  let data = { groups: {}, optout: {} };
-  let sched = { pantun: {}, roast: {} };
+  let data = { groups: {}, optout: {}, noreply: {} };
+  let sched = { pantun: {}, roast: {}, sapa: {}, balas: {} };
   let loadedOk = !state;
   const buffers = new Map(); // key -> [{ name, ids, text, ts, isOwner, msg }]   (hanya di memori)
   const lastTriggerAt = new Map();
+  const ctxBuf = new Map(); // key -> [{ name, ids, text, ts, isBot, msg }]  konteks obrolan untuk balas/sapa (hanya di memori)
+  const lastSpontAt = new Map(); // key -> kapan bot terakhir bicara sendiri di grup itu (pantun/roast/balas/sapa)
   const busy = new Set();
   const label = (a) => labels[a] || (a === SECOND ? "Nomor 2" : "Nomor utama");
   const keyOf = (account, jid) => `${account === SECOND ? SECOND : MAIN}|${jid}`;
@@ -366,12 +381,12 @@ export function createHumor({ state = null, ai = null, send = null, listGroups =
       const raw = await state.get(STATE_KEY);
       if (raw) {
         const j = JSON.parse(raw);
-        data = { groups: j?.groups && typeof j.groups === "object" ? j.groups : {}, optout: j?.optout && typeof j.optout === "object" ? j.optout : {} };
+        data = { groups: j?.groups && typeof j.groups === "object" ? j.groups : {}, optout: j?.optout && typeof j.optout === "object" ? j.optout : {}, noreply: j?.noreply && typeof j.noreply === "object" ? j.noreply : {} };
       }
       const rs = await state.get(SCHED_KEY);
       if (rs) {
         const j = JSON.parse(rs);
-        sched = { pantun: j?.pantun || {}, roast: j?.roast || {} };
+        sched = { pantun: j?.pantun || {}, roast: j?.roast || {}, sapa: j?.sapa || {}, balas: j?.balas || {} };
       }
       loadedOk = true;
     } catch (e) {
@@ -401,10 +416,44 @@ export function createHumor({ state = null, ai = null, send = null, listGroups =
   function settings(account, jid) {
     if (!loadedOk) return null;
     const g = data.groups[keyOf(account, jid)];
-    if (!g || !(g.chat || g.pantun || g.roast)) return null;
+    if (!anyFlag(g)) return null;
     return g;
   }
-  const anyEnabled = () => loadedOk && Object.values(data.groups).some((g) => g && (g.chat || g.pantun || g.roast));
+  const anyEnabled = () => loadedOk && Object.values(data.groups).some((g) => anyFlag(g));
+
+  // ------------------------------------------------ konteks obrolan (hanya di memori) + pesan spontan bot
+  function pushCtx(key, entry) {
+    const buf = ctxBuf.get(key) || [];
+    buf.push(entry);
+    while (buf.length > config.contextSize + 8) buf.shift();
+    for (let i = 0; i < buf.length - 6; i += 1) buf[i].msg = null; // referensi pesan (untuk reply) hanya dipertahankan untuk yang terbaru
+    ctxBuf.set(key, buf);
+  }
+  /** Chat sebelum indeks `before` (bawaan: semua) yang masih segar, paling banyak contextSize, urut lama -> baru. */
+  function contextBefore(key, before = null) {
+    const t = now();
+    const buf = (ctxBuf.get(key) || []).filter((m) => t - m.ts <= config.contextMaxAgeMs);
+    const upto = before === null ? buf.length : Math.max(0, buf.indexOf(before));
+    return buf.slice(Math.max(0, upto - config.contextSize), upto);
+  }
+  /** Jawaban biasa bot (saat dipanggil) dicatat sebagai bagian obrolan, supaya balasan/sapa berikutnya nyambung. Hanya di memori. */
+  function noteBotSaid(account, jid, text) {
+    const key = keyOf(account, jid);
+    const g = settings(account, jid);
+    if (!g || !(g.balas || g.sapa)) return;
+    const clean = String(text ?? "").replace(/\s+/g, " ").trim();
+    if (clean) pushCtx(key, { name: "Ayyubi", ids: [], text: clean.slice(0, 240), ts: now(), isBot: true, msg: null });
+  }
+  /** Kirim pesan spontan bot ke grup dan catat sebagai bagian obrolan (supaya pesan berikutnya tahu apa yang baru dikatakan). */
+  async function out(account, jid, text, opts = {}) {
+    const key = keyOf(account, jid);
+    await send(account, jid, text, opts);
+    lastSpontAt.set(key, now());
+    const g = data.groups[key];
+    if (g && (g.balas || g.sapa)) pushCtx(key, { name: "Ayyubi", ids: [], text: String(text).replace(/\s+/g, " ").slice(0, 240), ts: now(), isBot: true, msg: null });
+  }
+  const dayOf = () => localParts(now(), timeZone).day;
+  const inWindow = (win, minutes) => minutes >= win.from && minutes < win.to;
 
   // ------------------------------------------------ gaya jawaban
   /** Catatan prompt gaya humoris untuk jawaban ini, atau "" (mati / topik serius / jawaban berupa berkas). */
@@ -425,9 +474,25 @@ export function createHumor({ state = null, ai = null, send = null, listGroups =
   async function handlePreference(account, jid, { name = "", ids = [], text = "" }) {
     const g = settings(account, jid);
     if (!g || !ids.length) return null;
+    const key = keyOf(account, jid);
+    const rpref = detectReplyPref(text);
+    if (rpref) {
+      const nl = new Set(data.noreply[key] || []);
+      const first0 = String(name || "").trim().split(/\s+/)[0] || "kamu";
+      if (rpref === "out") {
+        for (const id of ids) nl.add(id);
+        data.noreply[key] = [...nl];
+        const saved = await saveData();
+        return { pref: "noreply", reply: `Siap ${first0}, chatmu tidak akan kubalas-balas sendiri lagi 🙏 (kalau berubah pikiran: "bot boleh balas chatku lagi")${saved ? "" : " — catatan: gagal tersimpan, berlaku sampai bot restart."}` };
+      }
+      for (const id of ids) nl.delete(id);
+      if (nl.size) data.noreply[key] = [...nl];
+      else delete data.noreply[key];
+      await saveData();
+      return { pref: "reply-ok", reply: `Oke ${first0}, aku boleh nimbrung lagi di chatmu ya 😄` };
+    }
     const pref = detectRoastPref(text);
     if (!pref) return null;
-    const key = keyOf(account, jid);
     const list = new Set(data.optout[key] || []);
     const first = String(name || "").trim().split(/\s+/)[0] || "kamu";
     if (pref === "out") {
@@ -470,6 +535,7 @@ export function createHumor({ state = null, ai = null, send = null, listGroups =
     if (rs.count >= config.roastMaxPerDay) return { ok: false, reason: "jatah hari ini habis" };
     if (t - rs.lastAt < config.roastCooldownMs) return { ok: false, reason: "masih dalam jeda" };
     if (t - (lastTriggerAt.get(key) || 0) < config.afterTriggerMs) return { ok: false, reason: "bot baru saja dipanggil" };
+    if (t - (lastSpontAt.get(key) || 0) < config.afterSpontMs) return { ok: false, reason: "bot baru saja bicara sendiri" };
     const buf = (buffers.get(key) || []).filter((m) => t - m.ts <= config.bufferMaxAgeMs);
     if (buf.length < config.minMessages) return { ok: false, reason: "belum ramai" };
     if (new Set(buf.map((m) => m.ids[0] || m.name)).size < 2) return { ok: false, reason: "hanya satu orang" };
@@ -494,12 +560,32 @@ export function createHumor({ state = null, ai = null, send = null, listGroups =
     return { ok: true, target: { name: target.name || "kamu", ids: target.ids, msg: target.msg, text: target.text }, recent: recent.map((m) => ({ name: m.name || "?", text: m.text })) };
   }
 
-  /** Dipanggil untuk tiap pesan grup yang TIDAK memanggil bot. Murah: bila roast mati, tidak menyimpan apa pun. */
-  function observe(account, jid, { name = "", ids = [], text = "", isOwner = false, msg = null } = {}) {
+  /**
+   * Dipanggil untuk tiap pesan grup (yang memanggil bot diberi triggered=true: hanya dicatat sebagai konteks, tidak dibalas/diroast).
+   * Murah: bila roast/balas/sapa semuanya mati, tidak menyimpan apa pun.
+   */
+  function observe(account, jid, { name = "", ids = [], text = "", isOwner = false, msg = null, triggered = false } = {}) {
     const g = settings(account, jid);
-    if (!g?.roast) return null;
-    const clean = String(text ?? "").replace(/\s+/g, " ").trim();
+    if (!g || !(g.roast || g.balas || g.sapa)) return null;
+    const clean = String(text ?? "").replace(/@\d{5,}/g, " ").replace(/\s+/g, " ").trim();
     if (!clean) return null;
+    const key = keyOf(account, jid);
+    let entry = null;
+    if (g.balas || g.sapa) {
+      entry = { name, ids: ids.filter(Boolean), text: clean.slice(0, 240), ts: now(), isBot: false, isOwner, msg };
+      pushCtx(key, entry);
+    }
+    if (triggered) return { ok: false, reason: "bot dipanggil" };
+    const r = g.roast ? observeRoast(account, jid, { name, ids, clean, isOwner, msg }) : null;
+    if (r?.ok) return r; // roast terjadwal: jangan menumpuk dengan balasan biasa
+    if (g.balas && entry) {
+      const b = scheduleBalas(account, jid, entry);
+      if (b) return b;
+    }
+    return r;
+  }
+
+  function observeRoast(account, jid, { name, ids, clean, isOwner, msg }) {
     const key = keyOf(account, jid);
     const buf = buffers.get(key) || [];
     buf.push({ name, ids: ids.filter(Boolean), text: clean.slice(0, 240), ts: now(), isOwner, msg });
@@ -548,13 +634,225 @@ export function createHumor({ state = null, ai = null, send = null, listGroups =
     // masih layak setelah menunggu AI?
     const last = evaluate(account, jid, { ignoreChance: true });
     if (!last.ok) return false;
-    await send(account, jid, text, { quoted: target.msg || null });
+    await out(account, jid, text, { quoted: target.msg || null });
     const rs = roastToday(key);
     sched.roast[key] = { day: rs.day, count: rs.count + 1, lastAt: now(), lastTarget: target.ids.slice(0, 3) };
     buffers.delete(key);
     await saveSched();
     log.log?.(`😄 [Humor] roast terkirim ke ${target.name} (${rs.count + 1}/${config.roastMaxPerDay} hari ini).`);
     return true;
+  }
+
+  // ------------------------------------------------ balas chat acak (reply) setelah membaca konteks
+  function balasToday(key) {
+    const day = dayOf();
+    const r = sched.balas[key];
+    return r && r.day === day ? r : { day, count: 0 };
+  }
+
+  /** Layakkah membalas pesan `entry` sekarang? -> { ok: true, context } | { ok: false, reason } (tanpa efek samping). */
+  function evaluateBalas(account, jid, entry, { ignoreChance = false } = {}) {
+    const key = keyOf(account, jid);
+    const g = settings(account, jid);
+    if (!g?.balas) return { ok: false, reason: "balas mati" };
+    if (config.balasMaxPerDay <= 0) return { ok: false, reason: "jatah 0" };
+    const t = now();
+    if (!inWindow(config.balasWindow, localParts(t, timeZone).minutes)) return { ok: false, reason: "di luar jam aktif" };
+    if (balasToday(key).count >= config.balasMaxPerDay) return { ok: false, reason: "jatah hari ini habis" };
+    if (t - (lastSpontAt.get(key) || 0) < config.balasGapMs) return { ok: false, reason: "bot baru saja bicara" };
+    if (t - (lastTriggerAt.get(key) || 0) < 60_000) return { ok: false, reason: "bot baru saja dipanggil" };
+    if (!isReplyWorthy(entry.text)) return { ok: false, reason: "pesan tidak layak dibalas" };
+    if ((data.noreply[key] || []).some((id) => entry.ids.includes(id))) return { ok: false, reason: "orang ini menolak dibalas" };
+    const context = contextBefore(key, entry);
+    if (!context.length) return { ok: false, reason: "belum ada konteks" };
+    const humans = context.filter((m) => !m.isBot).slice(-5);
+    if (isSeriousChat([...humans, entry])) return { ok: false, reason: "obrolan serius" };
+    if (!ignoreChance) {
+      const p = Math.min(0.9, config.balasChance * (/\?/.test(entry.text) ? 1.8 : 1) * (hasCasualCue([entry]) ? 1.3 : 1));
+      if (random() >= p) return { ok: false, reason: "tidak terpilih (acak)" };
+    }
+    return { ok: true, context };
+  }
+
+  function scheduleBalas(account, jid, entry) {
+    const key = keyOf(account, jid);
+    const ev = evaluateBalas(account, jid, entry);
+    if (!ev.ok) return ev;
+    if (busy.has(`balas|${key}`) || busy.has(`sapa|${key}`) || busy.has(`roast|${key}`)) return { ok: false, reason: "sedang menyusun" };
+    busy.add(`balas|${key}`);
+    const delay = 6000 + Math.floor(random() * 19_000); // jeda alami 6-25 detik
+    timer(() =>
+      balasNow(account, jid, entry)
+        .catch((e) => log.warn?.(`💬 [Humor] balasan gagal: ${e instanceof Error ? e.message : e}`))
+        .finally(() => busy.delete(`balas|${key}`)), delay);
+    return { ok: true, scheduled: true, kind: "balas", target: entry.name };
+  }
+
+  /** Susun dan kirim satu balasan (reply) untuk `entry`. force = uji manual (lewati peluang & batas). -> { sent, text?, reason? } */
+  async function balasNow(account, jid, entry, { force = false } = {}) {
+    const key = keyOf(account, jid);
+    let context;
+    if (force) context = contextBefore(key, entry);
+    else {
+      const again = evaluateBalas(account, jid, entry, { ignoreChance: true }); // cek ulang setelah jeda
+      if (!again.ok) {
+        log.log?.(`💬 [Humor] balasan dibatalkan: ${again.reason}`);
+        return { sent: false, reason: again.reason };
+      }
+      context = again.context;
+    }
+    if (!ai || !send) return { sent: false, reason: "AI/pengiriman belum siap" };
+    const recentBot = (ctxBuf.get(key) || []).filter((m) => m.isBot).slice(-6).map((m) => m.text);
+    const { system, user } = buildReplyPrompt({ target: { name: entry.name, text: entry.text }, context });
+    let text = null;
+    let why = "";
+    for (let i = 0; i < 2 && !text; i += 1) {
+      let raw = "";
+      try {
+        raw = await ai({ system, user, temperature: 0.85, maxTokens: 120 });
+      } catch (e) {
+        log.warn?.(`💬 [Humor] AI balasan gagal: ${e instanceof Error ? e.message : e}`);
+        return { sent: false, reason: "AI gagal" };
+      }
+      const v = validateChat(raw, { maxLen: 260, recent: recentBot });
+      if (v.ok) text = v.text;
+      else {
+        why = v.reason;
+        log.log?.(`💬 [Humor] balasan ditolak penyaring (${v.reason}): ${String(raw).slice(0, 80)}`);
+        if (v.reason === "AI memilih SKIP") break;
+      }
+    }
+    if (!text) return { sent: false, reason: why || "tidak ada balasan yang lolos" };
+    if (!force) {
+      const last = evaluateBalas(account, jid, entry, { ignoreChance: true }); // masih layak setelah menunggu AI?
+      if (!last.ok) return { sent: false, reason: last.reason };
+    }
+    await out(account, jid, text, { quoted: entry.msg || null });
+    if (!force) {
+      const st = balasToday(key);
+      sched.balas[key] = { day: st.day, count: st.count + 1, lastAt: now() };
+      await saveSched();
+    }
+    log.log?.(`💬 [Humor] membalas ${entry.name || "?"}${force ? " (uji)" : ""}: ${text.slice(0, 60)}`);
+    return { sent: true, text };
+  }
+
+  // ------------------------------------------------ chat otomatis harian (sapa)
+  function sapaTarget(minutes) {
+    const win = config.sapaWindow;
+    const left = win.to - Math.max(win.from, minutes);
+    if (left <= 0) return 0;
+    return Math.max(1, Math.ceil((config.sapaPerDay * left) / (win.to - win.from))); // hari pertama dinyalakan siang hari: jatah menyesuaikan sisa hari
+  }
+
+  /** Jadwal berikutnya menyesuaikan sisa jatah & sisa waktu: bila bot sempat mati, jarak otomatis merapat supaya jatah tetap terkejar. */
+  function planNextSapa(st, minutes) {
+    const win = config.sapaWindow;
+    const remaining = st.target - st.count;
+    if (remaining <= 0) {
+      st.nextAt = 0;
+      return;
+    }
+    const wait = Math.max(0, win.from - minutes) * 60_000; // sebelum jendela dibuka
+    const left = Math.max(0, win.to - Math.max(win.from, minutes)) * 60_000;
+    let gap = (left / remaining) * (0.4 + 0.8 * random());
+    gap = Math.max(config.sapaMinGapMs, gap);
+    gap = Math.min(gap, Math.max(config.sapaMinGapMs, left * 0.9));
+    st.nextAt = now() + wait + Math.floor(gap);
+  }
+
+  function sapaState(key) {
+    const lp = localParts(now(), timeZone);
+    let st = sched.sapa[key];
+    if (!st || st.day !== lp.day) {
+      st = { day: lp.day, count: 0, target: sapaTarget(lp.minutes), nextAt: 0, tries: 0, recent: st?.recent || [], kinds: st?.kinds || [] };
+      planNextSapa(st, lp.minutes);
+      sched.sapa[key] = st;
+      return { st, fresh: true };
+    }
+    return { st, fresh: false };
+  }
+
+  async function makeSapa(key) {
+    const lp = localParts(now(), timeZone);
+    const st = sched.sapa[key] || {};
+    const avoid = st.recent || [];
+    const t = now();
+    const recentCtx = (ctxBuf.get(key) || []).filter((m) => !m.isBot && t - m.ts <= 3 * 3_600_000);
+    let hasContext = recentCtx.length >= 3 && !isSeriousChat(recentCtx.slice(-6));
+    if (ai) {
+      for (let i = 0; i < 2; i += 1) {
+        const kind = pickSapaKind(random, { hasContext, avoid: (st.kinds || []).slice(0, 2) });
+        const { system, user } = buildSapaPrompt({ kind, weekday: lp.weekday, part: partOfDay(lp.minutes), context: kind.needsContext ? contextBefore(key) : [], avoid });
+        try {
+          const v = validateChat(await ai({ system, user, temperature: 0.95, maxTokens: 140 }), { maxLen: 320, recent: avoid });
+          if (v.ok) return { text: v.text, source: "ai", kind: kind.id };
+          if (v.reason === "AI memilih SKIP" && kind.needsContext) hasContext = false;
+        } catch (e) {
+          log.warn?.(`💬 [Humor] AI sapa gagal: ${e instanceof Error ? e.message : e}`);
+          break;
+        }
+      }
+    }
+    return { text: pickFallbackSapa(avoid, random), source: "cadangan", kind: "cadangan" };
+  }
+
+  async function sendSapa(account, jid, key, { force = false } = {}) {
+    const r = await makeSapa(key);
+    await out(account, jid, r.text);
+    const { st } = sapaState(key);
+    st.recent = [r.text, ...(st.recent || [])].slice(0, 10);
+    st.kinds = [r.kind, ...(st.kinds || [])].slice(0, 6);
+    sched.sapa[key] = st;
+    return { ...r, force };
+  }
+
+  async function checkSapa() {
+    const t = now();
+    const lp = localParts(t, timeZone);
+    for (const [key, g] of Object.entries(data.groups)) {
+      if (!g?.sapa) continue;
+      const { st, fresh } = sapaState(key);
+      if (fresh) {
+        await saveSched();
+        log.log?.(`💬 [Humor] ${g.name || key}: chat otomatis hari ini ${st.target}× (mulai ±${hm(Math.min(1439, lp.minutes + Math.round(Math.max(0, st.nextAt - t) / 60_000)))}).`);
+      }
+      if (st.count >= st.target || !inWindow(config.sapaWindow, lp.minutes) || t < st.nextAt) continue;
+      if (busy.has(`sapa|${key}`) || busy.has(`balas|${key}`) || busy.has(`roast|${key}`)) continue;
+      // jangan menyela: obrolan sedang berlangsung atau bot baru saja bicara
+      const buf = ctxBuf.get(key) || [];
+      const lastHuman = [...buf].reverse().find((m) => !m.isBot);
+      if (t - (lastSpontAt.get(key) || 0) < Math.min(config.sapaMinGapMs, 5 * 60_000)) {
+        st.nextAt = t + 2 * 60_000;
+        continue;
+      }
+      if (lastHuman && t - lastHuman.ts < 25_000) {
+        st.nextAt = t + 60_000;
+        continue;
+      }
+      const humans = buf.filter((m) => !m.isBot && t - m.ts <= 30 * 60_000).slice(-6);
+      if (humans.length && isSeriousChat(humans)) {
+        st.nextAt = t + 15 * 60_000;
+        continue;
+      }
+      const [account, jid] = key.split("|");
+      busy.add(`sapa|${key}`);
+      try {
+        const r = await sendSapa(account, jid, key);
+        st.count += 1;
+        st.tries = 0;
+        planNextSapa(st, localParts(now(), timeZone).minutes);
+        await saveSched();
+        log.log?.(`💬 [Humor] chat otomatis ${st.count}/${st.target} terkirim ke ${g.name || jid} (${r.source}/${r.kind}).`);
+      } catch (e) {
+        st.tries = (st.tries || 0) + 1;
+        st.nextAt = t + Math.min(60, 5 * st.tries) * 60_000;
+        await saveSched();
+        log.warn?.(`💬 [Humor] chat otomatis gagal dikirim ke ${g.name || jid} (percobaan ${st.tries}): ${e instanceof Error ? e.message : e}`);
+      } finally {
+        busy.delete(`sapa|${key}`);
+      }
+    }
   }
 
   // ------------------------------------------------ pantun harian
@@ -587,7 +885,7 @@ export function createHumor({ state = null, ai = null, send = null, listGroups =
     const { text, source } = await makePantun(key);
     const lp = localParts(now(), timeZone);
     const head = { pagi: "🎋 Pantun pagi", siang: "🎋 Pantun siang", sore: "🎋 Pantun sore", malam: "🎋 Pantun malam" }[partOfDay(lp.minutes)];
-    await send(account, jid, `${head}, ${lp.weekday}:\n\n${text}`);
+    await out(account, jid, `${head}, ${lp.weekday}:\n\n${text}`);
     const st = sched.pantun[key] || {};
     st.recent = [text, ...(st.recent || [])].slice(0, 8);
     sched.pantun[key] = st;
@@ -597,6 +895,11 @@ export function createHumor({ state = null, ai = null, send = null, listGroups =
   /** Dipanggil tiap menit: memilih jam acak hari ini lalu mengirim pantun saat waktunya. Satu pantun per grup per hari. */
   async function check() {
     if (!loadedOk || !send) return;
+    try {
+      await checkSapa();
+    } catch (e) {
+      log.warn?.(`💬 [Humor] pemeriksaan chat otomatis error: ${e instanceof Error ? e.message : e}`);
+    }
     const t = now();
     const lp = localParts(t, timeZone);
     for (const [key, g] of Object.entries(data.groups)) {
@@ -674,7 +977,15 @@ export function createHumor({ state = null, ai = null, send = null, listGroups =
     const rs = roastToday(key);
     const roastInfo = g.roast ? ` (${rs.count}/${config.roastMaxPerDay} hari ini)` : "";
     const nOut = (data.optout[key] || []).length;
-    return `gaya ${flag(g.chat)} • pantun ${flag(g.pantun)}${pantunInfo} • roast ${flag(g.roast)}${roastInfo}${nOut ? ` • ${nOut} orang menolak roast` : ""}`;
+    const bs = balasToday(key);
+    const balasInfo = g.balas ? ` (${bs.count}/${config.balasMaxPerDay} hari ini)` : "";
+    let sapaInfo = "";
+    if (g.sapa) {
+      const sp = sched.sapa[key];
+      sapaInfo = sp && sp.day === lp.day ? ` (${sp.count}/${sp.target} hari ini${sp.count < sp.target && sp.nextAt ? `, berikut ±${hm(localParts(sp.nextAt, timeZone).minutes)}` : ""})` : " (belum mulai hari ini)";
+    }
+    const nNo = (data.noreply[key] || []).length;
+    return `gaya ${flag(g.chat)} • pantun ${flag(g.pantun)}${pantunInfo} • roast ${flag(g.roast)}${roastInfo}${nOut ? ` • ${nOut} orang menolak roast` : ""}\n   balas ${flag(g.balas)}${balasInfo} • sapa ${flag(g.sapa)}${sapaInfo}${nNo ? ` • ${nNo} orang menolak dibalas` : ""}`;
   }
 
   async function statusText(only = null) {
@@ -695,8 +1006,9 @@ export function createHumor({ state = null, ai = null, send = null, listGroups =
       }
     }
     lines.push(
-      "\nNyalakan: /humor on <nomor|nama> • matikan: /humor off <nomor|nama>\nSebagian: /humor pantun|roast|gaya on|off <grup> • semua grup: /humor semua on|off\nJam pantun: /humor jam 09:00-17:00 <grup> • coba sekarang: /humor tes <grup>" + (secondEnabled ? "\n(nomor kedua: tambahkan kata wa2)" : "")
+      "\nNyalakan: /humor on <nomor|nama> • matikan: /humor off <nomor|nama>\nSebagian: /humor pantun|roast|gaya|balas|sapa on|off <grup> • semua grup: /humor semua on|off\nJam pantun: /humor jam 09:00-17:00 <grup> • coba sekarang: /humor tes [pantun|sapa|balas] <grup>" + (secondEnabled ? "\n(nomor kedua: tambahkan kata wa2)" : "")
     );
+    lines.push(`\nBalas: peluang ${Math.round(config.balasChance * 100)}% per chat, jeda ≥ ${Math.round(config.balasGapMs / 60000)} menit, maks ${config.balasMaxPerDay}×/hari/grup, membaca ${config.contextSize} chat sebelumnya, jam ${hm(config.balasWindow.from)}–${hm(config.balasWindow.to)}. Sapa: minimal ${config.sapaPerDay}×/hari/grup, jam ${hm(config.sapaWindow.from)}–${hm(config.sapaWindow.to)}.`);
     lines.push(`\nRoast: maks ${config.roastMaxPerDay}×/hari/grup, jeda ≥ ${Math.round(config.roastCooldownMs / 60000)} menit, hanya saat obrolan santai & ramai, jam ${hm(config.roastWindow.from)}–${hm(config.roastWindow.to)}. Anggota bisa menolak dengan "bot jangan roasting aku".`);
     return lines.join("\n");
   }
@@ -735,14 +1047,25 @@ export function createHumor({ state = null, ai = null, send = null, listGroups =
         const e = r.entries[0];
         if (!send) return "Pengiriman belum siap.";
         const key = keyOf(e.account, e.id);
-        const out = await sendPantun(e.account, e.id, key, { force: true });
+        if (p.what === "sapa") {
+          const o = await sendSapa(e.account, e.id, key, { force: true });
+          await saveSched();
+          return `💬 Chat otomatis percobaan terkirim ke "${e.subject}" (${o.source === "ai" ? "dibuat AI" : "dari cadangan"}):\n\n${o.text}\n\n(Percobaan ini tidak menghabiskan jatah harian.)`;
+        }
+        if (p.what === "balas") {
+          const last = [...(ctxBuf.get(key) || [])].reverse().find((m) => !m.isBot && isReplyWorthy(m.text));
+          if (!last) return `Belum ada chat anggota yang terbaca di memori untuk "${e.subject}" (balas harus menyala dan ada yang mengobrol dulu). Nyalakan: /humor balas on ${p.target}`;
+          const o = await balasNow(e.account, e.id, last, { force: true });
+          return o.sent ? `💬 Balasan percobaan terkirim ke "${e.subject}" (membalas ${last.name || "?"}):\n\n${o.text}` : `Tidak ada balasan yang dikirim (${o.reason}).`;
+        }
+        const out_ = await sendPantun(e.account, e.id, key, { force: true });
         await saveSched();
-        return `🎋 Pantun percobaan terkirim ke "${e.subject}" (${out.source === "ai" ? "dibuat AI" : "dari cadangan"}):\n\n${out.text}\n\n(Percobaan ini tidak menghabiskan jatah pantun harian.)`;
+        return `🎋 Pantun percobaan terkirim ke "${e.subject}" (${out_.source === "ai" ? "dibuat AI" : "dari cadangan"}):\n\n${out_.text}\n\n(Percobaan ini tidak menghabiskan jatah pantun harian.)`;
       }
       const names = [];
       for (const e of r.entries) {
         const key = keyOf(e.account, e.id);
-        const g = data.groups[key] || { name: e.subject, chat: false, pantun: false, roast: false };
+        const g = data.groups[key] || { name: e.subject, chat: false, pantun: false, roast: false, balas: false, sapa: false };
         g.name = e.subject;
         if (p.kind === "set") for (const f of p.flags) g[f] = p.value;
         if (p.kind === "window") {
@@ -750,9 +1073,10 @@ export function createHumor({ state = null, ai = null, send = null, listGroups =
           else g.window = p.window;
           delete sched.pantun[key]?.day; // pilih ulang jam hari ini
         }
-        if (g.chat || g.pantun || g.roast || g.window) data.groups[key] = g;
+        if (anyFlag(g) || g.window) data.groups[key] = g;
         else delete data.groups[key];
         if (!g.roast) buffers.delete(key); // roast dimatikan: buang obrolan yang tersimpan
+        if (!g.balas && !g.sapa) ctxBuf.delete(key);
         names.push(e.subject);
       }
       const saved = await saveData();
@@ -761,8 +1085,8 @@ export function createHumor({ state = null, ai = null, send = null, listGroups =
       let msg;
       if (p.kind === "window") msg = `⏰ Jam pantun ${who}: ${p.window === "reset" ? `bawaan ${hm(config.pantunWindow.from)}–${hm(config.pantunWindow.to)}` : `${hm(p.window.from)}–${hm(p.window.to)}`} (jam acak dipilih di dalam rentang itu).`;
       else {
-        const what = p.flags.length === 3 ? "humor (gaya + pantun harian + roasting ringan)" : FLAG_LABEL[p.flags[0]];
-        msg = `${p.value ? "😄 Dinyalakan" : "🔕 Dimatikan"}: ${what} untuk ${who}.${p.value && p.flags.includes("roast") ? `\nRoast: maks ${config.roastMaxPerDay}×/hari, hanya saat obrolan santai; pesan grup yang tidak memanggil bot dibaca sebentar di memori (≈${config.bufferSize} pesan, tidak disimpan).` : ""}${p.value && p.flags.includes("pantun") ? `\nPantun: sekali sehari di jam acak ${hm(windowOf(data.groups[keyOf(r.entries[0].account, r.entries[0].id)]).from)}–${hm(windowOf(data.groups[keyOf(r.entries[0].account, r.entries[0].id)]).to)}.` : ""}`;
+        const what = p.flags.length === ALL_FLAGS.length ? "humor lengkap (gaya + pantun harian + roasting ringan + balas chat acak + chat otomatis harian)" : FLAG_LABEL[p.flags[0]];
+        msg = `${p.value ? "😄 Dinyalakan" : "🔕 Dimatikan"}: ${what} untuk ${who}.${p.value && p.flags.includes("roast") ? `\nRoast: maks ${config.roastMaxPerDay}×/hari, hanya saat obrolan santai; pesan grup yang tidak memanggil bot dibaca sebentar di memori (≈${config.bufferSize} pesan, tidak disimpan).` : ""}${p.value && p.flags.includes("balas") ? `\nBalas: sesekali membalas (reply) chat anggota setelah membaca ${config.contextSize} chat sebelumnya; obrolan dibaca sebentar di memori saja (tidak disimpan). Anggota bisa menolak: "bot jangan balas chatku".` : ""}${p.value && p.flags.includes("sapa") ? `\nSapa: minimal ${config.sapaPerDay}× sehari bot membuka obrolan sendiri (jam menyebar ${hm(config.sapaWindow.from)}–${hm(config.sapaWindow.to)}). Coba satu sekarang: /humor tes sapa ${p.target}` : ""}${p.value && p.flags.includes("pantun") ? `\nPantun: sekali sehari di jam acak ${hm(windowOf(data.groups[keyOf(r.entries[0].account, r.entries[0].id)]).from)}–${hm(windowOf(data.groups[keyOf(r.entries[0].account, r.entries[0].id)]).to)}.` : ""}`;
       }
       return `${msg}${saved ? "" : "\n⚠️ Gagal menyimpan ke database: berlaku sampai bot restart saja."}`;
     } catch (e) {
@@ -771,9 +1095,9 @@ export function createHumor({ state = null, ai = null, send = null, listGroups =
   }
 
   function describe() {
-    const n = Object.values(data.groups).filter((g) => g && (g.chat || g.pantun || g.roast)).length;
+    const n = Object.values(data.groups).filter((g) => anyFlag(g)).length;
     return n ? `AKTIF di ${n} grup` : "mati di semua grup";
   }
 
-  return { load, settings, anyEnabled, chatNote, observe, noteTriggered, handlePreference, evaluate, roastNow, check, handle, describe, _debug: { data: () => data, sched: () => sched, buffers } };
+  return { load, settings, anyEnabled, chatNote, observe, noteBotSaid, noteTriggered, handlePreference, evaluate, roastNow, evaluateBalas, balasNow, check, checkSapa, handle, describe, _debug: { data: () => data, sched: () => sched, buffers, ctxBuf, lastSpontAt } };
 }

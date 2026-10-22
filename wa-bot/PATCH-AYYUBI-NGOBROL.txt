@@ -1,0 +1,44 @@
+PATCH AYYUBI v5: BALAS CHAT ACAK (reply, baca 15 chat sebelumnya) + CHAT OTOMATIS MINIMAL 10x/HARI di grup yang dinyalakan
+(Zip ini KUMULATIF: sudah memuat patch humor sebelumnya. Cukup pasang yang ini.)
+
+PASANG
+1. Cadangkan:  cp index.js index.js.bak && cp humor.js humor.js.bak && cp telegram.js telegram.js.bak
+2. Ekstrak dari folder yang MEMUATNYA wa-bot (zip berisi folder wa-bot/):  unzip -o patch-ayyubi-ngobrol.zip
+   Cek:  ls wa-bot/ngobrol.js   (harus ada; kalau muncul wa-bot/wa-bot/, pindahkan isinya ke wa-bot/)
+3. (Opsional) tes:  cd wa-bot && node test-humor.mjs && node test-ngobrol.mjs
+4. Restart bot. Tidak ada migrasi database (memakai tabel bot_state yang sudah ada).
+
+PAKAI (dari Telegram)
+/humor                       lihat grup + status (sekarang ada baris "balas" dan "sapa" beserta hitungan hari ini)
+/humor on keluarga           menyalakan SEMUA fitur humor termasuk balas & sapa untuk grup itu
+/humor balas on 2            hanya balas chat acak          (/humor balas off 2 = matikan)
+/humor sapa on 2             hanya chat otomatis harian     (/humor sapa off 2 = matikan)
+/humor tes sapa 2            kirim satu chat otomatis percobaan sekarang (tidak menghabiskan jatah)
+/humor tes balas 2           balas chat terakhir anggota yang terbaca (percobaan)
+Catatan: grup yang SUDAH menyala humor sebelum patch ini TIDAK otomatis ikut balas/sapa; nyalakan dengan /humor balas on ... dan /humor sapa on ...
+
+APA YANG TERJADI
+- BALAS: bot sesekali nimbrung dengan me-REPLY chat anggota (yang tidak memanggil bot). Sebelum membalas ia membaca 15 chat sebelumnya
+  (termasuk yang tadi dikatakan bot sendiri), supaya nyambung. TIDAK dibatasi jam (24 jam). Peluang tiap chat dibalas 20% (pertanyaan lebih sering),
+  jeda minimal 3 menit sejak bot terakhir bicara di grup itu, maks 40 balasan/hari/grup, jeda alami 6-25 detik + efek "sedang mengetik".
+  Bot diam bila obrolan serius/duka/komplain/resmi, pesan terlalu pendek/hanya tawa/tautan/menyebut orang lain, orangnya menolak, atau AI memilih SKIP.
+- SAPA: bot membuka obrolan sendiri MINIMAL 10x sehari per grup, jam menyebar sepanjang hari (24 jam), jarak minimal 10 menit.
+  Jenis bergantian: sapaan sesuai waktu, pertanyaan ringan, fakta receh, lelucon receh, penyemangat, tips kecil, menyambung topik terakhir grup.
+  Jadwal dihitung ulang dari sisa jatah & sisa waktu, jadi kalau bot sempat mati jatah tetap dikejar. Ditunda bila ada obrolan duka/serius atau ada yang baru mengetik.
+  Grup yang baru dinyalakan siang/sore: jatah hari itu menyesuaikan sisa hari (mis. dinyalakan 18:00 -> 3x).
+- Menolak: anggota menulis "bot jangan balas chatku" -> tidak dibalas acak lagi di grup itu. Mencabut: "bot boleh balas chatku lagi".
+- Privasi: ±23 chat terakhir grup (hanya grup yang balas/sapa-nya menyala) disimpan DI MEMORI saja; tidak ke database/berkas; hilang saat restart.
+
+PENGATURAN .env (semua opsional, lihat .env.example)
+WA_BALAS_CONTEXT=15  WA_BALAS_CHANCE=0.2  WA_BALAS_GAP_MIN=3  WA_BALAS_MAX_PER_DAY=40  WA_BALAS_WINDOW=00:00-23:59
+WA_SAPA_PER_DAY=10 (minimal 10)  WA_SAPA_MIN_GAP_MIN=10  WA_SAPA_WINDOW=00:00-23:59
+
+FILE BARU: ngobrol.js, test-ngobrol.mjs
+FILE DIUBAH: humor.js, index.js, telegram.js, package.json, README.md, .env.example, PATCH-AYYUBI-HUMOR.txt (+ file patch sebelumnya)
+
+CATATAN JUJUR
+- Logika (konteks 15 chat, reply, jatah, jadwal sebaran 24 jam, restart, penolakan, penyaring) sudah dites otomatis (18 kelompok); BELUM dicoba di WhatsApp sungguhan.
+- RISIKO NOMOR: pesan otomatis dari nomor Baileys (bukan API resmi) menambah risiko ditandai spam, terlebih bila banyak grup dinyalakan dan anggotanya jarang membalas.
+  Mulai dari SATU grup dulu. Kalau terasa mengganggu: /humor sapa off <grup> atau persempit jam: WA_SAPA_WINDOW=08:00-21:00.
+- Jam 24 penuh (termasuk dini hari) sesuai permintaan; anggota grup bisa terganggu notifikasi malam hari kalau grup tidak di-mute. Bisa dipersempit kapan saja lewat .env.
+- Kualitas lucu & nyambung sangat bergantung model AI. Model lokal kecil (qwen2.5:3b) sering kaku; hasil terbaik: urutkan AI ke Gemini/Groq lewat /urutan atau WA_AI_ENGINE=gemini.
