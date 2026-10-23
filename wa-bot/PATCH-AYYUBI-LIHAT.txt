@@ -29,6 +29,8 @@ PASANG
 - Stiker dibaca (label perasaan + deskripsi, sekali per stiker) dan masuk konteks obrolan.
 - Stiker anggota disimpan di folder data-stiker/ (maks 40/grup). Bot kadang membalas stiker dengan
   stiker lain yang sesuai dari perpustakaan grup itu (peluang 12%, 70% bila me-reply bot, jeda 10 menit, maks 10x/hari).
+- Jika tidak membalas dengan stiker: kadang bereaksi emoji sesuai perasaan stiker, atau menanggapi satu kalimat.
+  Log mencatat tiap stiker yang dibaca; /humor profil menampilkan stiker terbaru yang dikenali.
 - Tidak mengirim stiker saat: suasana sedih/kesal, mode latihan, bisu, jam tidur.
 - Stiker yang tampak tidak pantas otomatis dibuang. Anggota yang menolak dibalas tidak dibaca stikernya.
 

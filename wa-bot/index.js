@@ -5337,7 +5337,9 @@ async function observeHumorMedia(sock, msg, content, groupJid, { caption = "" } 
   }
   const ids = [msg.key.participant, msg.key.participantAlt].filter(Boolean).map((j) => j.split("@")[0].split(":")[0]);
   mediaSock.set(msg, sock);
-  humor.observeMedia(acct, groupJid, { name: msg.pushName || "", ids, kind: content.stickerMessage ? "stiker" : "gambar", caption, isOwner: isOwnerSender(msg, false), msg, repliedToBot });
+  const kind = content.stickerMessage ? "stiker" : "gambar";
+  const r = humor.observeMedia(acct, groupJid, { name: msg.pushName || "", ids, kind, caption, isOwner: isOwnerSender(msg, false), msg, repliedToBot });
+  if (kind === "stiker" && (!r || !r.ok)) console.log(`🎭 [${subject || "?"}] stiker dari ${msg.pushName || "?"} tidak diproses: ${r?.reason || "fitur belum siap (balas/sapa atau lihat mati / AI penglihatan belum tersedia)"}.`);
 }
 
 /** Bot dipanggil dengan foto/gambar/stiker ("@bot ini apa?"): lihat gambarnya dan jawab singkat. */

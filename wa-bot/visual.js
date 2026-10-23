@@ -18,7 +18,8 @@ export function readVisualConfig(env = process.env) {
     stikerBalasChance: num(env.WA_STIKER_CHANCE, 0.12, 0, 1), // peluang membalas stiker orang dengan stiker
     stikerGapMs: Math.floor(num(env.WA_STIKER_GAP_MIN, 10, 1, 24 * 60)) * 60_000,
     stikerMaxPerDay: Math.floor(num(env.WA_STIKER_MAX_PER_DAY, 10, 0, 200)), // 0 = bot tidak pernah mengirim stiker
-    fotoBalasFactor: num(env.WA_FOTO_BALAS_FACTOR, 1.5, 0, 5) // foto lebih menarik dikomentari daripada chat biasa
+    fotoBalasFactor: num(env.WA_FOTO_BALAS_FACTOR, 1.5, 0, 5), // foto lebih menarik dikomentari daripada chat biasa
+    stikerTeksFactor: num(env.WA_STIKER_TEKS_FACTOR, 0.5, 0, 3) // stiker berlabel kadang ditanggapi dengan kalimat (pengali WA_BALAS_CHANCE)
   };
 }
 
@@ -67,21 +68,40 @@ export const STICKER_SYSTEM = `Kamu membantu bot grup WhatsApp memahami sebuah S
 <label> | <deskripsi>
 <label> HARUS salah satu dari: ${STICKER_TAGS.join(", ")}. <deskripsi> = maks 60 karakter bahasa Indonesia: apa yang digambarkan dan perasaannya (contoh: "kucing tertawa terbahak-bahak"). Jangan menyebut nama orang dari wajah. Jika stiker bertuliskan kata kasar/SARA/vulgar atau menggambarkan hal tidak pantas, jawab persis: lain | SENSITIF`;
 
-/** "tawa | kucing tertawa" -> { tag, desc } | null. Label di luar daftar -> "lain". Stiker SENSITIF -> { sensitive: true }. */
+/** Emoji reaksi untuk stiker berlabel X (sedih/kesal tidak direaksi: suasana berat). */
+export const STICKER_REACTION = { tawa: "😂", senang: "😊", kaget: "😮", setuju: "👍", terimakasih: "🙏", semangat: "💪", bingung: "🤔", lain: "👍" };
+
+const stripDeskripsi = (t) => t.replace(/^deskripsi\s*[:=-]\s*/i, "").trim();
+
+/**
+ * Jawaban AI -> { tag, desc } | { sensitive: true } | null. Toleran terhadap gaya AI: **tebal**, "Label: x | Deskripsi: y", dua baris,
+ * label asing -> "lain". Jawaban tanpa format dan tanpa label yang dikenal -> null.
+ */
 export function parseStickerTag(raw) {
-  const line = clean1(String(raw ?? "").split(/\r?\n/).find((l) => l.trim()) || "", 200);
-  if (!line) return null;
-  const m = /^([A-Za-z]+)\s*[|:–-]\s*(.+)$/.exec(line);
-  if (!m) {
-    const only = line.toLowerCase().replace(/[^a-z]/g, "");
-    return STICKER_TAGS.includes(only) && only === line.toLowerCase() ? { tag: only, desc: "" } : null; // tanpa format: hanya label tunggal yang diterima
-  }
-  const tagRaw = m[1].toLowerCase();
-  const tag = STICKER_TAGS.includes(tagRaw) ? tagRaw : "lain";
-  const desc = clean1(m[2], 80);
-  if (/sensitif/i.test(desc)) return { sensitive: true, tag: "lain", desc: "" };
-  if (HAS_LINK_OR_MENTION.test(desc)) return { tag, desc: "" };
-  return { tag, desc };
+  const text = String(raw ?? "").replace(/[*_`#>]+/g, " ");
+  const lines = text.split(/\r?\n/).map((l) => clean1(l, 200)).filter(Boolean);
+  if (!lines.length) return null;
+  if (/\bsensitif\b/i.test(lines.join(" "))) return { sensitive: true, tag: "lain", desc: "" };
+  const first = lines[0];
+  const finish = (tagRaw, descRaw) => {
+    const t = String(tagRaw).toLowerCase().replace(/[^a-z]/g, "");
+    const tag = STICKER_TAGS.includes(t) ? t : "lain";
+    let desc = clean1(stripDeskripsi(clean1(descRaw, 200)), 80);
+    if (!desc) {
+      const dl = lines.slice(1).find((l) => /^deskripsi\s*[:=-]/i.test(l)) || lines[1] || "";
+      desc = clean1(stripDeskripsi(dl), 80);
+    }
+    if (HAS_LINK_OR_MENTION.test(desc)) desc = "";
+    return { tag, desc };
+  };
+  // "Label: kaget | Deskripsi: kucing terkejut" / "label = kaget"
+  const lab = /^label\s*[:=-]\s*([A-Za-z]+)\s*(?:[|;,-]\s*(.*))?$/i.exec(first);
+  if (lab) return finish(lab[1], lab[2] || "");
+  const m = /^([A-Za-z]+)\s*[|:–—-]\s*(.+)$/.exec(first);
+  if (m) return finish(m[1], m[2]);
+  const only = first.toLowerCase().replace(/[^a-z]/g, "");
+  if (STICKER_TAGS.includes(only) && only === first.toLowerCase()) return finish(only, "");
+  return null;
 }
 
 // ---------------------------------------------------------------- perpustakaan stiker

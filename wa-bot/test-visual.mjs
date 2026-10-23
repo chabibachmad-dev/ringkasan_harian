@@ -542,6 +542,82 @@ await ok("perpustakaan penuh: stiker lama dibuang beserta berkasnya", async () =
   assert.equal(r.files.size, 5, "berkas yang dibuang ikut terhapus");
 });
 
+await ok("label stiker: toleran pada gaya AI (**tebal**, 'Label: x | Deskripsi: y', dua baris, huruf besar)", () => {
+  assert.deepEqual(parseStickerTag("**tawa** | kucing tertawa terbahak"), { tag: "tawa", desc: "kucing tertawa terbahak" });
+  assert.deepEqual(parseStickerTag("Label: kaget | Deskripsi: kucing terkejut"), { tag: "kaget", desc: "kucing terkejut" });
+  assert.deepEqual(parseStickerTag("Label: setuju\nDeskripsi: jempol terangkat"), { tag: "setuju", desc: "jempol terangkat" });
+  assert.deepEqual(parseStickerTag("`senang` | anak kecil melompat"), { tag: "senang", desc: "anak kecil melompat" });
+  assert.deepEqual(parseStickerTag("TAWA: orang ngakak"), { tag: "tawa", desc: "orang ngakak" });
+  assert.deepEqual(parseStickerTag("tawa"), { tag: "tawa", desc: "" });
+  assert.equal(parseStickerTag("Stiker ini menampilkan seekor kucing yang sedang tertawa"), null, "tanpa format & tanpa label: tidak ditebak");
+  assert.equal(parseStickerTag("lain | SENSITIF").sensitive, true);
+  assert.equal(parseStickerTag("**SENSITIF**").sensitive, true);
+});
+
+await ok("stiker: bereaksi emoji sesuai label (tawa -> 😂); sedih/kesal tidak direaksi dan tidak dibalas teks", async () => {
+  let r = rig({ env: { WA_REAKSI_CHANCE: "1", WA_REAKSI_GAP_SEC: "5" } });
+  await r.h.load();
+  await r.h.handle("balas on keluarga");
+  await r.h.handle("lihat on keluarga");
+  chat(r);
+  r.tick(5 * MIN);
+  sticker(r, "Sari", STK(1));
+  await settle(r);
+  assert.deepEqual(r.reacts.map((x) => x.emoji), ["😂"]);
+  r = rig({ env: { WA_REAKSI_CHANCE: "1", WA_REAKSI_GAP_SEC: "5" }, visionOut: "sedih | anak kecil menangis" });
+  await r.h.load();
+  await r.h.handle("balas on keluarga");
+  await r.h.handle("lihat on keluarga");
+  chat(r);
+  r.tick(5 * MIN);
+  r.setRnd(0.01);
+  sticker(r, "Sari", STK(1));
+  await settle(r);
+  assert.equal(r.reacts.length, 0, "stiker sedih tidak direaksi");
+  assert.equal(r.sent.length, 0, "stiker sedih tidak ditanggapi teks");
+  assert.equal(r.stickersSent.length, 0);
+});
+
+await ok("stiker: kadang ditanggapi satu kalimat (dengan makna stiker di prompt), reply ke stikernya", async () => {
+  const r = rig();
+  await r.h.load();
+  await r.h.handle("balas on keluarga");
+  await r.h.handle("lihat on keluarga");
+  chat(r);
+  r.tick(5 * MIN);
+  r.setRnd(0.01);
+  sticker(r, "Sari", STK(1));
+  await settle(r);
+  assert.equal(r.sent.length, 1, "ditanggapi dengan kalimat");
+  assert.ok(r.sent[0].o.quoted);
+  const prompt = r.aiCalls.at(-1).user;
+  assert.match(prompt, /\[stiker: kucing tertawa/);
+  assert.match(prompt, /STIKER/);
+  // peluang tidak lolos: diam
+  const r2 = rig();
+  await r2.h.load();
+  await r2.h.handle("balas on keluarga");
+  await r2.h.handle("lihat on keluarga");
+  chat(r2);
+  r2.tick(5 * MIN);
+  sticker(r2, "Sari", STK(1));
+  await settle(r2);
+  assert.equal(r2.sent.length, 0);
+});
+
+await ok("/humor profil: menampilkan stiker terbaru yang sudah dibaca (label + deskripsi)", async () => {
+  const r = rig();
+  await r.h.load();
+  await r.h.handle("balas on keluarga");
+  await r.h.handle("lihat on keluarga");
+  chat(r);
+  sticker(r, "Sari", STK(1));
+  await settle(r);
+  const prof = await r.h.handle("profil keluarga");
+  assert.match(prof, /Stiker tersimpan: 1 \(berlabel 1\)/);
+  assert.match(prof, /tawa: kucing tertawa terbahak/);
+});
+
 // ---------------------------------------------------------------- integrasi
 await ok("terintegrasi: index.js (gambar/stiker/AI penglihatan), dokumentasi, .env.example, package.json", () => {
   const idx = fs.readFileSync(new URL("./index.js", import.meta.url), "utf8");

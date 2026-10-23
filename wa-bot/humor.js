@@ -36,7 +36,7 @@ import {
   MEMORY_MAX_FACTS, MEMORY_REFUSE_TEXT, SILENT_MOODS, addressedToOther, balasEngagementFactor, describeStyle, detectMood, emptyFeedback, emptyStyle, fewShotNote, isDuoChat,
   kindWeights, moodHint, occasionsFor, parseBirthday, parseMemoryCmd, parseReactionOutput, pickReaction, pushExample, sanitizeFact, splitBubbles, updateStyle
 } from "./manusiawi.js";
-import { IMAGE_SYSTEM, STICKER_SYSTEM, addToLibrary, buildImageUserPrompt, cleanImageDescription, parseStickerTag, pickStickerFor, readVisualConfig } from "./visual.js";
+import { IMAGE_SYSTEM, STICKER_SYSTEM, addToLibrary, buildImageUserPrompt, cleanImageDescription, parseStickerTag, pickStickerFor, readVisualConfig, STICKER_REACTION } from "./visual.js";
 
 export const STATE_KEY = "wa_group_humor";
 export const SCHED_KEY = "wa_group_humor_sched";
@@ -908,7 +908,7 @@ export function createHumor({ state = null, ai = null, send = null, react = null
     if (balasToday(key).count >= config.balasMaxPerDay) return { ok: false, reason: "jatah hari ini habis" };
     if (t - (lastSpontAt.get(key) || 0) < config.balasGapMs) return { ok: false, reason: "bot baru saja bicara" };
     if (t - (lastTriggerAt.get(key) || 0) < 60_000) return { ok: false, reason: "bot baru saja dipanggil" };
-    if (!(entry.media ? entry.media.kind === "gambar" : isReplyWorthy(entry.text))) return { ok: false, reason: "pesan tidak layak dibalas" };
+    if (!(entry.media ? entry.media.kind === "gambar" || Boolean(entry.media.tag) : isReplyWorthy(entry.text))) return { ok: false, reason: "pesan tidak layak dibalas" };
     if ((data.noreply[key] || []).some((id) => entry.ids.includes(id))) return { ok: false, reason: "orang ini menolak dibalas" };
     const context = contextBefore(key, entry);
     if (!context.length) return { ok: false, reason: "belum ada konteks" };
@@ -916,6 +916,7 @@ export function createHumor({ state = null, ai = null, send = null, react = null
     if (isSeriousChat([...humans, entry])) return { ok: false, reason: "obrolan serius" };
     const mood = detectMood(entry.text);
     if (SILENT_MOODS.has(mood) || humans.slice(-3).some((m) => SILENT_MOODS.has(detectMood(m.text)))) return { ok: false, reason: "suasana sedih/kesal: bot memilih diam" };
+    if (entry.media?.tag === "sedih" || entry.media?.tag === "kesal") return { ok: false, reason: "stiker sedih/kesal: bot memilih diam" };
     if (addressedToOther(entry.text, humans.filter((m) => m !== entry).map((m) => m.name))) return { ok: false, reason: "pesan ditujukan ke orang lain" };
     const night = isNight(localParts(t, timeZone).minutes);
     if (night) {
@@ -925,7 +926,7 @@ export function createHumor({ state = null, ai = null, send = null, react = null
     }
     if (!ignoreChance) {
       const duo = isDuoChat([...humans, entry].filter((m) => !m.isBot), entry.text);
-      const p = Math.min(0.9, (night ? config.tidurBalasFactor : 1) * (entry.media?.kind === "gambar" ? config.fotoBalasFactor : 1) * config.balasChance * (/\?/.test(entry.text) ? 1.8 : 1) * (hasCasualCue([entry]) ? 1.3 : 1) * (duo ? 0.35 : 1) * balasEngagementFactor(fbOf(key)));
+      const p = Math.min(0.9, (night ? config.tidurBalasFactor : 1) * (entry.media?.kind === "gambar" ? config.fotoBalasFactor : entry.media ? config.stikerTeksFactor : 1) * config.balasChance * (/\?/.test(entry.text) ? 1.8 : 1) * (hasCasualCue([entry]) ? 1.3 : 1) * (duo ? 0.35 : 1) * balasEngagementFactor(fbOf(key)));
       if (random() >= p) return { ok: false, reason: duo ? "dua orang sedang ngobrol berdua" : "tidak terpilih (acak)" };
     }
     return { ok: true, context, mood };
@@ -1003,7 +1004,12 @@ export function createHumor({ state = null, ai = null, send = null, react = null
   }
 
   /** Teks petunjuk untuk pembalas: pesan yang dibalas adalah foto. */
-  const photoHint = (entry) => (entry.media?.kind === "gambar" ? " Pesan yang dibalas adalah FOTO (isinya ada di tanda [foto: ...]). Komentari isi foto itu secara singkat dan hangat; jangan menebak hal yang tidak ada di deskripsi dan jangan menyebut nama orang di foto." : "");
+  const photoHint = (entry) =>
+    entry.media?.kind === "gambar"
+      ? " Pesan yang dibalas adalah FOTO (isinya ada di tanda [foto: ...]). Komentari isi foto itu secara singkat dan hangat; jangan menebak hal yang tidak ada di deskripsi dan jangan menyebut nama orang di foto."
+      : entry.media
+        ? " Pesan yang dibalas adalah STIKER (maknanya ada di tanda [stiker: ...]). Tanggapi perasaan/maksudnya seperti teman, satu kalimat pendek; jangan menjelaskan isi stikernya."
+        : "";
 
   /** Anggota mengirim gambar/stiker. Dicatat sebagai konteks; gambar bisa dibalas, stiker bisa dibalas stiker. */
   function observeMedia(account, jid, { name = "", ids = [], kind = "gambar", caption = "", isOwner = false, msg = null, repliedToBot = false, triggered = false } = {}) {
@@ -1075,7 +1081,18 @@ export function createHumor({ state = null, ai = null, send = null, react = null
       entry.media.tag = item.tag;
       entry.text = `[stiker${item.desc ? `: ${item.desc}` : ""}]`.slice(0, 240);
     }
-    await considerStickerReply(account, jid, key, entry, item, { repliedToBot });
+    log.log?.(`🎭 [Humor] stiker dari ${entry.name || "?"} dibaca: ${item.tag ? `${item.tag}${item.desc ? ` — ${item.desc}` : ""}` : "(label gagal)"} • perpustakaan ${lib.length} stiker.`);
+    const sr = await considerStickerReply(account, jid, key, entry, item, { repliedToBot });
+    if (sr.sent || !item.tag) return;
+    // tidak membalas dengan stiker: kadang cukup bereaksi emoji, atau menanggapi dengan satu kalimat
+    if (!maybeReactSticker(account, jid, entry, item.tag)) scheduleBalas(account, jid, entry);
+  }
+
+  /** Reaksi emoji untuk stiker berlabel (tanpa AI). */
+  function maybeReactSticker(account, jid, entry, tag) {
+    const emoji = STICKER_REACTION[tag];
+    if (!emoji) return null; // sedih/kesal tidak punya emoji: bot diam
+    return maybeReact(account, jid, entry, emoji);
   }
 
   function stikerToday(key) {
@@ -1162,14 +1179,14 @@ export function createHumor({ state = null, ai = null, send = null, react = null
     return true;
   }
   /** Beri reaksi emoji pada pesan bernuansa (lucu, kabar baik, terima kasih, capek, ulang tahun). Aturan murni; tanpa AI. */
-  function maybeReact(account, jid, entry) {
+  function maybeReact(account, jid, entry, forcedEmoji = null) {
     const key = keyOf(account, jid);
     const g = settings(account, jid);
     if (!g?.balas || !react || !entry.msg || muted(key)) return null;
     if (config.reaksiMaxPerDay <= 0) return null;
     const t = now();
     if (!inWindow(config.balasWindow, localParts(t, timeZone).minutes)) return null;
-    const emoji = pickReaction(detectMood(entry.text));
+    const emoji = forcedEmoji || pickReaction(detectMood(entry.text));
     if (!emoji) return null;
     if ((ctxBuf.get(key) || []).filter((m) => !m.isBot && m !== entry).slice(-3).some((m) => SILENT_MOODS.has(detectMood(m.text)))) return null; // suasana sedang berat: jangan "bercanda" lewat emoji
     if ((data.noreply[key] || []).some((id) => entry.ids.includes(id))) return null;
@@ -1689,7 +1706,7 @@ export function createHumor({ state = null, ai = null, send = null, react = null
           stl || `Gaya grup: belum cukup data (${styles[key]?.n || 0}/20 pesan terbaca; fitur balas/sapa harus menyala).`,
           fb ? `Contoh disukai: ${fb.good.length} • ditolak: ${fb.bad.length}${data.groups[key]?.latihan ? " (mode latihan AKTIF)" : ""}` : "Belum ada umpan balik.",
           kinds.length ? `Tanggapan grup per jenis pesan:\n${kinds.map(([k, v]) => `• ${k}: ${v.sent} terkirim, ${Math.round((v.eng / Math.max(1, v.sent)) * 100)}% ditanggapi`).join("\n")}` : "Belum ada data tanggapan grup.",
-          data.groups[key]?.lihat ? `Stiker tersimpan: ${(stickers[key] || []).length} (berlabel ${(stickers[key] || []).filter((x) => x.tag).length}).` : "Baca gambar/stiker: mati (nyalakan: /humor lihat on <grup>).",
+          data.groups[key]?.lihat ? `Stiker tersimpan: ${(stickers[key] || []).length} (berlabel ${(stickers[key] || []).filter((x) => x.tag).length}).${(stickers[key] || []).filter((x) => x.tag).slice(-4).map((x) => `\n  • ${x.tag}${x.desc ? `: ${x.desc}` : ""}`).join("")}` : "Baca gambar/stiker: mati (nyalakan: /humor lihat on <grup>).",
           mem.length ? `Anggota yang minta diingat: ${mem.length} (${mem.map((m) => m.nick || firstName(m.name)).slice(0, 8).join(", ")})` : "Belum ada anggota yang minta diingat."
         ].join("\n");
       }
