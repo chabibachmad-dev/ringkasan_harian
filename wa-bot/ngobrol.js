@@ -4,6 +4,8 @@
 // Jam tidur (bawaan 22:30-05:00, WA_JAM_TIDUR): bot TIDAK membuka obrolan sendiri; membalas hanya bila obrolan sedang ramai dan dengan peluang kecil.
 // Chat otomatis (sapa) bawaannya hanya 06:00-21:30; bisa diubah lewat WA_BALAS_WINDOW / WA_SAPA_WINDOW.
 
+import { NO_OFFER_NOTE, stripHelpOffers } from "./insani.js";
+
 import { hasBannedWord } from "./humor.js";
 
 const ALL_DAY = { from: 0, to: 24 * 60 - 1 };
@@ -105,7 +107,7 @@ export function isReplyWorthy(text) {
 
 // ---------------------------------------------------------------- prompt & penyaring: BALAS
 export function cleanChat(raw) {
-  let t = String(raw ?? "").replace(/```[a-z]*/gi, "").trim();
+  let t = stripHelpOffers(String(raw ?? "").replace(/```[a-z]*/gi, "").trim(), { fallback: "" });
   t = t.split(/\r?\n/).map((l) => l.trim()).filter(Boolean).slice(0, 2).join("\n"); // dua baris = dua gelembung pesan
   t = t.replace(/^(?:ayyubi|bot|balasan|jawaban|saya|aku)\s*:\s*/i, "").replace(/^["“”'`]+|["“”'`]+$/g, "").trim();
   return t;
@@ -131,13 +133,14 @@ export const PERSONA_BASE = `Kamu Ayyubi, bot yang ikut nimbrung di grup WhatsAp
 const personaExtra = () => (process.env.WA_PERSONA_NOTE ? `\nCiri tambahan dari pemilik: ${String(process.env.WA_PERSONA_NOTE).slice(0, 400)}` : "");
 const persona = () => `${PERSONA_BASE}${personaExtra()}`;
 
-const SAFETY = `ATURAN KERAS: tanpa SARA, politik, ejekan fisik, keluarga, pasangan, uang/gaji, kesehatan; tanpa kata kasar; jangan menyudutkan atau menggurui siapa pun; jangan mengarang fakta, angka, atau aturan; jangan mengaku punya pengalaman fisik (makan, tidur, bepergian) atau tubuh; jangan menyebut dirimu AI/model/nama produk kecuali ditanya; jangan memakai tautan, mention (@), atau tagar.`;
+const SAFETY = `${NO_OFFER_NOTE}
+ATURAN KERAS: tanpa SARA, politik, ejekan fisik, keluarga, pasangan, uang/gaji, kesehatan; tanpa kata kasar; jangan menyudutkan atau menggurui siapa pun; jangan mengarang fakta, angka, atau aturan; jangan mengaku punya pengalaman fisik (makan, tidur, bepergian) atau tubuh; jangan menyebut dirimu AI/model/nama produk kecuali ditanya; jangan memakai tautan, mention (@), atau tagar.`;
 
 export function buildReplyPrompt({ target, context = [], botName = "Ayyubi", styleNote = "", memberNote = "", fewShot = "", moodHint = "", allowReaction = true, stickerTags = [] }) {
   const system = `${persona()}
 Tugas: baca obrolan sebelumnya, lalu balas SATU pesan terakhir dengan nyambung ke konteksnya, seperti teman yang kebetulan lewat dan ikut menimpali.
 ${SAFETY}
-Gaya balasan: 1-2 kalimat pendek (maksimal 35 kata), boleh satu emoji, boleh bercanda ringan atau menimpali/bertanya balik. Kalau perlu dua gelembung pesan (mis. menimpali lalu bertanya), tulis di dua baris terpisah. Untuk pertanyaan teknis/hukum/keuangan yang butuh jawaban pasti dan kamu tidak yakin, jangan menebak: balas singkat dan ajak "panggil namaku ya kalau mau jawaban lengkap".
+Gaya balasan: 1-2 kalimat pendek (maksimal 35 kata), boleh satu emoji, boleh bercanda ringan atau menimpali/bertanya balik. Kalau perlu dua gelembung pesan (mis. menimpali lalu bertanya), tulis di dua baris terpisah. Untuk pertanyaan teknis/hukum/keuangan yang butuh jawaban pasti dan kamu tidak yakin, jangan menebak dan jangan mengajak bertanya: cukup balas singkat seadanya, atau SKIP.
 ${allowReaction ? "Bila cukup memberi reaksi saja (pesan lucu, kabar baik, ucapan terima kasih), jawab persis: REAKSI: <satu emoji dari 👍 😂 🙏 🎉 👏 💪 ❤️ 😮 🔥>.\n" : ""}${stickerTags.length ? `Kamu punya koleksi stiker. Sesekali (jangan tiap balasan) boleh membalas dengan stiker saja bila lebih pas daripada kata-kata (lucu, kabar baik, terima kasih, setuju): tulis satu baris persis STIKER: <label>, label dari: ${stickerTags.join(", ")}. Boleh juga satu kalimat pendek lalu baris STIKER: di bawahnya.\n` : ""}Jawab persis SKIP bila: obrolan serius/sedih/resmi/pertengkaran, bahasan agama atau politik, pesan itu ditujukan khusus ke orang lain, atau kamu tidak punya tambahan yang wajar. Keluarkan HANYA teks balasan (atau REAKSI/SKIP), tanpa tanda kutip dan tanpa penjelasan.${styleNote ? `\n${styleNote}` : ""}${fewShot ? `\n${fewShot}` : ""}`;
   const lines = context.map((m) => `${m.isBot ? `${botName} (kamu)` : m.name || "?"}: ${String(m.text).slice(0, 220)}`).join("\n");
   const user = `${context.length ? `Obrolan sebelumnya (${context.length} chat terakhir):\n${lines}\n\n` : ""}Pesan yang dibalas -- ${target.name || "seseorang"}: ${String(target.text).slice(0, 300)}${target.quoted ? `\n(pesan itu sendiri membalas/mengutip: "${String(target.quoted).replace(/\s+/g, " ").slice(0, 160)}")` : ""}${moodHint ? `\n\nCatatan suasana: ${moodHint}` : ""}${memberNote ? `\n\n${memberNote}` : ""}`;
@@ -206,7 +209,7 @@ export const FALLBACK_SAPA = [
   "Siapa yang lagi nungguin jam pulang? Aku temani dengan semangat virtual 🕒",
   "Hari ini ada kabar baik, sekecil apa pun? Bagi dong biar grupnya ikut senang 🌟",
   "Tantangan santai: sebut satu makanan khas daerahmu yang wajib dicoba orang lain 🍲",
-  "Lagi ada yang butuh teman ngobrol? Aku siap dengerin receh-receh kalian 😄",
+  "Lagi santai nih. Cerita receh apa yang paling bikin kalian ketawa minggu ini? 😄",
   "Satu kata untuk menggambarkan harimu sejauh ini? Aku mulai: \"lancar\" 😌"
 ];
 

@@ -220,3 +220,72 @@ export function reactionFromText(text) {
   for (const [re, e] of REACTION_CUES) if (re.test(t)) return e;
   return null;
 }
+
+// ---------------------------------------------------------------- tanpa tawaran bantuan
+/** Aturan untuk semua prompt balasan WhatsApp: jangan menawarkan bantuan. */
+export const NO_OFFER_NOTE = `JANGAN menawarkan bantuan atau mengundang bertanya: tidak ada "Ada yang bisa dibantu?", "Ada yang bisa kubantu lagi?", "Silakan tanya kalau butuh bantuan", "Jangan ragu bertanya", "Semoga membantu", "Kabari ya kalau ada yang kurang". Orang akan bertanya sendiri bila memang ingin bertanya; jawab apa yang ditanyakan lalu berhenti, seperti teman, bukan petugas layanan.`;
+
+const OFFER_RES = [
+  /\b(?:ada|apa|masih ada|ada lagi)\s+(?:yang|yg|hal)\s+(?:lain\s+|lagi\s+)?(?:bisa|dapat|boleh|perlu|butuh|mau|ingin)\s+(?:saya\s+|aku\s+|gue\s+|kami\s+|kita\s+|ayyubi\s+)?(?:bantu|dibantu|kubantu|kubantuin|dibantuin|dibantukan|bantuan|dibantu lagi)/i,
+  /\b(?:apa|ada)\s+(?:yang|yg)\s+(?:bisa|dapat|boleh)\s+(?:saya|aku|gue|kami|ayyubi)\s+(?:bantu|lakukan|kerjakan)/i,
+  /\bbisa\s+(?:saya|aku|gue|ayyubi)\s+bantu\b/i,
+  /\b(?:bisa|boleh)\s+(?:kubantu|kubantuin)\b/i,
+  /\b(?:ada|apa)\s+(?:yang\s+)?(?:perlu|butuh|mau)\s+(?:kubantu|aku bantu|saya bantu|dibantu|bantuan)/i,
+  /\b(?:mau|perlu|butuh|ingin)\s+(?:dibantu|bantuan)\s*(?:apa|lagi|lain|lebih lanjut|nih|ya|\?|$)/i,
+  /\b(?:siap|senang|dengan senang hati|selalu siap)\s+(?:untuk\s+)?(?:membantu|bantu|menolong|mendengarkan|dengerin|mendengar)\b/i,
+  /\b(?:jangan|gak usah|nggak usah|tidak perlu)\s+(?:ragu|sungkan|malu|segan)\b/i,
+  /\b(?:silakan|silahkan|boleh|monggo)\s+(?:bertanya|tanya|tanyakan|bilang|kabari|hubungi|minta|panggil)\b[^.!?]{0,50}\b(?:lagi|kapan saja|kapan pun|bila|kalau|jika|aja|saja|ya)\b/i,
+  /\b(?:kalau|jika|bila|apabila)\s+(?:masih\s+|ada\s+)?(?:ada\s+)?(?:pertanyaan|yang kurang jelas|yang belum jelas|hal lain|yang ingin ditanyakan|yang mau ditanyakan|butuh|perlu)\b[^.!?]{0,60}\b(?:tanya|tanyakan|bilang|kabari|hubungi|panggil|kasih tahu|beri tahu|bantu|bantuan|silakan|silahkan|jangan)/i,
+  /\b(?:semoga|moga-moga)\s+(?:ini\s+|jawaban(?:ku| ini)?\s+)?(?:membantu|bermanfaat|menjawab|cukup jelas|jelas)\b/i,
+  /\b(?:lagi\s+)?ada\s+yang\s+(?:butuh|perlu|mau)\s+(?:teman|temen)\s+(?:ngobrol|cerita|curhat)/i,
+  /\bhappy to help\b|\bfeel free to (?:ask|reach)\b|\blet me know if\b|\banything else\b|\bhow can i (?:help|assist)\b/i
+];
+const isOffer = (s) => s.length <= 150 && OFFER_RES.some((re) => re.test(s));
+
+function stripSegment(text) {
+  const sentences = text.match(/\n+|[^.!?\n]+(?:[.!?]+|$)[ \t]*/g) || [text];
+  const kept = [];
+  for (const sent of sentences) {
+    const core = sent.trim();
+    if (!core) {
+      kept.push(sent);
+      continue;
+    }
+    // "Jawabannya 12, ada lagi yang bisa kubantu?" -> buang ekor tawaran setelah koma/strip, jawabannya dipertahankan
+    const cuts = [];
+    for (const m of core.matchAll(/[,;]| [-–—] /g)) cuts.push(m.index);
+    let handled = false;
+    for (const cut of cuts.reverse()) {
+      if (cut < 3) continue;
+      const tail = core.slice(cut).replace(/^[\s,;\-–—]+(?:dan|atau|oh ya|btw)?\s*/i, "");
+      if (!isOffer(tail)) continue;
+      const head = core.slice(0, cut).trim();
+      if (isOffer(head) || /^(?:kalau|jika|bila|apabila)\b/i.test(head)) {
+        handled = true; // kepala kalimat hanyalah syarat/tawaran ("Kalau ada pertanyaan lain, silakan tanya"): seluruh kalimat dibuang
+        break;
+      }
+      const mark = /^(?:halo|hai|hi|hei|hey|selamat|assalamualaikum|permisi)\b/i.test(head) || /!\s*$/.test(core) ? "!" : ".";
+      kept.push(`${head}${/[.!?]$/.test(head) ? "" : mark}${sent.slice(sent.trimEnd().length)}`);
+      handled = true;
+      break;
+    }
+    if (handled) continue;
+    if (isOffer(core)) continue; // seluruh kalimat adalah tawaran
+    kept.push(sent);
+  }
+  return kept.join("");
+}
+
+/**
+ * Buang tawaran bantuan dari balasan ("Ada yang bisa dibantu?", "Jangan ragu bertanya", "Semoga membantu", ...). Blok kode tidak disentuh.
+ * Bila seluruh balasan ternyata hanya tawaran, kembalikan `fallback` (bawaan "Iya?"; "" = tidak ada balasan).
+ */
+export function stripHelpOffers(text, { fallback = "Iya?" } = {}) {
+  const raw = String(text ?? "");
+  if (!raw.trim()) return raw;
+  const parts = raw.split(/(```[\s\S]*?```)/g);
+  let out = parts.map((p, i) => (i % 2 === 1 ? p : stripSegment(p))).join("");
+  out = out.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").replace(/[ \t]{2,}/g, " ").trim();
+  if (!out.replace(/[\s\p{P}\p{S}]/gu, "")) return fallback;
+  return out;
+}

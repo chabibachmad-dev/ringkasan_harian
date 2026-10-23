@@ -24,7 +24,7 @@ export const FEMALE_VOICES = ["Achernar", "Aoede", "Autonoe", "Callirrhoe", "Des
 export const MALE_VOICES = ["Achird", "Algenib", "Algieba", "Alnilam", "Charon", "Enceladus", "Fenrir", "Iapetus", "Orus", "Puck", "Rasalgethi", "Sadachbia", "Sadaltager", "Schedar", "Umbriel", "Zubenelgenubi"];
 export const ALL_VOICES = [...FEMALE_VOICES, ...MALE_VOICES];
 export const STYLE_MAX = 240;
-export const sampleText = (name = "") => (name ? `Halo, aku ${name}. Senang bertemu denganmu! Ada yang bisa kubantu hari ini?` : "Halo, ini contoh suaranya. Senang bertemu denganmu! Ada yang bisa kubantu hari ini?");
+export const sampleText = (name = "") => (name ? `Halo, aku ${name}. Senang bertemu denganmu!` : "Halo, ini contoh suaranya. Senang bertemu denganmu!");
 
 /** "puck" / "PUCK" -> "Puck"; tidak dikenal -> null. */
 export function findVoice(name) {

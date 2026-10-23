@@ -25,3 +25,9 @@ CATATAN JUJUR
   terlalu ramai turunkan WA_BALAS_CHANCE atau naikkan WA_BALAS_GAP_MIN; kalau terlalu sepi sebaliknya. Mulai dari 1 grup dengan /humor latihan on.
 - Salah ketik buatan itu gimmick: kalau terasa aneh, WA_TYPO_CHANCE=0.
 - Ingatan otomatis hanya untuk grup yang kamu nyalakan; beri tahu anggota grup bahwa bot bisa "lupakan aku".
+
+TAMBAHAN: TANPA TAWARAN BANTUAN
+- "Ada yang bisa dibantu?", "Silakan tanya kalau butuh bantuan", "Jangan ragu bertanya", "Semoga membantu" dan sejenisnya dibuang:
+  (1) aturan di semua prompt balasan WhatsApp, (2) penyaring kode di insani.js (stripHelpOffers) pada balasan grup/pribadi dan balasan acak/sapa.
+- Kalimat cadangan yang menawarkan bantuan diganti (sapa cadangan, contoh suara, teks pemilik).
+- Telegram (chat dengan pemilik) tidak diubah.

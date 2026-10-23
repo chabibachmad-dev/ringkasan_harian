@@ -140,4 +140,4 @@ const DEFLECT_RE = /(?:di|ku|kami|saya\s+|aku\s+|akan\s+)?(?:sampaikan|teruskan|
 export const deflectsToOwner = (reply) => DEFLECT_RE.test(String(reply ?? ""));
 
 export const OWNER_DEFLECT_FIX = "KOREKSI: draf jawabanmu tadi menyuruh menunggu/menyampaikan ke pemilik nomor, padahal yang bertanya adalah PEMILIK nomor itu sendiri. Tulis ulang: jawab langsung pertanyaan atau permintaannya sekarang, tanpa menyebut 'disampaikan ke pemilik'.";
-export const OWNER_DEFLECT_FALLBACK = "Siap. Aku bisa bantu langsung, ya. Tolong tulis pertanyaan atau perintahnya sedikit lebih jelas.";
+export const OWNER_DEFLECT_FALLBACK = "Siap. Tolong tulis pertanyaan atau perintahnya sedikit lebih jelas.";

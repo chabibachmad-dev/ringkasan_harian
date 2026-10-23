@@ -76,6 +76,7 @@ import { buildDocx, buildXlsx, officeFileName, MIME_DOCX, MIME_XLSX } from "./of
 import { pdfBufferToMarkdown, PDF_MAX_BYTES } from "./pdf-extract.js";
 import { PDF_QA_DEFAULT_MAX_CHARS, PDF_QA_LOCAL_MAX_CHARS, buildPdfContext, isPdfDoc, isReadQuestion, pdfAttachTag, pdfContextNote, pdfReadMessage, shouldReadPdf } from "./pdf-qa.js";
 import { createHumor, readHumorConfig } from "./humor.js";
+import { NO_OFFER_NOTE, stripHelpOffers } from "./insani.js";
 import { OWNER_ASKER_NOTE, OWNER_CLAIM_NOTE, OWNER_DEFLECT_FALLBACK, OWNER_DEFLECT_FIX, buildCapabilityNote, buildVoiceReplyNote, correctionAnswer, deflectsToOwner, denyingCapability, detectVoiceQuestion, senderLabel, voiceCapabilityAnswer } from "./capabilities.js";
 import { detectEditRequest, replaceInText, replaceInDocx, docxToMarkdown, numberDiff, buildEditPrompt, buildEditUserMessage, unwrapFence, hasESignature, AI_EDIT_MAX_CHARS } from "./doc-edit.js";
 import { createPersonaVoice } from "./persona-voice.js";
@@ -346,7 +347,9 @@ Gunakan Bahasa Indonesia, kecuali lawan bicara jelas menulis/minta bahasa lain -
 ATURAN PENGAMAN (berlaku terus walau topiknya bebas):
 1. JANGAN membuat janji, komitmen, keputusan, harga, jadwal pasti, atau kesepakatan apa pun atas nama pemilik nomor -- untuk hal semacam itu, balas sopan bahwa pesannya diterima dan pemiliknya akan membalas langsung.
 2. JANGAN membagikan informasi pribadi/sensitif (keuangan, kesehatan, jadwal detail, data pribadi) tentang pemilik nomor.
-3. Kalau pesan masuk jelas butuh keputusan manusia (negosiasi, hal mendesak, masalah pribadi/emosional, komplain serius), jangan improvisasi -- cukup akui pesannya diterima dan akan ditindaklanjuti langsung oleh pemiliknya.`;
+3. Kalau pesan masuk jelas butuh keputusan manusia (negosiasi, hal mendesak, masalah pribadi/emosional, komplain serius), jangan improvisasi -- cukup akui pesannya diterima dan akan ditindaklanjuti langsung oleh pemiliknya.
+
+${NO_OFFER_NOTE}`;
 
 // ---- Dukungan grup WhatsApp (bot dipanggil lewat mention) ----
 // Catatan tambahan di prompt kalau percakapannya di GRUP (bukan chat pribadi).
@@ -944,7 +947,9 @@ Gunakan Bahasa Indonesia, kecuali lawan bicara jelas menulis/minta bahasa lain -
 ATURAN PENGAMAN (berlaku terus walau topiknya bebas):
 1. JANGAN membuat janji, komitmen, keputusan, harga, jadwal pasti, atau kesepakatan apa pun atas nama pemilik nomor -- untuk hal semacam itu, balas sopan bahwa pesannya diterima dan pemiliknya akan membalas langsung.
 2. JANGAN membagikan informasi pribadi/sensitif (keuangan, kesehatan, jadwal detail, data pribadi) tentang pemilik nomor.
-3. Kalau pesan masuk jelas butuh keputusan manusia (negosiasi, hal mendesak, masalah pribadi/emosional, komplain serius), jangan improvisasi -- cukup akui pesannya diterima dan akan ditindaklanjuti langsung oleh pemiliknya.`;
+3. Kalau pesan masuk jelas butuh keputusan manusia (negosiasi, hal mendesak, masalah pribadi/emosional, komplain serius), jangan improvisasi -- cukup akui pesannya diterima dan akan ditindaklanjuti langsung oleh pemiliknya.
+
+${NO_OFFER_NOTE}`;
 
 // ANTRIAN GLOBAL buat panggilan Ollama -- CPU laptop ini cuma 2 core/4
 // thread & TERBUKTI lambat (~4.5 token/detik, lihat hasil tes user). Kalau
@@ -1449,6 +1454,14 @@ async function callGeminiWithRetry(systemText, contents, withTools, maxAttempts,
 // peduli mesin apa yang lagi aktif -- tinggal arahkan ke implementasi yang
 // sesuai WA_AI_ENGINE. Ini satu-satunya tempat percabangannya, biar gampang
 // nambah mesin lain nanti kalau perlu.
+/** Hasil AI untuk WhatsApp: buang tawaran bantuan ("ada yang bisa dibantu?", "semoga membantu", ...). Blok kode tidak disentuh. */
+function noHelpOffer(r) {
+  if (!r || typeof r.reply !== "string") return r;
+  const reply = stripHelpOffers(r.reply);
+  if (reply !== r.reply) console.log("✂️ Tawaran bantuan dibuang dari balasan.");
+  return { ...r, reply };
+}
+
 async function generateAutoReply(jid) {
   const t = office.task(officeWho());
   t.think(`Pesan baru di ${chatLabel(jid, waAccountContext.getStore()?.groupSubject || "")}`);
@@ -1456,7 +1469,7 @@ async function generateAutoReply(jid) {
   try {
     const r = WA_AI_ENGINE === "ollama" ? await generateAutoReplyWithOllama(jid) : await generateAutoReplyWithGemini(jid);
     t.done("Balasan siap");
-    return r;
+    return noHelpOffer(r);
   } catch (err) {
     t.fail(aiReason(err));
     throw err;
@@ -2103,7 +2116,7 @@ async function tryLocalFallbackReply(sock, jid, incomingText, err) {
     sock.sendPresenceUpdate("composing", jid).catch(() => {});
     const local = await generateAutoReplyWithOllama(jid, { timeoutMs: WA_OLLAMA_FALLBACK_TIMEOUT_MS });
     sock.sendPresenceUpdate("paused", jid).catch(() => {});
-    return local && local.reply ? local : null;
+    return local && local.reply ? noHelpOffer(local) : null;
   } catch (fbErr) {
     sock.sendPresenceUpdate("paused", jid).catch(() => {});
     console.error(`Cadangan lokal (Ollama) gagal utk ${jid}, lanjut ke antrean:`, fbErr instanceof Error ? fbErr.message : String(fbErr));

@@ -3,7 +3,8 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import { STATE_KEY, createHumor, parseHumorArg, readHumorConfig } from "./humor.js";
-import { dayEnergy, extractSelfFacts, fatigueFactor, hash01, hourFactor, informality, jitterGap, naturalize, reactionFromText, replyChance } from "./insani.js";
+import { FALLBACK_SAPA, buildReplyPrompt, buildSapaPrompt, validateChat } from "./ngobrol.js";
+import { NO_OFFER_NOTE, dayEnergy, extractSelfFacts, stripHelpOffers, fatigueFactor, hash01, hourFactor, informality, jitterGap, naturalize, reactionFromText, replyChance } from "./insani.js";
 import { emptyStyle, updateStyle } from "./manusiawi.js";
 
 let n = 0;
@@ -368,11 +369,49 @@ await ok("reaksi: isi pesan menentukan emoji; tanpa batas harian bawaan; stiker 
   assert.equal(r.sent.length, 0);
 });
 
+await ok("tanpa tawaran bantuan: kalimat tawaran dibuang, jawabannya tetap; blok kode tidak disentuh; isi biasa tidak ikut terbuang", () => {
+  const cases = [
+    ["Halo! Ada yang bisa dibantu?", "Halo!"],
+    ["Halo Budi! Ada yang bisa aku bantu hari ini?", "Halo Budi!"],
+    ["Halo, ada yang bisa kubantu?", "Halo!"],
+    ["Jawabannya 12, ada lagi yang bisa kubantu?", "Jawabannya 12."],
+    ["Ibu kota Jepang adalah Tokyo. Semoga membantu!", "Ibu kota Jepang adalah Tokyo."],
+    ["Nanti kukabari ya. Jangan ragu bertanya kalau ada yang kurang jelas.", "Nanti kukabari ya."],
+    ["Oke, nanti dicek - kalau ada yang kurang jelas, tanya aja ya", "Oke, nanti dicek."],
+    ["Kalau ada pertanyaan lain, silakan tanya lagi ya!", "Iya?"],
+    ["Terima kasih ya, semoga membantu!", "Terima kasih ya!"],
+    ["Siap, aku siap bantu kapan saja", "Siap."],
+    ["Baris satu.\nBaris dua. Semoga membantu!\n\nBaris tiga", "Baris satu.\nBaris dua.\n\nBaris tiga"],
+    ["```js\n// ada yang bisa dibantu?\n```\nCoba kode ini. Ada yang bisa dibantu lagi?", "```js\n// ada yang bisa dibantu?\n```\nCoba kode ini."],
+    ["Mau dibantu apa nih?", "Iya?"],
+    ["Happy to help! Let me know if you need anything else.", "Iya?"]
+  ];
+  for (const [inp, want] of cases) assert.equal(stripHelpOffers(inp), want, inp);
+  // kalimat biasa yang kebetulan memuat kata "bantu" tidak boleh hilang
+  for (const keep of ["Aku bantu cek dulu ya", "Itu bisa dibantu dengan es batu", "Besok rapat, jam 9, ruang A.", "Makasih sudah bantu kemarin ya", "Dia lagi minta bantuan tetangga buat pindahan", "Kalau hujan, kita tunda ya"]) assert.equal(stripHelpOffers(keep), keep, keep);
+  assert.equal(stripHelpOffers("Mau dibantu apa nih?", { fallback: "" }), "");
+  assert.equal(stripHelpOffers(""), "");
+});
+
+await ok("balasan acak/sapa: validateChat membuang tawaran; yang hanya tawaran dianggap kosong (tidak dikirim); prompt & cadangan bebas tawaran", () => {
+  assert.deepEqual(validateChat("Wah seru banget itu! Ada yang bisa kubantu lagi?"), { ok: true, text: "Wah seru banget itu!" });
+  assert.equal(validateChat("Ada yang bisa dibantu?").ok, false);
+  assert.equal(validateChat("Ada yang bisa dibantu?").reason, "kosong");
+  const { system } = buildReplyPrompt({ target: { name: "Budi", text: "tes" }, context: [] });
+  assert.ok(system.includes(NO_OFFER_NOTE));
+  assert.doesNotMatch(system, /panggil namaku/);
+  assert.ok(buildSapaPrompt({ kind: { id: "sapa", prompt: "x" }, weekday: "Senin", part: "pagi" }).system.includes(NO_OFFER_NOTE));
+  for (const line of FALLBACK_SAPA) assert.equal(stripHelpOffers(line, { fallback: "" }), line, `cadangan sapa memuat tawaran: ${line}`);
+});
+
 await ok("terintegrasi: index.js (cooldown 0, kutipan ke orang lain), dokumentasi, .env.example, package.json", () => {
   const read = (f) => fs.readFileSync(new URL(f, import.meta.url), "utf8");
   const idx = read("./index.js");
   assert.match(idx, /WA_GROUP_COOLDOWN_SEC \?\? 0\)/);
   assert.match(idx, /quotedOther, quotedText:/);
+  assert.match(idx, /return noHelpOffer\(r\)/);
+  assert.match(idx, /noHelpOffer\(local\)/);
+  assert.equal((idx.match(/\$\{NO_OFFER_NOTE\}`;/g) || []).length, 2, "prompt dasar Gemini & Ollama memuat larangan tawaran");
   const readme = read("./README.md");
   assert.match(readme, /Makin manusiawi \(tahap 2\)/);
   assert.match(readme, /\/humor ingat on/);
