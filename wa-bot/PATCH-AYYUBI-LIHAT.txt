@@ -62,3 +62,11 @@ CATATAN JUJUR
 - Kualitas deskripsi/label dari Gemini bisa meleset (sarkasme, meme berbahasa daerah, teks kecil).
 - Foto dikirim ke layanan AI luar (Gemini). Karena itu fitur ini dimatikan secara bawaan dan terpisah dari /humor on.
 - Jam tidur memakai zona WA_TIMEZONE; pastikan nilainya sesuai lokasi grup.
+
+Tambahan (stiker chat sendiri tidak tersimpan):
+- index.js: stiker bertipe "append" & pembungkus deviceSentMessage ikut diproses; log "🎭 Stiker terlihat ..." tiap stiker;
+  galat penyimpanan dikabari ke pemilik. WAJIB ganti index.js (bukan hanya humor.js) lalu restart bot.
+- Jalur cadangan: kirim stiker (statis) ke bot Telegram -> masuk koleksi (telegram.js).
+- /humor koleksi (saat kosong) menampilkan baris 🔎 diagnosa jumlah stiker yang terlihat bot.
+
+Uji kirim stiker: /humor koleksi tes [nomor] <grup> -> kirim satu stiker koleksi ke grup itu (tidak memakai jatah harian).

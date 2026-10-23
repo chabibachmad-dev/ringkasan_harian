@@ -314,7 +314,7 @@ export function parseHumorArg(arg, { secondAliases = [] } = {}) {
     }
   };
   const need = (what) => ({ kind: "error", error: what });
-  const USAGE = "Pakai: /humor • /humor on <grup> • /humor off <grup> • /humor pantun|roast|gaya|balas|sapa|latihan|lihat on|off <grup> • /humor semua on|off • /humor jam 09:00-17:00 <grup> • /humor diam <jam> <grup> • /humor lanjut <grup> • /humor profil <grup> • /humor koleksi [hapus <no>|label <no> <label>] • /humor tes [pantun|sapa|balas] <grup>";
+  const USAGE = "Pakai: /humor • /humor on <grup> • /humor off <grup> • /humor pantun|roast|gaya|balas|sapa|latihan|lihat on|off <grup> • /humor semua on|off • /humor jam 09:00-17:00 <grup> • /humor diam <jam> <grup> • /humor lanjut <grup> • /humor profil <grup> • /humor koleksi [hapus <no>|label <no> <label>|tes [no] <grup>] • /humor tes [pantun|sapa|balas] <grup>";
   if (aliases.has(verb) && words.length === 1) return { kind: "status", account: SECOND };
   if (ON_RE.test(verb) || OFF_RE.test(verb)) {
     takeAccount();
@@ -379,7 +379,14 @@ export function parseHumorArg(arg, { secondAliases = [] } = {}) {
       if (!Number.isInteger(n) || n < 1 || !tag) return need(`Pakai: /humor koleksi label <nomor> <${STICKER_TAGS.join("|")}>`);
       return { kind: "koleksi", action: "label", index: n, tag, account };
     }
-    return need("Pakai: /humor koleksi • /humor koleksi hapus <nomor> • /humor koleksi label <nomor> <label>");
+    if (/^(tes|test|coba|kirim)$/.test(sub)) {
+      let index = null;
+      if (rest.length >= 2 && /^\d{1,3}$/.test(rest[0])) index = Number(rest.shift());
+      const target = rest.join(" ").trim();
+      if (!target) return need("Pakai: /humor koleksi tes [nomor stiker] <grup>  (contoh: /humor koleksi tes 2 keluarga)");
+      return { kind: "koleksi", action: "tes", index, target, account };
+    }
+    return need("Pakai: /humor koleksi • /humor koleksi hapus <nomor> • /humor koleksi label <nomor> <label> • /humor koleksi tes [nomor] <grup>");
   }
   if (/^(profil|belajar)$/.test(verb)) {
     takeAccount();
@@ -1282,7 +1289,8 @@ export function createHumor({ state = null, ai = null, send = null, react = null
   function koleksiText(account) {
     const lib = stickers[kolKey(account)] || [];
     if (!lib.length) return `🎭 Koleksi stiker ${label(account)} masih kosong.
-Cara mengisi: buka chat "Pesan untuk diri sendiri" di WhatsApp ${label(account)} lalu kirim stiker-stikernya ke situ — bot menyimpan dan memakainya di semua grup yang menyalakan /humor balas.`;
+Cara mengisi: buka chat "Pesan untuk diri sendiri" di WhatsApp ${label(account)} lalu kirim stiker-stikernya ke situ — bot menyimpan dan memakainya di semua grup yang menyalakan /humor balas.
+Cadangan: kirim stiker (yang tidak beranimasi) langsung ke bot Telegram ini, otomatis masuk koleksi.${media?.intakeInfo ? `\n🔎 ${media.intakeInfo()}` : ""}`;
     const untagged = lib.filter((x) => !x.tag).length;
     const lines = lib.slice(0, 60).map(koleksiLine);
     return `🎭 *Koleksi stiker ${label(account)}* (${lib.length}/${config.koleksiMax}${untagged ? `, ${untagged} belum berlabel` : ""})
@@ -1313,6 +1321,30 @@ Label menentukan kapan stiker dipakai.`;
       return `✅ Stiker #${p.index} sekarang berlabel "${p.tag}".`;
     }
     return koleksiText(account);
+  }
+
+  /** /humor koleksi tes [nomor] <grup>: kirim SATU stiker koleksi ke grup untuk uji (melewati peluang, jeda, jam tidur, dan jatah harian). */
+  async function koleksiTes(p) {
+    if (!media?.sendSticker || !media?.store) return "Pengiriman stiker belum terpasang di bot ini.";
+    const r = await resolveTarget(p.target, p.account || null);
+    if (r.error) return r.error;
+    if (r.entries.length !== 1) return "Sebutkan satu grup saja (nama atau nomor dari /humor).";
+    const e = r.entries[0];
+    const lib = stickers[kolKey(e.account)] || [];
+    if (!lib.length) return `Koleksi stiker ${label(e.account)} masih kosong. Isi dulu (lihat /humor koleksi).`;
+    let item;
+    if (p.index) {
+      item = lib[p.index - 1];
+      if (!item) return `Nomor ${p.index} tidak ada di koleksi (1-${lib.length}).`;
+    } else item = lib[Math.floor(random() * lib.length)];
+    const buffer = await media.store.get(stickerFile(kolKey(e.account), item.id));
+    if (!buffer) return `Berkas stiker #${lib.indexOf(item) + 1} hilang dari penyimpanan. Hapus: /humor koleksi hapus ${lib.indexOf(item) + 1}`;
+    try {
+      await media.sendSticker(e.account, e.id, buffer, {});
+    } catch (err) {
+      return `⚠️ Stiker gagal terkirim ke "${e.subject}": ${String(err?.message || err).slice(0, 200)}`;
+    }
+    return `🎭 Stiker #${lib.indexOf(item) + 1} (${item.tag || "belum berlabel"}) terkirim ke "${e.subject}". (Uji ini tidak memakai jatah harian.)`;
   }
 
   function visualNote() {
@@ -1847,6 +1879,7 @@ Label menentukan kapan stiker dipakai.`;
         if (!loadedOk) return "⚠️ Pengaturan humor tersimpan belum bisa dibaca dari database, jadi perubahan ditunda supaya pengaturan lama tidak tertimpa. Coba lagi sebentar lagi.";
       }
       if (p.kind === "status") return await statusText(p.account || null);
+      if (p.kind === "koleksi" && p.action === "tes") return await koleksiTes(p);
       if (p.kind === "koleksi") return await koleksiCommand(p);
       const r = await resolveTarget(p.target, p.account || null);
       if (r.error) return r.error;

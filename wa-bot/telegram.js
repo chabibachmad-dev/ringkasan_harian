@@ -878,6 +878,20 @@ Suara khusus satu grup: /suara grup wanita <nama grup> • /suara grup (daftar) 
   }
 
   /** Pesan suara pemilik: ubah jadi teks, tampilkan apa yang terdengar, lalu proses seperti pesan teks (obrolan / SiMAB). */
+  /** Stiker Telegram dari pemilik -> koleksi stiker bot WhatsApp (jalur cadangan; hanya stiker statis .webp). */
+  async function handleOwnerSticker(chatId, st) {
+    if (st.is_animated || st.is_video) return void (await send(chatId, "🎭 Stiker animasi/video Telegram belum bisa disimpan (formatnya beda dengan WhatsApp). Kirim stiker statis, atau kirim stikernya lewat WhatsApp ke \"Pesan untuk diri sendiri\".").catch(() => {}));
+    try {
+      const buffer = await withAction(chatId, "typing", () => downloadFile(st.file_id));
+      const r = await deps.stickers.add(buffer);
+      if (!r.ok) return void (await send(chatId, `🎭 Stiker tidak disimpan: ${r.reason}`));
+      if (r.dup) return void (await send(chatId, `🎭 Stiker itu sudah ada di koleksi (#${r.index}${r.item?.tag ? `, ${r.item.tag}` : ""}).`));
+      await send(chatId, `🎭 Stiker tersimpan di koleksi (#${r.index}): ${r.item?.tag || "belum berlabel"}.${r.labelErr ? `\n⚠️ Label otomatis gagal: ${r.labelErr}` : ""}\nLihat/kelola: /humor koleksi`);
+    } catch (e) {
+      await send(chatId, `🎭 Stiker gagal disimpan: ${String(e?.message || e).slice(0, 200)}`).catch(() => {});
+    }
+  }
+
   /** Berkas (mis. patch*.zip) dari pemilik: diserahkan ke ops.js; bila bukan urusannya, balasan umum. */
   async function handleOwnerDocument(chatId, doc) {
     try {
@@ -1322,6 +1336,7 @@ Suara khusus satu grup: /suara grup wanita <nama grup> • /suara grup (daftar) 
       addStopPhoto(chatId, fileId);
       return;
     }
+    if (m.sticker && deps.stickers?.add) return handleOwnerSticker(chatId, m.sticker);
     if (m.voice || m.audio) return handleOwnerVoice(chatId, m.voice || m.audio);
     if (m.document && deps.ops?.handleDocument) return handleOwnerDocument(chatId, m.document);
     // FOTO HIDUP: foto + keterangan ("/video salju", "jadikan video dengan hujan") atau membalas foto dengan perintah itu

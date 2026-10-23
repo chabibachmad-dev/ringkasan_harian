@@ -1,6 +1,7 @@
 // Tes jam tidur + kemampuan melihat (gambar & stiker). Jalankan: node test-visual.mjs
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import { createTelegram } from "./telegram.js";
 import { createHumor, parseHumorArg, readHumorConfig, STIKER_KEY } from "./humor.js";
 import { inNightWindow, parseNightWindow, readNgobrolConfig } from "./ngobrol.js";
 import { parseStickerOutput, STICKER_REPLY_TAGS, addToLibrary, cleanImageDescription, guessTagFromText, looksLikeImageQuestion, parseStickerTag, pickStickerFor, readVisualConfig, webpFirstFrame } from "./visual.js";
@@ -781,6 +782,27 @@ await ok("koleksi: /humor koleksi menampilkan daftar, mengubah label, menghapus 
   assert.match(await r.h.handle(""), /Koleksi stiker .*: 1/);
 });
 
+await ok("/humor koleksi tes [nomor] <grup>: mengirim stiker koleksi ke grup walau jam tidur/jatah habis, tanpa memakai jatah", async () => {
+  assert.deepEqual(parseHumorArg("koleksi tes keluarga"), { kind: "koleksi", action: "tes", index: null, target: "keluarga", account: null });
+  assert.deepEqual(parseHumorArg("koleksi tes 2 keluarga"), { kind: "koleksi", action: "tes", index: 2, target: "keluarga", account: null });
+  assert.equal(parseHumorArg("koleksi tes 1").target, "1"); // satu angka = nomor grup
+  assert.equal(parseHumorArg("koleksi tes").kind, "error");
+  const r = rig({ visionOut: tagByBuf });
+  await r.h.load();
+  assert.match(await r.h.handle("koleksi tes keluarga"), /masih kosong/);
+  await r.h.addToKoleksi("main", KOL.tawa);
+  await r.h.addToKoleksi("main", KOL.kaget);
+  const out = await r.h.handle("koleksi tes 2 keluarga");
+  assert.match(out, /Stiker #2 \(kaget\) terkirim ke "Keluarga/);
+  assert.equal(r.stickersSent.length, 1);
+  assert.deepEqual(r.stickersSent[0].buffer, KOL.kaget);
+  assert.match(await r.h.handle("koleksi tes 9 keluarga"), /tidak ada di koleksi/);
+  assert.match(await r.h.handle("koleksi tes grupgaib"), /Tidak ada grup/);
+  assert.equal(r.stickersSent.length, 1);
+  await r.h.handle("koleksi tes keluarga");
+  assert.equal(r.stickersSent.length, 2, "tanpa nomor = pilih acak");
+});
+
 await ok("balas dengan stiker: AI memilih 'STIKER: tawa' -> stiker dari koleksi (reply ke pesannya), tanpa perlu /humor lihat; teks+stiker juga bisa", async () => {
   const mk = async (aiOut, env = {}) => {
     const r = rig({ aiOut, visionOut: tagByBuf, env });
@@ -882,6 +904,41 @@ await ok("koleksi: pemakaian dicatat dan stiker tidak diulang beruntun", async (
   void used;
 });
 
+await ok("koleksi kosong: menyebut jalur cadangan Telegram + info diagnosa penerimaan stiker dari WhatsApp", async () => {
+  const r = rig({ visionOut: tagByBuf });
+  await r.h.load();
+  const t = await r.h.handle("koleksi");
+  assert.match(t, /Telegram/);
+});
+
+await ok("Telegram: stiker dari pemilik masuk koleksi; stiker animasi ditolak sopan; bukan pemilik diabaikan", async () => {
+  const sent = [];
+  const added = [];
+  const f = async (url, init) => {
+    const method = String(url).split("/").pop();
+    if (String(url).includes("/file/bot")) return { ok: true, status: 200, arrayBuffer: async () => new Uint8Array([82, 73, 70, 70, 1, 2, 3, 4, 5, 6]).buffer };
+    const body = init?.body && typeof init.body === "string" ? JSON.parse(init.body) : {};
+    if (method === "sendMessage") sent.push(body.text);
+    if (method === "getFile") return { status: 200, json: async () => ({ ok: true, result: { file_path: "stickers/a.webp" } }) };
+    return { status: 200, json: async () => ({ ok: true, result: true }) };
+  };
+  const quiet = { log() {}, warn() {}, error() {} };
+  const tg = createTelegram({
+    config: { token: "T", enabled: true, ownerIds: ["111"], mirror: true, historyLimit: 4, pollTimeoutSec: 1, speakText: true },
+    deps: { chat: async () => "x", stickers: { add: async (b) => { added.push(b.length); return { ok: true, added: true, index: added.length, item: { tag: "tawa" } }; } } },
+    fetchImpl: f, log: quiet, sleep: async () => {}
+  });
+  const upd = (chat, sticker) => ({ update_id: 1, message: { chat: { id: chat, type: "private" }, sticker } });
+  await tg.handleUpdate(upd(111, { file_id: "S1", is_animated: false, is_video: false }));
+  assert.deepEqual(added, [10]);
+  assert.ok(sent.some((t) => /Stiker tersimpan di koleksi \(#1\): tawa/.test(t)), sent.join("|"));
+  await tg.handleUpdate(upd(111, { file_id: "S2", is_animated: true }));
+  assert.equal(added.length, 1);
+  assert.ok(sent.some((t) => /animasi/.test(t)));
+  await tg.handleUpdate(upd(999, { file_id: "S3" }));
+  assert.equal(added.length, 1);
+});
+
 // ---------------------------------------------------------------- integrasi
 await ok("terintegrasi: index.js (gambar/stiker/AI penglihatan), dokumentasi, .env.example, package.json", () => {
   const idx = fs.readFileSync(new URL("./index.js", import.meta.url), "utf8");
@@ -892,6 +949,10 @@ await ok("terintegrasi: index.js (gambar/stiker/AI penglihatan), dokumentasi, .e
   assert.match(idx, /addOwnerSticker\(/);
   assert.match(idx, /stk && isSelfChat/);
   assert.match(idx, /botStickerIds/);
+  assert.match(idx, /type !== "append"/, "stiker bertipe append ikut diproses");
+  assert.match(idx, /deviceSentMessage\?\.message/);
+  assert.match(idx, /stickerIntakeInfo/);
+  assert.match(idx, /stickers: \{\s*add:/);
   const readme = fs.readFileSync(new URL("./README.md", import.meta.url), "utf8");
   assert.match(readme, /Jam tidur/i);
   assert.match(readme, /\/humor lihat on/);

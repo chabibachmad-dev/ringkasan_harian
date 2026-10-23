@@ -2914,6 +2914,9 @@ function unwrapMessageContent(message) {
       m.viewOnceMessage?.message ||
       m.viewOnceMessageV2?.message ||
       m.documentWithCaptionMessage?.message ||
+      m.viewOnceMessageV2Extension?.message ||
+      m.deviceSentMessage?.message ||
+      m.lottieStickerMessage?.message ||
       m.editedMessage?.message;
     if (!inner) break;
     m = inner;
@@ -4155,8 +4158,23 @@ async function handleIncoming(msg, sock) {
   // ikut disimpan hanya bila WA_STIKER_DARI_PEMILIK=true (stiker yang dikirim bot sendiri tidak dihitung).
   if (!sock.waAccount?.secondary && msg.message) {
     const stk = unwrapMessageContent(msg.message)?.stickerMessage;
+    if (stk && msg.key.fromMe && !botStickerIds.has(msg.key.id)) {
+      stickerIntake.seen += 1;
+      stickerIntake.lastAt = Date.now();
+      stickerIntake.lastSelf = isSelfChat;
+      console.log(`🎭 Stiker terlihat (fromMe) ke ${jid}${isSelfChat ? " = chat sendiri" : ` — BUKAN chat sendiri (jid saya: ${getOwnJids(sock).join(", ") || "?"})`}.`);
+    }
     if (stk && isSelfChat) {
-      await addOwnerSticker(sock, msg, { announce: true }).catch((e) => console.error("🎭 Koleksi stiker gagal:", e instanceof Error ? e.message : String(e)));
+      if (msg.key.id && stickerIntakeDone.has(msg.key.id)) return;
+      if (msg.key.id) {
+        stickerIntakeDone.add(msg.key.id);
+        if (stickerIntakeDone.size > 300) stickerIntakeDone.delete(stickerIntakeDone.values().next().value);
+      }
+      await addOwnerSticker(sock, msg, { announce: true }).catch((e) => {
+        stickerIntake.lastErr = e instanceof Error ? e.message : String(e);
+        console.error("🎭 Koleksi stiker gagal:", stickerIntake.lastErr);
+        sendToOwner(`🎭 Stiker dari chat sendiri gagal disimpan: ${stickerIntake.lastErr.slice(0, 200)}`).catch(() => {});
+      });
       return;
     }
     if (stk && msg.key.fromMe && WA_STIKER_DARI_PEMILIK && !botStickerIds.has(msg.key.id)) {
@@ -4563,7 +4581,22 @@ async function connect(acct = MAIN_ACCOUNT_DEF) {
   sock.ev.on("messages.upsert", async ({ messages, type }) => {
     // type "notify" = pesan baru beneran masuk (bukan hasil sinkronisasi
     // riwayat lama waktu pertama kali login).
-    if (type !== "notify") return;
+    if (type !== "notify") {
+      // Stiker yang baru saja kamu kirim ke "Pesan untuk diri sendiri" dari HP kadang datang bertipe "append", bukan "notify".
+      if (type !== "append" || acct.secondary) return;
+      for (const msg of messages) {
+        try {
+          const ts = Number(msg.messageTimestamp?.toNumber?.() ?? msg.messageTimestamp ?? 0) * 1000;
+          if (!msg.key?.fromMe || !msg.message || !ts || Date.now() - ts > 3 * 60_000) continue;
+          if (!unwrapMessageContent(msg.message)?.stickerMessage) continue;
+          if (!getOwnJids(sock).includes(msg.key.remoteJid)) continue;
+          await waAccountContext.run({ account: acct.id }, () => handleIncoming(msg, sock));
+        } catch (err) {
+          console.error("Gagal proses stiker (append):", err instanceof Error ? err.message : String(err));
+        }
+      }
+      return;
+    }
     for (const msg of messages) {
       try {
         accountRouter.remember(msg.key.remoteJid, acct.id);
@@ -5290,6 +5323,7 @@ const stickerPath = (name) => (/^[a-f0-9_]+\.webp$/.test(String(name)) ? path.jo
 const humorMedia = {
   visionAvailable: () => GEMINI_API_KEYS.length > 0,
   vision: geminiVision,
+  intakeInfo: stickerIntakeInfo,
   fetch: async (msg, kind) => {
     const node = kind === "stiker" ? unwrapMessageContent(msg?.message)?.stickerMessage : unwrapMessageContent(msg?.message)?.imageMessage;
     if (!node) return null;
@@ -5338,6 +5372,14 @@ const humorMedia = {
   }
 };
 
+const stickerIntake = { seen: 0, saved: 0, lastAt: 0, lastSelf: false, lastErr: "" };
+const stickerIntakeDone = new Set();
+function stickerIntakeInfo() {
+  if (!stickerIntake.seen && !stickerIntake.saved) return "Belum ada satu pun stiker yang terlihat bot dari WhatsApp-mu sejak bot dihidupkan (pastikan index.js versi terbaru terpasang & bot sudah di-restart).";
+  const ago = stickerIntake.lastAt ? Math.round((Date.now() - stickerIntake.lastAt) / 60000) : null;
+  return `Stiker terlihat dari WhatsApp-mu sejak bot hidup: ${stickerIntake.seen}${ago !== null ? ` (terakhir ${ago} mnt lalu${stickerIntake.lastSelf ? "" : ", ke chat LAIN, bukan chat sendiri"})` : ""}; tersimpan: ${stickerIntake.saved}.${stickerIntake.lastErr ? ` Galat terakhir: ${stickerIntake.lastErr.slice(0, 120)}` : ""}`;
+}
+
 /** Stiker milik pemilik (dikirim ke chat "Pesan untuk diri sendiri", atau dikirim pemilik dari HP bila WA_STIKER_DARI_PEMILIK) -> koleksi yang dipakai bot di grup. */
 async function addOwnerSticker(sock, msg, { announce = true } = {}) {
   const content = unwrapMessageContent(msg.message);
@@ -5352,6 +5394,7 @@ async function addOwnerSticker(sock, msg, { announce = true } = {}) {
   if (!buffer) return tell("🎭 Stikernya tidak bisa diunduh (terlalu besar atau kedaluwarsa). Coba kirim ulang ya.");
   const r = await humor.addToKoleksi(currentAccountId(), buffer);
   if (!r.ok) return tell(`🎭 Stiker tidak disimpan: ${r.reason}`);
+  if (!r.dup) stickerIntake.saved += 1;
   console.log(`🎭 Koleksi stiker: ${r.dup ? "sudah ada" : "ditambah"} #${r.index} (${r.item.tag || "tanpa label"}).`);
   if (!announce) return;
   if (r.dup) return tell(`🎭 Stiker itu sudah ada di koleksi (#${r.index}${r.item.tag ? `, ${r.item.tag}` : ""}).`);
@@ -5672,6 +5715,13 @@ const telegram = createTelegram({
     status: () => buildBotStatusText(),
     localDocs,
     ops,
+    stickers: {
+      add: async (buffer) => {
+        const r = await humor.addToKoleksi(MAIN_ACCOUNT, buffer);
+        if (r.ok && !r.dup) stickerIntake.saved += 1;
+        return r;
+      }
+    },
     memory: { handle: (cmd) => handleMemoryCommand(ownerMemory, cmd) },
     skills,
     skillAdmin,
