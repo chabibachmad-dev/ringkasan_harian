@@ -88,7 +88,7 @@ import { qrToPng } from "./qr-png.js";
 import { createGroupList } from "./group-list.js";
 import { createVideoGen, readVideoConfig, videoSentNote, photoVideoSentNote, storySentNote, morphSentNote, VIDEO_TEXT } from "./video-gen.js";
 const VIDEO_NOPHOTO_TEXT = VIDEO_TEXT.nophoto;
-import { IMAGE_QA_SYSTEM, buildImageQaPrompt, looksLikeImageQuestion, readVisualConfig } from "./visual.js";
+import { IMAGE_QA_SYSTEM, buildImageQaPrompt, looksLikeImageQuestion, readVisualConfig, webpFirstFrame } from "./visual.js";
 import { createImageGen, readImageConfig, imageSentNote, quotedImageNote, prepareEditInput, KIND_TEXT as IMAGE_KIND_TEXT } from "./image-gen.js";
 import { createEnvEditor } from "./env-edit.js";
 import { createMetaAi, readMetaAiConfig, parseMetaAiArg, unsafeTarget } from "./meta-ai.js";
@@ -5356,6 +5356,7 @@ async function answerGroupImageQuestion(sock, msg, groupJid, { source, kind, que
   let buffer = null;
   try {
     buffer = await downloadVisualMedia(sock, source, kind === "stiker" ? VISUAL_CFG.stikerMaxBytes : 8 * 1024 * 1024);
+    if (buffer && kind === "stiker") buffer = webpFirstFrame(buffer).buffer; // stiker animasi: bingkai pertama saja
   } catch (e) {
     console.error("👁️ Gagal mengunduh gambar:", describeError(e));
   }

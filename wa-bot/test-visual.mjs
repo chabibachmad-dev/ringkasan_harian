@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import { createHumor, parseHumorArg, readHumorConfig, STIKER_KEY } from "./humor.js";
 import { inNightWindow, parseNightWindow, readNgobrolConfig } from "./ngobrol.js";
-import { STICKER_REPLY_TAGS, addToLibrary, cleanImageDescription, looksLikeImageQuestion, parseStickerTag, pickStickerFor, readVisualConfig } from "./visual.js";
+import { STICKER_REPLY_TAGS, addToLibrary, cleanImageDescription, guessTagFromText, looksLikeImageQuestion, parseStickerTag, pickStickerFor, readVisualConfig, webpFirstFrame } from "./visual.js";
 
 let n = 0;
 async function ok(name, fn) {
@@ -549,7 +549,10 @@ await ok("label stiker: toleran pada gaya AI (**tebal**, 'Label: x | Deskripsi: 
   assert.deepEqual(parseStickerTag("`senang` | anak kecil melompat"), { tag: "senang", desc: "anak kecil melompat" });
   assert.deepEqual(parseStickerTag("TAWA: orang ngakak"), { tag: "tawa", desc: "orang ngakak" });
   assert.deepEqual(parseStickerTag("tawa"), { tag: "tawa", desc: "" });
-  assert.equal(parseStickerTag("Stiker ini menampilkan seekor kucing yang sedang tertawa"), null, "tanpa format & tanpa label: tidak ditebak");
+  assert.equal(parseStickerTag("Stiker ini menampilkan seekor kucing yang sedang tertawa").tag, "tawa", "kalimat bebas: label ditebak dari katanya");
+  assert.equal(parseStickerTag("Seorang anak menangis sambil tertawa").tag, "sedih", "sedih diperiksa lebih dulu daripada ceria");
+  assert.equal(parseStickerTag("Gambar kotak berwarna biru di latar putih"), null, "tanpa petunjuk perasaan: tidak ditebak");
+  assert.equal(guessTagFromText("orang marah besar"), "kesal");
   assert.equal(parseStickerTag("lain | SENSITIF").sensitive, true);
   assert.equal(parseStickerTag("**SENSITIF**").sensitive, true);
 });
@@ -616,6 +619,83 @@ await ok("/humor profil: menampilkan stiker terbaru yang sudah dibaca (label + d
   const prof = await r.h.handle("profil keluarga");
   assert.match(prof, /Stiker tersimpan: 1 \(berlabel 1\)/);
   assert.match(prof, /tawa: kucing tertawa terbahak/);
+});
+
+// stiker animasi WebP palsu: RIFF/WEBP + VP8X + ANIM + 2 bingkai ANMF
+function animWebp() {
+  const le = (n) => {
+    const b = Buffer.alloc(4);
+    b.writeUInt32LE(n);
+    return b;
+  };
+  const chunk = (id, data) => Buffer.concat([Buffer.from(id, "ascii"), le(data.length), data, data.length & 1 ? Buffer.alloc(1) : Buffer.alloc(0)]);
+  const frame = (payload) => chunk("ANMF", Buffer.concat([Buffer.alloc(16), chunk("VP8L", payload)]));
+  const body = Buffer.concat([Buffer.from("WEBP", "ascii"), chunk("VP8X", Buffer.alloc(10)), chunk("ANIM", Buffer.alloc(6)), frame(Buffer.from("PERTAMA")), frame(Buffer.from("KEDUA"))]);
+  return Buffer.concat([Buffer.from("RIFF", "ascii"), le(body.length), body]);
+}
+
+await ok("stiker animasi: bingkai pertama diambil jadi WebP statis yang sah; stiker statis & bukan WebP tidak diubah", () => {
+  const a = animWebp();
+  const r = webpFirstFrame(a);
+  assert.equal(r.animated, true);
+  assert.equal(r.buffer.toString("ascii", 0, 4), "RIFF");
+  assert.equal(r.buffer.toString("ascii", 8, 12), "WEBP");
+  assert.equal(r.buffer.readUInt32LE(4), r.buffer.length - 8, "ukuran RIFF benar");
+  assert.equal(r.buffer.toString("ascii", 12, 16), "VP8L");
+  assert.equal(r.buffer.subarray(20, 27).toString(), "PERTAMA", "isi bingkai pertama, bukan kedua");
+  assert.ok(!r.buffer.includes(Buffer.from("KEDUA")));
+  const stat = Buffer.concat([Buffer.from("RIFF"), Buffer.from([8, 0, 0, 0]), Buffer.from("WEBPVP8 "), Buffer.alloc(4)]);
+  assert.equal(webpFirstFrame(stat).buffer, stat);
+  assert.equal(webpFirstFrame(stat).animated, false);
+  const junk = Buffer.from("bukan webp sama sekali, hanya teks biasa");
+  assert.equal(webpFirstFrame(junk).buffer, junk);
+  assert.equal(webpFirstFrame(null).animated, false);
+});
+
+await ok("stiker animasi dikirim ke AI penglihatan hanya bingkai pertamanya, tapi berkas yang disimpan tetap asli", async () => {
+  const r = rig();
+  await r.h.load();
+  await r.h.handle("balas on keluarga");
+  await r.h.handle("lihat on keluarga");
+  chat(r);
+  const a = animWebp();
+  sticker(r, "Sari", a);
+  await settle(r);
+  assert.equal(r.visionCalls.length, 1);
+  assert.ok(r.visionCalls[0].image.buffer.length < a.length, "bingkai pertama saja");
+  assert.ok(![...r.files.values()].some((b) => b.length !== a.length), "berkas yang disimpan = stiker asli (animasi tetap utuh)");
+  assert.equal(r.h._debug.stickers()[`main|${JID}`][0].tag, "tawa");
+});
+
+await ok("pelabelan stiker gagal: alasan tampil di /humor profil; setelah 3 kali gagal berhenti mencoba (hemat jatah) lalu pulih bila berhasil", async () => {
+  let mode = "error";
+  const r = rig({ visionOut: () => { if (mode === "error") throw new Error("Gemini API error 400: bad"); if (mode === "ngawur") return "hmm entahlah"; return "tawa | kucing tertawa"; } });
+  await r.h.load();
+  await r.h.handle("balas on keluarga");
+  await r.h.handle("lihat on keluarga");
+  chat(r);
+  for (let i = 0; i < 5; i += 1) {
+    sticker(r, "Sari", STK(1), { gap: MIN });
+    await settle(r);
+  }
+  assert.equal(r.visionCalls.length, 3, "berhenti setelah 3 kali gagal");
+  let prof = await r.h.handle("profil keluarga");
+  assert.match(prof, /Stiker tersimpan: 1 \(berlabel 0\)/);
+  assert.match(prof, /Pelabelan terakhir gagal: AI penglihatan gagal: Gemini API error 400/);
+  // 6 jam kemudian boleh mencoba lagi; jawaban ngawur dicatat apa adanya
+  r.tick(7 * 3_600_000);
+  mode = "ngawur";
+  sticker(r, "Sari", STK(1));
+  await settle(r);
+  prof = await r.h.handle("profil keluarga");
+  assert.match(prof, /jawaban AI tidak bisa dibaca sebagai label: "hmm entahlah"/);
+  r.tick(7 * 3_600_000);
+  mode = "ok";
+  sticker(r, "Sari", STK(1));
+  await settle(r);
+  prof = await r.h.handle("profil keluarga");
+  assert.match(prof, /berlabel 1/);
+  assert.ok(!/Pelabelan terakhir gagal/.test(prof), "pulih: peringatan hilang");
 });
 
 // ---------------------------------------------------------------- integrasi

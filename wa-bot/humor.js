@@ -36,7 +36,7 @@ import {
   MEMORY_MAX_FACTS, MEMORY_REFUSE_TEXT, SILENT_MOODS, addressedToOther, balasEngagementFactor, describeStyle, detectMood, emptyFeedback, emptyStyle, fewShotNote, isDuoChat,
   kindWeights, moodHint, occasionsFor, parseBirthday, parseMemoryCmd, parseReactionOutput, pickReaction, pushExample, sanitizeFact, splitBubbles, updateStyle
 } from "./manusiawi.js";
-import { IMAGE_SYSTEM, STICKER_SYSTEM, addToLibrary, buildImageUserPrompt, cleanImageDescription, parseStickerTag, pickStickerFor, readVisualConfig, STICKER_REACTION } from "./visual.js";
+import { IMAGE_SYSTEM, STICKER_SYSTEM, addToLibrary, buildImageUserPrompt, cleanImageDescription, parseStickerTag, pickStickerFor, readVisualConfig, STICKER_REACTION, webpFirstFrame } from "./visual.js";
 
 export const STATE_KEY = "wa_group_humor";
 export const SCHED_KEY = "wa_group_humor_sched";
@@ -401,6 +401,7 @@ export function createHumor({ state = null, ai = null, send = null, react = null
   let feedbacks = {}; // key -> { good, bad, kinds } (contoh pesan BOT yang disetujui/ditolak pemilik + tingkat respons grup)
   const dirty = { style: false, feedback: false, stiker: false };
   const lastStickerAt = new Map();
+  const stickerErr = new Map(); // key -> alasan pembacaan/pelabelan stiker terakhir yang gagal (memori; tampil di /humor profil)
   const recentStickers = new Map(); // key -> id stiker yang baru dipakai bot
   const pending = new Map(); // id -> draf mode latihan yang menunggu keputusan pemilik (memori saja)
   const lastBot = new Map(); // key -> { ts, kind, counted } pesan bot terakhir (untuk mengukur respons grup)
@@ -1056,24 +1057,39 @@ export function createHumor({ state = null, ai = null, send = null, react = null
     }
     dirty.stiker = true;
     const item = lib.find((x) => x.id === id);
-    // label (sekali per stiker); sisakan sebagian jatah untuk membaca foto
-    if (!item.tag && visionBudget(key, 0.3)) {
-      spendVision(key);
-      try {
-        const t = parseStickerTag(await media.vision({ system: STICKER_SYSTEM, user: "Stiker ini dikirim di grup. Beri label dan deskripsinya.", image: { buffer: got.buffer, mime: "image/webp" } }));
-        if (t?.sensitive) {
-          lib.splice(lib.findIndex((x) => x.id === id), 1); // stiker tidak pantas: tidak disimpan & tidak dipakai
-          await media.store.del?.(stickerFile(key, id)).catch(() => {});
+    // label (sekali per stiker); sisakan sebagian jatah untuk membaca foto. Gagal berulang -> berhenti mencoba sementara (hemat jatah).
+    const retryOk = (item.fail || 0) < 3 || now() - (item.failAt || 0) > 6 * 3_600_000;
+    if (!item.tag && retryOk) {
+      if (!visionBudget(key, 0.3)) stickerErr.set(key, "jatah baca gambar/stiker hari ini habis (WA_LIHAT_PER_DAY)");
+      else {
+        spendVision(key);
+        const fail = (why) => {
+          item.fail = (item.fail || 0) + 1;
+          item.failAt = now();
           dirty.stiker = true;
-          await saveSched();
-          return;
+          stickerErr.set(key, why);
+          log.warn?.(`🎭 [Humor] stiker belum bisa dilabeli: ${why}`);
+        };
+        try {
+          const frame = webpFirstFrame(got.buffer); // stiker animasi: pakai bingkai pertama saja
+          const raw = await media.vision({ system: STICKER_SYSTEM, user: "Stiker ini dikirim di grup. Beri label dan deskripsinya.", image: { buffer: frame.buffer, mime: "image/webp" } });
+          const t = parseStickerTag(raw);
+          if (t?.sensitive) {
+            lib.splice(lib.findIndex((x) => x.id === id), 1); // stiker tidak pantas: tidak disimpan & tidak dipakai
+            await media.store.del?.(stickerFile(key, id)).catch(() => {});
+            dirty.stiker = true;
+            await saveSched();
+            return;
+          }
+          if (t) {
+            item.tag = t.tag;
+            item.desc = t.desc;
+            item.fail = 0;
+            stickerErr.delete(key);
+          } else fail(`jawaban AI tidak bisa dibaca sebagai label: "${String(raw ?? "").replace(/\s+/g, " ").slice(0, 80)}"`);
+        } catch (e) {
+          fail(`AI penglihatan gagal: ${(e instanceof Error ? e.message : String(e)).replace(/\s+/g, " ").slice(0, 120)}`);
         }
-        if (t) {
-          item.tag = t.tag;
-          item.desc = t.desc;
-        }
-      } catch (e) {
-        log.warn?.(`🎭 [Humor] AI penglihatan (stiker) gagal: ${e instanceof Error ? e.message : e}`);
       }
       await saveSched();
     }
@@ -1706,7 +1722,7 @@ export function createHumor({ state = null, ai = null, send = null, react = null
           stl || `Gaya grup: belum cukup data (${styles[key]?.n || 0}/20 pesan terbaca; fitur balas/sapa harus menyala).`,
           fb ? `Contoh disukai: ${fb.good.length} • ditolak: ${fb.bad.length}${data.groups[key]?.latihan ? " (mode latihan AKTIF)" : ""}` : "Belum ada umpan balik.",
           kinds.length ? `Tanggapan grup per jenis pesan:\n${kinds.map(([k, v]) => `• ${k}: ${v.sent} terkirim, ${Math.round((v.eng / Math.max(1, v.sent)) * 100)}% ditanggapi`).join("\n")}` : "Belum ada data tanggapan grup.",
-          data.groups[key]?.lihat ? `Stiker tersimpan: ${(stickers[key] || []).length} (berlabel ${(stickers[key] || []).filter((x) => x.tag).length}).${(stickers[key] || []).filter((x) => x.tag).slice(-4).map((x) => `\n  • ${x.tag}${x.desc ? `: ${x.desc}` : ""}`).join("")}` : "Baca gambar/stiker: mati (nyalakan: /humor lihat on <grup>).",
+          data.groups[key]?.lihat ? `Stiker tersimpan: ${(stickers[key] || []).length} (berlabel ${(stickers[key] || []).filter((x) => x.tag).length}).${stickerErr.get(key) ? `\n⚠️ Pelabelan terakhir gagal: ${stickerErr.get(key)}` : ""}${(stickers[key] || []).filter((x) => x.tag).slice(-4).map((x) => `\n  • ${x.tag}${x.desc ? `: ${x.desc}` : ""}`).join("")}` : "Baca gambar/stiker: mati (nyalakan: /humor lihat on <grup>).",
           mem.length ? `Anggota yang minta diingat: ${mem.length} (${mem.map((m) => m.nick || firstName(m.name)).slice(0, 8).join(", ")})` : "Belum ada anggota yang minta diingat."
         ].join("\n");
       }

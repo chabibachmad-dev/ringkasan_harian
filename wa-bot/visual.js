@@ -101,7 +101,68 @@ export function parseStickerTag(raw) {
   if (m) return finish(m[1], m[2]);
   const only = first.toLowerCase().replace(/[^a-z]/g, "");
   if (STICKER_TAGS.includes(only) && only === first.toLowerCase()) return finish(only, "");
+  // AI menjawab kalimat bebas ("Stiker ini menampilkan kucing yang sedang tertawa"): label ditebak dari katanya; tak ada petunjuk = tidak ditebak
+  const guess = guessTagFromText(lines.join(" "));
+  return guess ? { tag: guess, desc: clean1(lines[0], 80) } : null;
+}
+
+const TAG_HINTS = [
+  ["kesal", /\b(marah|kesal|jengkel|emosi|geram|benci)\b/i],
+  ["sedih", /\b(sedih|menangis|nangis|air mata|kecewa|murung|galau)\b/i],
+  ["tawa", /\b(tertawa|tawa|ngakak|terbahak|tertawa|lucu|cekikikan|menertawakan)\b/i],
+  ["kaget", /\b(kaget|terkejut|shock|syok|melongo|terperanjat)\b/i],
+  ["terimakasih", /\b(terima kasih|makasih|bersyukur|berterima)\b/i],
+  ["setuju", /\b(setuju|jempol|acungan|oke|mengangguk|menyetujui)\b/i],
+  ["semangat", /\b(semangat|menyemangati|berjuang|kuat|otot)\b/i],
+  ["bingung", /\b(bingung|heran|bertanya-tanya|garuk kepala|tanda tanya|berpikir)\b/i],
+  ["senang", /\b(senang|bahagia|gembira|tersenyum|senyum|cinta|hati|melompat|bersorak)\b/i]
+];
+/** Tebak label dari kalimat deskripsi. Sedih/kesal diperiksa lebih dulu supaya tidak salah dianggap ceria. -> label | null */
+export function guessTagFromText(text) {
+  const t = String(text ?? "");
+  for (const [tag, re] of TAG_HINTS) if (re.test(t)) return tag;
   return null;
+}
+
+// ---------------------------------------------------------------- stiker animasi
+/**
+ * Stiker animasi WebP -> WebP statis dari bingkai pertama (AI penglihatan & ffmpeg sering gagal membaca yang animasi).
+ * Stiker statis dikembalikan apa adanya. -> { buffer, animated }
+ */
+export function webpFirstFrame(buf) {
+  if (!Buffer.isBuffer(buf) || buf.length < 20 || buf.toString("ascii", 0, 4) !== "RIFF" || buf.toString("ascii", 8, 12) !== "WEBP") return { buffer: buf, animated: false };
+  let off = 12;
+  while (off + 8 <= buf.length) {
+    const id = buf.toString("ascii", off, off + 4);
+    const size = buf.readUInt32LE(off + 4);
+    const start = off + 8;
+    const end = start + size;
+    if (end > buf.length) break;
+    if (id === "ANMF") {
+      let p = start + 16; // 16 byte: posisi, ukuran, durasi, flag bingkai
+      while (p + 8 <= end) {
+        const sid = buf.toString("ascii", p, p + 4);
+        const ssz = buf.readUInt32LE(p + 4);
+        if (p + 8 + ssz > end) break;
+        if (sid === "VP8 " || sid === "VP8L") {
+          const data = buf.subarray(p + 8, p + 8 + ssz);
+          const pad = ssz & 1 ? Buffer.alloc(1) : Buffer.alloc(0);
+          const head = Buffer.alloc(8);
+          head.write(sid, 0, "ascii");
+          head.writeUInt32LE(ssz, 4);
+          const body = Buffer.concat([Buffer.from("WEBP", "ascii"), head, data, pad]);
+          const riff = Buffer.alloc(8);
+          riff.write("RIFF", 0, "ascii");
+          riff.writeUInt32LE(body.length, 4);
+          return { buffer: Buffer.concat([riff, body]), animated: true };
+        }
+        p += 8 + ssz + (ssz & 1);
+      }
+      return { buffer: buf, animated: true };
+    }
+    off = end + (size & 1);
+  }
+  return { buffer: buf, animated: false };
 }
 
 // ---------------------------------------------------------------- perpustakaan stiker
