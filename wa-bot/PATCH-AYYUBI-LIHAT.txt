@@ -1,0 +1,51 @@
+PATCH AYYUBI: JAM TIDUR + BACA GAMBAR & STIKER
+================================================
+Patch ini KUMULATIF (sudah termasuk patch humor, ngobrol, dan manusiawi sebelumnya).
+
+PASANG
+1. Backup folder wa-bot lama.
+2. Ekstrak zip ini, timpa isi folder wa-bot (file baru: visual.js, test-visual.mjs).
+3. npm test   (atau: node test-visual.mjs)
+4. Restart bot.
+5. Untuk baca gambar/stiker: pastikan GEMINI_API_KEYS terisi di .env, lalu di Telegram:
+     /humor lihat on <grup>
+
+1) JAM TIDUR (masalah "ngajak ngobrol jam 2 malam")
+- Bawaan 22:30-05:00 (WA_JAM_TIDUR, mengikuti WA_TIMEZONE; "off" untuk mematikan).
+- Di jam tidur: chat otomatis, pantun, roasting dan stiker TIDAK jalan.
+- Balas chat: hanya bila memang ada obrolan ramai (>=4 chat dari >=2 orang dalam 10 menit),
+  peluangnya dikali WA_TIDUR_BALAS_FACTOR (0.2).
+- Chat otomatis sekarang bawaan hanya 06:00-21:30 (WA_SAPA_WINDOW); jatah minimal 10x/hari tetap tercapai.
+- Reaksi emoji tidak berubah (diam-diam, tidak membangunkan).
+
+2) BACA GAMBAR
+- Foto yang dikirim anggota kadang dikomentari bot (reply ke fotonya).
+- Foto dikirim SEKALI ke Gemini untuk dideskripsikan satu kalimat, lalu dibuang. Gambar TIDAK disimpan.
+- Foto sensitif (tubuh, kekerasan, KTP/kartu, data rekening) tidak dikomentari. Bot tidak menebak nama orang di foto.
+- Tanya langsung: balas foto/stiker sambil memanggil bot ("@bot ini apa?", "bacain tulisannya") -> bot melihat dan menjawab.
+  Jatah 10x/orang/hari (WA_LIHAT_TANYA_PER_DAY). Berlaku di grup yang diizinkan, tidak perlu /humor lihat.
+
+3) BACA & BALAS STIKER
+- Stiker dibaca (label perasaan + deskripsi, sekali per stiker) dan masuk konteks obrolan.
+- Stiker anggota disimpan di folder data-stiker/ (maks 40/grup). Bot kadang membalas stiker dengan
+  stiker lain yang sesuai dari perpustakaan grup itu (peluang 12%, 70% bila me-reply bot, jeda 10 menit, maks 10x/hari).
+- Tidak mengirim stiker saat: suasana sedih/kesal, mode latihan, bisu, jam tidur.
+- Stiker yang tampak tidak pantas otomatis dibuang. Anggota yang menolak dibalas tidak dibaca stikernya.
+
+PERINTAH
+  /humor lihat on|off <grup>    nyalakan/matikan (TIDAK ikut /humor on atau /humor semua)
+  /humor profil <grup>          lihat jumlah stiker tersimpan
+  /humor                        grup dengan fitur ini ditandai 👁️
+
+ENV BARU (semua opsional, lihat .env.example)
+  WA_JAM_TIDUR  WA_TIDUR_BALAS_FACTOR  WA_SAPA_WINDOW(bawaan baru)
+  WA_LIHAT_PER_DAY  WA_LIHAT_GAMBAR_MAX_MB  WA_LIHAT_TANYA_PER_DAY  WA_FOTO_BALAS_FACTOR
+  WA_STIKER_CHANCE  WA_STIKER_GAP_MIN  WA_STIKER_MAX_PER_DAY  WA_STIKER_MAX  WA_STICKER_DIR
+
+CATATAN JUJUR
+- Diuji dengan simulasi (tes otomatis), BELUM di WhatsApp sungguhan. Unduh media, pengiriman stiker
+  (Baileys {sticker: buffer}) dan panggilan Gemini bergambar baru terbukti saat dipakai langsung.
+- Stiker animasi dikirim ulang apa adanya; jika WhatsApp menolak, bot hanya mencatat galat di log.
+- Kualitas deskripsi/label dari Gemini bisa meleset (sarkasme, meme berbahasa daerah, teks kecil).
+- Foto dikirim ke layanan AI luar (Gemini). Karena itu fitur ini dimatikan secara bawaan dan terpisah dari /humor on.
+- Jam tidur memakai zona WA_TIMEZONE; pastikan nilainya sesuai lokasi grup.

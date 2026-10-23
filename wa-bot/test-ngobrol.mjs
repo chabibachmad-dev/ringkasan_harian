@@ -64,7 +64,8 @@ await ok("konfigurasi ngobrol: bawaan 15 chat, 24 jam, minimal 10 sapa/hari; bat
   const d = readNgobrolConfig({});
   assert.equal(d.contextSize, 15);
   assert.deepEqual(d.balasWindow, { from: 0, to: 1439 }, "tanpa batas jam");
-  assert.deepEqual(d.sapaWindow, { from: 0, to: 1439 });
+  assert.deepEqual(d.sapaWindow, { from: 360, to: 1290 }, "chat otomatis hanya 06:00-21:30");
+  assert.deepEqual(d.tidurWindow, { from: 1350, to: 300 }, "jam tidur bawaan 22:30-05:00");
   assert.equal(d.sapaPerDay, 10);
   assert.equal(readNgobrolConfig({ WA_SAPA_PER_DAY: "3" }).sapaPerDay, 10, "tidak bisa di bawah 10");
   assert.equal(readNgobrolConfig({ WA_SAPA_PER_DAY: "20" }).sapaPerDay, 20);

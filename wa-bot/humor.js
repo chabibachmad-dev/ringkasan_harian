@@ -30,16 +30,19 @@
 //   WA_HUMOR_ROAST_WINDOW=08:00-21:00    roast hanya di rentang jam ini
 //   WA_HUMOR_ROAST_OWNER=false           true = pemilik nomor boleh ikut diroasting
 
-import { SAPA_KINDS, buildReplyPrompt, buildSapaPrompt, detectReplyPref, isReplyWorthy, pickFallbackSapa, pickSapaKind, readNgobrolConfig, validateChat } from "./ngobrol.js";
+import { createHash } from "node:crypto";
+import { SAPA_KINDS, buildReplyPrompt, buildSapaPrompt, detectReplyPref, inNightWindow, isReplyWorthy, pickFallbackSapa, pickSapaKind, readNgobrolConfig, validateChat } from "./ngobrol.js";
 import {
   MEMORY_MAX_FACTS, MEMORY_REFUSE_TEXT, SILENT_MOODS, addressedToOther, balasEngagementFactor, describeStyle, detectMood, emptyFeedback, emptyStyle, fewShotNote, isDuoChat,
   kindWeights, moodHint, occasionsFor, parseBirthday, parseMemoryCmd, parseReactionOutput, pickReaction, pushExample, sanitizeFact, splitBubbles, updateStyle
 } from "./manusiawi.js";
+import { IMAGE_SYSTEM, STICKER_SYSTEM, addToLibrary, buildImageUserPrompt, cleanImageDescription, parseStickerTag, pickStickerFor, readVisualConfig } from "./visual.js";
 
 export const STATE_KEY = "wa_group_humor";
 export const SCHED_KEY = "wa_group_humor_sched";
 export const STYLE_KEY = "wa_group_style";
 export const FEEDBACK_KEY = "wa_group_feedback";
+export const STIKER_KEY = "wa_group_stiker";
 const MAIN = "main";
 const SECOND = "wa2";
 const DAY_ID = { Sunday: "Minggu", Monday: "Senin", Tuesday: "Selasa", Wednesday: "Rabu", Thursday: "Kamis", Friday: "Jumat", Saturday: "Sabtu" };
@@ -76,7 +79,8 @@ export function readHumorConfig(env = process.env) {
     freshMs: 2 * 60_000,
     afterTriggerMs: 5 * 60_000,
     afterSpontMs: 90_000, // roast tidak menyusul pesan spontan bot lain dalam jeda ini
-    ...readNgobrolConfig(env)
+    ...readNgobrolConfig(env),
+    ...readVisualConfig(env)
   };
 }
 
@@ -290,8 +294,8 @@ GAYA HUMORIS (grup ini): kamu asisten yang santai dan jenaka. Boleh menyelipkan 
 // ---------------------------------------------------------------- perintah /humor
 const ON_RE = /^(on|aktif|nyala|hidup|ya|1)$/i;
 const OFF_RE = /^(off|mati|matikan|tidak|0)$/i;
-const FLAG_WORDS = { gaya: "chat", jawaban: "chat", chat: "chat", pantun: "pantun", roast: "roast", roasting: "roast", godaan: "roast", ledek: "roast", balas: "balas", nimbrung: "balas", sapa: "sapa", ngobrol: "sapa", latihan: "latihan" };
-export const FLAG_LABEL = { chat: "gaya jawaban", pantun: "pantun harian", roast: "roasting ringan", balas: "balas chat acak", sapa: "chat otomatis harian", latihan: "mode latihan (draf ke pemilik dulu)" };
+const FLAG_WORDS = { gaya: "chat", jawaban: "chat", chat: "chat", pantun: "pantun", roast: "roast", roasting: "roast", godaan: "roast", ledek: "roast", balas: "balas", nimbrung: "balas", sapa: "sapa", ngobrol: "sapa", latihan: "latihan", lihat: "lihat", gambar: "lihat", stiker: "lihat", sticker: "lihat", baca: "lihat" };
+export const FLAG_LABEL = { chat: "gaya jawaban", pantun: "pantun harian", roast: "roasting ringan", balas: "balas chat acak", sapa: "chat otomatis harian", latihan: "mode latihan (draf ke pemilik dulu)", lihat: "baca gambar & stiker, balas dengan stiker" };
 export const ALL_FLAGS = ["chat", "pantun", "roast", "balas", "sapa"];
 const anyFlag = (g) => Boolean(g && (g.chat || g.pantun || g.roast || g.balas || g.sapa));
 
@@ -310,7 +314,7 @@ export function parseHumorArg(arg, { secondAliases = [] } = {}) {
     }
   };
   const need = (what) => ({ kind: "error", error: what });
-  const USAGE = "Pakai: /humor • /humor on <grup> • /humor off <grup> • /humor pantun|roast|gaya|balas|sapa|latihan on|off <grup> • /humor semua on|off • /humor jam 09:00-17:00 <grup> • /humor diam <jam> <grup> • /humor lanjut <grup> • /humor profil <grup> • /humor tes [pantun|sapa|balas] <grup>";
+  const USAGE = "Pakai: /humor • /humor on <grup> • /humor off <grup> • /humor pantun|roast|gaya|balas|sapa|latihan|lihat on|off <grup> • /humor semua on|off • /humor jam 09:00-17:00 <grup> • /humor diam <jam> <grup> • /humor lanjut <grup> • /humor profil <grup> • /humor tes [pantun|sapa|balas] <grup>";
   if (aliases.has(verb) && words.length === 1) return { kind: "status", account: SECOND };
   if (ON_RE.test(verb) || OFF_RE.test(verb)) {
     takeAccount();
@@ -389,12 +393,15 @@ export function parseHumorArg(arg, { secondAliases = [] } = {}) {
  *   listGroups(account) -> Promise<[{ id, subject, allowed }] | null>    grup yang diikuti nomor itu
  *   labels, secondEnabled, timeZone, config, now, random, log, timer(fn, ms)
  */
-export function createHumor({ state = null, ai = null, send = null, react = null, review = null, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), listGroups = null, labels = {}, secondEnabled = false, timeZone = "Asia/Makassar", config = readHumorConfig({}), now = () => Date.now(), random = Math.random, log = console, timer = (fn, ms) => setTimeout(fn, ms) } = {}) {
+export function createHumor({ state = null, ai = null, send = null, react = null, review = null, media = null, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), listGroups = null, labels = {}, secondEnabled = false, timeZone = "Asia/Makassar", config = readHumorConfig({}), now = () => Date.now(), random = Math.random, log = console, timer = (fn, ms) => setTimeout(fn, ms) } = {}) {
   let data = { groups: {}, optout: {}, noreply: {}, members: {} };
-  let sched = { pantun: {}, roast: {}, sapa: {}, balas: {}, reaksi: {} };
+  let sched = { pantun: {}, roast: {}, sapa: {}, balas: {}, reaksi: {}, vision: {}, stiker: {} };
   let styles = {}; // key -> hitungan gaya grup (hanya angka, tanpa isi chat)
+  let stickers = {}; // key -> [{ id, tag, desc, seen, uses, ts }] perpustakaan stiker per grup (berkasnya disimpan lewat media.store)
   let feedbacks = {}; // key -> { good, bad, kinds } (contoh pesan BOT yang disetujui/ditolak pemilik + tingkat respons grup)
-  const dirty = { style: false, feedback: false };
+  const dirty = { style: false, feedback: false, stiker: false };
+  const lastStickerAt = new Map();
+  const recentStickers = new Map(); // key -> id stiker yang baru dipakai bot
   const pending = new Map(); // id -> draf mode latihan yang menunggu keputusan pemilik (memori saja)
   const lastBot = new Map(); // key -> { ts, kind, counted } pesan bot terakhir (untuk mengukur respons grup)
   const lastReactAt = new Map();
@@ -419,13 +426,15 @@ export function createHumor({ state = null, ai = null, send = null, react = null
       const rs = await state.get(SCHED_KEY);
       if (rs) {
         const j = JSON.parse(rs);
-        sched = { pantun: j?.pantun || {}, roast: j?.roast || {}, sapa: j?.sapa || {}, balas: j?.balas || {}, reaksi: j?.reaksi || {} };
+        sched = { pantun: j?.pantun || {}, roast: j?.roast || {}, sapa: j?.sapa || {}, balas: j?.balas || {}, reaksi: j?.reaksi || {}, vision: j?.vision || {}, stiker: j?.stiker || {} };
       }
       try {
         const rst = await state.get(STYLE_KEY);
         if (rst) styles = JSON.parse(rst) || {};
         const rfb = await state.get(FEEDBACK_KEY);
         if (rfb) feedbacks = JSON.parse(rfb) || {};
+        const rsk = await state.get(STIKER_KEY);
+        if (rsk) stickers = JSON.parse(rsk) || {};
       } catch (e) {
         log.warn?.(`😄 [Humor] gagal membaca gaya/umpan balik tersimpan (dimulai dari kosong): ${e instanceof Error ? e.message : e}`);
       }
@@ -456,8 +465,12 @@ export function createHumor({ state = null, ai = null, send = null, react = null
         dirty.feedback = false;
         await state.set(FEEDBACK_KEY, JSON.stringify(feedbacks));
       }
+      if (dirty.stiker) {
+        dirty.stiker = false;
+        await state.set(STIKER_KEY, JSON.stringify(stickers));
+      }
     } catch (e) {
-      dirty.style = dirty.feedback = true;
+      dirty.style = dirty.feedback = dirty.stiker = true;
       log.warn?.(`😄 [Humor] gagal menyimpan gaya/umpan balik: ${e instanceof Error ? e.message : e}`);
     }
   }
@@ -484,7 +497,10 @@ export function createHumor({ state = null, ai = null, send = null, react = null
     const buf = ctxBuf.get(key) || [];
     buf.push(entry);
     while (buf.length > config.contextSize + 8) buf.shift();
-    for (let i = 0; i < buf.length - 6; i += 1) buf[i].msg = null; // referensi pesan (untuk reply) hanya dipertahankan untuk yang terbaru
+    for (let i = 0; i < buf.length - 6; i += 1) {
+      buf[i].msg = null; // referensi pesan (untuk reply) hanya dipertahankan untuk yang terbaru
+      if (buf[i].media) buf[i].media.ref = null;
+    }
     ctxBuf.set(key, buf);
   }
   /** Chat sebelum indeks `before` (bawaan: semua) yang masih segar, paling banyak contextSize, urut lama -> baru. */
@@ -673,6 +689,8 @@ export function createHumor({ state = null, ai = null, send = null, react = null
   }
   const dayOf = () => localParts(now(), timeZone).day;
   const inWindow = (win, minutes) => minutes >= win.from && minutes < win.to;
+  const isNight = (minutes) => inNightWindow(minutes, config.tidurWindow); // jam tidur: tidak membuka obrolan, membalas hanya saat ramai
+  const sapaOpen = (minutes) => inWindow(config.sapaWindow, minutes) && !isNight(minutes);
 
   // ------------------------------------------------ gaya jawaban
   /** Catatan prompt gaya humoris untuk jawaban ini, atau "" (mati / topik serius / jawaban berupa berkas). */
@@ -890,7 +908,7 @@ export function createHumor({ state = null, ai = null, send = null, react = null
     if (balasToday(key).count >= config.balasMaxPerDay) return { ok: false, reason: "jatah hari ini habis" };
     if (t - (lastSpontAt.get(key) || 0) < config.balasGapMs) return { ok: false, reason: "bot baru saja bicara" };
     if (t - (lastTriggerAt.get(key) || 0) < 60_000) return { ok: false, reason: "bot baru saja dipanggil" };
-    if (!isReplyWorthy(entry.text)) return { ok: false, reason: "pesan tidak layak dibalas" };
+    if (!(entry.media ? entry.media.kind === "gambar" : isReplyWorthy(entry.text))) return { ok: false, reason: "pesan tidak layak dibalas" };
     if ((data.noreply[key] || []).some((id) => entry.ids.includes(id))) return { ok: false, reason: "orang ini menolak dibalas" };
     const context = contextBefore(key, entry);
     if (!context.length) return { ok: false, reason: "belum ada konteks" };
@@ -899,9 +917,15 @@ export function createHumor({ state = null, ai = null, send = null, react = null
     const mood = detectMood(entry.text);
     if (SILENT_MOODS.has(mood) || humans.slice(-3).some((m) => SILENT_MOODS.has(detectMood(m.text)))) return { ok: false, reason: "suasana sedih/kesal: bot memilih diam" };
     if (addressedToOther(entry.text, humans.filter((m) => m !== entry).map((m) => m.name))) return { ok: false, reason: "pesan ditujukan ke orang lain" };
+    const night = isNight(localParts(t, timeZone).minutes);
+    if (night) {
+      // jam tidur: hanya ikut menimpali kalau memang sedang ada obrolan ramai (bukan membangunkan grup yang sepi)
+      const live = (ctxBuf.get(key) || []).filter((m) => !m.isBot && t - m.ts <= 10 * 60_000);
+      if (live.length < 4 || new Set(live.map((m) => m.ids[0] || m.name)).size < 2) return { ok: false, reason: "jam tidur & obrolan sepi" };
+    }
     if (!ignoreChance) {
       const duo = isDuoChat([...humans, entry].filter((m) => !m.isBot), entry.text);
-      const p = Math.min(0.9, config.balasChance * (/\?/.test(entry.text) ? 1.8 : 1) * (hasCasualCue([entry]) ? 1.3 : 1) * (duo ? 0.35 : 1) * balasEngagementFactor(fbOf(key)));
+      const p = Math.min(0.9, (night ? config.tidurBalasFactor : 1) * (entry.media?.kind === "gambar" ? config.fotoBalasFactor : 1) * config.balasChance * (/\?/.test(entry.text) ? 1.8 : 1) * (hasCasualCue([entry]) ? 1.3 : 1) * (duo ? 0.35 : 1) * balasEngagementFactor(fbOf(key)));
       if (random() >= p) return { ok: false, reason: duo ? "dua orang sedang ngobrol berdua" : "tidak terpilih (acak)" };
     }
     return { ok: true, context, mood };
@@ -922,6 +946,203 @@ export function createHumor({ state = null, ai = null, send = null, react = null
         .catch((e) => log.warn?.(`💬 [Humor] balasan gagal: ${e instanceof Error ? e.message : e}`))
         .finally(() => busy.delete(`balas|${key}`)), delay);
     return { ok: true, scheduled: true, kind: "balas", target: entry.name };
+  }
+
+  // ------------------------------------------------ melihat: baca gambar & stiker, balas dengan stiker (hanya bila /humor lihat on)
+  const visionReady = () => Boolean(media && typeof media.vision === "function" && typeof media.fetch === "function" && (typeof media.visionAvailable === "function" ? media.visionAvailable() : true));
+  const stickerFile = (key, id) => `${createHash("sha1").update(key).digest("hex").slice(0, 8)}_${id}.webp`;
+
+  function visionToday(key) {
+    const day = dayOf();
+    const r = sched.vision[key];
+    return r && r.day === day ? r : { day, count: 0 };
+  }
+  /** Masih ada jatah panggilan AI penglihatan hari ini? reserve = bagian jatah yang disisakan untuk keperluan lain (0..1). */
+  function visionBudget(key, reserve = 0) {
+    return visionToday(key).count < Math.floor(config.visiPerDay * (1 - reserve));
+  }
+  function spendVision(key) {
+    const v = visionToday(key);
+    sched.vision[key] = { day: v.day, count: v.count + 1 };
+  }
+
+  /** Isi `entry.media.desc` (deskripsi 1 kalimat) lewat AI penglihatan. Gambar tidak disimpan. -> { ok } | { ok: false, reason } */
+  async function ensureDescribed(key, entry) {
+    const m = entry.media;
+    if (!m || m.kind !== "gambar") return { ok: true };
+    if (m.desc) return { ok: true };
+    if (m.blocked) return { ok: false, reason: "gambar sensitif" };
+    if (!visionReady()) return { ok: false, reason: "AI penglihatan belum tersedia" };
+    if (!m.ref) return { ok: false, reason: "pesan gambar sudah tidak tersedia" };
+    if (!visionBudget(key)) return { ok: false, reason: "jatah baca gambar hari ini habis" };
+    spendVision(key);
+    let got = null;
+    try {
+      got = await media.fetch(m.ref, "gambar");
+    } catch (e) {
+      log.warn?.(`👁️ [Humor] gagal mengunduh gambar: ${e instanceof Error ? e.message : e}`);
+    }
+    if (!got?.buffer) return { ok: false, reason: "gambar tidak bisa diunduh" };
+    let raw = "";
+    try {
+      raw = await media.vision({ system: IMAGE_SYSTEM, user: buildImageUserPrompt(m.caption), image: { buffer: got.buffer, mime: got.mime || "image/jpeg" } });
+    } catch (e) {
+      log.warn?.(`👁️ [Humor] AI penglihatan gagal: ${e instanceof Error ? e.message : e}`);
+      return { ok: false, reason: "AI penglihatan gagal" };
+    } finally {
+      m.ref = null;
+    }
+    const d = cleanImageDescription(raw);
+    if (!d.ok) {
+      if (d.reason === "sensitif") m.blocked = true;
+      return { ok: false, reason: d.reason === "sensitif" ? "gambar sensitif" : `deskripsi ditolak (${d.reason})` };
+    }
+    m.desc = d.desc;
+    entry.text = `[foto: ${d.desc}]${m.caption ? ` ${m.caption}` : ""}`.slice(0, 240);
+    return { ok: true };
+  }
+
+  /** Teks petunjuk untuk pembalas: pesan yang dibalas adalah foto. */
+  const photoHint = (entry) => (entry.media?.kind === "gambar" ? " Pesan yang dibalas adalah FOTO (isinya ada di tanda [foto: ...]). Komentari isi foto itu secara singkat dan hangat; jangan menebak hal yang tidak ada di deskripsi dan jangan menyebut nama orang di foto." : "");
+
+  /** Anggota mengirim gambar/stiker. Dicatat sebagai konteks; gambar bisa dibalas, stiker bisa dibalas stiker. */
+  function observeMedia(account, jid, { name = "", ids = [], kind = "gambar", caption = "", isOwner = false, msg = null, repliedToBot = false, triggered = false } = {}) {
+    const g = settings(account, jid);
+    if (!g?.lihat || !(g.balas || g.sapa) || !media) return null;
+    const key = keyOf(account, jid);
+    const cap = String(caption ?? "").replace(/@\d{5,}/g, " ").replace(/\s+/g, " ").trim().slice(0, 160);
+    const isSticker = kind === "stiker";
+    const entry = { name, ids: ids.filter(Boolean), text: isSticker ? "[stiker]" : cap ? `[foto] ${cap}` : "[foto]", ts: now(), isBot: false, isOwner, msg, media: { kind: isSticker ? "stiker" : "gambar", caption: cap, desc: null, tag: "", ref: msg } };
+    pushCtx(key, entry);
+    noteEngagement(key, { repliedToBot });
+    if (triggered) return { ok: false, reason: "bot dipanggil" };
+    if (!g.balas) return { ok: false, reason: "balas mati" };
+    if (isSticker) {
+      if (busy.has(`stiker|${key}`) || !visionReady()) return { ok: false, reason: busy.has(`stiker|${key}`) ? "sedang menyusun" : "AI penglihatan belum tersedia" };
+      busy.add(`stiker|${key}`);
+      processSticker(account, jid, key, entry, { repliedToBot })
+        .catch((e) => log.warn?.(`🎭 [Humor] stiker gagal diproses: ${e instanceof Error ? e.message : e}`))
+        .finally(() => busy.delete(`stiker|${key}`));
+      return { ok: true, scheduled: true, kind: "stiker" };
+    }
+    return scheduleBalas(account, jid, entry);
+  }
+
+  /** Simpan stiker ke perpustakaan grup, beri label (sekali), lalu mungkin membalas dengan stiker. */
+  async function processSticker(account, jid, key, entry, { repliedToBot = false } = {}) {
+    if (!media.store) return;
+    const noreply = (data.noreply[key] || []).some((id) => entry.ids.includes(id));
+    if (noreply) return; // anggota yang menolak dibalas: stikernya tidak disimpan/dibaca
+    const got = await media.fetch(entry.media.ref, "stiker").catch(() => null);
+    entry.media.ref = null;
+    if (!got?.buffer || got.buffer.length > config.stikerMaxBytes) return;
+    const id = createHash("sha1").update(got.buffer).digest("hex").slice(0, 16);
+    const lib = (stickers[key] ||= []);
+    const r = addToLibrary(lib, { id, ts: now() }, config.stikerLibMax);
+    if (r.added) {
+      try {
+        await media.store.put(stickerFile(key, id), got.buffer);
+      } catch (e) {
+        lib.splice(lib.findIndex((x) => x.id === id), 1);
+        throw e;
+      }
+      if (r.evicted) await media.store.del?.(stickerFile(key, r.evicted.id)).catch(() => {});
+    }
+    dirty.stiker = true;
+    const item = lib.find((x) => x.id === id);
+    // label (sekali per stiker); sisakan sebagian jatah untuk membaca foto
+    if (!item.tag && visionBudget(key, 0.3)) {
+      spendVision(key);
+      try {
+        const t = parseStickerTag(await media.vision({ system: STICKER_SYSTEM, user: "Stiker ini dikirim di grup. Beri label dan deskripsinya.", image: { buffer: got.buffer, mime: "image/webp" } }));
+        if (t?.sensitive) {
+          lib.splice(lib.findIndex((x) => x.id === id), 1); // stiker tidak pantas: tidak disimpan & tidak dipakai
+          await media.store.del?.(stickerFile(key, id)).catch(() => {});
+          dirty.stiker = true;
+          await saveSched();
+          return;
+        }
+        if (t) {
+          item.tag = t.tag;
+          item.desc = t.desc;
+        }
+      } catch (e) {
+        log.warn?.(`🎭 [Humor] AI penglihatan (stiker) gagal: ${e instanceof Error ? e.message : e}`);
+      }
+      await saveSched();
+    }
+    if (item.tag) {
+      entry.media.tag = item.tag;
+      entry.text = `[stiker${item.desc ? `: ${item.desc}` : ""}]`.slice(0, 240);
+    }
+    await considerStickerReply(account, jid, key, entry, item, { repliedToBot });
+  }
+
+  function stikerToday(key) {
+    const day = dayOf();
+    const r = sched.stiker[key];
+    return r && r.day === day ? r : { day, count: 0 };
+  }
+
+  /** Layakkah membalas stiker `entry` dengan stiker sekarang? (tanpa efek samping) -> { ok, pick? } | { ok: false, reason } */
+  function evaluateStickerReply(account, jid, entry, item, { repliedToBot = false, ignoreChance = false } = {}) {
+    const key = keyOf(account, jid);
+    const g = settings(account, jid);
+    if (!g?.balas || !g.lihat) return { ok: false, reason: "balas/lihat mati" };
+    if (g.latihan) return { ok: false, reason: "mode latihan: stiker tidak dikirim otomatis" };
+    if (muted(key)) return { ok: false, reason: "sedang didiamkan pemilik" };
+    if (!media?.sendSticker || config.stikerMaxPerDay <= 0) return { ok: false, reason: "pengiriman stiker mati" };
+    if (!item?.tag) return { ok: false, reason: "stiker belum berlabel" };
+    const t = now();
+    const lp = localParts(t, timeZone);
+    if (isNight(lp.minutes) && !repliedToBot) return { ok: false, reason: "jam tidur" };
+    if (stikerToday(key).count >= config.stikerMaxPerDay) return { ok: false, reason: "jatah stiker hari ini habis" };
+    if (t - (lastStickerAt.get(key) || 0) < config.stikerGapMs) return { ok: false, reason: "baru saja mengirim stiker" };
+    if (t - (lastTriggerAt.get(key) || 0) < 60_000) return { ok: false, reason: "bot baru saja dipanggil" };
+    const humans = (ctxBuf.get(key) || []).filter((m) => !m.isBot && m !== entry).slice(-4);
+    if (humans.some((m) => SILENT_MOODS.has(detectMood(m.text)))) return { ok: false, reason: "suasana sedih/kesal: bot memilih diam" };
+    const pick = pickStickerFor(stickers[key] || [], item.tag, { excludeIds: [item.id], avoidIds: recentStickers.get(key) || [], random });
+    if (!pick) return { ok: false, reason: "tidak ada stiker yang cocok" };
+    if (!ignoreChance) {
+      const lb = lastBot.get(key);
+      const afterBot = lb && t - lb.ts < 3 * 60_000;
+      const p = Math.min(0.9, repliedToBot ? 0.7 : config.stikerBalasChance * (afterBot ? 2 : 1));
+      if (random() >= p) return { ok: false, reason: "tidak terpilih (acak)" };
+    }
+    return { ok: true, pick };
+  }
+
+  async function considerStickerReply(account, jid, key, entry, item, { repliedToBot = false } = {}) {
+    const ev = evaluateStickerReply(account, jid, entry, item, { repliedToBot });
+    if (!ev.ok) {
+      log.log?.(`🎭 [Humor] tidak membalas stiker: ${ev.reason}`);
+      return { sent: false, reason: ev.reason };
+    }
+    await sleep(2500 + Math.floor(random() * 5000)); // jeda manusiawi: "memilih stiker"
+    const again = evaluateStickerReply(account, jid, entry, item, { repliedToBot, ignoreChance: true });
+    if (!again.ok) return { sent: false, reason: again.reason };
+    const buffer = await media.store.get(stickerFile(key, again.pick.id));
+    if (!buffer) return { sent: false, reason: "berkas stiker hilang" };
+    await media.sendSticker(account, jid, buffer, entry.msg ? { quoted: entry.msg } : {});
+    again.pick.uses = (again.pick.uses || 0) + 1;
+    const recent = recentStickers.get(key) || [];
+    recent.push(again.pick.id);
+    recentStickers.set(key, recent.slice(-5));
+    lastStickerAt.set(key, now());
+    lastSpontAt.set(key, now());
+    const st = stikerToday(key);
+    sched.stiker[key] = { day: st.day, count: st.count + 1 };
+    dirty.stiker = true;
+    markSent(key, "stiker");
+    await saveSched();
+    log.log?.(`🎭 [Humor] membalas stiker ${entry.name || "?"} dengan stiker (${again.pick.tag}${again.pick.desc ? `: ${again.pick.desc}` : ""}).`);
+    return { sent: true, sticker: again.pick.id };
+  }
+
+  function visualNote() {
+    if (!media) return "\n⚠️ Fitur melihat belum terpasang di bot ini.";
+    if (!visionReady()) return "\n⚠️ Kemampuan melihat butuh API key Gemini (GEMINI_API_KEYS di .env). Sebelum itu terisi, gambar & stiker tidak dibaca.";
+    return `\nLihat: gambar yang dikirim anggota kadang dibaca AI (dikirim sekali ke Gemini untuk dideskripsikan satu kalimat; GAMBAR TIDAK DISIMPAN) lalu dikomentari; stiker anggota disimpan (maks ${config.stikerLibMax}/grup, bukan foto) dan kadang dibalas dengan stiker yang sesuai (maks ${config.stikerMaxPerDay}×/hari). Jatah baca ${config.visiPerDay}×/hari/grup. Butuh /humor balas atau sapa menyala. Anggota yang menolak dibalas tidak dibaca stikernya.`;
   }
 
   // ------------------------------------------------ reaksi emoji (tanpa menulis apa-apa)
@@ -981,6 +1202,14 @@ export function createHumor({ state = null, ai = null, send = null, react = null
       mood = again.mood;
     }
     if (!ai || !send) return { sent: false, reason: "AI/pengiriman belum siap" };
+    if (entry.media?.kind === "gambar") {
+      const d = await ensureDescribed(key, entry); // membaca gambar dulu (lewat AI penglihatan) sebelum menanggapi
+      await saveSched();
+      if (!d.ok) {
+        log.log?.(`👁️ [Humor] gambar tidak dibalas: ${d.reason}`);
+        return { sent: false, reason: d.reason };
+      }
+    }
     const recentBot = (ctxBuf.get(key) || []).filter((m) => m.isBot).slice(-6).map((m) => m.text);
     const who = callName(key, entry.ids, entry.name);
     const { system, user } = buildReplyPrompt({
@@ -989,7 +1218,7 @@ export function createHumor({ state = null, ai = null, send = null, react = null
       styleNote: describeStyle(styles[key]),
       fewShot: fewShotNote(feedbacks[key]),
       memberNote: memberNoteFor(key, entry.ids, entry.name),
-      moodHint: moodHint(mood),
+      moodHint: `${moodHint(mood) || ""}${photoHint(entry)}`.trim(),
       allowReaction: Boolean(react && entry.msg)
     });
     let text = null;
@@ -1054,7 +1283,7 @@ export function createHumor({ state = null, ai = null, send = null, react = null
     const left = Math.max(0, win.to - Math.max(win.from, minutes)) * 60_000;
     let gap = (left / remaining) * (0.4 + 0.8 * random());
     gap = Math.max(config.sapaMinGapMs, gap);
-    gap = Math.min(gap, Math.max(config.sapaMinGapMs, left * 0.9));
+    gap = Math.min(gap, Math.max(config.sapaMinGapMs, left * 0.8));
     st.nextAt = now() + wait + Math.floor(gap);
   }
 
@@ -1176,7 +1405,7 @@ export function createHumor({ state = null, ai = null, send = null, react = null
       const humansRecent = buf.filter((m) => !m.isBot && t - m.ts <= 30 * 60_000).slice(-6);
       const [account, jid] = key.split("|");
       // ulang tahun anggota (opt-in) didahulukan, tidak menunggu jadwal biasa
-      if (inWindow(config.sapaWindow, lp.minutes) && !busy.has(`sapa|${key}`) && !humansRecent.some((m) => SILENT_MOODS.has(detectMood(m.text)))) {
+      if (sapaOpen(lp.minutes) && !busy.has(`sapa|${key}`) && !humansRecent.some((m) => SILENT_MOODS.has(detectMood(m.text)))) {
         busy.add(`sapa|${key}`);
         try {
           if (await maybeBirthday(account, jid, key, g, lp)) st.count += 1;
@@ -1186,7 +1415,7 @@ export function createHumor({ state = null, ai = null, send = null, react = null
           busy.delete(`sapa|${key}`);
         }
       }
-      if (st.count >= st.target || !inWindow(config.sapaWindow, lp.minutes) || t < st.nextAt) continue;
+      if (st.count >= st.target || !sapaOpen(lp.minutes) || t < st.nextAt) continue;
       if (busy.has(`sapa|${key}`) || busy.has(`balas|${key}`) || busy.has(`roast|${key}`)) continue;
       // jangan menyela: obrolan sedang berlangsung, bot baru saja bicara, atau suasana sedang berat
       const lastHuman = [...buf].reverse().find((m) => !m.isBot);
@@ -1354,7 +1583,7 @@ export function createHumor({ state = null, ai = null, send = null, react = null
     }
     const nNo = (data.noreply[key] || []).length;
     const mutedInfo = muted(key) ? ` • 🤫 diam sampai ±${hm(localParts(g.muteUntil, timeZone).minutes)}` : "";
-    const latihanInfo = g.latihan ? " • 📝 mode latihan" : "";
+    const latihanInfo = (g.latihan ? " • 📝 mode latihan" : "") + (g.lihat ? ` • 👁️ baca gambar/stiker (${(stickers[key] || []).length} stiker)` : "");
     const nMem = Object.keys(data.members[key] || {}).length;
     return `gaya ${flag(g.chat)} • pantun ${flag(g.pantun)}${pantunInfo} • roast ${flag(g.roast)}${roastInfo}${nOut ? ` • ${nOut} orang menolak roast` : ""}\n   balas ${flag(g.balas)}${balasInfo} • sapa ${flag(g.sapa)}${sapaInfo}${nNo ? ` • ${nNo} orang menolak dibalas` : ""}${nMem ? ` • ${nMem} anggota minta diingat` : ""}${latihanInfo}${mutedInfo}`;
   }
@@ -1377,9 +1606,9 @@ export function createHumor({ state = null, ai = null, send = null, react = null
       }
     }
     lines.push(
-      "\nNyalakan: /humor on <nomor|nama> • matikan: /humor off <nomor|nama>\nSebagian: /humor pantun|roast|gaya|balas|sapa|latihan on|off <grup> • semua grup: /humor semua on|off\nDiamkan sementara: /humor diam <jam> <grup> • /humor lanjut <grup> • lihat yang dipelajari: /humor profil <grup>\nJam pantun: /humor jam 09:00-17:00 <grup> • coba sekarang: /humor tes [pantun|sapa|balas] <grup>" + (secondEnabled ? "\n(nomor kedua: tambahkan kata wa2)" : "")
+      "\nNyalakan: /humor on <nomor|nama> • matikan: /humor off <nomor|nama>\nSebagian: /humor pantun|roast|gaya|balas|sapa|latihan|lihat on|off <grup> • semua grup: /humor semua on|off\nDiamkan sementara: /humor diam <jam> <grup> • /humor lanjut <grup> • lihat yang dipelajari: /humor profil <grup>\nJam pantun: /humor jam 09:00-17:00 <grup> • coba sekarang: /humor tes [pantun|sapa|balas] <grup>" + (secondEnabled ? "\n(nomor kedua: tambahkan kata wa2)" : "")
     );
-    lines.push(`\nBalas: peluang ${Math.round(config.balasChance * 100)}% per chat, jeda ≥ ${Math.round(config.balasGapMs / 60000)} menit, maks ${config.balasMaxPerDay}×/hari/grup, membaca ${config.contextSize} chat sebelumnya, jam ${hm(config.balasWindow.from)}–${hm(config.balasWindow.to)}. Sapa: minimal ${config.sapaPerDay}×/hari/grup, jam ${hm(config.sapaWindow.from)}–${hm(config.sapaWindow.to)}.`);
+    lines.push(`\nBalas: peluang ${Math.round(config.balasChance * 100)}% per chat, jeda ≥ ${Math.round(config.balasGapMs / 60000)} menit, maks ${config.balasMaxPerDay}×/hari/grup, membaca ${config.contextSize} chat sebelumnya, jam ${hm(config.balasWindow.from)}–${hm(config.balasWindow.to)}. Sapa: minimal ${config.sapaPerDay}×/hari/grup, jam ${hm(config.sapaWindow.from)}–${hm(config.sapaWindow.to)}. ${config.tidurWindow ? `Jam tidur ${hm(config.tidurWindow.from)}–${hm(config.tidurWindow.to)}: tidak membuka obrolan, membalas hanya saat obrolan ramai.` : "Tanpa jam tidur."}`);
     lines.push(`\nRoast: maks ${config.roastMaxPerDay}×/hari/grup, jeda ≥ ${Math.round(config.roastCooldownMs / 60000)} menit, hanya saat obrolan santai & ramai, jam ${hm(config.roastWindow.from)}–${hm(config.roastWindow.to)}. Anggota bisa menolak dengan "bot jangan roasting aku".`);
     return lines.join("\n");
   }
@@ -1460,13 +1689,14 @@ export function createHumor({ state = null, ai = null, send = null, react = null
           stl || `Gaya grup: belum cukup data (${styles[key]?.n || 0}/20 pesan terbaca; fitur balas/sapa harus menyala).`,
           fb ? `Contoh disukai: ${fb.good.length} • ditolak: ${fb.bad.length}${data.groups[key]?.latihan ? " (mode latihan AKTIF)" : ""}` : "Belum ada umpan balik.",
           kinds.length ? `Tanggapan grup per jenis pesan:\n${kinds.map(([k, v]) => `• ${k}: ${v.sent} terkirim, ${Math.round((v.eng / Math.max(1, v.sent)) * 100)}% ditanggapi`).join("\n")}` : "Belum ada data tanggapan grup.",
+          data.groups[key]?.lihat ? `Stiker tersimpan: ${(stickers[key] || []).length} (berlabel ${(stickers[key] || []).filter((x) => x.tag).length}).` : "Baca gambar/stiker: mati (nyalakan: /humor lihat on <grup>).",
           mem.length ? `Anggota yang minta diingat: ${mem.length} (${mem.map((m) => m.nick || firstName(m.name)).slice(0, 8).join(", ")})` : "Belum ada anggota yang minta diingat."
         ].join("\n");
       }
       const names = [];
       for (const e of r.entries) {
         const key = keyOf(e.account, e.id);
-        const g = data.groups[key] || { name: e.subject, chat: false, pantun: false, roast: false, balas: false, sapa: false, latihan: false };
+        const g = data.groups[key] || { name: e.subject, chat: false, pantun: false, roast: false, balas: false, sapa: false, latihan: false, lihat: false };
         g.name = e.subject;
         if (p.kind === "set") for (const f of p.flags) g[f] = p.value;
         if (p.kind === "window") {
@@ -1479,6 +1709,7 @@ export function createHumor({ state = null, ai = null, send = null, react = null
         if (!g.roast) buffers.delete(key); // roast dimatikan: buang obrolan yang tersimpan
         if (!g.balas && !g.sapa) ctxBuf.delete(key);
         if (g.latihan === false) delete g.latihan;
+        if (g.lihat === false) delete g.lihat;
         names.push(e.subject);
       }
       const saved = await saveData();
@@ -1488,7 +1719,7 @@ export function createHumor({ state = null, ai = null, send = null, react = null
       if (p.kind === "window") msg = `⏰ Jam pantun ${who}: ${p.window === "reset" ? `bawaan ${hm(config.pantunWindow.from)}–${hm(config.pantunWindow.to)}` : `${hm(p.window.from)}–${hm(p.window.to)}`} (jam acak dipilih di dalam rentang itu).`;
       else {
         const what = p.flags.length === ALL_FLAGS.length ? "humor lengkap (gaya + pantun harian + roasting ringan + balas chat acak + chat otomatis harian)" : FLAG_LABEL[p.flags[0]];
-        msg = `${p.value ? "😄 Dinyalakan" : "🔕 Dimatikan"}: ${what} untuk ${who}.${p.value && p.flags.includes("roast") ? `\nRoast: maks ${config.roastMaxPerDay}×/hari, hanya saat obrolan santai; pesan grup yang tidak memanggil bot dibaca sebentar di memori (≈${config.bufferSize} pesan, tidak disimpan).` : ""}${p.value && p.flags.includes("latihan") ? (review ? "\nMode latihan: draf balasan & chat otomatis dikirim DULU ke Telegram-mu dengan tombol ✅ Kirim / ❌ Buang; yang kamu pilih menjadi contoh belajar. Matikan: /humor latihan off <grup>." : "\n⚠️ Pengiriman draf ke Telegram belum tersedia di bot ini, jadi balasan/chat otomatis TIDAK akan dikirim selama mode latihan menyala.") : ""}${p.value && p.flags.includes("balas") ? `\nBalas: sesekali membalas (reply) chat anggota setelah membaca ${config.contextSize} chat sebelumnya; obrolan dibaca sebentar di memori saja (tidak disimpan). Anggota bisa menolak: "bot jangan balas chatku".` : ""}${p.value && p.flags.includes("sapa") ? `\nSapa: minimal ${config.sapaPerDay}× sehari bot membuka obrolan sendiri (jam menyebar ${hm(config.sapaWindow.from)}–${hm(config.sapaWindow.to)}). Coba satu sekarang: /humor tes sapa ${p.target}` : ""}${p.value && p.flags.includes("pantun") ? `\nPantun: sekali sehari di jam acak ${hm(windowOf(data.groups[keyOf(r.entries[0].account, r.entries[0].id)]).from)}–${hm(windowOf(data.groups[keyOf(r.entries[0].account, r.entries[0].id)]).to)}.` : ""}`;
+        msg = `${p.value ? "😄 Dinyalakan" : "🔕 Dimatikan"}: ${what} untuk ${who}.${p.value && p.flags.includes("roast") ? `\nRoast: maks ${config.roastMaxPerDay}×/hari, hanya saat obrolan santai; pesan grup yang tidak memanggil bot dibaca sebentar di memori (≈${config.bufferSize} pesan, tidak disimpan).` : ""}${p.value && p.flags.includes("latihan") ? (review ? "\nMode latihan: draf balasan & chat otomatis dikirim DULU ke Telegram-mu dengan tombol ✅ Kirim / ❌ Buang; yang kamu pilih menjadi contoh belajar. Matikan: /humor latihan off <grup>." : "\n⚠️ Pengiriman draf ke Telegram belum tersedia di bot ini, jadi balasan/chat otomatis TIDAK akan dikirim selama mode latihan menyala.") : ""}${p.value && p.flags.includes("lihat") ? visualNote() : ""}${p.value && p.flags.includes("balas") ? `\nBalas: sesekali membalas (reply) chat anggota setelah membaca ${config.contextSize} chat sebelumnya; obrolan dibaca sebentar di memori saja (tidak disimpan). Anggota bisa menolak: "bot jangan balas chatku".` : ""}${p.value && p.flags.includes("sapa") ? `\nSapa: minimal ${config.sapaPerDay}× sehari bot membuka obrolan sendiri (jam menyebar ${hm(config.sapaWindow.from)}–${hm(config.sapaWindow.to)}). Coba satu sekarang: /humor tes sapa ${p.target}` : ""}${p.value && p.flags.includes("pantun") ? `\nPantun: sekali sehari di jam acak ${hm(windowOf(data.groups[keyOf(r.entries[0].account, r.entries[0].id)]).from)}–${hm(windowOf(data.groups[keyOf(r.entries[0].account, r.entries[0].id)]).to)}.` : ""}`;
       }
       return `${msg}${saved ? "" : "\n⚠️ Gagal menyimpan ke database: berlaku sampai bot restart saja."}`;
     } catch (e) {
@@ -1501,5 +1732,5 @@ export function createHumor({ state = null, ai = null, send = null, react = null
     return n ? `AKTIF di ${n} grup` : "mati di semua grup";
   }
 
-  return { load, settings, anyEnabled, chatNote, observe, noteBotSaid, noteTriggered, handlePreference, evaluate, roastNow, evaluateBalas, balasNow, check, checkSapa, decide, handle, describe, _debug: { data: () => data, sched: () => sched, buffers, ctxBuf, lastSpontAt, styles: () => styles, feedbacks: () => feedbacks, pending, lastBot } };
+  return { load, settings, anyEnabled, chatNote, observe, observeMedia, visionReady, noteBotSaid, noteTriggered, handlePreference, evaluate, roastNow, evaluateBalas, balasNow, check, checkSapa, decide, handle, describe, _debug: { stickers: () => stickers, ensureDescribed, evaluateStickerReply, considerStickerReply, processSticker, data: () => data, sched: () => sched, buffers, ctxBuf, lastSpontAt, styles: () => styles, feedbacks: () => feedbacks, pending, lastBot } };
 }

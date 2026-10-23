@@ -156,7 +156,7 @@ const HELP = [
   "/voice wag on|off|id|eng|kor|arb|jawa  — balasan grup WA berupa suara/teks + bahasa suara",
   "/wa2  — nomor WhatsApp kedua (status, kode, qr)",
   "/grup  — grup WA yang dijawab bot: lihat, semua, tambah, hapus",
-  "/humor  — humor per grup WA: pantun harian, roasting ringan, balas chat acak, chat otomatis, mode latihan",
+  "/humor  — humor per grup WA: pantun harian, roasting ringan, balas chat acak, chat otomatis, mode latihan, baca gambar & stiker",
   "/gambar <deskripsi>  — buat gambar; /gambar grup on|off = izinkan di grup WA\n/video <deskripsi>  — video bernarasi; kirim FOTO + keterangan \"jadikan video salju\" = foto hidup\n/env  — ubah kunci gambar (token Cloudflare, jatah) dari sini",
   "/kas  — laporan kas bulanan: konfirmasi angka, submit, simpan (/kas bantuan)",
   "/nodin  — konsep Nota Dinas LPJ (PDF + Word), otomatis tiap tanggal 1 (/nodin cek)",

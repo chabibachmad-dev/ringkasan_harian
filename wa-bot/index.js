@@ -88,6 +88,7 @@ import { qrToPng } from "./qr-png.js";
 import { createGroupList } from "./group-list.js";
 import { createVideoGen, readVideoConfig, videoSentNote, photoVideoSentNote, storySentNote, morphSentNote, VIDEO_TEXT } from "./video-gen.js";
 const VIDEO_NOPHOTO_TEXT = VIDEO_TEXT.nophoto;
+import { IMAGE_QA_SYSTEM, buildImageQaPrompt, looksLikeImageQuestion, readVisualConfig } from "./visual.js";
 import { createImageGen, readImageConfig, imageSentNote, quotedImageNote, prepareEditInput, KIND_TEXT as IMAGE_KIND_TEXT } from "./image-gen.js";
 import { createEnvEditor } from "./env-edit.js";
 import { createMetaAi, readMetaAiConfig, parseMetaAiArg, unsafeTarget } from "./meta-ai.js";
@@ -2925,6 +2926,7 @@ function getMessageContextInfo(m) {
   return (
     m.extendedTextMessage?.contextInfo ||
     m.imageMessage?.contextInfo ||
+    m.stickerMessage?.contextInfo ||
     m.videoMessage?.contextInfo ||
     m.documentMessage?.contextInfo ||
     m.audioMessage?.contextInfo ||
@@ -2939,6 +2941,11 @@ async function handleGroupMessage(msg, sock) {
   const groupJid = msg.key.remoteJid;
   const content = unwrapMessageContent(msg.message);
   if (!content) return;
+  // Stiker, atau gambar TANPA keterangan: tidak pernah memanggil bot. Hanya dibaca bila /humor lihat menyala di grup ini (baca gambar & stiker).
+  if (!msg.key.fromMe && (content.stickerMessage || (content.imageMessage && !String(content.imageMessage.caption ?? "").trim()))) {
+    await observeHumorMedia(sock, msg, content, groupJid, { caption: "" }).catch((e) => console.error("👁️ Baca gambar/stiker gagal:", e instanceof Error ? e.message : String(e)));
+    return;
+  }
   // Voice note di grup tidak bisa me-mention bot; yang dihitung memanggil bot = voice note yang membalas (reply) pesan bot.
   const groupAudio = audioOf(content);
   if (groupAudio && !(waVoiceCfg.inGroups && transcriber.available())) return;
@@ -3007,6 +3014,7 @@ async function handleGroupMessage(msg, sock) {
   if (!triggered) {
     // Kalimat biasa yang tampak jelas seperti pengumuman jadwal ("besok rapat jam 9"): bot menawarkan mencatatnya (tanpa AI, tanpa menyimpan obrolan).
     if (!photo && !docAttached && !groupAudio && agenda.mightOffer(rawText)) offerAgendaFromChat(sock, msg, groupJid, rawText).catch((e) => console.error("📅 Tawaran jadwal gagal:", e instanceof Error ? e.message : String(e)));
+    if (photo && !msg.key.fromMe) observeHumorMedia(sock, msg, content, groupJid, { caption: rawText }).catch((e) => console.error("👁️ Baca gambar gagal:", e instanceof Error ? e.message : String(e)));
     return;
   }
 
@@ -3026,7 +3034,14 @@ async function handleGroupMessage(msg, sock) {
   // Foto hidup ("bot, jadikan video dengan salju" + foto/balas foto) didahulukan: kata "jadikan" juga dikenali sebagai edit foto.
   const animReq = videoGen.photoGroupEnabled() ? videoGen.detectPhoto(text, { hasImage: Boolean(photo || quotedImage) }) : null;
   const editReq = !animReq && imageGen.groupEnabled() ? imageGen.detectEdit(text, { hasImage: Boolean(photo || quotedImage) }) : null;
-  if (photo && !editReq && !animReq) return; // foto dengan keterangan biasa: tetap diabaikan seperti sebelumnya
+  // Bot dipanggil + foto/gambar/stiker yang dikutip: kalau terdengar bertanya tentang gambarnya ("ini apa?", "bacain tulisannya"), bot melihat & menjawab.
+  const quotedSticker = !photo && ctx?.quotedMessage ? unwrapMessageContent(ctx.quotedMessage)?.stickerMessage || null : null;
+  if ((photo || quotedImage || quotedSticker) && !editReq && !animReq && looksLikeImageQuestion(text)) {
+    const qSource = photo ? { key: msg.key, message: content } : { key: { remoteJid: groupJid, id: ctx.stanzaId, participant: ctx.participant }, message: unwrapMessageContent(ctx.quotedMessage) };
+    await answerGroupImageQuestion(sock, msg, groupJid, { source: qSource, kind: quotedSticker ? "stiker" : "gambar", question: text, who: `${groupJid}|${msg.key.participant || sender}` });
+    return;
+  }
+  if (photo && !editReq && !animReq) return; // foto dengan keterangan biasa (bukan pertanyaan tentang gambarnya): tetap diabaikan seperti sebelumnya
   let quotedText = ctx?.quotedMessage ? extractText({ message: unwrapMessageContent(ctx.quotedMessage) }) : null;
   // Mengutip GAMBAR buatan bot ini (tanpa keterangan): ambil deskripsi permintaannya dari catatan keluar, supaya AI tahu itu gambar apa.
   if (!quotedText && repliedToOwn && ctx?.stanzaId && unwrapMessageContent(ctx.quotedMessage || {})?.imageMessage) {
@@ -5230,8 +5245,135 @@ async function reviewHumorDraft({ id, group, kind, targetName, targetText, text 
   const sent = await telegram.sendOwner(body, { markup: [[{ text: "✅ Kirim", callback_data: `hr:ok:${id}` }, { text: "❌ Buang", callback_data: `hr:no:${id}` }]] });
   if (!sent) throw new Error("Telegram pemilik tidak tersedia untuk meninjau draf");
 }
+// ---------------------------------------------------------------- Melihat: baca gambar & stiker (mode humor /humor lihat, dan tanya bot tentang gambar)
+// Gambar TIDAK disimpan: diunduh sebentar ke memori, dikirim sekali ke Gemini untuk dideskripsikan, lalu dibuang. Stiker anggota disimpan sebagai berkas kecil per grup (folder WA_STICKER_DIR).
+const VISUAL_CFG = readVisualConfig(process.env);
+const STICKER_DIR = path.resolve(process.env.WA_STICKER_DIR || path.join(BOT_DIR, "data-stiker"));
+const mediaSock = new WeakMap(); // pesan -> sock yang menerimanya (untuk mengunduh ulang media di nomor yang benar)
+const IMAGE_QA_DAILY_MAX = Math.max(0, Math.min(100, Number(process.env.WA_LIHAT_TANYA_PER_DAY) || 10));
+const imageQaQuota = new Map(); // "grup|orang|tanggal" -> jumlah
+
+async function geminiVision({ system, user, image }) {
+  if (GEMINI_API_KEYS.length === 0) throw new Error("GEMINI_API_KEYS belum diisi");
+  const data = await geminiGenerateWithRotation(system, [{ role: "user", parts: [{ text: user }, { inline_data: { mime_type: image.mime || "image/jpeg", data: Buffer.from(image.buffer).toString("base64") } }] }], { useSearch: false });
+  return extractGeminiText(data);
+}
+async function downloadVisualMedia(sk, source, maxBytes) {
+  let lastErr = null;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const buffer = await downloadMediaMessage(source, "buffer", {}, { logger: pino({ level: "silent" }), reuploadRequest: sk?.updateMediaMessage });
+      return buffer.length > maxBytes ? null : buffer;
+    } catch (e) {
+      lastErr = e;
+      await new Promise((r) => setTimeout(r, 700));
+    }
+  }
+  throw lastErr || new Error("gagal mengunduh media");
+}
+const stickerPath = (name) => (/^[a-f0-9_]+\.webp$/.test(String(name)) ? path.join(STICKER_DIR, name) : null);
+const humorMedia = {
+  visionAvailable: () => GEMINI_API_KEYS.length > 0,
+  vision: geminiVision,
+  fetch: async (msg, kind) => {
+    const node = kind === "stiker" ? unwrapMessageContent(msg?.message)?.stickerMessage : unwrapMessageContent(msg?.message)?.imageMessage;
+    if (!node) return null;
+    const max = kind === "stiker" ? VISUAL_CFG.stikerMaxBytes : VISUAL_CFG.gambarMaxBytes;
+    if (Number(node.fileLength) > max) return null;
+    const buffer = await downloadVisualMedia(mediaSock.get(msg) || currentSock, { key: msg.key, message: unwrapMessageContent(msg.message) }, max);
+    return buffer ? { buffer, mime: kind === "stiker" ? "image/webp" : node.mimetype || "image/jpeg" } : null;
+  },
+  sendSticker: async (account, jid, buffer, { quoted = null } = {}) => {
+    const sk = account === SECOND_ACCOUNT ? WA2_ACCOUNT_DEF?.sock : currentSock;
+    if (!sk) throw new Error("WhatsApp belum tersambung");
+    const subject = await getGroupSubject(sk, jid);
+    if (!AUTO_REPLY_ACTIVE || !groupRulesFor(sk).enabled || !isGroupAllowed(jid, subject, sk)) throw new Error("grup sudah tidak diizinkan");
+    await waAccountContext.run({ account }, async () => {
+      try {
+        await sk.sendPresenceUpdate("composing", jid);
+        await new Promise((r) => setTimeout(r, 1200));
+        await sk.sendPresenceUpdate("paused", jid);
+      } catch {
+        /* presence gagal tidak boleh menggagalkan stiker */
+      }
+      const sent = await sk.sendMessage(jid, { sticker: buffer }, quoted ? { quoted } : undefined);
+      const { error } = await supabase.from("whatsapp_messages").insert({ wa_jid: jid, wa_name: subject || null, direction: "out", content: "[stiker]", status: "sent", wa_message_id: sent?.key?.id ?? null, ...acctFields(currentAccountId()) });
+      if (error) console.error("Gagal catat stiker humor:", error.message);
+    });
+  },
+  store: {
+    put: async (name, buf) => {
+      const f = stickerPath(name);
+      if (!f) throw new Error("nama berkas stiker tidak valid");
+      await fs.promises.mkdir(STICKER_DIR, { recursive: true });
+      await fs.promises.writeFile(f, buf);
+    },
+    get: async (name) => {
+      const f = stickerPath(name);
+      return f ? fs.promises.readFile(f).catch(() => null) : null;
+    },
+    del: async (name) => {
+      const f = stickerPath(name);
+      if (f) await fs.promises.unlink(f).catch(() => {});
+    }
+  }
+};
+
+/** Gambar/stiker di grup yang menyalakan /humor lihat -> dicatat sebagai konteks; bisa dikomentari / dibalas stiker (humor.js). */
+async function observeHumorMedia(sock, msg, content, groupJid, { caption = "" } = {}) {
+  const acct = currentAccountId();
+  const g = humor.settings(acct, groupJid);
+  if (!g?.lihat) return;
+  if (content.imageMessage?.viewOnce || content.stickerMessage?.isAvatar) return; // sekali-lihat & stiker avatar tidak dibaca
+  const subject = await getGroupSubject(sock, groupJid);
+  if (!isGroupAllowed(groupJid, subject, sock)) return;
+  const ctx = getMessageContextInfo(content);
+  const ownJids = getOwnJids(sock);
+  const qp = ctx?.participant ? normalizeJidSuffix(ctx.participant) : null;
+  let repliedToBot = false;
+  if (qp !== null && ownJids.includes(qp) && ctx?.stanzaId) {
+    const { data: botMsg } = await supabase.from("whatsapp_messages").select("id").eq("wa_jid", groupJid).eq("direction", "out").eq("wa_message_id", ctx.stanzaId).limit(1);
+    repliedToBot = Boolean(botMsg && botMsg.length > 0);
+  }
+  const ids = [msg.key.participant, msg.key.participantAlt].filter(Boolean).map((j) => j.split("@")[0].split(":")[0]);
+  mediaSock.set(msg, sock);
+  humor.observeMedia(acct, groupJid, { name: msg.pushName || "", ids, kind: content.stickerMessage ? "stiker" : "gambar", caption, isOwner: isOwnerSender(msg, false), msg, repliedToBot });
+}
+
+/** Bot dipanggil dengan foto/gambar/stiker ("@bot ini apa?"): lihat gambarnya dan jawab singkat. */
+async function answerGroupImageQuestion(sock, msg, groupJid, { source, kind, question, who }) {
+  const acct = currentAccountId();
+  const say = (t) => sendHumorGroupText(acct, groupJid, t, { quoted: msg }).catch((e) => console.error("👁️ Jawaban gambar gagal terkirim:", e instanceof Error ? e.message : String(e)));
+  if (GEMINI_API_KEYS.length === 0) return say("Aku belum bisa melihat gambar di sini (kunci Gemini belum diisi oleh pemilik bot) 🙏");
+  const day = new Date().toLocaleDateString("en-CA", { timeZone: WA_TIMEZONE });
+  for (const k of imageQaQuota.keys()) if (!k.endsWith(`|${day}`)) imageQaQuota.delete(k);
+  const qk = `${who}|${day}`;
+  const used = imageQaQuota.get(qk) ?? 0;
+  if (IMAGE_QA_DAILY_MAX <= 0 || used >= IMAGE_QA_DAILY_MAX) return say(`Jatah aku melihat gambar untukmu hari ini sudah habis (${IMAGE_QA_DAILY_MAX}×). Coba lagi besok ya 🙏`);
+  imageQaQuota.set(qk, used + 1);
+  let buffer = null;
+  try {
+    buffer = await downloadVisualMedia(sock, source, kind === "stiker" ? VISUAL_CFG.stikerMaxBytes : 8 * 1024 * 1024);
+  } catch (e) {
+    console.error("👁️ Gagal mengunduh gambar:", describeError(e));
+  }
+  if (!buffer) return say("Gambarnya tidak bisa kubuka (terlalu besar atau sudah kedaluwarsa). Coba kirim ulang ya 🙏");
+  let out = "";
+  try {
+    out = await geminiVision({ system: IMAGE_QA_SYSTEM, user: buildImageQaPrompt(question), image: { buffer, mime: kind === "stiker" ? "image/webp" : (source.message?.imageMessage?.mimetype || "image/jpeg") } });
+  } catch (e) {
+    console.error("👁️ AI penglihatan gagal:", describeError(e));
+    return say("Maaf, aku belum bisa melihat gambarnya sekarang (AI-nya sedang bermasalah). Coba sebentar lagi ya 🙏");
+  }
+  const text = String(out || "").replace(/https?:\/\/\S+/g, "").replace(/@\d{5,}/g, "").trim().slice(0, 700);
+  if (!text) return say("Aku melihatnya, tapi bingung mau bilang apa 😅");
+  console.log(`👁️ [${groupJid}] menjawab pertanyaan tentang ${kind}.`);
+  await say(text);
+}
+
 const humor = createHumor({
   state: strictStateStore,
+  media: humorMedia,
   ai: AUTO_REPLY_ACTIVE ? humorAi : null,
   send: sendHumorGroupText,
   react: reactHumorGroup,

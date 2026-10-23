@@ -21,3 +21,6 @@ khatam-state.json
 
 # Indeks dokumen pengetahuan di laptop (bisa dibangun ulang, tapi besar)
 kb/
+
+# Stiker yang dipelajari bot humor (WA_STICKER_DIR)
+data-stiker/

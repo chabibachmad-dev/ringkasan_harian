@@ -1,7 +1,8 @@
 // Bagian "ngobrol" dari mode humor grup: (1) BALAS -- bot sesekali nimbrung membalas chat orang (di-reply) setelah membaca 15 chat sebelumnya;
 // (2) SAPA -- bot mengobrol sendiri di grup minimal N kali sehari (bawaan 10), jam menyebar sepanjang hari.
 // Bagian murni (konfigurasi, prompt, penyaring, daftar cadangan) ada di sini; logika berstatus ada di createHumor (humor.js).
-// Tidak ada pembatasan jam secara bawaan (24 jam); bisa dibatasi lewat WA_BALAS_WINDOW / WA_SAPA_WINDOW.
+// Jam tidur (bawaan 22:30-05:00, WA_JAM_TIDUR): bot TIDAK membuka obrolan sendiri; membalas hanya bila obrolan sedang ramai dan dengan peluang kecil.
+// Chat otomatis (sapa) bawaannya hanya 06:00-21:30; bisa diubah lewat WA_BALAS_WINDOW / WA_SAPA_WINDOW.
 
 import { hasBannedWord } from "./humor.js";
 
@@ -14,6 +15,27 @@ function windowOrDefault(text, fallback) {
   const to = Number(m[3]) * 60 + Number(m[4]);
   if (Number(m[1]) > 23 || Number(m[3]) > 23 || Number(m[2]) > 59 || Number(m[4]) > 59 || to - from < 30) return fallback;
   return { from, to };
+}
+
+const DEFAULT_TIDUR = { from: 22 * 60 + 30, to: 5 * 60 };
+
+/** "22:30-05:00" (boleh melewati tengah malam) -> { from, to }; "off"/"mati" -> null (tanpa jam tidur); selain itu bawaan. */
+export function parseNightWindow(text, fallback = DEFAULT_TIDUR) {
+  const t = String(text ?? "").trim();
+  if (!t) return fallback;
+  if (/^(off|mati|tidak|tanpa|0|none)$/i.test(t)) return null;
+  const m = /^(\d{1,2})[:.](\d{2})\s*[-–—]\s*(\d{1,2})[:.](\d{2})$/.exec(t);
+  if (!m || Number(m[1]) > 23 || Number(m[3]) > 23 || Number(m[2]) > 59 || Number(m[4]) > 59) return fallback;
+  const from = Number(m[1]) * 60 + Number(m[2]);
+  const to = Number(m[3]) * 60 + Number(m[4]);
+  if (from === to) return fallback;
+  return { from, to };
+}
+
+/** Apakah menit-ke-N dalam sehari (0-1439) termasuk jam tidur? Mendukung rentang yang melewati tengah malam. */
+export function inNightWindow(minutes, night) {
+  if (!night) return false;
+  return night.from < night.to ? minutes >= night.from && minutes < night.to : minutes >= night.from || minutes < night.to;
 }
 
 export function readNgobrolConfig(env = process.env) {
@@ -30,7 +52,9 @@ export function readNgobrolConfig(env = process.env) {
     balasWindow: windowOrDefault(env.WA_BALAS_WINDOW, ALL_DAY),
     sapaPerDay: Math.floor(num(env.WA_SAPA_PER_DAY, 10, 10, 48)), // minimal 10
     sapaMinGapMs: Math.floor(num(env.WA_SAPA_MIN_GAP_MIN, 10, 1, 24 * 60)) * 60_000,
-    sapaWindow: windowOrDefault(env.WA_SAPA_WINDOW, ALL_DAY),
+    sapaWindow: windowOrDefault(env.WA_SAPA_WINDOW, { from: 6 * 60, to: 21 * 60 + 30 }),
+    tidurWindow: parseNightWindow(env.WA_JAM_TIDUR), // null = tanpa jam tidur
+    tidurBalasFactor: num(env.WA_TIDUR_BALAS_FACTOR, 0.2, 0, 1), // jam tidur: peluang membalas dikali ini (dan hanya bila obrolan sedang ramai)
     reaksiChance: num(env.WA_REAKSI_CHANCE, 0.25, 0, 1), // peluang pesan bernuansa (lucu/kabar baik/terima kasih) diberi reaksi emoji
     reaksiGapMs: Math.floor(num(env.WA_REAKSI_GAP_SEC, 45, 5, 3600)) * 1000,
     reaksiMaxPerDay: Math.floor(num(env.WA_REAKSI_MAX_PER_DAY, 30, 0, 500)),
