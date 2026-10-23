@@ -31,3 +31,8 @@ TAMBAHAN: TANPA TAWARAN BANTUAN
   (1) aturan di semua prompt balasan WhatsApp, (2) penyaring kode di insani.js (stripHelpOffers) pada balasan grup/pribadi dan balasan acak/sapa.
 - Kalimat cadangan yang menawarkan bantuan diganti (sapa cadangan, contoh suara, teks pemilik).
 - Telegram (chat dengan pemilik) tidak diubah.
+
+TAMBAHAN: JAWAB PERTANYAAN DI GRUP TANPA MENTION
+- Di grup yang /humor balas on: anggota bertanya ke grup (tanda tanya / kata tanya) -> bot menjawab sebagai reply, sesuai konteks, padat,
+  boleh memakai pencarian Google. Tanpa batas harian. Diam bila ditujukan ke satu orang, topik berat, sudah dijawab orang lain, atau AI tidak yakin.
+- ENV: WA_TANYA_TANPA_MENTION (on), WA_TANYA_CHANCE (0.85), WA_TANYA_GAP_SEC (15).

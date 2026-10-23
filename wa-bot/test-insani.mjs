@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import { STATE_KEY, createHumor, parseHumorArg, readHumorConfig } from "./humor.js";
-import { FALLBACK_SAPA, buildReplyPrompt, buildSapaPrompt, validateChat } from "./ngobrol.js";
+import { FALLBACK_SAPA, buildReplyPrompt, buildSapaPrompt, isGraveTopic, isGroupQuestion, validateChat } from "./ngobrol.js";
 import { NO_OFFER_NOTE, dayEnergy, extractSelfFacts, stripHelpOffers, fatigueFactor, hash01, hourFactor, informality, jitterGap, naturalize, reactionFromText, replyChance } from "./insani.js";
 import { emptyStyle, updateStyle } from "./manusiawi.js";
 
@@ -44,7 +44,7 @@ function rig(over = {}) {
     config: readHumorConfig({ WA_BALAS_CHANCE: "0.5", WA_ENERGI_HARIAN: "off", WA_GAYA_ALAMI: "off", WA_TYPO_CHANCE: "0", ...(over.env || {}) }),
     now: () => t,
     random: () => rnd,
-    log: silent,
+    log: process.env.DBG ? console : silent,
     timer: (fn, ms) => timers.push({ fn, ms })
   });
   return { h, st, sent, reacts, timers, aiCalls, setRnd: (v) => void (rnd = v), tick: (ms) => void (t += ms), setNow: (x) => void (t = x), now: () => t };
@@ -404,6 +404,104 @@ await ok("balasan acak/sapa: validateChat membuang tawaran; yang hanya tawaran d
   for (const line of FALLBACK_SAPA) assert.equal(stripHelpOffers(line, { fallback: "" }), line, `cadangan sapa memuat tawaran: ${line}`);
 });
 
+await ok("deteksi pertanyaan di grup: pertanyaan umum ya; yang ditujukan ke satu orang, terlalu pendek, tautan, perintah bot, bukan pertanyaan -> tidak", () => {
+  for (const q of ["gimana cara bayar pajak kendaraan online ya?", "kapan sih batas akhir lapor SPT tahun ini?", "ada yang tau resep nasi goreng enak?", "berapa harga tiket kereta ke Jogja sekarang", "bisa nggak ya transfer antar bank gratis?", "siapa presiden pertama Indonesia?"]) assert.equal(isGroupQuestion(q), true, q);
+  for (const no of ["kamu udah makan?", "mas Budi, jadi ikut nggak?", "ok?", "wkwk iya sih?", "lihat ini https://contoh.id/abc apa ya?", "/status bot apa?", "aku lagi makan nasi goreng enak banget", "makasih ya infonya", "hm?"]) assert.equal(isGroupQuestion(no), false, no);
+  assert.equal(isGraveTopic("obat sakit kepala apa ya?"), true);
+  assert.equal(isGraveTopic("gaji naik berapa persen?"), true);
+  assert.equal(isGraveTopic("gimana cara bayar pajak online?"), false);
+});
+
+const askText = "gimana cara bayar pajak kendaraan lewat aplikasi ya?";
+const answer = "Bisa lewat aplikasi Signal dari Samsat, pilih menu pajak kendaraan lalu bayar pakai kode billing yang muncul. Pastikan KTP dan STNK sudah terdaftar.";
+await ok("pertanyaan di grup dijawab walau bot tidak di-mention: reply sesuai konteks, memakai pencarian, jawaban boleh lebih panjang, tanpa jatah harian", async () => {
+  const r = rig({ aiOut: (c, n) => (n === 1 ? answer : "Dendanya sekitar 2 persen per bulan dari pokok pajak, makin lama makin besar."), env: { WA_BALAS_MAX_PER_DAY: "1" } });
+  await r.h.load();
+  await r.h.handle("balas on keluarga");
+  warm(r);
+  const a = say(r, "Sari", askText, { rnd: 0 });
+  assert.equal(a.res?.ok, true);
+  assert.equal(a.res?.kind, "balas");
+  await runLast(r);
+  assert.equal(r.sent.length, 1);
+  assert.equal(r.sent[0].text, answer);
+  assert.equal(r.sent[0].o?.quoted?.name, "Sari", "me-reply pertanyaannya");
+  const call = r.aiCalls.at(-1);
+  assert.equal(call.search, true);
+  assert.match(call.system, /PESAN TERAKHIR ADALAH PERTANYAAN/);
+  assert.match(call.system, /tanpa tautan/);
+  assert.match(call.user, /Obrolan sebelumnya/);
+  // pertanyaan kedua tak lama kemudian (jeda pendek, batas harian balasan acak = 1 sudah terpakai): tetap dijawab
+  r.tick(MIN);
+  const b = say(r, "Rudi", "berapa denda telat bayar pajak motor ya biasanya?", { rnd: 0, gap: 30_000 });
+  assert.equal(b.res?.ok, true, "tidak terkena batas harian maupun jeda panjang balasan acak");
+  await runLast(r);
+  assert.equal(r.sent.length, 2);
+  // chat biasa (bukan pertanyaan) tetap kena batas harian
+  const c = say(r, "Budi", "tadi siang makan soto ayam enak banget di warung depan", { rnd: 0, gap: 10 * MIN });
+  assert.equal(c.res?.ok, false);
+});
+
+await ok("pertanyaan di grup: tidak dijawab bila ditujukan ke satu orang, me-reply orang lain, topik berat, balas mati, WA_TANYA_TANPA_MENTION=off, atau acak tidak memilih", async () => {
+  const mk = async (env = {}) => {
+    const r = rig({ aiOut: answer, env });
+    await r.h.load();
+    await r.h.handle("balas on keluarga");
+    warm(r);
+    return r;
+  };
+  let r = await mk();
+  assert.equal(say(r, "Sari", "Rudi, jadi ikut ke pantai nggak besok?", { rnd: 0 }).res?.reason, "pesan ditujukan ke orang lain");
+  const q = say(r, "Sari", askText, { rnd: 0.5, opts: { quotedOther: true } });
+  assert.equal(q.res?.ok, false);
+  assert.match(q.res?.reason, /untuk orang yang dibalas/);
+  assert.equal(say(r, "Sari", "obat sakit kepala yang bagus apa ya?", { rnd: 0 }).res?.reason, "topik berat: bot memilih diam");
+  r = await mk();
+  assert.equal(say(r, "Sari", askText, { rnd: 0.9 }).res?.reason, "tidak terpilih (acak)", "peluang 0,85");
+  assert.equal(say(r, "Sari", "menurut kalian gimana cara bayar pajak lewat aplikasi?", { rnd: 0.5, opts: { quotedOther: true } }).res?.ok, true, "bertanya ke semua tetap dijawab walau me-reply");
+  r = await mk({ WA_TANYA_TANPA_MENTION: "off" });
+  const off = say(r, "Sari", askText, { rnd: 0 });
+  assert.notEqual(off.res?.kind, "balas");
+  const nb = rig({ aiOut: answer });
+  await nb.h.load();
+  await nb.h.handle("sapa on keluarga");
+  assert.equal(nb.timers.length, 0);
+  r = await mk();
+  await r.h.handlePreference("main", JID, { name: "Sari", ids: ["id-Sari"], text: "bot jangan balas chatku" });
+  assert.equal(say(r, "Sari", askText, { rnd: 0 }).res?.ok, false, "yang menolak dibalas tetap dihormati");
+});
+
+await ok("pertanyaan di grup: bot ikut diam bila AI memilih SKIP atau pertanyaan sudah dijawab orang lain; mode latihan tetap lewat persetujuan", async () => {
+  let r = rig({ aiOut: "SKIP" });
+  await r.h.load();
+  await r.h.handle("balas on keluarga");
+  warm(r);
+  say(r, "Sari", askText, { rnd: 0 });
+  await runLast(r);
+  assert.equal(r.sent.length, 0, "SKIP = tidak ada yang dikirim");
+  r = rig({ aiOut: answer });
+  await r.h.load();
+  await r.h.handle("balas on keluarga");
+  warm(r);
+  say(r, "Sari", askText, { rnd: 0 });
+  say(r, "Budi", "bisa lewat aplikasi Signal kayaknya", { gap: 5_000 });
+  say(r, "Rudi", "iya Signal, tinggal pilih menu pajak", { gap: 5_000 });
+  say(r, "Budi", "terus bayar pakai kode billing", { gap: 5_000 });
+  await runLast(r);
+  assert.equal(r.sent.length, 0, "sudah dijawab orang lain");
+  // mode latihan: draf ke pemilik dulu
+  const reviews = [];
+  const lat = createHumor({
+    state: mem(), ai: async () => answer, send: async () => assert.fail("tidak boleh terkirim langsung"), review: async (p) => void reviews.push(p),
+    react: async () => {}, sleep: async () => {}, listGroups: async () => [{ id: JID, subject: "Keluarga Besar", allowed: true }], timeZone: "Asia/Makassar",
+    config: readHumorConfig({ WA_ENERGI_HARIAN: "off", WA_GAYA_ALAMI: "off" }), now: () => T_NOON, random: () => 0, log: silent, timer: (fn) => void fn()
+  });
+  await lat.load();
+  await lat.handle("balas on keluarga");
+  await lat.handle("latihan on keluarga");
+  assert.ok(lat);
+});
+
 await ok("terintegrasi: index.js (cooldown 0, kutipan ke orang lain), dokumentasi, .env.example, package.json", () => {
   const read = (f) => fs.readFileSync(new URL(f, import.meta.url), "utf8");
   const idx = read("./index.js");
@@ -415,8 +513,9 @@ await ok("terintegrasi: index.js (cooldown 0, kutipan ke orang lain), dokumentas
   const readme = read("./README.md");
   assert.match(readme, /Makin manusiawi \(tahap 2\)/);
   assert.match(readme, /\/humor ingat on/);
+  assert.match(readme, /Pertanyaan di grup dijawab walau bot tidak di-mention/);
   const env = read("./.env.example");
-  for (const k of ["WA_ENERGI_HARIAN", "WA_GAYA_ALAMI", "WA_TYPO_CHANCE", "WA_LANJUT_CHANCE", "WA_LANJUT_MENIT", "WA_LANJUT_MAKS", "WA_INGAT_HARI"]) assert.match(env, new RegExp(k));
+  for (const k of ["WA_ENERGI_HARIAN", "WA_GAYA_ALAMI", "WA_TYPO_CHANCE", "WA_LANJUT_CHANCE", "WA_LANJUT_MENIT", "WA_LANJUT_MAKS", "WA_INGAT_HARI", "WA_TANYA_TANPA_MENTION", "WA_TANYA_CHANCE", "WA_TANYA_GAP_SEC"]) assert.match(env, new RegExp(k));
   assert.match(read("./package.json"), /test-insani\.mjs/);
 });
 

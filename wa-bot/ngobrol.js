@@ -62,6 +62,9 @@ export function readNgobrolConfig(env = process.env) {
     reaksiMaxPerDay: Math.floor(num(env.WA_REAKSI_MAX_PER_DAY, 0, 0, 5000)), // 0 = tanpa batas harian
     energi: !/^(0|false|off|mati|tidak)$/i.test(String(env.WA_ENERGI_HARIAN ?? "on").trim()), // suasana hati harian + ritme jam + kelelahan
     naturalize: !/^(0|false|off|mati|tidak)$/i.test(String(env.WA_GAYA_ALAMI ?? "on").trim()), // balasan dirapikan mengikuti gaya tulis grup
+    tanyaOn: !/^(0|false|off|mati|tidak)$/i.test(String(env.WA_TANYA_TANPA_MENTION ?? "on").trim()), // pertanyaan di grup dijawab walau bot tidak di-mention
+    tanyaChance: num(env.WA_TANYA_CHANCE, 0.85, 0, 1), // peluang menjawab pertanyaan yang tidak ditujukan ke orang tertentu
+    tanyaGapMs: Math.floor(num(env.WA_TANYA_GAP_SEC, 15, 3, 600)) * 1000, // jeda minimal sejak bot terakhir bicara (lebih pendek dari balasan acak)
     typoChance: num(env.WA_TYPO_CHANCE, 0.03, 0, 0.2), // salah ketik kecil lalu dikoreksi (0 = tidak pernah)
     followUpChance: num(env.WA_LANJUT_CHANCE, 0.55, 0, 0.9), // peluang menyahut orang yang BARU dibalas bot dan menulis lagi
     followUpMs: Math.floor(num(env.WA_LANJUT_MENIT, 4, 1, 30)) * 60_000,
@@ -88,6 +91,28 @@ export function detectReplyPref(text) {
   if (NO_REPLY_RES.some((re) => re.test(t))) return "out";
   return null;
 }
+
+// ---------------------------------------------------------------- pertanyaan di grup (dijawab walau bot tidak di-mention)
+const Q_START = /^(?:apa|apakah|siapa|siapakah|kapan|dimana|di mana|kemana|ke mana|darimana|dari mana|kenapa|knp|mengapa|bagaimana|gimana|gmn|berapa|brp|mana|kok|emang|emangnya|bisa|boleh|ada|adakah|masa|yang mana|tau|tahu|ngerti|kira-kira|kira2)\b/i;
+const DIRECTED_START = /^(?:kamu|km|kau|lu|lo|loe|elu|anda|dirimu|dek|mas|mbak|mba|kak|kakak|bang|abang|pak|bu|ibu|bapak|om|tante|bro|sis)\b/i;
+const GRAVE_RE = /\b(?:innalillahi|inalillahi|meninggal|wafat|duka|berduka|belasungkawa|almarhum\w*|sakit|opname|operasi|kecelakaan|musibah|bencana|kehilangan|sedih|menangis|nangis|stres|depresi|marah|kesal|kecewa|komplain|protes|cerai|phk|dipecat|pecat|polisi|hamil|gaji|utang|hutang|pinjol)\b/i;
+
+/** Pertanyaan yang pantas dijawab bot walau tidak di-mention: berupa pertanyaan (tanda tanya / kata tanya di awal), cukup panjang, tidak ditujukan ke satu orang. */
+export function isGroupQuestion(text) {
+  const t = String(text ?? "").replace(/@\d{5,}/g, " ").replace(/\s+/g, " ").trim();
+  if (t.length < 10 || t.length > 320) return false;
+  if ((t.match(/\p{L}/gu) || []).length < 7) return false;
+  if (/https?:\/\/|www\./i.test(t)) return false;
+  if (/^[/!.#]\w/.test(t)) return false;
+  const asks = /\?\s*(?:[\p{Extended_Pictographic}\s]*)$/u.test(t) || (Q_START.test(t) && t.length >= 14);
+  if (!asks) return false;
+  if (/^(?:w[kw]{2,}|(?:ha){2,}|(?:he){2,}|lol\b|xi(?:xi)+)/i.test(t)) return false; // diawali tawa = biasanya retoris
+  if (DIRECTED_START.test(t)) return false; // "kamu udah makan?" / "mas, ..." : biasanya untuk satu orang
+  return true;
+}
+
+/** Topik berat (duka, sakit, konflik, uang/gaji/utang, hamil): pertanyaan tentang ini TIDAK dijawab otomatis. */
+export const isGraveTopic = (text) => GRAVE_RE.test(String(text ?? ""));
 
 // ---------------------------------------------------------------- kelayakan target balasan
 /** Pesan yang tidak pantas dibalas acak: terlalu pendek, hanya tautan, menyebut orang lain (@), atau perintah ke bot lain. */
@@ -136,14 +161,14 @@ const persona = () => `${PERSONA_BASE}${personaExtra()}`;
 const SAFETY = `${NO_OFFER_NOTE}
 ATURAN KERAS: tanpa SARA, politik, ejekan fisik, keluarga, pasangan, uang/gaji, kesehatan; tanpa kata kasar; jangan menyudutkan atau menggurui siapa pun; jangan mengarang fakta, angka, atau aturan; jangan mengaku punya pengalaman fisik (makan, tidur, bepergian) atau tubuh; jangan menyebut dirimu AI/model/nama produk kecuali ditanya; jangan memakai tautan, mention (@), atau tagar.`;
 
-export function buildReplyPrompt({ target, context = [], botName = "Ayyubi", styleNote = "", memberNote = "", fewShot = "", moodHint = "", allowReaction = true, stickerTags = [] }) {
+export function buildReplyPrompt({ target, context = [], botName = "Ayyubi", styleNote = "", memberNote = "", fewShot = "", moodHint = "", allowReaction = true, stickerTags = [], question = false, after = [] }) {
   const system = `${persona()}
 Tugas: baca obrolan sebelumnya, lalu balas SATU pesan terakhir dengan nyambung ke konteksnya, seperti teman yang kebetulan lewat dan ikut menimpali.
 ${SAFETY}
-Gaya balasan: 1-2 kalimat pendek (maksimal 35 kata), boleh satu emoji, boleh bercanda ringan atau menimpali/bertanya balik. Kalau perlu dua gelembung pesan (mis. menimpali lalu bertanya), tulis di dua baris terpisah. Untuk pertanyaan teknis/hukum/keuangan yang butuh jawaban pasti dan kamu tidak yakin, jangan menebak dan jangan mengajak bertanya: cukup balas singkat seadanya, atau SKIP.
+${question ? `PESAN TERAKHIR ADALAH PERTANYAAN di grup (tidak memanggilmu, tapi kamu anggota yang tahu). Jawab langsung pertanyaannya sesuai konteks obrolan sebelumnya, padat dan akurat, 1-3 kalimat (maksimal 60 kata), tanpa basa-basi pembuka, tanpa tautan, dan tanpa menawarkan bantuan. Jangan mengarang fakta, angka, atau aturan: bila tidak yakin, jawab persis SKIP. Jawab SKIP juga bila pertanyaan itu jelas ditujukan ke orang tertentu, sudah dijawab orang lain di chat sesudahnya, butuh data pribadi seseorang, atau topiknya duka/sakit/uang/politik/agama.` : "Gaya balasan: 1-2 kalimat pendek (maksimal 35 kata), boleh satu emoji, boleh bercanda ringan atau menimpali/bertanya balik."} Kalau perlu dua gelembung pesan (mis. menimpali lalu bertanya), tulis di dua baris terpisah. Untuk pertanyaan teknis/hukum/keuangan yang butuh jawaban pasti dan kamu tidak yakin, jangan menebak dan jangan mengajak bertanya: cukup balas singkat seadanya, atau SKIP.
 ${allowReaction ? "Bila cukup memberi reaksi saja (pesan lucu, kabar baik, ucapan terima kasih), jawab persis: REAKSI: <satu emoji dari 👍 😂 🙏 🎉 👏 💪 ❤️ 😮 🔥>.\n" : ""}${stickerTags.length ? `Kamu punya koleksi stiker. Sesekali (jangan tiap balasan) boleh membalas dengan stiker saja bila lebih pas daripada kata-kata (lucu, kabar baik, terima kasih, setuju): tulis satu baris persis STIKER: <label>, label dari: ${stickerTags.join(", ")}. Boleh juga satu kalimat pendek lalu baris STIKER: di bawahnya.\n` : ""}Jawab persis SKIP bila: obrolan serius/sedih/resmi/pertengkaran, bahasan agama atau politik, pesan itu ditujukan khusus ke orang lain, atau kamu tidak punya tambahan yang wajar. Keluarkan HANYA teks balasan (atau REAKSI/SKIP), tanpa tanda kutip dan tanpa penjelasan.${styleNote ? `\n${styleNote}` : ""}${fewShot ? `\n${fewShot}` : ""}`;
   const lines = context.map((m) => `${m.isBot ? `${botName} (kamu)` : m.name || "?"}: ${String(m.text).slice(0, 220)}`).join("\n");
-  const user = `${context.length ? `Obrolan sebelumnya (${context.length} chat terakhir):\n${lines}\n\n` : ""}Pesan yang dibalas -- ${target.name || "seseorang"}: ${String(target.text).slice(0, 300)}${target.quoted ? `\n(pesan itu sendiri membalas/mengutip: "${String(target.quoted).replace(/\s+/g, " ").slice(0, 160)}")` : ""}${moodHint ? `\n\nCatatan suasana: ${moodHint}` : ""}${memberNote ? `\n\n${memberNote}` : ""}`;
+  const user = `${context.length ? `Obrolan sebelumnya (${context.length} chat terakhir):\n${lines}\n\n` : ""}${after.length ? `Chat sesudah pertanyaan itu (bila sudah ada yang menjawab, jawab SKIP):\n${after.map((m) => `${m.name || "?"}: ${String(m.text).slice(0, 160)}`).join("\n")}\n\n` : ""}Pesan yang dibalas -- ${target.name || "seseorang"}: ${String(target.text).slice(0, 300)}${target.quoted ? `\n(pesan itu sendiri membalas/mengutip: "${String(target.quoted).replace(/\s+/g, " ").slice(0, 160)}")` : ""}${moodHint ? `\n\nCatatan suasana: ${moodHint}` : ""}${memberNote ? `\n\n${memberNote}` : ""}`;
   return { system, user };
 }
 

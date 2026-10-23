@@ -5249,7 +5249,7 @@ const groupList = createGroupList({
 groupList.load().catch(() => {});
 
 // Mode humor grup (/humor di Telegram, bawaan MATI): gaya jawaban jenaka, pantun harian di jam acak, roasting ringan saat obrolan santai. Lihat humor.js.
-async function humorAi({ system, user, temperature = 0.9, maxTokens = 160 }) {
+async function humorAi({ system, user, temperature = 0.9, maxTokens = 160, search = false }) {
   const viaOllama = async () => {
     const out = await enqueueOllamaCall(
       () => callOllamaChat([{ role: "system", content: system }, { role: "user", content: user }], { timeoutMs: 120_000, maxTokens, numCtx: Math.max(OLLAMA_NUM_CTX, 2048), temperature }),
@@ -5259,8 +5259,8 @@ async function humorAi({ system, user, temperature = 0.9, maxTokens = 160 }) {
     return out;
   };
   const viaFallback = async () => (await llmFallback.generate({ system, messages: [{ role: "user", content: user }], temperature })).text;
-  const viaGemini = async () => extractGeminiText(await geminiGenerateWithRotation(system, [{ role: "user", parts: [{ text: user }] }], { useSearch: false }));
-  const order = WA_AI_ENGINE === "ollama" ? [viaOllama, llmFallback.available() ? viaFallback : null, GEMINI_API_KEYS.length ? viaGemini : null] : [llmFallback.available() ? viaFallback : null, GEMINI_API_KEYS.length ? viaGemini : null, WA_OLLAMA_FALLBACK_ENABLED ? viaOllama : null];
+  const viaGemini = async () => extractGeminiText(await geminiGenerateWithRotation(system, [{ role: "user", parts: [{ text: user }] }], { useSearch: Boolean(search) })); // search: pertanyaan anggota (fakta terbaru) boleh memakai pencarian Google
+  const order = search && GEMINI_API_KEYS.length ? [viaGemini, ...(WA_AI_ENGINE === "ollama" ? [viaOllama] : []), llmFallback.available() ? viaFallback : null] : WA_AI_ENGINE === "ollama" ? [viaOllama, llmFallback.available() ? viaFallback : null, GEMINI_API_KEYS.length ? viaGemini : null] : [llmFallback.available() ? viaFallback : null, GEMINI_API_KEYS.length ? viaGemini : null, WA_OLLAMA_FALLBACK_ENABLED ? viaOllama : null];
   let lastErr = null;
   for (const fn of order.filter(Boolean)) {
     try {
