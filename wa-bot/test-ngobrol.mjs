@@ -42,7 +42,7 @@ function rig(over = {}) {
     react: over.react,
     review: over.review,
     timeZone: "Asia/Makassar",
-    config: readHumorConfig({ WA_BALAS_CHANCE: "0.5", ...(over.env || {}) }),
+    config: readHumorConfig({ WA_BALAS_CHANCE: "0.5", WA_ENERGI_HARIAN: "off", WA_GAYA_ALAMI: "off", ...(over.env || {}) }),
     now: () => t,
     random: over.random || (() => rnd),
     log: silent,
@@ -429,7 +429,7 @@ await ok("roast tidak menyusul pesan spontan bot yang baru saja terkirim", async
 await ok("terintegrasi di index.js, telegram/dokumentasi, .env.example, package.json", () => {
   const read = (f) => fs.readFileSync(new URL(f, import.meta.url), "utf8");
   const idx = read("./index.js");
-  assert.match(idx, /humor\.observe\(humorAcct, groupJid, \{[^}]*triggered, repliedToBot: repliedToOwn \}\)/, "semua pesan grup (termasuk yang memanggil bot) jadi konteks");
+  assert.match(idx, /humor\.observe\(humorAcct, groupJid, \{[^}]*triggered, repliedToBot: repliedToOwn[^}]*\}\)/, "semua pesan grup (termasuk yang memanggil bot) jadi konteks");
   assert.match(idx, /humor\.noteBotSaid\(/, "jawaban bot ikut jadi konteks");
   assert.ok(idx.indexOf("humor.observe(") < idx.indexOf("offerAgendaFromChat(sock, msg, groupJid, rawText)"));
   assert.match(read("./README.md"), /Balas chat acak/);

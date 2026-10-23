@@ -58,10 +58,10 @@ function rig(over = {}) {
     secondEnabled: false,
     sleep: async () => {},
     timeZone: "Asia/Makassar",
-    config: readHumorConfig({ WA_BALAS_CHANCE: "0.5", WA_REAKSI_CHANCE: "0", ...(over.env || {}) }),
+    config: readHumorConfig({ WA_BALAS_CHANCE: "0.5", WA_REAKSI_CHANCE: "0", WA_ENERGI_HARIAN: "off", WA_GAYA_ALAMI: "off", ...(over.env || {}) }),
     now: () => t,
     random: over.random || (() => rnd),
-    log: silent,
+    log: process.env.DBG ? console : silent,
     timer: (fn, ms) => timers.push({ fn, ms })
   });
   return { h, st, sent, stickersSent, reacts, visionCalls, aiCalls, files, timers, setRnd: (v) => void (rnd = v), tick: (ms) => void (t += ms), setNow: (x) => void (t = x), now: () => t };
@@ -835,7 +835,7 @@ await ok("balas dengan stiker: AI memilih 'STIKER: tawa' -> stiker dari koleksi 
   r = await mk("STIKER: sedih");
   assert.equal(r.stickersSent.length, 0);
   // batas harian
-  r = await mk("STIKER: tawa", { WA_STIKER_MAX_PER_DAY: "0" });
+  r = await mk("STIKER: tawa", { WA_STIKER_MAX_PER_DAY: "-1" });
   assert.equal(r.stickersSent.length, 0);
   assert.ok(!/STIKER: </.test(r.aiCalls.at(-1)?.system || ""), "jatah 0: AI tidak ditawari stiker");
 });

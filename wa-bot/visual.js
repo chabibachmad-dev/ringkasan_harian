@@ -17,7 +17,7 @@ export function readVisualConfig(env = process.env) {
     stikerLibMax: Math.floor(num(env.WA_STIKER_MAX, 40, 5, 200)), // jumlah stiker tersimpan per grup
     stikerBalasChance: num(env.WA_STIKER_CHANCE, 0.12, 0, 1), // peluang membalas stiker orang dengan stiker
     stikerGapMs: Math.floor(num(env.WA_STIKER_GAP_MIN, 10, 1, 24 * 60)) * 60_000,
-    stikerMaxPerDay: Math.floor(num(env.WA_STIKER_MAX_PER_DAY, 10, 0, 200)), // 0 = bot tidak pernah mengirim stiker
+    stikerMaxPerDay: Math.floor(num(env.WA_STIKER_MAX_PER_DAY, 0, -1, 5000)), // 0 = tanpa batas harian (diatur peluang & jeda); -1 = bot tidak pernah mengirim stiker
     fotoBalasFactor: num(env.WA_FOTO_BALAS_FACTOR, 1.5, 0, 5), // foto lebih menarik dikomentari daripada chat biasa
     koleksiMax: Math.floor(num(env.WA_KOLEKSI_MAX, 100, 5, 300)), // jumlah stiker koleksi pemilik
     stikerDariPemilik: /^(1|true|ya|yes|on|aktif)$/i.test(String(env.WA_STIKER_DARI_PEMILIK ?? "").trim()), // otomatis menyimpan stiker yang KAMU kirim dari HP ke koleksi

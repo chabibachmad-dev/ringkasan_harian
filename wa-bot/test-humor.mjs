@@ -142,7 +142,7 @@ function rig(over = {}) {
     labels: { main: "Nomor utama", wa2: "Wongsobot" },
     secondEnabled: true,
     timeZone: "Asia/Makassar",
-    config: { ...readHumorConfig({ WA_HUMOR_ROAST_CHANCE: "1", ...(over.env || {}) }) },
+    config: { ...readHumorConfig({ WA_HUMOR_ROAST_CHANCE: "1", WA_ENERGI_HARIAN: "off", WA_GAYA_ALAMI: "off", ...(over.env || {}) }) },
     now: () => t,
     random: over.random || (() => 0.5),
     log: silent,

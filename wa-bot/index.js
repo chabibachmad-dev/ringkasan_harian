@@ -2860,7 +2860,7 @@ const GROUP_KEYWORDS = (process.env.WA_GROUP_KEYWORDS || "")
   .map((x) => x.trim().toLowerCase())
   .filter(Boolean);
 // Jeda minimal antar pertanyaan dari ORANG YANG SAMA di grup (detik).
-const GROUP_COOLDOWN_MS = Math.max(0, Number(process.env.WA_GROUP_COOLDOWN_SEC ?? 20) || 0) * 1000;
+const GROUP_COOLDOWN_MS = Math.max(0, Number(process.env.WA_GROUP_COOLDOWN_SEC ?? 0) || 0) * 1000; // bawaan 0: setiap mention/reply ke bot dijawab semua
 const GROUP_QUOTE_MAX_CHARS = 400;
 // Pesan grup baru memicu pencarian dokumen/web kalau mengandung kata yang menandakan
 // butuh data (berita, harga, aturan, dll). Selain itu dijawab langsung tanpa lookup.
@@ -3011,7 +3011,10 @@ async function handleGroupMessage(msg, sock) {
         await sendHumorGroupText(humorAcct, groupJid, pref.reply, { quoted: msg }).catch((e) => console.error("😄 Balasan preferensi roasting gagal:", e instanceof Error ? e.message : String(e)));
         return;
       }
-      humor.observe(humorAcct, groupJid, { name: msg.pushName || "", ids: humorIds, text: rawText, isOwner: isOwnerSender(msg, false), msg, triggered, repliedToBot: repliedToOwn });
+      // pesan yang membalas (me-reply) orang LAIN, bukan bot: biasanya bukan untuk bot -> jarang disahut; isi kutipannya jadi konteks
+      const quotedOther = Boolean(ctx?.stanzaId && ctx?.participant && !repliedToOwn);
+      const quotedPlain = ctx?.quotedMessage ? extractText({ message: unwrapMessageContent(ctx.quotedMessage) }) || "" : "";
+      humor.observe(humorAcct, groupJid, { name: msg.pushName || "", ids: humorIds, text: rawText, isOwner: isOwnerSender(msg, false), msg, triggered, repliedToBot: repliedToOwn, quotedOther, quotedText: quotedPlain.startsWith("[") ? "" : quotedPlain });
     }
   }
   if (!triggered) {

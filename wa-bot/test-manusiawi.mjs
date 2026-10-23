@@ -47,7 +47,7 @@ function rig(over = {}) {
     listGroups: async () => [{ id: JID, subject: "Keluarga Besar", allowed: true }, { id: "222@g.us", subject: "Arisan RT 05", allowed: true }],
     secondEnabled: false,
     timeZone: "Asia/Makassar",
-    config: readHumorConfig({ WA_BALAS_CHANCE: "0.5", ...(over.env || {}) }),
+    config: readHumorConfig({ WA_BALAS_CHANCE: "0.5", WA_ENERGI_HARIAN: "off", WA_GAYA_ALAMI: "off", ...(over.env || {}) }),
     now: () => t,
     random: over.random || (() => (seq.length ? seq.shift() : rnd)),
     log: silent,
@@ -467,7 +467,7 @@ await ok("ingatan anggota (opt-in): disimpan atas permintaan, dipakai di prompt,
   await r.timers.at(-1).fn();
   const prompt = r.aiCalls.at(-1).user;
   assert.match(prompt, /Pesan yang dibalas -- Bro Budi:/);
-  assert.match(prompt, /Yang kamu ingat \(atas permintaan orangnya sendiri[\s\S]*aku suka kopi hitam/);
+  assert.match(prompt, /Yang kamu ingat tentang orang ini[\s\S]*minta kamu ingat: aku suka kopi hitam/);
   // orang lain tidak membawa ingatan Budi
   r.tick(10 * MIN);
   say(r, "Sari", "aku juga bingung mau ngapain sore ini nih", { rnd: 0 });

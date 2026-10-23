@@ -19,7 +19,7 @@ const LAUGHS = [
 const FORMAL_RE = /\b(mohon|izin|dimohon|bersama ini|terima kasih atas|selamat (?:pagi|siang|sore|malam)|rekan-rekan|bapak\/ibu|yth)\b/i;
 const EMOJI_RE = /\p{Extended_Pictographic}/gu;
 
-export const emptyStyle = () => ({ n: 0, words: 0, emoji: {}, emojiTotal: 0, particles: {}, honorifics: {}, laugh: {}, formal: 0, excl: 0, lower: 0 });
+export const emptyStyle = () => ({ n: 0, words: 0, emoji: {}, emojiTotal: 0, particles: {}, honorifics: {}, laugh: {}, formal: 0, excl: 0, lower: 0, stretch: 0 });
 
 const bump = (obj, k, by = 1) => {
   obj[k] = (obj[k] || 0) + by;
@@ -47,6 +47,7 @@ export function updateStyle(style, text) {
   for (const e of emos) bump(style.emoji, e);
   style.emojiTotal += emos.length;
   if (FORMAL_RE.test(t)) style.formal += 1;
+  if (words.some((w) => w.length >= 3 && /(\p{L})\1{2,}/u.test(w) && !/^(?:w[kw]+|h?a+h[ah]*|he+h[eh]*|x[ix]+|k[wk]+)$/.test(w))) style.stretch = (style.stretch || 0) + 1;
   if (/!/.test(t)) style.excl += 1;
   if (t === lower) style.lower += 1;
   trimCounts(style.emoji, 12);
@@ -54,7 +55,7 @@ export function updateStyle(style, text) {
   trimCounts(style.honorifics, 8);
   if (style.n > 400) {
     // peluruhan: gaya terbaru lebih berpengaruh daripada gaya berbulan-bulan lalu
-    for (const k of ["n", "words", "emojiTotal", "formal", "excl", "lower"]) style[k] = Math.floor(style[k] / 2);
+    for (const k of ["n", "words", "emojiTotal", "formal", "excl", "lower", "stretch"]) style[k] = Math.floor((style[k] || 0) / 2);
     for (const group of ["emoji", "particles", "honorifics", "laugh"]) {
       for (const k of Object.keys(style[group])) {
         style[group][k] = Math.floor(style[group][k] / 2);

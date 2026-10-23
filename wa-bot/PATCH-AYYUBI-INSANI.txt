@@ -1,0 +1,27 @@
+PATCH AYYUBI: MAKIN MANUSIAWI (TAHAP 2)
+========================================
+Patch KUMULATIF (sudah termasuk humor, ngobrol, manusiawi, lihat/stiker). File baru: insani.js, test-insani.mjs.
+
+PASANG
+1. Backup folder wa-bot.   2. Ekstrak zip, timpa isi wa-bot.   3. npm test (atau node test-insani.mjs)   4. Restart bot.
+
+YANG BERUBAH
+- Semua mention/reply ke bot dijawab: jeda per orang bawaan 0 (WA_GROUP_COOLDOWN_SEC). Tanpa jatah harian untuk balasan acak,
+  reaksi, dan stiker (bawaan 0 = tanpa batas; isi angka bila ingin dibatasi; stiker -1 = mati). Jatah berkas/PDF/gambar/video TIDAK diubah.
+- Balasan acak = reply ke orangnya, tidak semua chat: peluang, jeda berubah-ubah, bergantian antar-orang, pesan yang me-reply orang lain jarang disahut.
+- Lanjutan obrolan: orang yang baru dibalas menulis lagi dalam 4 menit -> boleh disahut tanpa menunggu jeda (maks 2 beruntun).
+- Energi harian (kalem/biasa/semangat) + ritme jam + kelelahan. Lihat /humor profil <grup>.
+- Gaya tulis alami: udah/aja/nggak, huruf kecil, tanpa titik akhir, ikut tertawa, salah ketik langka yang dikoreksi.
+- Ingatan ringan dari cerita anggota sendiri: /humor ingat on <grup> (mati bawaan). "bot lupakan aku" menghapus & menghentikan pencatatan.
+- Reaksi dipilih dari isi pesan (terima kasih, selamat, mantap, keren, semangat, wkwk, ...).
+- Kutipan pesan yang di-reply orang ikut jadi konteks prompt.
+
+ENV BARU (semua opsional, lihat .env.example)
+WA_ENERGI_HARIAN, WA_GAYA_ALAMI, WA_TYPO_CHANCE, WA_LANJUT_CHANCE, WA_LANJUT_MENIT, WA_LANJUT_MAKS, WA_INGAT_HARI
+Bawaan berubah: WA_GROUP_COOLDOWN_SEC 20->0, WA_BALAS_MAX_PER_DAY 40->0, WA_REAKSI_MAX_PER_DAY 30->0, WA_STIKER_MAX_PER_DAY 10->0, WA_REAKSI_CHANCE 0.25->0.3.
+
+CATATAN JUJUR
+- Diuji dengan simulasi, BELUM di WhatsApp sungguhan. Tanpa jatah harian, kenyamanan grup bergantung pada peluang/jeda: kalau terasa
+  terlalu ramai turunkan WA_BALAS_CHANCE atau naikkan WA_BALAS_GAP_MIN; kalau terlalu sepi sebaliknya. Mulai dari 1 grup dengan /humor latihan on.
+- Salah ketik buatan itu gimmick: kalau terasa aneh, WA_TYPO_CHANCE=0.
+- Ingatan otomatis hanya untuk grup yang kamu nyalakan; beri tahu anggota grup bahwa bot bisa "lupakan aku".
