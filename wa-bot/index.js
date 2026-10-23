@@ -4151,6 +4151,19 @@ async function handleIncoming(msg, sock) {
   // Nomor kedua: HP-nya dipegang orang lain, jadi chat-ke-diri-sendiri di sana TIDAK dianggap perintah pemilik -- diabaikan sama sekali.
   if (isSelfChat && sock.waAccount?.secondary) return;
 
+  // Stiker ke chat sendiri = menambah koleksi stiker bot (dipakai membalas di grup). Stiker yang pemilik kirim dari HP ke chat lain
+  // ikut disimpan hanya bila WA_STIKER_DARI_PEMILIK=true (stiker yang dikirim bot sendiri tidak dihitung).
+  if (!sock.waAccount?.secondary && msg.message) {
+    const stk = unwrapMessageContent(msg.message)?.stickerMessage;
+    if (stk && isSelfChat) {
+      await addOwnerSticker(sock, msg, { announce: true }).catch((e) => console.error("🎭 Koleksi stiker gagal:", e instanceof Error ? e.message : String(e)));
+      return;
+    }
+    if (stk && msg.key.fromMe && WA_STIKER_DARI_PEMILIK && !botStickerIds.has(msg.key.id)) {
+      addOwnerSticker(sock, msg, { announce: false }).catch((e) => console.error("🎭 Koleksi stiker gagal:", e instanceof Error ? e.message : String(e)));
+    }
+  }
+
   // Pesan yang KITA kirim sendiri (fromMe) KE KONTAK LAIN juga muncul lewat
   // event ini -- sudah dicatat duluan waktu diproses dari antrian "pending"
   // (lihat processPendingOutgoing), jadi di sini cukup dilewati supaya tidak
@@ -5249,6 +5262,8 @@ async function reviewHumorDraft({ id, group, kind, targetName, targetText, text 
 // Gambar TIDAK disimpan: diunduh sebentar ke memori, dikirim sekali ke Gemini untuk dideskripsikan, lalu dibuang. Stiker anggota disimpan sebagai berkas kecil per grup (folder WA_STICKER_DIR).
 const VISUAL_CFG = readVisualConfig(process.env);
 const STICKER_DIR = path.resolve(process.env.WA_STICKER_DIR || path.join(BOT_DIR, "data-stiker"));
+const WA_STIKER_DARI_PEMILIK = VISUAL_CFG.stikerDariPemilik;
+const botStickerIds = new Set(); // id stiker yang DIKIRIM bot (agar tidak dianggap stiker pemilik)
 const mediaSock = new WeakMap(); // pesan -> sock yang menerimanya (untuk mengunduh ulang media di nomor yang benar)
 const IMAGE_QA_DAILY_MAX = Math.max(0, Math.min(100, Number(process.env.WA_LIHAT_TANYA_PER_DAY) || 10));
 const imageQaQuota = new Map(); // "grup|orang|tanggal" -> jumlah
@@ -5297,6 +5312,10 @@ const humorMedia = {
         /* presence gagal tidak boleh menggagalkan stiker */
       }
       const sent = await sk.sendMessage(jid, { sticker: buffer }, quoted ? { quoted } : undefined);
+      if (sent?.key?.id) {
+        botStickerIds.add(sent.key.id);
+        if (botStickerIds.size > 500) botStickerIds.delete(botStickerIds.values().next().value);
+      }
       const { error } = await supabase.from("whatsapp_messages").insert({ wa_jid: jid, wa_name: subject || null, direction: "out", content: "[stiker]", status: "sent", wa_message_id: sent?.key?.id ?? null, ...acctFields(currentAccountId()) });
       if (error) console.error("Gagal catat stiker humor:", error.message);
     });
@@ -5318,6 +5337,26 @@ const humorMedia = {
     }
   }
 };
+
+/** Stiker milik pemilik (dikirim ke chat "Pesan untuk diri sendiri", atau dikirim pemilik dari HP bila WA_STIKER_DARI_PEMILIK) -> koleksi yang dipakai bot di grup. */
+async function addOwnerSticker(sock, msg, { announce = true } = {}) {
+  const content = unwrapMessageContent(msg.message);
+  if (!content?.stickerMessage) return;
+  const tell = (t) => (announce ? sendToOwner(t).catch((e) => console.error("🎭 Gagal memberi tahu pemilik:", e instanceof Error ? e.message : String(e))) : null);
+  let buffer = null;
+  try {
+    buffer = await downloadVisualMedia(sock, { key: msg.key, message: content }, VISUAL_CFG.stikerMaxBytes);
+  } catch (e) {
+    console.error("🎭 Gagal mengunduh stiker pemilik:", describeError(e));
+  }
+  if (!buffer) return tell("🎭 Stikernya tidak bisa diunduh (terlalu besar atau kedaluwarsa). Coba kirim ulang ya.");
+  const r = await humor.addToKoleksi(currentAccountId(), buffer);
+  if (!r.ok) return tell(`🎭 Stiker tidak disimpan: ${r.reason}`);
+  console.log(`🎭 Koleksi stiker: ${r.dup ? "sudah ada" : "ditambah"} #${r.index} (${r.item.tag || "tanpa label"}).`);
+  if (!announce) return;
+  if (r.dup) return tell(`🎭 Stiker itu sudah ada di koleksi (#${r.index}${r.item.tag ? `, ${r.item.tag}` : ""}).`);
+  return tell(`🎭 Stiker tersimpan di koleksi (#${r.index}): ${r.item.tag ? `${r.item.tag}${r.item.desc ? ` — ${r.item.desc}` : ""}` : "belum berlabel"}.${r.labelErr ? `\n⚠️ Label otomatis gagal: ${r.labelErr}\nBeri label manual: /humor koleksi label ${r.index} <tawa|senang|sedih|kaget|kesal|setuju|terimakasih|semangat|bingung|lain>` : ""}\nLihat/kelola: /humor koleksi`);
+}
 
 /** Gambar/stiker di grup yang menyalakan /humor lihat -> dicatat sebagai konteks; bisa dikomentari / dibalas stiker (humor.js). */
 async function observeHumorMedia(sock, msg, content, groupJid, { caption = "" } = {}) {

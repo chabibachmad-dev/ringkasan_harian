@@ -35,7 +35,17 @@ PASANG
 - Tidak mengirim stiker saat: suasana sedih/kesal, mode latihan, bisu, jam tidur.
 - Stiker yang tampak tidak pantas otomatis dibuang. Anggota yang menolak dibalas tidak dibaca stikernya.
 
+4) KOLEKSI STIKER PEMILIK + BALAS DENGAN STIKER
+- WhatsApp tidak membuka "stiker favorit" ke bot. Caranya: buka chat "Pesan untuk diri sendiri" di WhatsApp bot,
+  lalu kirim stiker-stiker yang ingin dipakai. Bot menyimpan, melabeli (AI penglihatan), dan memberi kabar.
+- Dipakai di SEMUA grup yang menyalakan /humor balas on (tidak perlu /humor lihat on).
+- Saat membalas chat, AI boleh memilih: hanya stiker, atau satu kalimat + stiker. Anggota yang mengirim stiker
+  dibalas stiker yang sesuai. Aturan keselamatan sama (tidak saat sedih/kesal, latihan, bisu, jam tidur).
+- Kelola: /humor koleksi | /humor koleksi label <no> <label> | /humor koleksi hapus <no>
+- Opsional WA_STIKER_DARI_PEMILIK=true: stiker yang kamu kirim dari HP ikut masuk koleksi otomatis.
+
 PERINTAH
+  /humor koleksi [wa2]          daftar stiker koleksi (bernomor)
   /humor lihat on|off <grup>    nyalakan/matikan (TIDAK ikut /humor on atau /humor semua)
   /humor profil <grup>          lihat jumlah stiker tersimpan
   /humor                        grup dengan fitur ini ditandai 👁️

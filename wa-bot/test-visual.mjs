@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import { createHumor, parseHumorArg, readHumorConfig, STIKER_KEY } from "./humor.js";
 import { inNightWindow, parseNightWindow, readNgobrolConfig } from "./ngobrol.js";
-import { STICKER_REPLY_TAGS, addToLibrary, cleanImageDescription, guessTagFromText, looksLikeImageQuestion, parseStickerTag, pickStickerFor, readVisualConfig, webpFirstFrame } from "./visual.js";
+import { parseStickerOutput, STICKER_REPLY_TAGS, addToLibrary, cleanImageDescription, guessTagFromText, looksLikeImageQuestion, parseStickerTag, pickStickerFor, readVisualConfig, webpFirstFrame } from "./visual.js";
 
 let n = 0;
 async function ok(name, fn) {
@@ -698,6 +698,190 @@ await ok("pelabelan stiker gagal: alasan tampil di /humor profil; setelah 3 kali
   assert.ok(!/Pelabelan terakhir gagal/.test(prof), "pulih: peringatan hilang");
 });
 
+// ---------------------------------------------------------------- koleksi stiker pemilik + balas dengan stiker
+const tagByBuf = (c) => {
+  const t = c.image.buffer.toString();
+  if (c.system.includes("STIKER")) return t.includes("sedih") ? "sedih | anak menangis" : t.includes("kaget") ? "kaget | kucing terkejut" : "tawa | kucing tertawa terbahak";
+  return "Sepiring nasi goreng";
+};
+const KOL = { tawa: Buffer.from("koleksi-tawa-1"), tawa2: Buffer.from("koleksi-tawa-2"), kaget: Buffer.from("koleksi-kaget-1"), sedih: Buffer.from("koleksi-sedih-1") };
+
+await ok("perintah /humor koleksi: daftar, hapus <no>, label <no> <label>", () => {
+  assert.deepEqual(parseHumorArg("koleksi"), { kind: "koleksi", action: "list", account: null });
+  assert.deepEqual(parseHumorArg("koleksi hapus 3"), { kind: "koleksi", action: "hapus", index: 3, account: null });
+  assert.deepEqual(parseHumorArg("koleksi label 2 TAWA"), { kind: "koleksi", action: "label", index: 2, tag: "tawa", account: null });
+  assert.equal(parseHumorArg("koleksi hapus").kind, "error");
+  assert.equal(parseHumorArg("koleksi label 2").kind, "error");
+  assert.equal(parseHumorArg("koleksi wa2").account, "wa2");
+});
+
+await ok("koleksi: stiker pemilik disimpan + dilabeli AI; duplikat dikenali; sensitif ditolak; penuh ditolak; tanpa AI tersimpan tanpa label", async () => {
+  let r = rig({ visionOut: tagByBuf, env: { WA_KOLEKSI_MAX: "5" } });
+  await r.h.load();
+  const a = await r.h.addToKoleksi("main", KOL.tawa);
+  assert.equal(a.ok, true);
+  assert.equal(a.added, true);
+  assert.equal(a.item.tag, "tawa");
+  assert.equal(a.index, 1);
+  assert.equal(r.files.size, 1);
+  const dup = await r.h.addToKoleksi("main", KOL.tawa);
+  assert.equal(dup.dup, true);
+  assert.equal(dup.index, 1);
+  assert.equal(r.files.size, 1);
+  assert.equal(r.visionCalls.length, 1, "duplikat tidak dibaca ulang");
+  // tersimpan di bot_state sebagai indeks (tanpa isi stiker)
+  const saved = JSON.parse(r.st.m.get(STIKER_KEY));
+  assert.equal(saved["koleksi|main"].length, 1);
+  assert.ok(!r.st.m.get(STIKER_KEY).includes("koleksi-tawa"));
+  // sensitif
+  const r2 = rig({ visionOut: "lain | SENSITIF" });
+  await r2.h.load();
+  const bad = await r2.h.addToKoleksi("main", KOL.tawa);
+  assert.equal(bad.ok, false);
+  assert.match(bad.reason, /tidak pantas/);
+  assert.equal(r2.files.size, 0);
+  // penuh
+  for (const k of ["tawa2", "kaget", "sedih"]) await r.h.addToKoleksi("main", KOL[k]);
+  await r.h.addToKoleksi("main", Buffer.from("koleksi-lagi-5"));
+  const full = await r.h.addToKoleksi("main", Buffer.from("koleksi-lagi-6"));
+  assert.equal(full.ok, false);
+  assert.match(full.reason, /penuh/);
+  // tanpa AI penglihatan: tersimpan tanpa label + alasan
+  const r3 = rig({ visionFail: true });
+  await r3.h.load();
+  const nl = await r3.h.addToKoleksi("main", KOL.tawa);
+  assert.equal(nl.ok, true);
+  assert.equal(nl.item.tag, "");
+  assert.match(nl.labelErr, /AI penglihatan gagal/);
+  const r4 = rig({ noMedia: true });
+  await r4.h.load();
+  assert.equal((await r4.h.addToKoleksi("main", KOL.tawa)).ok, false);
+  // label manual saat menyimpan
+  const r5 = rig({ visionFail: true });
+  await r5.h.load();
+  assert.equal((await r5.h.addToKoleksi("main", KOL.tawa, { label: "setuju" })).item.tag, "setuju");
+});
+
+await ok("koleksi: /humor koleksi menampilkan daftar, mengubah label, menghapus (berkas ikut terhapus); status menyebut jumlahnya", async () => {
+  const r = rig({ visionOut: tagByBuf });
+  await r.h.load();
+  assert.match(await r.h.handle("koleksi"), /masih kosong[\s\S]*Pesan untuk diri sendiri/);
+  await r.h.addToKoleksi("main", KOL.tawa);
+  await r.h.addToKoleksi("main", KOL.kaget);
+  const list = await r.h.handle("koleksi");
+  assert.match(list, /1\. tawa — kucing tertawa terbahak/);
+  assert.match(list, /2\. kaget — kucing terkejut/);
+  assert.match(await r.h.handle("koleksi label 2 senang"), /berlabel "senang"/);
+  assert.match(await r.h.handle("koleksi"), /2\. senang/);
+  assert.match(await r.h.handle("koleksi label 9 tawa"), /tidak ada/);
+  assert.match(await r.h.handle("koleksi label 1 ngawur"), /Label harus salah satu/);
+  assert.match(await r.h.handle("koleksi hapus 1"), /dihapus/);
+  assert.equal(r.files.size, 1);
+  assert.match(await r.h.handle("koleksi"), /1\. senang/);
+  assert.match(await r.h.handle(""), /Koleksi stiker .*: 1/);
+});
+
+await ok("balas dengan stiker: AI memilih 'STIKER: tawa' -> stiker dari koleksi (reply ke pesannya), tanpa perlu /humor lihat; teks+stiker juga bisa", async () => {
+  const mk = async (aiOut, env = {}) => {
+    const r = rig({ aiOut, visionOut: tagByBuf, env });
+    await r.h.load();
+    await r.h.handle("balas on keluarga"); // lihat TIDAK dinyalakan
+    await r.h.addToKoleksi("main", KOL.tawa);
+    await r.h.addToKoleksi("main", KOL.kaget);
+    chat(r);
+    r.tick(5 * MIN);
+    r.setRnd(0.01);
+    text(r, "Sari", "akhirnya gajian hari ini senang banget nih rasanya");
+    r.setRnd(0.99);
+    await settle(r);
+    return r;
+  };
+  let r = await mk("STIKER: tawa");
+  assert.equal(r.stickersSent.length, 1);
+  assert.deepEqual(r.stickersSent[0].buffer, KOL.tawa);
+  assert.ok(r.stickersSent[0].o.quoted, "stiker saja: reply ke pesannya");
+  assert.equal(r.sent.length, 0, "tidak ada teks");
+  assert.match(r.aiCalls.at(-1).system, /STIKER: <label>, label dari: tawa, kaget/, "AI diberi tahu label yang tersedia (hanya yang ada di koleksi)");
+  r = await mk("Wah selamat ya, mantap!\nSTIKER: tawa");
+  assert.equal(r.sent.length, 1);
+  assert.match(r.sent[0].text, /selamat/);
+  assert.equal(r.stickersSent.length, 1);
+  assert.equal(r.stickersSent[0].o.quoted, undefined, "teks + stiker: stikernya menyusul tanpa reply ganda");
+  // label yang tidak ada di koleksi / sedih: stiker tidak dikirim
+  r = await mk("STIKER: semangat");
+  assert.equal(r.stickersSent.length, 0);
+  r = await mk("STIKER: sedih");
+  assert.equal(r.stickersSent.length, 0);
+  // batas harian
+  r = await mk("STIKER: tawa", { WA_STIKER_MAX_PER_DAY: "0" });
+  assert.equal(r.stickersSent.length, 0);
+  assert.ok(!/STIKER: </.test(r.aiCalls.at(-1)?.system || ""), "jatah 0: AI tidak ditawari stiker");
+});
+
+await ok("balas dengan stiker: tidak ditawarkan saat tanpa koleksi, mode latihan, bisu, jam tidur, atau suasana sedih", async () => {
+  const mk = async (opt = {}) => {
+    const r = rig({ aiOut: "STIKER: tawa", visionOut: tagByBuf, t0: opt.t0 });
+    await r.h.load();
+    await r.h.handle("balas on keluarga");
+    if (!opt.empty) await r.h.addToKoleksi("main", KOL.tawa);
+    if (opt.latihan) await r.h.handle("latihan on keluarga");
+    if (opt.diam) await r.h.handle("diam 2 keluarga");
+    const people = ["Budi", "Sari", "Rudi"];
+    for (const n of people) text(r, n, opt.t0 ? "belum tidur juga nih ada yang bangun gak" : "tadi siang makan apa nih kalian");
+    text(r, "Budi", opt.t0 ? "wah iya skornya lagi ketat banget malam ini" : "aku makan soto ayam enak banget");
+    if (opt.sedih) text(r, "Sari", "aku lagi sedih banget hari ini ditinggal");
+    r.tick(5 * MIN);
+    r.setRnd(0.01);
+    text(r, "Rudi", opt.sedih ? "turut sedih ya semoga cepat membaik" : "akhirnya gajian hari ini senang banget nih rasanya");
+    r.setRnd(0.99);
+    await settle(r);
+    return r;
+  };
+  for (const opt of [{ empty: true }, { latihan: true }, { diam: true }, { t0: T_2AM }, { sedih: true }]) {
+    const r = await mk(opt);
+    assert.equal(r.stickersSent.length, 0, `tanpa stiker: ${JSON.stringify(opt)}`);
+    if (r.aiCalls.length) assert.ok(!/STIKER: </.test(r.aiCalls.at(-1).system), `AI tidak ditawari stiker: ${JSON.stringify(opt)}`);
+  }
+});
+
+await ok("balas stiker orang: memakai koleksi pemilik walau grup belum punya stiker sendiri", async () => {
+  const r = rig({ random: undefined, visionOut: tagByBuf });
+  await r.h.load();
+  await r.h.handle("balas on keluarga");
+  await r.h.handle("lihat on keluarga");
+  await r.h.addToKoleksi("main", KOL.tawa2);
+  chat(r);
+  r.tick(15 * MIN);
+  r.setRnd(0.01);
+  sticker(r, "Sari", STK(7)); // dibaca "tawa" -> dibalas stiker dari koleksi
+  await settle(r);
+  assert.equal(r.stickersSent.length, 1);
+  assert.deepEqual(r.stickersSent[0].buffer, KOL.tawa2);
+  assert.ok(r.stickersSent[0].o.quoted);
+});
+
+await ok("koleksi: pemakaian dicatat dan stiker tidak diulang beruntun", async () => {
+  const r = rig({ aiOut: "STIKER: tawa", visionOut: tagByBuf, env: { WA_STIKER_GAP_MIN: "1" } });
+  await r.h.load();
+  await r.h.handle("balas on keluarga");
+  await r.h.addToKoleksi("main", KOL.tawa);
+  await r.h.addToKoleksi("main", KOL.tawa2);
+  const used = [];
+  for (let i = 0; i < 2; i += 1) {
+    chat(r);
+    r.tick(5 * MIN);
+    r.setRnd(0.01);
+    text(r, "Sari", `akhirnya gajian hari ini senang banget nih rasanya ${i}`);
+    r.setRnd(0.99);
+    await settle(r);
+    r.tick(30 * MIN);
+  }
+  assert.equal(r.stickersSent.length, 2);
+  assert.notDeepEqual(r.stickersSent[0].buffer, r.stickersSent[1].buffer, "stiker bergantian");
+  assert.match(await r.h.handle("koleksi"), /dipakai 1×/);
+  void used;
+});
+
 // ---------------------------------------------------------------- integrasi
 await ok("terintegrasi: index.js (gambar/stiker/AI penglihatan), dokumentasi, .env.example, package.json", () => {
   const idx = fs.readFileSync(new URL("./index.js", import.meta.url), "utf8");
@@ -705,11 +889,16 @@ await ok("terintegrasi: index.js (gambar/stiker/AI penglihatan), dokumentasi, .e
   assert.match(idx, /media:\s*humorMedia/);
   assert.match(idx, /sendMessage\(jid, \{ sticker:/);
   assert.match(idx, /inline_data/);
+  assert.match(idx, /addOwnerSticker\(/);
+  assert.match(idx, /stk && isSelfChat/);
+  assert.match(idx, /botStickerIds/);
   const readme = fs.readFileSync(new URL("./README.md", import.meta.url), "utf8");
   assert.match(readme, /Jam tidur/i);
   assert.match(readme, /\/humor lihat on/);
+  assert.match(readme, /Koleksi stiker/);
+  assert.match(readme, /Pesan untuk diri sendiri/);
   const env = fs.readFileSync(new URL("./.env.example", import.meta.url), "utf8");
-  for (const k of ["WA_JAM_TIDUR", "WA_LIHAT_PER_DAY", "WA_STIKER_CHANCE", "WA_STIKER_MAX_PER_DAY"]) assert.match(env, new RegExp(k));
+  for (const k of ["WA_JAM_TIDUR", "WA_LIHAT_PER_DAY", "WA_STIKER_CHANCE", "WA_STIKER_MAX_PER_DAY", "WA_KOLEKSI_MAX", "WA_STIKER_DARI_PEMILIK"]) assert.match(env, new RegExp(k));
   const pkg = fs.readFileSync(new URL("./package.json", import.meta.url), "utf8");
   assert.match(pkg, /test-visual\.mjs/);
 });

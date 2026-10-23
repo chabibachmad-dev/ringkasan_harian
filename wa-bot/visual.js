@@ -19,6 +19,8 @@ export function readVisualConfig(env = process.env) {
     stikerGapMs: Math.floor(num(env.WA_STIKER_GAP_MIN, 10, 1, 24 * 60)) * 60_000,
     stikerMaxPerDay: Math.floor(num(env.WA_STIKER_MAX_PER_DAY, 10, 0, 200)), // 0 = bot tidak pernah mengirim stiker
     fotoBalasFactor: num(env.WA_FOTO_BALAS_FACTOR, 1.5, 0, 5), // foto lebih menarik dikomentari daripada chat biasa
+    koleksiMax: Math.floor(num(env.WA_KOLEKSI_MAX, 100, 5, 300)), // jumlah stiker koleksi pemilik
+    stikerDariPemilik: /^(1|true|ya|yes|on|aktif)$/i.test(String(env.WA_STIKER_DARI_PEMILIK ?? "").trim()), // otomatis menyimpan stiker yang KAMU kirim dari HP ke koleksi
     stikerTeksFactor: num(env.WA_STIKER_TEKS_FACTOR, 0.5, 0, 3) // stiker berlabel kadang ditanggapi dengan kalimat (pengali WA_BALAS_CHANCE)
   };
 }
@@ -165,13 +167,38 @@ export function webpFirstFrame(buf) {
   return { buffer: buf, animated: false };
 }
 
+// ---------------------------------------------------------------- AI memilih stiker sebagai balasan
+/** Label yang boleh dipilih AI sebagai balasan (suasana sedih/kesal: bot tidak membalas dengan stiker). */
+export const STICKER_PICK_TAGS = ["tawa", "senang", "kaget", "setuju", "terimakasih", "semangat", "bingung"];
+
+/**
+ * Keluaran AI dengan baris "STIKER: <label>" -> { tag, rest }. tag null bila label tidak dikenal/tidak tersedia (baris itu dibuang, sisanya jadi teks).
+ * rest = teks lain di keluaran itu (boleh kosong = balas dengan stiker saja). Tanpa baris STIKER -> null.
+ */
+export function parseStickerOutput(raw, allowed = STICKER_PICK_TAGS) {
+  const lines = String(raw ?? "").split(/\r?\n/);
+  let tag = null;
+  let found = false;
+  const keep = [];
+  for (const l of lines) {
+    const m = /^\s*STIKER\s*[:：]\s*([A-Za-z]+)\s*$/i.exec(l);
+    if (m) {
+      found = true;
+      const t = m[1].toLowerCase();
+      if (!tag && allowed.includes(t)) tag = t;
+    } else keep.push(l);
+  }
+  if (!found) return null;
+  return { tag, rest: keep.join("\n").trim() };
+}
+
 // ---------------------------------------------------------------- perpustakaan stiker
 /**
  * Pilih stiker balasan dari perpustakaan: label cocok dengan label stiker yang diterima, bukan stiker yang sama dengan yang diterima,
  * bukan yang baru dipakai. Yang jarang dipakai bot diutamakan. -> item | null
  */
-export function pickStickerFor(library, receivedTag, { excludeIds = [], avoidIds = [], random = Math.random } = {}) {
-  const wanted = STICKER_REPLY_TAGS[receivedTag] ?? STICKER_REPLY_TAGS.lain;
+export function pickStickerFor(library, receivedTag, { excludeIds = [], avoidIds = [], random = Math.random, exact = false } = {}) {
+  const wanted = exact ? [receivedTag] : STICKER_REPLY_TAGS[receivedTag] ?? STICKER_REPLY_TAGS.lain;
   if (!wanted.length) return null;
   const pool = (library || []).filter((s) => s && s.tag && wanted.includes(s.tag) && !excludeIds.includes(s.id));
   if (!pool.length) return null;
