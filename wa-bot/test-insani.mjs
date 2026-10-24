@@ -502,6 +502,63 @@ await ok("pertanyaan di grup: bot ikut diam bila AI memilih SKIP atau pertanyaan
   assert.ok(lat);
 });
 
+await ok("akhir pekan tanpa inisiatif: Sabtu & Minggu tidak menyapa/pantun/roast/ucapan ulang tahun, tapi tetap membalas mention, reply & pertanyaan", async () => {
+  const { parseHariDiam } = await import("./ngobrol.js");
+  assert.deepEqual(parseHariDiam({}), ["Sabtu", "Minggu"]);
+  assert.deepEqual(parseHariDiam({ WA_AKHIR_PEKAN_DIAM: "off" }), []);
+  assert.deepEqual(parseHariDiam({ WA_HARI_DIAM: "minggu, jumat" }), ["Minggu", "Jumat"]);
+  assert.deepEqual(parseHariDiam({ WA_HARI_DIAM: "off" }), []);
+  assert.deepEqual(parseHariDiam({ WA_HARI_DIAM: "ngawur" }), ["Sabtu", "Minggu"]);
+
+  const SAT = Date.UTC(2026, 9, 10, 1, 0); // Sabtu 10 Okt 2026 09:00 WITA
+  const SUN = SAT + DAY;
+  const MON = SAT + 2 * DAY;
+  for (const [label, t0, quiet] of [["Sabtu", SAT, true], ["Minggu", SUN, true], ["Senin", MON, false]]) {
+    const r = rig({ t0, rnd: 0.5, env: { WA_HUMOR_ROAST_CHANCE: "1" } });
+    await r.h.load();
+    await r.h.handle("sapa on keluarga");
+    await r.h.handle("pantun on keluarga");
+    await r.h.handle("roast on keluarga");
+    await r.h.handle("balas on keluarga");
+    await r.h.handlePreference("main", JID, { name: "Budi Santoso", ids: ["id-Budi"], text: "bot ingat ulang tahunku 10 Oktober" });
+    const sapaMulai = r.sent.length;
+    for (let i = 0; i < 40; i += 1) {
+      r.tick(15 * MIN);
+      await r.h.check();
+    }
+    const sendiri = r.sent.slice(sapaMulai);
+    if (quiet) assert.equal(sendiri.length, 0, `${label}: tidak ada chat sendiri, tapi terkirim ${JSON.stringify(sendiri.map((x) => x.text))}`);
+    else assert.ok(sendiri.length > 0, `${label}: hari biasa tetap menyapa`);
+    // roast juga inisiatif
+    const e = r.h.evaluate("main", JID, { ignoreChance: true });
+    if (quiet) assert.equal(e.reason, "hari tanpa inisiatif (akhir pekan)");
+    else assert.notEqual(e.reason, "hari tanpa inisiatif (akhir pekan)");
+    // status menyebut aturan
+    const desc = await r.h.handle("");
+    assert.match(JSON.stringify(desc), /Hari tanpa inisiatif: Sabtu & Minggu/);
+  }
+
+  // membalas tetap jalan di akhir pekan: pesan yang memanggil bot & pertanyaan di grup
+  const r = rig({ t0: SAT, rnd: 0.99 });
+  await r.h.load();
+  await r.h.handle("balas on keluarga");
+  warm(r);
+  const ask = say(r, "Sari", "ada yang tau cara bayar pajak kendaraan lewat aplikasi?", { rnd: 0 });
+  assert.ok(ask.res && ask.res.ok !== false, "pertanyaan di akhir pekan tetap dijadwalkan dibalas");
+  await runLast(r);
+  assert.equal(r.sent.length, 1, "pertanyaan dijawab pada hari Sabtu");
+
+  // WA_AKHIR_PEKAN_DIAM=off: kembali menyapa seperti biasa di akhir pekan
+  const off = rig({ t0: SAT, rnd: 0.5, env: { WA_AKHIR_PEKAN_DIAM: "off" } });
+  await off.h.load();
+  await off.h.handle("sapa on keluarga");
+  for (let i = 0; i < 40; i += 1) {
+    off.tick(15 * MIN);
+    await off.h.check();
+  }
+  assert.ok(off.sent.length > 0, "dimatikan: Sabtu tetap menyapa");
+});
+
 await ok("terintegrasi: index.js (cooldown 0, kutipan ke orang lain), dokumentasi, .env.example, package.json", () => {
   const read = (f) => fs.readFileSync(new URL(f, import.meta.url), "utf8");
   const idx = read("./index.js");
@@ -514,8 +571,9 @@ await ok("terintegrasi: index.js (cooldown 0, kutipan ke orang lain), dokumentas
   assert.match(readme, /Makin manusiawi \(tahap 2\)/);
   assert.match(readme, /\/humor ingat on/);
   assert.match(readme, /Pertanyaan di grup dijawab walau bot tidak di-mention/);
+  assert.match(readme, /Akhir pekan: hanya membalas/);
   const env = read("./.env.example");
-  for (const k of ["WA_ENERGI_HARIAN", "WA_GAYA_ALAMI", "WA_TYPO_CHANCE", "WA_LANJUT_CHANCE", "WA_LANJUT_MENIT", "WA_LANJUT_MAKS", "WA_INGAT_HARI", "WA_TANYA_TANPA_MENTION", "WA_TANYA_CHANCE", "WA_TANYA_GAP_SEC"]) assert.match(env, new RegExp(k));
+  for (const k of ["WA_ENERGI_HARIAN", "WA_GAYA_ALAMI", "WA_TYPO_CHANCE", "WA_LANJUT_CHANCE", "WA_LANJUT_MENIT", "WA_LANJUT_MAKS", "WA_INGAT_HARI", "WA_TANYA_TANPA_MENTION", "WA_TANYA_CHANCE", "WA_TANYA_GAP_SEC", "WA_AKHIR_PEKAN_DIAM", "WA_HARI_DIAM"]) assert.match(env, new RegExp(k));
   assert.match(read("./package.json"), /test-insani\.mjs/);
 });
 

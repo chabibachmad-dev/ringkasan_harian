@@ -40,6 +40,21 @@ export function inNightWindow(minutes, night) {
   return night.from < night.to ? minutes >= night.from && minutes < night.to : minutes >= night.from || minutes < night.to;
 }
 
+const HARI_ID = { senin: "Senin", selasa: "Selasa", rabu: "Rabu", kamis: "Kamis", jumat: "Jumat", jum_at: "Jumat", sabtu: "Sabtu", minggu: "Minggu", ahad: "Minggu" };
+/** WA_AKHIR_PEKAN_DIAM=on|off (bawaan on) + WA_HARI_DIAM="Sabtu,Minggu" (daftar hari; kosong/off = tidak ada). -> ["Sabtu","Minggu"] */
+export function parseHariDiam(env = process.env) {
+  if (/^(0|false|off|mati|tidak)$/i.test(String(env.WA_AKHIR_PEKAN_DIAM ?? "on").trim())) return [];
+  const raw = String(env.WA_HARI_DIAM ?? "").trim();
+  if (!raw) return ["Sabtu", "Minggu"];
+  if (/^(0|false|off|mati|tidak|tanpa|kosong)$/i.test(raw)) return [];
+  const out = [];
+  for (const w of raw.split(/[\s,;/]+/)) {
+    const d = HARI_ID[w.toLowerCase().replace(/'/g, "")];
+    if (d && !out.includes(d)) out.push(d);
+  }
+  return out.length ? out : ["Sabtu", "Minggu"];
+}
+
 export function readNgobrolConfig(env = process.env) {
   const num = (v, d, lo, hi) => {
     const n = Number(v);
@@ -56,6 +71,7 @@ export function readNgobrolConfig(env = process.env) {
     sapaMinGapMs: Math.floor(num(env.WA_SAPA_MIN_GAP_MIN, 10, 1, 24 * 60)) * 60_000,
     sapaWindow: windowOrDefault(env.WA_SAPA_WINDOW, { from: 6 * 60, to: 21 * 60 + 30 }),
     tidurWindow: parseNightWindow(env.WA_JAM_TIDUR), // null = tanpa jam tidur
+    hariDiam: parseHariDiam(env), // hari tanpa inisiatif (bawaan Sabtu & Minggu): tidak menyapa/kirim chat sendiri, hanya membalas
     tidurBalasFactor: num(env.WA_TIDUR_BALAS_FACTOR, 0.2, 0, 1), // jam tidur: peluang membalas dikali ini (dan hanya bila obrolan sedang ramai)
     reaksiChance: num(env.WA_REAKSI_CHANCE, 0.3, 0, 1), // peluang pesan bernuansa (lucu/kabar baik/terima kasih) diberi reaksi emoji
     reaksiGapMs: Math.floor(num(env.WA_REAKSI_GAP_SEC, 45, 5, 3600)) * 1000,

@@ -36,3 +36,10 @@ TAMBAHAN: JAWAB PERTANYAAN DI GRUP TANPA MENTION
 - Di grup yang /humor balas on: anggota bertanya ke grup (tanda tanya / kata tanya) -> bot menjawab sebagai reply, sesuai konteks, padat,
   boleh memakai pencarian Google. Tanpa batas harian. Diam bila ditujukan ke satu orang, topik berat, sudah dijawab orang lain, atau AI tidak yakin.
 - ENV: WA_TANYA_TANPA_MENTION (on), WA_TANYA_CHANCE (0.85), WA_TANYA_GAP_SEC (15).
+
+TAMBAHAN: AKHIR PEKAN HANYA MEMBALAS (TANPA INISIATIF)
+- Sabtu & Minggu (zona waktu WA_TIMEZONE, bawaan Asia/Makassar): bot TIDAK menyapa/membuka obrolan sendiri, tidak kirim pantun harian,
+  tidak roast spontan, tidak mengucap ulang tahun sendiri (dilewati, tidak diganti Senin).
+- Tetap jalan: balasan mention/reply ke bot, jawaban pertanyaan di grup, balasan acak ke chat anggota, reaksi, sahutan lanjutan.
+- Perintah uji pemilik (/humor tes sapa|pantun <grup>) tetap bisa. /humor status menampilkan aturan ini.
+- ENV: WA_AKHIR_PEKAN_DIAM (on; off = matikan aturan), WA_HARI_DIAM ("Sabtu,Minggu"; bisa diubah, mis. "Minggu").

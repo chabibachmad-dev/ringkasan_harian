@@ -802,6 +802,8 @@ export function createHumor({ state = null, ai = null, send = null, react = null
   const dayOf = () => localParts(now(), timeZone).day;
   const inWindow = (win, minutes) => minutes >= win.from && minutes < win.to;
   const isNight = (minutes) => inNightWindow(minutes, config.tidurWindow); // jam tidur: tidak membuka obrolan, membalas hanya saat ramai
+  /** Hari tanpa inisiatif (bawaan Sabtu & Minggu): bot hanya membalas — tidak menyapa, tidak kirim pantun/roast/ucapan sendiri. */
+  const quietDay = (t = now()) => Boolean(config.hariDiam?.length) && config.hariDiam.includes(localParts(t, timeZone).weekday);
   const sapaOpen = (minutes) => inWindow(config.sapaWindow, minutes) && !isNight(minutes);
 
   // ------------------------------------------------ gaya jawaban
@@ -880,6 +882,7 @@ export function createHumor({ state = null, ai = null, send = null, react = null
     if (!g?.roast) return { ok: false, reason: "roast mati" };
     if (muted(key)) return { ok: false, reason: "sedang didiamkan pemilik" };
     if (config.roastMaxPerDay <= 0) return { ok: false, reason: "jatah 0" };
+    if (quietDay()) return { ok: false, reason: "hari tanpa inisiatif (akhir pekan)" };
     const t = now();
     const lp = localParts(t, timeZone);
     if (lp.minutes < config.roastWindow.from || lp.minutes >= config.roastWindow.to) return { ok: false, reason: "di luar jam aktif" };
@@ -1764,6 +1767,7 @@ Label menentukan kapan stiker dipakai.`;
 
   async function checkSapa() {
     const t = now();
+    if (quietDay(t)) return; // akhir pekan: tidak membuka obrolan & tidak mengucap sendiri (ulang tahun ikut dilewati)
     const lp = localParts(t, timeZone);
     for (const [key, g] of Object.entries(data.groups)) {
       if (!g?.sapa) continue;
@@ -1871,8 +1875,10 @@ Label menentukan kapan stiker dipakai.`;
     await flush();
     const t = now();
     const lp = localParts(t, timeZone);
+    const quiet = quietDay(t);
     for (const [key, g] of Object.entries(data.groups)) {
       if (!g?.pantun) continue;
+      if (quiet) continue; // akhir pekan: tidak ada pantun terjadwal
       if (busy.has(`pantun|${key}`) || muted(key)) continue;
       const win = windowOf(g);
       let st = sched.pantun[key];
@@ -1984,7 +1990,7 @@ Label menentukan kapan stiker dipakai.`;
       const n = (stickers[kolKey(a)] || []).length;
       if (n) lines.push(`\n🎭 Koleksi stiker ${label(a)}: ${n} (lihat/kelola: /humor koleksi${a === SECOND ? " wa2" : ""})`);
     }
-    lines.push(`\nBalas: peluang ${Math.round(config.balasChance * 100)}% per chat, jeda ≥ ${Math.round(config.balasGapMs / 60000)} menit, ${config.balasMaxPerDay > 0 ? `maks ${config.balasMaxPerDay}×/hari/grup` : "tanpa batas harian (diatur energi, jeda & kelelahan)"}, membaca ${config.contextSize} chat sebelumnya, jam ${hm(config.balasWindow.from)}–${hm(config.balasWindow.to)}. Sapa: minimal ${config.sapaPerDay}×/hari/grup, jam ${hm(config.sapaWindow.from)}–${hm(config.sapaWindow.to)}. ${config.tidurWindow ? `Jam tidur ${hm(config.tidurWindow.from)}–${hm(config.tidurWindow.to)}: tidak membuka obrolan, membalas hanya saat obrolan ramai.` : "Tanpa jam tidur."}`);
+    lines.push(`\nBalas: peluang ${Math.round(config.balasChance * 100)}% per chat, jeda ≥ ${Math.round(config.balasGapMs / 60000)} menit, ${config.balasMaxPerDay > 0 ? `maks ${config.balasMaxPerDay}×/hari/grup` : "tanpa batas harian (diatur energi, jeda & kelelahan)"}, membaca ${config.contextSize} chat sebelumnya, jam ${hm(config.balasWindow.from)}–${hm(config.balasWindow.to)}. Sapa: minimal ${config.sapaPerDay}×/hari/grup, jam ${hm(config.sapaWindow.from)}–${hm(config.sapaWindow.to)}. ${config.hariDiam?.length ? `Hari tanpa inisiatif: ${config.hariDiam.join(" & ")} (tidak menyapa/kirim pantun/roast/ucapan sendiri; hanya membalas)${quietDay() ? " — HARI INI termasuk" : ""}. ` : ""}${config.tidurWindow ? `Jam tidur ${hm(config.tidurWindow.from)}–${hm(config.tidurWindow.to)}: tidak membuka obrolan, membalas hanya saat obrolan ramai.` : "Tanpa jam tidur."}`);
     lines.push(`\nRoast: maks ${config.roastMaxPerDay}×/hari/grup, jeda ≥ ${Math.round(config.roastCooldownMs / 60000)} menit, hanya saat obrolan santai & ramai, jam ${hm(config.roastWindow.from)}–${hm(config.roastWindow.to)}. Anggota bisa menolak dengan "bot jangan roasting aku".`);
     return lines.join("\n");
   }
