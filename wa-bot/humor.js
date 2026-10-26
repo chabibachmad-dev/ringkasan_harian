@@ -315,7 +315,7 @@ export function parseHumorArg(arg, { secondAliases = [] } = {}) {
     }
   };
   const need = (what) => ({ kind: "error", error: what });
-  const USAGE = "Pakai: /humor • /humor on <grup> • /humor off <grup> • /humor pantun|roast|gaya|balas|sapa|latihan|lihat|ingat on|off <grup> • /humor semua on|off • /humor jam 09:00-17:00 <grup> • /humor diam <jam> <grup> • /humor lanjut <grup> • /humor profil <grup> • /humor koleksi [hapus <no>|label <no> <label>|tes [no] <grup>] • /humor tes [pantun|sapa|balas] <grup>";
+  const USAGE = "Pakai: /humor • /humor on <grup> • /humor off <grup> • /humor pantun|roast|gaya|balas|sapa|latihan|lihat|ingat on|off <grup> • /humor semua on|off • /humor jam 09:00-17:00 <grup> • /humor diam <jam> <grup> • /humor lanjut <grup> • /humor profil <grup> • /humor koleksi [wa2] [hapus <no>|label <no> <label>|tes [no] <grup>|salin [semua|no ...]] • /humor tes [pantun|sapa|balas] <grup>";
   if (aliases.has(verb) && words.length === 1) return { kind: "status", account: SECOND };
   if (ON_RE.test(verb) || OFF_RE.test(verb)) {
     takeAccount();
@@ -380,6 +380,16 @@ export function parseHumorArg(arg, { secondAliases = [] } = {}) {
       if (!Number.isInteger(n) || n < 1 || !tag) return need(`Pakai: /humor koleksi label <nomor> <${STICKER_TAGS.join("|")}>`);
       return { kind: "koleksi", action: "label", index: n, tag, account };
     }
+    if (/^(salin|copy|tiru|impor|import)$/.test(sub)) {
+      // "koleksi wa2 salin [semua|nomor ...]" = salin dari koleksi nomor utama KE nomor 2; tanpa wa2 = sebaliknya (dari nomor 2 ke nomor utama)
+      const nums = [];
+      for (const w of rest) {
+        if (/^(semua|all)$/i.test(w)) continue;
+        if (!/^\d{1,3}$/.test(w) || Number(w) < 1) return need("Pakai: /humor koleksi wa2 salin [semua | nomor nomor ...]  (nomor dari /humor koleksi nomor utama)");
+        nums.push(Number(w));
+      }
+      return { kind: "koleksi", action: "salin", indexes: nums.length ? [...new Set(nums)] : null, account };
+    }
     if (/^(tes|test|coba|kirim)$/.test(sub)) {
       let index = null;
       if (rest.length >= 2 && /^\d{1,3}$/.test(rest[0])) index = Number(rest.shift());
@@ -387,7 +397,7 @@ export function parseHumorArg(arg, { secondAliases = [] } = {}) {
       if (!target) return need("Pakai: /humor koleksi tes [nomor stiker] <grup>  (contoh: /humor koleksi tes 2 keluarga)");
       return { kind: "koleksi", action: "tes", index, target, account };
     }
-    return need("Pakai: /humor koleksi • /humor koleksi hapus <nomor> • /humor koleksi label <nomor> <label> • /humor koleksi tes [nomor] <grup>");
+    return need("Pakai: /humor koleksi • /humor koleksi hapus <nomor> • /humor koleksi label <nomor> <label> • /humor koleksi tes [nomor] <grup> • /humor koleksi wa2 salin [semua|nomor ...]");
   }
   if (/^(profil|belajar)$/.test(verb)) {
     takeAccount();
@@ -1416,6 +1426,11 @@ export function createHumor({ state = null, ai = null, send = null, react = null
   const koleksiLine = (it, i) => `${i + 1}. ${it.tag || "(belum berlabel)"}${it.desc ? ` — ${it.desc}` : ""}${it.uses ? ` • dipakai ${it.uses}×` : ""}`;
   function koleksiText(account) {
     const lib = stickers[kolKey(account)] || [];
+    if (!lib.length && account === SECOND) return `🎭 Koleksi stiker ${label(account)} masih kosong.
+Bot tidak membaca stiker dari ${label(account)} (HP-nya dipegang orang lain), jadi isi dengan MENYALIN dari koleksi ${label(MAIN)}:
+• /humor koleksi wa2 salin semua  (semua stiker)
+• /humor koleksi wa2 salin 1 3 5  (nomor tertentu dari /humor koleksi)
+Label ikut tersalin. Koleksi ${label(MAIN)} diisi lewat chat "Pesan untuk diri sendiri" atau kirim stiker ke bot Telegram.${(stickers[kolKey(MAIN)] || []).length ? `\nKoleksi ${label(MAIN)} saat ini: ${(stickers[kolKey(MAIN)] || []).length} stiker.` : `\n⚠️ Koleksi ${label(MAIN)} juga masih kosong, isi itu dulu.`}`;
     if (!lib.length) return `🎭 Koleksi stiker ${label(account)} masih kosong.
 Cara mengisi: buka chat "Pesan untuk diri sendiri" di WhatsApp ${label(account)} lalu kirim stiker-stikernya ke situ — bot menyimpan dan memakainya di semua grup yang menyalakan /humor balas.
 Cadangan: kirim stiker (yang tidak beranimasi) langsung ke bot Telegram ini, otomatis masuk koleksi.${media?.intakeInfo ? `\n🔎 ${media.intakeInfo()}` : ""}`;
@@ -1428,10 +1443,42 @@ ${lines.join("\n")}${lib.length > 60 ? `
 Hapus: /humor koleksi hapus <nomor> • Ubah label: /humor koleksi label <nomor> <${STICKER_TAGS.join("|")}>
 Label menentukan kapan stiker dipakai.`;
   }
+  /** Salin stiker dari koleksi nomor LAIN ke koleksi `account` (label ikut; yang sudah ada dilewati). indexes = nomor di koleksi sumber, null = semua. */
+  async function koleksiSalin(account, indexes) {
+    if (!media?.store) return "Penyimpanan stiker belum terpasang di bot ini.";
+    if (!secondEnabled) return "Nomor kedua belum diaktifkan di bot ini, jadi tidak ada koleksi lain untuk disalin.";
+    const from = account === SECOND ? MAIN : SECOND;
+    const src = stickers[kolKey(from)] || [];
+    const dst = (stickers[kolKey(account)] ||= []);
+    if (!src.length) return `Koleksi ${label(from)} masih kosong, tidak ada yang bisa disalin. Lihat: /humor koleksi${from === SECOND ? " wa2" : ""}`;
+    for (const n of indexes || []) if (n > src.length) return `Nomor ${n} tidak ada di koleksi ${label(from)} (1-${src.length}).`;
+    const pick = indexes ? indexes.map((n) => src[n - 1]) : src;
+    let added = 0, dup = 0, missing = 0, full = 0;
+    for (const it of pick) {
+      if (dst.some((x) => x.id === it.id)) { dup += 1; continue; }
+      if (dst.length >= config.koleksiMax) { full += 1; continue; }
+      const buf = await media.store.get(stickerFile(kolKey(from), it.id));
+      if (!buf) { missing += 1; continue; }
+      await media.store.put(stickerFile(kolKey(account), it.id), buf);
+      dst.push({ id: it.id, tag: it.tag || "", desc: it.desc || "", seen: 1, uses: 0, ts: now(), own: true });
+      added += 1;
+    }
+    if (added) {
+      dirty.stiker = true;
+      await flush();
+    }
+    const bits = [`${added} stiker disalin dari ${label(from)} ke ${label(account)}`];
+    if (dup) bits.push(`${dup} sudah ada`);
+    if (full) bits.push(`${full} tidak muat (koleksi penuh, maks ${config.koleksiMax})`);
+    if (missing) bits.push(`${missing} berkasnya hilang`);
+    const untagged = dst.filter((x) => !x.tag).length;
+    return `🎭 ${bits.join(", ")}. Koleksi ${label(account)} sekarang ${dst.length} stiker${untagged ? ` (${untagged} belum berlabel, stiker tanpa label tidak dipakai bot: /humor koleksi${account === SECOND ? " wa2" : ""} label <nomor> <label>)` : ""}.${added ? `\nCoba kirim ke grup: /humor koleksi${account === SECOND ? " wa2" : ""} tes <grup>` : ""}`;
+  }
   async function koleksiCommand(p) {
     const account = p.account || MAIN;
     const lib = (stickers[kolKey(account)] ||= []);
     if (p.action === "list") return koleksiText(account);
+    if (p.action === "salin") return await koleksiSalin(account, p.indexes);
     const idx = p.index - 1;
     if (!Number.isInteger(idx) || idx < 0 || idx >= lib.length) return `Nomor ${p.index} tidak ada di koleksi (1-${lib.length}). Lihat: /humor koleksi`;
     if (p.action === "hapus") {
@@ -1459,7 +1506,7 @@ Label menentukan kapan stiker dipakai.`;
     if (r.entries.length !== 1) return "Sebutkan satu grup saja (nama atau nomor dari /humor).";
     const e = r.entries[0];
     const lib = stickers[kolKey(e.account)] || [];
-    if (!lib.length) return `Koleksi stiker ${label(e.account)} masih kosong. Isi dulu (lihat /humor koleksi).`;
+    if (!lib.length) return `Koleksi stiker ${label(e.account)} masih kosong. Isi dulu (lihat /humor koleksi${e.account === SECOND ? " wa2" : ""})${e.account === SECOND ? " — cara tercepat: /humor koleksi wa2 salin semua (menyalin dari nomor utama)." : "."}`;
     let item;
     if (p.index) {
       item = lib[p.index - 1];

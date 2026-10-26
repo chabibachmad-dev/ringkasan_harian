@@ -43,3 +43,9 @@ TAMBAHAN: AKHIR PEKAN HANYA MEMBALAS (TANPA INISIATIF)
 - Tetap jalan: balasan mention/reply ke bot, jawaban pertanyaan di grup, balasan acak ke chat anggota, reaksi, sahutan lanjutan.
 - Perintah uji pemilik (/humor tes sapa|pantun <grup>) tetap bisa. /humor status menampilkan aturan ini.
 - ENV: WA_AKHIR_PEKAN_DIAM (on; off = matikan aturan), WA_HARI_DIAM ("Sabtu,Minggu"; bisa diubah, mis. "Minggu").
+
+TAMBAHAN: KOLEKSI STIKER NOMOR 2 (wa2)
+- Bot tidak membaca stiker dari nomor kedua, jadi koleksinya kosong. Isi dengan menyalin dari nomor utama:
+  /humor koleksi wa2 salin semua   atau   /humor koleksi wa2 salin 1 3 5
+  lalu cek /humor koleksi wa2 dan uji: /humor koleksi wa2 tes <grup>. Label ikut, duplikat dilewati.
+- Perintah/teks "koleksi kosong" untuk wa2 kini menjelaskan cara ini.

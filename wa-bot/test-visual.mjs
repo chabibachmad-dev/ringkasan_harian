@@ -55,7 +55,7 @@ function rig(over = {}) {
     react: async (a, jid, msg, emoji) => void reacts.push({ jid, emoji }),
     media,
     listGroups: async () => [{ id: JID, subject: "Keluarga Besar", allowed: true }],
-    secondEnabled: false,
+    secondEnabled: Boolean(over.second),
     sleep: async () => {},
     timeZone: "Asia/Makassar",
     config: readHumorConfig({ WA_BALAS_CHANCE: "0.5", WA_REAKSI_CHANCE: "0", WA_ENERGI_HARIAN: "off", WA_GAYA_ALAMI: "off", ...(over.env || {}) }),
@@ -780,6 +780,38 @@ await ok("koleksi: /humor koleksi menampilkan daftar, mengubah label, menghapus 
   assert.equal(r.files.size, 1);
   assert.match(await r.h.handle("koleksi"), /1\. senang/);
   assert.match(await r.h.handle(""), /Koleksi stiker .*: 1/);
+});
+
+await ok("koleksi nomor 2: kosong -> petunjuk menyalin; /humor koleksi wa2 salin [semua|nomor] menyalin dari nomor utama (label ikut, duplikat dilewati), lalu bisa dites ke grup", async () => {
+  assert.deepEqual(parseHumorArg("koleksi wa2 salin semua"), { kind: "koleksi", action: "salin", indexes: null, account: "wa2" });
+  assert.deepEqual(parseHumorArg("koleksi wa2 salin 1 3 1"), { kind: "koleksi", action: "salin", indexes: [1, 3], account: "wa2" });
+  assert.deepEqual(parseHumorArg("koleksi salin"), { kind: "koleksi", action: "salin", indexes: null, account: null });
+  assert.equal(parseHumorArg("koleksi wa2 salin abc").kind, "error");
+  const r = rig({ visionOut: tagByBuf, second: true });
+  await r.h.load();
+  const kosong = await r.h.handle("koleksi wa2");
+  assert.match(kosong, /masih kosong[\s\S]*\/humor koleksi wa2 salin semua/);
+  assert.match(kosong, /juga masih kosong/, "koleksi utama juga kosong -> diberi tahu");
+  assert.match(await r.h.handle("koleksi wa2 salin semua"), /tidak ada yang bisa disalin/);
+  await r.h.addToKoleksi("main", KOL.tawa);
+  await r.h.addToKoleksi("main", KOL.kaget);
+  await r.h.addToKoleksi("main", KOL.sedih);
+  assert.match(await r.h.handle("koleksi wa2 salin 9"), /Nomor 9 tidak ada/);
+  assert.match(await r.h.handle("koleksi wa2 salin 2"), /1 stiker disalin dari .* ke .*Nomor 2.*sekarang 1 stiker/);
+  assert.match(await r.h.handle("koleksi wa2"), /1\. kaget/);
+  const lagi = await r.h.handle("koleksi wa2 salin semua");
+  assert.match(lagi, /2 stiker disalin.*1 sudah ada.*sekarang 3 stiker/);
+  assert.equal((await r.h.handle("koleksi")).includes("1. tawa"), true, "koleksi utama tidak berubah");
+  const filesBefore = r.files.size;
+  assert.equal(filesBefore, 6, "berkas koleksi utama (3) + salinan nomor 2 (3)");
+  // uji kirim dari nomor 2 (grup milik nomor 2)
+  const lib2 = await r.h.handle("koleksi wa2 tes keluarga");
+  assert.ok(/terkirim|Stiker #/.test(lib2) || /Tidak ada grup/.test(lib2), lib2);
+  // nomor 2 dimatikan di bot -> pesan jelas
+  const r1 = rig({ visionOut: tagByBuf });
+  await r1.h.load();
+  await r1.h.addToKoleksi("main", KOL.tawa);
+  assert.match(await r1.h.handle("koleksi wa2 salin semua"), /belum dinyalakan/);
 });
 
 await ok("/humor koleksi tes [nomor] <grup>: mengirim stiker koleksi ke grup walau jam tidur/jatah habis, tanpa memakai jatah", async () => {
