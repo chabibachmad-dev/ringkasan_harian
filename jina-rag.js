@@ -227,6 +227,26 @@ export function parseJinaCommand(text) {
   return { sub: sub.toLowerCase(), arg: args.join(" ").trim() };
 }
 
+
+/** Ringkasan satu-dua baris untuk /status (WhatsApp & Telegram): key siap/jeda/rusak, vektor, statistik pencarian. */
+export function describeJinaForStatus({ jina, hybrid = null, index = null } = {}) {
+  if (!jina || !jina.available()) return "🧠 Jina: belum aktif (isi JINA_API_KEYS di .env)";
+  const s = jina.status();
+  const ready = s.keys.filter((k) => k.state === "siap").length;
+  const rest = s.keys.filter((k) => /^jeda/.test(k.state)).length;
+  const bad = s.keys.filter((k) => k.state === "rusak").length;
+  const head = `🧠 Jina: ${ready} dari ${s.keys.length} key siap${rest ? ` • ${rest} jeda` : ""}${bad ? ` • ⚠️ ${bad} rusak/ditolak` : ""}` +
+    ` • embed ${s.embed ? "on" : "off"}, rerank ${s.rerank ? "on" : "off"}, reader ${s.reader ? "on" : "off"}`;
+  const vs = index?.vectorStats?.(jina.cfg.embedModel);
+  const hs = hybrid?.status?.();
+  const tail = [];
+  if (vs) tail.push(`vektor ${vs.embedded}/${vs.total}${vs.ready ? "" : " (belum lengkap)"}`);
+  if (hs) tail.push(`pencarian hibrida ${hs.hybrid}x, BM25 ${hs.bm25}x, fallback ${hs.fallbacks}x`);
+  tail.push(`panggilan embed ${s.totals.embedCalls}, rerank ${s.totals.rerankCalls}`);
+  const err = hs?.lastError ? `\n   galat terakhir: ${String(hs.lastError).slice(0, 120)}` : "";
+  return `${head}\n   ${tail.join(" • ")}${err}`;
+}
+
 /** /jina (status) | /jina tes | /jina baca <url> | /jina embed (paksa isi vektor sekarang). -> teks balasan. */
 export async function handleJinaCommand(cmd, { jina, hybrid = null, embedWorker = null, index = null, now = () => Date.now() } = {}) {
   if (!jina || !jina.available()) {

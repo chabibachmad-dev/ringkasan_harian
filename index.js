@@ -101,7 +101,7 @@ import { createPriorityQueue, PRIORITY } from "./ollama-queue.js";
 import { openKbIndex } from "./kb-index.js";
 import { createJina } from "./jina.js";
 import { createSbm, loadSbmData } from "./sbm.js";
-import { createHybridSearch, createEmbedWorker, parseJinaCommand, handleJinaCommand } from "./jina-rag.js";
+import { createHybridSearch, createEmbedWorker, parseJinaCommand, handleJinaCommand, describeJinaForStatus } from "./jina-rag.js";
 import { createKbIngestWorker, readKbConfig } from "./kb-ingest.js";
 import { createKbRetrievalWorker } from "./kb-retrieval.js";
 import { createDocFolderWorker } from "./doc-folder.js";
@@ -4901,6 +4901,13 @@ async function buildBotStatusText() {
   {
     const df = typeof docFolder !== "undefined" && docFolder ? docFolder.status() : null;
     lines.push(`📂 Dokumen lokal (khusus Ollama): ${df ? `${df.docs} dokumen .md di ${df.mdDir}${df.current ? ` • memproses ${df.current.file}` : ""}${df.lastError ? ` • error terakhir: ${df.lastError}` : ""}` : "mati"}`);
+  }
+  try {
+    lines.push(describeJinaForStatus({ jina: jinaClient, hybrid: hybridSearch, index: kbIndex }));
+    const ac = acuanLib?.status();
+    lines.push(`📚 Acuan publik: ${ac ? (ac.enabled ? `${ac.docs} dokumen di ${ac.dir}${ac.lastError ? ` • ⚠️ ${ac.lastError}` : ""}` : "mati") : "indeks belum aktif"}`);
+  } catch {
+    /* belum siap */
   }
   lines.push(`🖼️ Pembuat gambar: ${imageGen.monitorText((ms) => `${formatClockInTimezone(ms)} ${WA_TIMEZONE_LABEL}`)}`);
   try {

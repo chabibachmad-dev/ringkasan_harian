@@ -1,7 +1,7 @@
 // Tes pencarian hibrida (jina-rag.js) + pekerja embedding, dengan Jina palsu & indeks SQLite di memori.
 //   node test-jina-rag.mjs
 import { openKbIndex } from "./kb-index.js";
-import { createHybridSearch, createEmbedWorker, rrfMerge } from "./jina-rag.js";
+import { createHybridSearch, createEmbedWorker, rrfMerge, describeJinaForStatus } from "./jina-rag.js";
 import { JinaError } from "./jina.js";
 
 let fails = 0;
@@ -165,6 +165,16 @@ for (const [name, opts] of [["embed 429", { failEmbed: new JinaError("rate", "42
   const D = [{ doc_id: "b", seq: 0, __src: "dense", sim: 0.9 }, { doc_id: "c", seq: 0, __src: "dense", sim: 0.8 }];
   const m = rrfMerge([L, D]);
   check(m[0].row.doc_id === "b" && m[0].from.has("lex") && m[0].from.has("dense") && m[0].row.sim === 0.9, "RRF: yang muncul di dua daftar naik, sim dipertahankan");
+}
+
+// ---- ringkasan untuk /status
+{
+  const keys = [{ key: "jina_…aaaa", state: "siap", ok: 3, fail: 0, tokens: 10, last: null }, { key: "jina_…bbbb", state: "jeda 40 dtk", ok: 1, fail: 1, tokens: 5, last: "rate" }, { key: "jina_…cccc", state: "rusak", ok: 0, fail: 2, tokens: 0, last: "auth" }];
+  const j = { available: () => true, cfg: { embedModel: "m" }, status: () => ({ embed: true, rerank: true, reader: false, keys, totals: { embedCalls: 7, rerankCalls: 4 } }) };
+  const t = describeJinaForStatus({ jina: j, hybrid: { status: () => ({ hybrid: 5, bm25: 2, fallbacks: 1, lastError: "429" }) }, index: { vectorStats: () => ({ embedded: 10, total: 12, ready: false }) } });
+  check(/1 dari 3 key siap/.test(t) && /1 jeda/.test(t) && /1 rusak/.test(t) && /vektor 10\/12 \(belum lengkap\)/.test(t) && /hibrida 5x/.test(t) && /galat terakhir: 429/.test(t), "ringkasan /status: key siap/jeda/rusak, vektor, statistik, galat");
+  check(!/jina_/.test(t), "ringkasan /status tidak menampilkan key");
+  check(/belum aktif/.test(describeJinaForStatus({ jina: { available: () => false } })), "tanpa key: 'belum aktif'");
 }
 
 if (fails) { console.log(`\n${fails} GAGAL`); process.exit(1); }
