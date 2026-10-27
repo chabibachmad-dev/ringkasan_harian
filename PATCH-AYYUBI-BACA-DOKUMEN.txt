@@ -1,0 +1,20 @@
+PATCH AYYUBI: baca dokumen lebih pintar (Jina + kalkulator SBM + PDF chat pribadi + acuan publik + /komitmen)
+
+PASANG
+1. Cadangkan:  cp index.js index.js.bak ; cp kb-index.js kb-index.js.bak
+2. Ekstrak zip DI DALAM folder wa-bot (timpa file yang sama):  unzip -o patch-ayyubi-baca-dokumen.zip
+3. (Opsional, untuk Jina) tambahkan ke .env di laptop/hub — JANGAN kirim ke chat:  JINA_API_KEYS=key1,key2,key3,key4
+4. Taruh PDF PMK 32/2025 di  dokumen/acuan-publik/  (nama berkas = judul kutipan). Dokumen internal (Komitmen Bersama PPK) tetap di dokumen/peraturan-pdf/.
+5. Tes:  npm test   (atau satu per satu: node test-jina.mjs, test-jina-rag.mjs, test-sbm.mjs, test-pdf-chat.mjs, test-acuan-lib.mjs, test-komitmen.mjs, test-docrule.mjs)
+6. Restart bot. Cek dari WhatsApp (chat sendiri):  /jina   lalu  /jina tes   lalu  /jina embed
+
+CARA PAKAI
+- "berapa biaya dinas ke Surabaya 3 hari eselon III?"  -> kalkulator SBM (bertanya balik bila data kurang), lengkap dengan hlm PMK
+- kirim PDF di chat pribadi + tanya  -> dibaca semua halaman, dijawab dengan [Halaman n]
+- /komitmen cek <uraian>  -> daftar periksa dari Komitmen Bersama (lokal)
+
+FILE BARU: jina.js, jina-rag.js, sbm.js, sbm-build.mjs, data/sbm-pmk32-2025.json, pdf-chat.js, acuan-lib.js, komitmen.js,
+           test-jina.mjs, test-jina-rag.mjs, test-sbm.mjs, test-pdf-chat.mjs, test-acuan-lib.mjs, test-komitmen.mjs, test-docrule.mjs
+FILE DIUBAH: index.js, kb-index.js, kb-retrieval.js, kb-ingest.js, pdf-extract.js, pdf-qa.js, package.json, README.md, .env.example, test-owner.mjs
+
+PRIVASI: dokumen local: dan PDF chat TIDAK dikirim ke Jina; Jina hanya menerima dokumen non-lokal. Tanpa key: perilaku lama (BM25).
