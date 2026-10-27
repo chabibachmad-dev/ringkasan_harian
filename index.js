@@ -4906,8 +4906,8 @@ async function buildBotStatusText() {
     lines.push(describeJinaForStatus({ jina: jinaClient, hybrid: hybridSearch, index: kbIndex }));
     const ac = acuanLib?.status();
     lines.push(`📚 Acuan publik: ${ac ? (ac.enabled ? `${ac.docs} dokumen di ${ac.dir}${ac.lastError ? ` • ⚠️ ${ac.lastError}` : ""}` : "mati") : "indeks belum aktif"}`);
-  } catch {
-    /* belum siap */
+  } catch (e) {
+    lines.push(`🧠 Jina/acuan: gagal dibaca (${String(e instanceof Error ? e.message : e).slice(0, 120)})`);
   }
   lines.push(`🖼️ Pembuat gambar: ${imageGen.monitorText((ms) => `${formatClockInTimezone(ms)} ${WA_TIMEZONE_LABEL}`)}`);
   try {
