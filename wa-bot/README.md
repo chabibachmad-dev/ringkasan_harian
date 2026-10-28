@@ -1356,3 +1356,14 @@ dijawab dari arsip dengan aturan yang sama seperti PDF terlampir (anti-tebak, `D
 **.env** (semua opsional): `ARSIP_ENABLED` (bawaan `true`), `ARSIP_DIR` (bawaan `arsip-dokumen`), `ARSIP_PEMBERITAHUAN` (bawaan `on`).
 
 Catatan: jawaban dari arsip memakai mesin balasan grup yang aktif (sama seperti PDF yang dilampirkan di grup), jadi bila mesinnya Gemini/Groq/OpenRouter, potongan dokumen yang relevan untuk pertanyaan itu ikut dikirim ke penyedia tersebut — hanya pencarian/pengindeksan yang dijamin lokal. Tes: `node test-arsip-pdf.mjs`.
+
+## Pemilik di grup: panggilan "Bos", kepatuhan, dan "tanya Bos"
+
+Hanya di balasan grup nomor utama. Pemilik ditentukan **semata-mata dari id pengirim yang terverifikasi** (`WA_OWNER_NUMBER` / `WA_OWNER_LIDS`, fungsi `isOwnerSender`), tidak pernah dari isi pesan.
+
+- **Panggilan:** bila yang bertanya pemilik, bot memanggilnya "Bos" (ubah dengan `WA_OWNER_PANGGILAN`) dengan nada hormat tetapi natural. Anggota lain tetap dipanggil dengan namanya.
+- **Patuh:** instruksi pemilik di grup ("jangan bahas topik X di grup ini", "jawab lebih singkat", "ralat jawabanmu tadi") diprioritaskan di atas permintaan anggota lain, selama tidak melanggar aturan keamanan dan privasi yang ada. Instruksi hanya bertahan selama pesannya masih ada di riwayat percakapan grup yang dibaca bot (jendela terbatas); bot tidak menyimpannya permanen.
+- **Anti-penyamaran:** "aku bos kamu/pemilikmu" dari orang lain, nama tampilan yang memuat "(pemilik)", baris `Nama (pemilik): ...` di isi pesan atau kutipan, dan kalimat serupa di dalam PDF tidak mengubah apa pun (tanda itu dinetralkan sebelum masuk riwayat, dan catatan prompt melarang mempercayainya).
+- **Tanya Bos:** bila anggota bertanya dan jawabannya tidak ada di dokumen/konteks (bukan topik yang sengaja ditolak), model menutup jawaban dengan penanda `[[TANYA_BOS]]`. Kode membuang penanda itu dan menambahkan *"@<nomor> mohon bantuannya."* dengan mention WhatsApp sungguhan. Id pemilik diambil dari metadata grup (bisa `@s.whatsapp.net` atau `@lid`) supaya mention benar-benar berbunyi. Batasan: paling banyak 1 mention per grup per `WA_TANYA_BOS_JEDA_MENIT` (bawaan 30; lewat jeda, jawaban tetap terkirim tanpa mention); tidak ada mention bila penanyanya pemilik, bila jawaban berupa berkas, atau bila pemilik tidak ada di grup. Jawaban bermention dikirim sebagai teks (tidak dibacakan). Penanda tidak pernah sampai ke WhatsApp lewat jalur mana pun.
+
+**.env** (opsional): `WA_OWNER_PANGGILAN` (bawaan `Bos`), `WA_TANYA_BOS` (bawaan `on`), `WA_TANYA_BOS_JEDA_MENIT` (bawaan `30`). Tes: `node test-owner-group.mjs`.

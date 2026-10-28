@@ -102,6 +102,7 @@ import { createKhatamReminder } from "./khatam.js";
 import { createPriorityQueue, PRIORITY } from "./ollama-queue.js";
 import { openKbIndex } from "./kb-index.js";
 import { arsipConfig, createArsip, arsipCitationNote } from "./arsip-pdf.js";
+import { BOS_FALLBACK, createTanyaBosGate, neutralizeOwnerMarks, ownerGroupConfig, ownerGroupNote, plainSenderName, resolveTanyaBos, tanyaBosNote } from "./owner-group.js";
 import { createJina } from "./jina.js";
 import { createSbm, loadSbmData } from "./sbm.js";
 import { createHybridSearch, createEmbedWorker, parseJinaCommand, handleJinaCommand, describeJinaForStatus } from "./jina-rag.js";
@@ -362,6 +363,9 @@ ${NO_OFFER_NOTE}`;
 
 // ---- Dukungan grup WhatsApp (bot dipanggil lewat mention) ----
 // Catatan tambahan di prompt kalau percakapannya di GRUP (bukan chat pribadi).
+// Pemilik di grup (nomor utama): panggilan "Bos", kepatuhan, dan menandai pemilik bila bot tidak tahu. Lihat owner-group.js.
+const ownerGroupCfg = ownerGroupConfig(process.env);
+const tanyaBosGate = createTanyaBosGate({ jedaMs: ownerGroupCfg.jedaMs });
 const GROUP_PROMPT_NOTE = `
 
 KONTEKS GRUP: pesan ini datang dari GRUP WhatsApp (mis. grup keluarga), bukan chat pribadi. Banyak orang bisa bertanya; tiap pesan pengguna diawali "Nama: " (nama pengirim) dan kadang diikuti baris (mengutip: "...") berisi pesan yang dibalas pengirim. Jawab LANGSUNG ke orang yang bertanya di pesan TERAKHIR (boleh menyapa namanya), singkat dan santai, dan JANGAN menulis "Nama:" di awal jawabanmu. Kamu asisten AI, BUKAN pemilik nomor: jangan berbicara seolah-olah kamu pemiliknya dan jangan menjawab hal pribadi tentang pemilik nomor atau anggota grup.`;
@@ -492,7 +496,9 @@ function withGroupNote(basePrompt, jid, { local = false } = {}) {
     console.error("Catatan kemampuan grup gagal disusun:", e instanceof Error ? e.message : String(e));
   }
   const pdfNote = buildPdfNote(jid, local);
-  return `${base}${GROUP_PROMPT_NOTE}${ownerNote || OWNER_CLAIM_NOTE}${capNote}${imageNote}${videoNote}${fileNote}${voiceNote}${pdfNote}${ctxFlags?.humorNote || ""}${ctxFlags?.retryNote ? `\n\n${ctxFlags.retryNote}` : ""}${replyLang ? langInstruction(replyLang) : ""}`;
+  // Nomor utama saja: pemilik dipanggil "Bos" & dipatuhi; untuk orang lain, bot boleh menandai pemilik bila tidak tahu.
+  const bosNote = currentAccountId() !== MAIN_ACCOUNT ? "" : ctxFlags?.ownerAsker ? ownerGroupNote(ownerGroupCfg.panggilan) : ownerGroupCfg.tanyaBos ? tanyaBosNote(ownerGroupCfg.panggilan) : "";
+  return `${base}${GROUP_PROMPT_NOTE}${ownerNote || OWNER_CLAIM_NOTE}${bosNote}${capNote}${imageNote}${videoNote}${fileNote}${voiceNote}${pdfNote}${ctxFlags?.humorNote || ""}${ctxFlags?.retryNote ? `\n\n${ctxFlags.retryNote}` : ""}${replyLang ? langInstruction(replyLang) : ""}`;
 }
 
 // Buang awalan "Nama: " & baris "(mengutip: ...)" supaya pencarian dokumen/web
@@ -2112,8 +2118,10 @@ function rememberReplySource(id, markdown) {
   while (replySource.size > 80) replySource.delete(replySource.keys().next().value);
 }
 
-async function deliverAutoReplyText(sock, jid, result, logLabel = "🤖 Auto-reply", { quoted = null, waName = null } = {}) {
+async function deliverAutoReplyText(sock, jid, result, logLabel = "🤖 Auto-reply", { quoted = null, waName = null, mentions = [] } = {}) {
   // Tabel markdown -> tampilan yang terbaca di gelembung WhatsApp (jangan sampai perapian menggagalkan pengiriman).
+  // Penanda [[TANYA_BOS]] tidak pernah boleh sampai ke WhatsApp (jalur mana pun).
+  if (/\[\[\s*TANYA_BOS/i.test(result.reply)) result = { ...result, reply: result.reply.replace(/\s*\[\[\s*TANYA_BOS\s*\]\]\s*/gi, " ").trim() || BOS_FALLBACK };
   let outText = result.reply;
   try {
     outText = formatForWhatsApp(result.reply) || result.reply;
@@ -2121,7 +2129,7 @@ async function deliverAutoReplyText(sock, jid, result, logLabel = "🤖 Auto-rep
     console.error("Gagal merapikan balasan untuk WhatsApp:", e instanceof Error ? e.message : String(e));
   }
   try {
-    const sent = await sock.sendMessage(jid, { text: outText }, quoted ? { quoted } : undefined);
+    const sent = await sock.sendMessage(jid, { text: outText, ...(mentions.length ? { mentions } : {}) }, quoted ? { quoted } : undefined);
     rememberReplySource(sent?.key?.id, result.reply);
     await supabase.from("whatsapp_messages").insert({
       wa_jid: jid,
@@ -3111,7 +3119,7 @@ async function handleGroupMessage(msg, sock) {
   }
   humor.noteTriggered(currentAccountId(), groupJid); // habis dipanggil: jangan langsung bercanda/roasting
 
-  const sender = msg.pushName || "Anggota grup";
+  const sender = plainSenderName(msg.pushName) || "Anggota grup"; // nama tampilan tak boleh memalsukan "(pemilik)"
   const ownerAsker = isOwnerSender(msg, false); // pemilik nomor yang bertanya di grup
   console.log(`👥 [${subject || "?"}] pengirim: ${sender} (id: ${senderUserParts(msg).slice(2).join(", ") || "?"}) pemilik: ${ownerAsker ? "ya" : "tidak"}${ownerAsker || !OWNER_NUMBER ? "" : " -- kalau ini nomormu tapi tertulis tidak, isi WA_OWNER_LIDS=<id di atas> di .env"}`);
   // Edit foto: foto di pesan ini, atau foto yang DIBALAS (termasuk gambar buatan bot sendiri).
@@ -3176,10 +3184,11 @@ async function handleGroupMessage(msg, sock) {
     text = r.text;
   }
 
+  if (!ownerAsker) text = neutralizeOwnerMarks(text); // orang lain tak bisa menulis label "(pemilik)" sendiri
   const stored =
     `${senderLabel(sender, ownerAsker)}: ${groupAudio ? "🎤 " : ""}${text}` +
     (readPdf ? ` ${pdfAttachTag(pdfCandidate.fileName, !docAttached)}` : "") +
-    (quotedText ? `\n(mengutip: "${quotedText.replace(/\s+/g, " ").slice(0, GROUP_QUOTE_MAX_CHARS)}")` : "");
+    (quotedText ? `\n(mengutip: "${neutralizeOwnerMarks(quotedText).replace(/\s+/g, " ").slice(0, GROUP_QUOTE_MAX_CHARS)}")` : "");
   const { error } = await supabase.from("whatsapp_messages").insert({
     wa_jid: groupJid,
     wa_name: subject || null,
@@ -3439,17 +3448,41 @@ async function handleGroupMessage(msg, sock) {
     if (acctCtx) acctCtx.retryNote = "";
     result = again?.reply && !deflectsToOwner(again.reply) ? again : { ...result, reply: OWNER_DEFLECT_FALLBACK };
   }
+  // [[TANYA_BOS]]: penanda dibuang; bila bot memang tidak tahu, pemilik ditandai dengan mention sungguhan (jeda per grup, bukan untuk pemilik sendiri).
+  const bosOn = currentAccountId() === MAIN_ACCOUNT && ownerGroupCfg.tanyaBos && !fileReq;
+  const bos = resolveTanyaBos({
+    reply: result.reply,
+    enabled: bosOn,
+    ownerAsker,
+    participants: bosOn && !ownerAsker && /\[\[\s*TANYA_BOS/i.test(result.reply) ? await groupParticipants(sock, groupJid) : [],
+    ownerNumber: OWNER_NUMBER,
+    ownerLids: OWNER_LIDS,
+    groupJid,
+    gate: tanyaBosGate
+  });
+  result = { ...result, reply: bos.reply || BOS_FALLBACK };
+  if (bos.mentions.length) console.log(`👥 [${subject}] tidak bisa menjawab; pemilik ditandai (${bos.mentions[0]}).`);
   // Diminta berkas (PDF/Excel/Word): kirim jawaban sebagai berkas. Gagal membuatnya -> tetap dikirim sebagai teks.
   if (fileReq && (await deliverGroupFile(sock, groupJid, fileReq.format, result.reply, { quoted: msg, waName: subject || null, result, hint: fileHint }))) return;
   // /voice wag on: balasan grup berupa voice note saja (tanpa teks). Gagal/tidak layak dibacakan -> tetap dikirim teks.
   // Penanya minta "jawab pakai teks" -> tidak dibacakan (hanya untuk pesan ini).
   if (groupVoice.enabled() && !textOnly && !fileReq) {
     sock.sendPresenceUpdate("recording", groupJid).catch(() => {});
-    const voice = await groupVoice.tryVoice(result.reply);
+    const voice = bos.mentions.length === 0 ? await groupVoice.tryVoice(result.reply) : null; // jawaban bermention harus teks supaya mention berbunyi
     sock.sendPresenceUpdate("paused", groupJid).catch(() => {});
     if (voice && (await deliverAutoReplyVoice(sock, groupJid, result, voice, { quoted: msg, waName: subject || null }))) return;
   }
-  await deliverAutoReplyText(sock, groupJid, result, "👥 Balasan grup", { quoted: msg, waName: subject || null });
+  await deliverAutoReplyText(sock, groupJid, result, "👥 Balasan grup", { quoted: msg, waName: subject || null, mentions: bos.mentions });
+}
+
+/** Peserta grup dari metadata WhatsApp (id sebagaimana tercatat di sana, @s.whatsapp.net atau @lid). Gagal -> []. */
+async function groupParticipants(sock, jid) {
+  try {
+    return (await sock.groupMetadata(jid))?.participants ?? [];
+  } catch (err) {
+    console.error(`👥 Gagal ambil peserta grup ${jid}:`, err instanceof Error ? err.message : String(err));
+    return [];
+  }
 }
 
 /** Balas pesan di grup dengan teks biasa & catat ke riwayat. */
