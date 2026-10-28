@@ -39,7 +39,7 @@ assert.ok(grp.includes("flags.ownerAsker = ownerAsker"), "grup: AI diberi tahu p
 assert.ok(grp.includes("ownerAsker && deflectsToOwner(result.reply)"), "grup: jawaban melempar ke pemilik ditulis ulang");
 assert.ok(grp.includes("WA_OWNER_LIDS=<id di atas>"), "log membantu bila pemilik tampil sebagai id @lid");
 const wgn = src.slice(src.indexOf("function withGroupNote"), src.indexOf("function stripGroupMeta"));
-assert.ok(/if \(!isGroupJid\(jid\)\) return `\$\{base\}\$\{ownerNote\}`/.test(wgn), "chat pribadi dari pemilik juga mendapat catatan");
+assert.ok(/if \(!isGroupJid\(jid\)\) \{[\s\S]{0,400}return `\$\{base\}\$\{ownerNote\}/.test(wgn), "chat pribadi dari pemilik juga mendapat catatan");
 assert.ok(wgn.includes("${ownerNote || OWNER_CLAIM_NOTE}"), "grup: catatan pemilik, atau peringatan klaim palsu untuk orang lain");
 assert.ok(src.includes("st.ownerAsker = isOwnerSender(msg, isSelfChat)"), "chat pribadi: penanda pemilik di konteks pesan");
 ok("index.js: grup & chat pribadi tersambung");

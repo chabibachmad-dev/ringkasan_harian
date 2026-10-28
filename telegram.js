@@ -141,7 +141,7 @@ const HELP = [
   "Ketik biasa untuk ngobrol dengan AI (Gemini, bisa cari web & Dokumen Pengetahuan).",
   "🎤 Kirim PESAN SUARA (tahan tombol mikrofon) untuk ngobrol atau merekam SiMAB: bot menuliskan apa yang ia dengar, lalu menjalankannya seperti pesan teks. Contoh saat merekam: \"Pembelian ATK, tanggal 5 Oktober 2026, jumlah satu juta lima ratus ribu rupiah\".",
   "🔊 Balasan suara: /suara auto (default: dibalas suara bila kamu kirim suara), /suara on (selalu), /suara off. Butuh ffmpeg di laptop bot.",
-  "🎙️ Latihan ngobrol Inggris: /speak [topik] — kirim suara berbahasa Inggris, tutor membalas dengan SUARA SAJA (tanpa teks; /koreksi menampilkan koreksi terakhir, /teks on bila mau teks juga). Ngobrol santai berbahasa Indonesia: /speak id [topik]. Akhiri dengan /selesai atau ucapkan perpisahan (goodbye / sampai jumpa).",
+  "🎙️ Latihan ngobrol Inggris: /speak [topik] — kirim suara berbahasa Inggris, tutor membalas dengan SUARA SAJA (tanpa teks; /koreksi = koreksi terakhir, /teks on = dengan teks). Ngobrol santai berbahasa Indonesia: /speak id [topik]. Akhiri: /selesai atau ucapkan perpisahan.",
   "",
   "Perintah:",
   "/simab <perintah>  — SiMAB (pagu, cek, perjadin, sbm, rpd, rekam). Boleh juga tulis \"simab ...\" tanpa garis miring.",
@@ -150,13 +150,14 @@ const HELP = [
   "/ringkasan  — ringkasan percakapan WhatsApp hari ini",
   "/peraturan  — pantau peraturan terbaru (\"/peraturan semua\" = tampilkan semua hasil)",
   "/dokumen <pertanyaan>  — tanya dari dokumen lokal di laptop, dijawab Ollama. \"/dokumen\" saja = daftar dokumen",
-  "/pasar  — IHSG, emas dunia (Rp/gram), dan kurs USD/IDR (alias /emas, /ihsg); otomatis tiap pagi hari kerja; /pasar tes = uji sumber data",
+  "/pasar  — IHSG, emas dunia (Rp/gram), dan kurs USD/IDR (alias /emas, /ihsg); otomatis tiap pagi hari kerja",
   "/ingatkan <waktu> <teks>  — pengingat pribadi (contoh: /ingatkan besok 09:00 kirim SPJ);  /pengingat  — daftar / batal <nomor>;  /ibadah  — juz harian, hadits, ayat",
   "/kesehatan  — periksa Ollama, disk, memori, WhatsApp, basis data, dan cadangan sekarang",
+  "/edu  — channel YouTube edukasi (setujui draf video; /edu bantuan)",
   "/voice wag on|off|id|eng|kor|arb|jawa  — balasan grup WA berupa suara/teks + bahasa suara",
   "/wa2  — nomor WhatsApp kedua (status, kode, qr)",
   "/grup  — grup WA yang dijawab bot: lihat, semua, tambah, hapus",
-  "/humor  — humor per grup WA: pantun harian, roasting ringan",
+  "/humor  — humor per grup WA: pantun harian, roasting ringan, balas chat acak, chat otomatis, mode latihan",
   "/gambar <deskripsi>  — buat gambar; /gambar grup on|off = izinkan di grup WA\n/video <deskripsi>  — video bernarasi; kirim FOTO + keterangan \"jadikan video salju\" = foto hidup\n/env  — ubah kunci gambar (token Cloudflare, jatah) dari sini",
   "/kas  — laporan kas bulanan: konfirmasi angka, submit, simpan (/kas bantuan)",
   "/nodin  — konsep Nota Dinas LPJ (PDF + Word), otomatis tiap tanggal 1 (/nodin cek)",
@@ -438,12 +439,12 @@ export function createTelegram({ config, deps = {}, fetchImpl = globalThis.fetch
   }
 
   /** Kirim ke semua pemilik. Mengembalikan jumlah pemilik yang berhasil menerima (0 = tidak ada / semua gagal). */
-  async function sendOwner(text) {
+  async function sendOwner(text, { markup = null } = {}) {
     if (!enabled || owners.size === 0) return 0;
     let ok = 0;
     for (const id of owners) {
       try {
-        await send(id, text);
+        await send(id, text, markup ? { markup } : {});
         ok += 1;
       } catch (e) {
         log.error?.(`✈️ [Telegram] gagal kirim ke ${id}: ${e?.message || e}`);
@@ -817,6 +818,30 @@ Suara khusus satu grup: /suara grup wanita <nama grup> • /suara grup (daftar) 
     const chatId = chat ? String(chat.id) : "";
     if (owners.size === 0 || !chat || chat.type !== "private" || !owners.has(chatId) || !owners.has(String(cb.from?.id))) return;
     const data = String(cb.data || "");
+    if (data.startsWith("hr:") && deps.humorReview) {
+      // tombol draf mode latihan (humor.js): hr:ok:<id> kirim / hr:no:<id> buang
+      await clearKeyboard(chatId, cb.message.message_id);
+      let out;
+      try {
+        out = await deps.humorReview.decide(data.slice(3));
+      } catch (e) {
+        out = `⚠️ ${String(e?.message || e).slice(0, 300)}`;
+      }
+      if (out) await send(chatId, out).catch(() => {});
+      return;
+    }
+    if (data.startsWith("ed:") && deps.edu) {
+      // tombol draf video edukasi (edu-channel.js): ed:ok:<id> setujui / ed:again:<id> buat ulang / ed:no:<id> buang
+      await clearKeyboard(chatId, cb.message.message_id);
+      let out;
+      try {
+        out = await deps.edu.decide(data.slice(3));
+      } catch (e) {
+        out = `⚠️ ${String(e?.message || e).slice(0, 300)}`;
+      }
+      if (out) await send(chatId, out).catch(() => {});
+      return;
+    }
     if (!data.startsWith("sm:")) return;
     await clearKeyboard(chatId, cb.message.message_id);
     const simab = deps.simab;
@@ -866,6 +891,20 @@ Suara khusus satu grup: /suara grup wanita <nama grup> • /suara grup (daftar) 
   }
 
   /** Pesan suara pemilik: ubah jadi teks, tampilkan apa yang terdengar, lalu proses seperti pesan teks (obrolan / SiMAB). */
+  /** Stiker Telegram dari pemilik -> koleksi stiker bot WhatsApp (jalur cadangan; hanya stiker statis .webp). */
+  async function handleOwnerSticker(chatId, st) {
+    if (st.is_animated || st.is_video) return void (await send(chatId, "🎭 Stiker animasi/video Telegram belum bisa disimpan (formatnya beda dengan WhatsApp). Kirim stiker statis, atau kirim stikernya lewat WhatsApp ke \"Pesan untuk diri sendiri\".").catch(() => {}));
+    try {
+      const buffer = await withAction(chatId, "typing", () => downloadFile(st.file_id));
+      const r = await deps.stickers.add(buffer);
+      if (!r.ok) return void (await send(chatId, `🎭 Stiker tidak disimpan: ${r.reason}`));
+      if (r.dup) return void (await send(chatId, `🎭 Stiker itu sudah ada di koleksi (#${r.index}${r.item?.tag ? `, ${r.item.tag}` : ""}).`));
+      await send(chatId, `🎭 Stiker tersimpan di koleksi (#${r.index}): ${r.item?.tag || "belum berlabel"}.${r.labelErr ? `\n⚠️ Label otomatis gagal: ${r.labelErr}` : ""}\nLihat/kelola: /humor koleksi`);
+    } catch (e) {
+      await send(chatId, `🎭 Stiker gagal disimpan: ${String(e?.message || e).slice(0, 200)}`).catch(() => {});
+    }
+  }
+
   /** Berkas (mis. patch*.zip) dari pemilik: diserahkan ke ops.js; bila bukan urusannya, balasan umum. */
   async function handleOwnerDocument(chatId, doc) {
     try {
@@ -1096,6 +1135,16 @@ Suara khusus satu grup: /suara grup wanita <nama grup> • /suara grup (daftar) 
       return;
     }
 
+    if (name === "edu" || name === "channel" || name === "yt") {
+      const edu = deps.edu;
+      if (!edu) return void (await reply("Channel edukasi belum terpasang di bot ini."));
+      try {
+        return void (await reply(await withTyping(chatId, () => edu.handle(arg))));
+      } catch (e) {
+        return void (await reply(`⚠️ Channel edukasi: ${String(e?.message || e).slice(0, 300)}`));
+      }
+    }
+
     if (name === "pasar" || name === "emas" || name === "ihsg") {
       if (!deps.market) return void (await reply("Fitur pemeriksaan pasar belum aktif di bot ini."));
       try {
@@ -1310,6 +1359,7 @@ Suara khusus satu grup: /suara grup wanita <nama grup> • /suara grup (daftar) 
       addStopPhoto(chatId, fileId);
       return;
     }
+    if (m.sticker && deps.stickers?.add) return handleOwnerSticker(chatId, m.sticker);
     if (m.voice || m.audio) return handleOwnerVoice(chatId, m.voice || m.audio);
     if (m.document && deps.ops?.handleDocument) return handleOwnerDocument(chatId, m.document);
     // FOTO HIDUP: foto + keterangan ("/video salju", "jadikan video dengan hujan") atau membalas foto dengan perintah itu
@@ -1358,7 +1408,7 @@ Suara khusus satu grup: /suara grup wanita <nama grup> • /suara grup (daftar) 
   }
 
   const HANDLER_DEADLINE_MS = 10 * 60_000;
-  const FAST_COMMANDS = new Set(["dokumen", "dok", "doc", "status", "id", "help", "start", "ingat", "catatan", "lupa", "memori", "note", "penyedia", "provider", "skill", "skil", "lokal", "tanya", "pasar", "emas", "ihsg", "ingatkan", "remind", "pengingat", "reminder", "cadangan", "backup", "kesehatan", "sehat", "health", "urutan", "route", "rute", "nodin", "notadinas", "kas", "laporankas", "voice", "wa2", "nomor2", "grup", "group", "gambar", "image", "img", "video", "vidio", "vid", "metaai", "env", "stopmotion", "stop_motion", "edit", "ubah", "musik", "music"]);
+  const FAST_COMMANDS = new Set(["dokumen", "dok", "doc", "status", "id", "help", "start", "ingat", "catatan", "lupa", "memori", "note", "penyedia", "provider", "skill", "skil", "lokal", "tanya", "pasar", "emas", "ihsg", "ingatkan", "remind", "pengingat", "reminder", "cadangan", "backup", "kesehatan", "sehat", "health", "urutan", "route", "rute", "nodin", "notadinas", "kas", "laporankas", "voice", "wa2", "nomor2", "grup", "group", "gambar", "image", "img", "video", "vidio", "vid", "metaai", "env", "stopmotion", "stop_motion", "edit", "ubah", "musik", "music", "edu", "channel", "yt"]);
   function isFastUpdate(u) {
     const m = u?.message;
     if (!m) return false;
@@ -1477,10 +1527,11 @@ Suara khusus satu grup: /suara grup wanita <nama grup> • /suara grup (daftar) 
           { command: "dokumen", description: "Tanya dari dokumen lokal di laptop (dijawab Ollama)" },
           { command: "ingatkan", description: "Pengingat pribadi: /ingatkan besok 09:00 kirim SPJ; /pengingat" },
           { command: "ibadah", description: "Pengingat ibadah: juz harian, hadits, ayat (/ibadah mulai juz 2)" },
+          { command: "edu", description: "Channel YouTube edukasi: draf video, setujui, jadwal tayang" },
           { command: "kesehatan", description: "Periksa kesehatan bot: Ollama, disk, memori, WhatsApp, cadangan" },
           { command: "voice", description: "Balasan grup WhatsApp: suara (on) atau teks (off)" },
           { command: "grup", description: "Grup WhatsApp yang dijawab bot: lihat, tambah, hapus" },
-          { command: "humor", description: "Mode humor grup WA: pantun harian, roasting ringan, gaya jenaka" },
+          { command: "humor", description: "Mode humor grup WA: pantun, roasting ringan, balas chat acak, chat otomatis" },
           { command: "gambar", description: "Buat gambar dari deskripsi (Gemini); /gambar grup on|off" },
           { command: "video", description: "Buat video bernarasi dari deskripsi (gratis); /video grup on|off" },
           { command: "stopmotion", description: "Foto-foto berurutan jadi video stop motion" },

@@ -313,10 +313,23 @@ export async function openKbIndex({ file, log = console, chunkChars = 1000, over
       insert into chunks_stem_fts(chunks_stem_fts, rowid, stem) values ('delete', old.id, old.stem);
     end;
   `);
+  // Vektor makna (embedding) per potongan, diisi oleh pekerja embedding bila Jina aktif. Hanya untuk dokumen NON-lokal
+  // (dokumen 'local:' tidak pernah dikirim ke penyedia luar). Dihapus otomatis saat dokumen diganti/dibuang.
+  db.exec(`
+    create table if not exists chunk_vec (
+      doc_id text not null,
+      seq integer not null,
+      model text not null,
+      dim integer not null,
+      vec blob not null,
+      primary key (doc_id, seq)
+    );
+  `);
   const schemaVersion = Number(db.prepare("pragma user_version").get().user_version) || 0;
 
   const q = {
     delChunks: db.prepare("delete from chunks where doc_id = ?"),
+    delVecs: db.prepare("delete from chunk_vec where doc_id = ?"),
     delDoc: db.prepare("delete from docs where id = ?"),
     insChunk: db.prepare("insert into chunks (doc_id, seq, page, text, ov, toc, stem, head, bad) values (?, ?, ?, ?, ?, ?, ?, ?, ?)"),
     insDoc: db.prepare(
@@ -339,6 +352,8 @@ export async function openKbIndex({ file, log = console, chunkChars = 1000, over
     totals: db.prepare("select (select count(*) from docs) as docs, (select count(*) from chunks) as chunks, (select coalesce(sum(chars),0) from docs) as chars")
   };
 
+  let vecVer = 0; // naik tiap vektor/dokumen berubah: tanda untuk membuang cache vektor di memori
+
   function inTx(fn) {
     db.exec("BEGIN");
     try {
@@ -359,7 +374,9 @@ export async function openKbIndex({ file, log = console, chunkChars = 1000, over
   function upsertDoc({ id, title, filename = null, pages, ocrPages = 0, chunkChars = defaults.chunkChars, overlapChars = defaults.overlapChars }) {
     return inTx(() => {
       q.delChunks.run(id);
+      q.delVecs.run(id);
       q.delDoc.run(id);
+      vecVer += 1;
       let seq = 0;
       let chars = 0;
       let carryHead = null; // kepala tabel yang berlaku untuk halaman lanjutan (tabel bersambung antarhalaman)
@@ -392,7 +409,9 @@ export async function openKbIndex({ file, log = console, chunkChars = 1000, over
   function removeDoc(id) {
     inTx(() => {
       q.delChunks.run(id);
+      q.delVecs.run(id);
       q.delDoc.run(id);
+      vecVer += 1;
     });
   }
 
@@ -425,19 +444,13 @@ export async function openKbIndex({ file, log = console, chunkChars = 1000, over
     return q.listDocs.all().map((d) => ({ id: d.id, title: d.title, content: getDocText(d.id) }));
   }
 
-  // Cari potongan paling relevan. Mengembalikan [{ docId, title, text, page, score }].
-  // `text` sudah diawali "[Halaman n]" supaya model bisa menyebut halaman.
-  //   1. potongan mirip daftar isi dibuang (kecuali pertanyaannya memang soal daftar isi);
-  //   2. hasil teratas mengisi ±65% anggaran, lalu potongan SESUDAH/SEBELUM 3 hasil teratas
-  //      (dan 2 potongan sesudah hasil #1) ikut disertakan (daftar yang berlanjut ke potongan berikutnya tidak terpotong);
-  //   3. potongan yang bersebelahan digabung jadi satu blok berurutan (awalan overlap dibuang).
-  function search(question, { budgetChars = 5000, maxChunks = 8, neighbors = true, minCoverage = defaults.minCoverage, titles = null, excludeLocal = false, onlyLocal = false } = {}) {
+  // Kandidat potongan hasil RRF (kata persis + batang kata). Dasar untuk search() dan pencarian hibrida (jina-rag.js).
+  function fusedCandidates(question, { maxChunks = 8, titles = null, excludeLocal = false, onlyLocal = false, limit = Math.max(maxChunks * 5, 30) } = {}) {
     const tokens = tokenizeQuery(question);
     if (tokens.length === 0) return [];
     // Dua pencarian digabung dengan Reciprocal Rank Fusion:
     //   A. teks asli (kata persis / awalan) -- tepat untuk istilah, nomor pasal, angka;
     //   B. batang kata (stem) -- menjembatani imbuhan: menyetor ~ setoran ~ penyetoran.
-    const limit = Math.max(maxChunks * 5, 30);
     // Batasi ke dokumen tertentu (potongan judul, tanpa peduli huruf besar/kecil), mis. dokumen acuan sebuah grup.
     const titleLike = (Array.isArray(titles) ? titles : []).map((t) => String(t).trim().toLowerCase()).filter(Boolean).map((t) => `%${t}%`);
     const filtered = (ftsTable, prep) => {
@@ -483,13 +496,28 @@ export async function openKbIndex({ file, log = console, chunkChars = 1000, over
       .map((r) => ({ ...r, score: -r.rrf })) // kecil = baik (dipakai di bawah)
       .sort((a, b) => a.score - b.score);
     if (rows.length === 0) return [];
+    return rows;
+  }
+
+  // Cari potongan paling relevan. Mengembalikan [{ docId, title, text, page, score }].
+  // `text` sudah diawali "[Halaman n]" supaya model bisa menyebut halaman.
+  //   1. potongan mirip daftar isi dibuang (kecuali pertanyaannya memang soal daftar isi);
+  //   2. hasil teratas mengisi ±65% anggaran, lalu potongan SESUDAH/SEBELUM 3 hasil teratas
+  //      (dan 2 potongan sesudah hasil #1) ikut disertakan (daftar yang berlanjut ke potongan berikutnya tidak terpotong);
+  //   3. potongan yang bersebelahan digabung jadi satu blok berurutan (awalan overlap dibuang).
+  // opts.rows: kandidat yang sudah diurutkan pemanggil (pencarian hibrida + reranker); saring cakupan kata dilewati.
+  function search(question, { budgetChars = 5000, maxChunks = 8, neighbors = true, minCoverage = defaults.minCoverage, titles = null, excludeLocal = false, onlyLocal = false, rows: preRows = null } = {}) {
+    const tokens = tokenizeQuery(question);
+    if (tokens.length === 0 && !preRows) return [];
+    const rows = preRows || fusedCandidates(question, { maxChunks, titles, excludeLocal, onlyLocal });
+    if (rows.length === 0) return [];
     const wantToc = TOC_QUERY_RE.test(String(question || ""));
 
     // Cakupan kata: pertanyaan panjang (>= 5 kata penting) harus tercakup minimal 50% (KB_MIN_COVERAGE, 0 = mati) oleh potongan (kata dicocokkan
     // lewat batang kata, kepala tabel ikut dihitung). Bila tak ada potongan yang memenuhi -> tidak ada hasil, sehingga
     // model diberi tahu "tidak ditemukan" alih-alih disodori potongan yang kebetulan memuat 1-2 kata umum.
     let candidates = rows;
-    if (minCoverage > 0 && tokens.length >= 5) {
+    if (!preRows && minCoverage > 0 && tokens.length >= 5) {
       const need = Math.max(2, Math.ceil(tokens.length * minCoverage));
       candidates = rows.filter((r) => coverageOf(`${r.head || ""}\n${r.text}`, tokens) >= need);
       if (candidates.length === 0) return [];
@@ -573,6 +601,83 @@ export async function openKbIndex({ file, log = console, chunkChars = 1000, over
     return blocks;
   }
 
+
+  // ------------------------------------------------------------ vektor makna (embedding), opsional
+  const isLocalId = (id) => String(id).startsWith("local:");
+  const toBlob = (v) => Buffer.from(v.buffer, v.byteOffset, v.byteLength);
+  const fromBlob = (b) => {
+    const buf = Buffer.from(b);
+    const ab = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+    return new Float32Array(ab);
+  };
+  const qPending = db.prepare(
+    `select c.doc_id as doc_id, c.seq as seq, c.page as page, c.text as text, c.head as head, c.ov as ov, d.title as title
+     from chunks c join docs d on d.id = c.doc_id
+     left join chunk_vec v on v.doc_id = c.doc_id and v.seq = c.seq and v.model = ?
+     where v.doc_id is null and c.doc_id not like 'local:%' and c.toc = 0
+     order by c.doc_id, c.seq limit ?`
+  );
+  const qPutVec = db.prepare("insert or replace into chunk_vec (doc_id, seq, model, dim, vec) values (?, ?, ?, ?, ?)");
+  const qAllVecs = db.prepare("select v.doc_id as doc_id, v.seq as seq, v.vec as vec, d.title as title from chunk_vec v join docs d on d.id = v.doc_id where v.model = ?");
+  const qVecCount = db.prepare("select count(*) as n from chunk_vec where model = ?");
+  const qEmbeddable = db.prepare("select count(*) as n from chunks where doc_id not like 'local:%' and toc = 0");
+  let vecCache = { ver: -1, model: "", items: [] };
+
+  /** Potongan NON-lokal yang belum punya vektor untuk `model` (pekerja embedding mengisinya). Teks sudah diberi judul & halaman. */
+  function pendingVectors(model, limit = 64) {
+    return qPending.all(model, limit).map((r) => ({
+      docId: r.doc_id,
+      seq: r.seq,
+      text: `${r.title}${r.page != null ? ` (hlm ${r.page})` : ""}\n${r.head ? `${r.head}\n` : ""}${r.ov > 0 ? r.text.slice(r.ov) : r.text}`
+    }));
+  }
+
+  /** items: [{ docId, seq, vec: Float32Array }]. Dokumen lokal ditolak (tak boleh dikirim ke penyedia luar). */
+  function putVectors(model, items) {
+    inTx(() => {
+      for (const it of items) {
+        if (isLocalId(it.docId)) continue;
+        qPutVec.run(it.docId, it.seq, model, it.vec.length, toBlob(it.vec));
+      }
+    });
+    vecVer += 1;
+  }
+
+  function vectorStats(model) {
+    const total = Number(qEmbeddable.get().n);
+    const done = Number(qVecCount.get(model).n);
+    return { model, embedded: done, total, ready: total > 0 && done >= total };
+  }
+
+  /** Cari potongan berdasarkan kemiripan vektor (cosine; vektor sudah dinormalisasi). -> baris seperti candidates(), urut terbaik dulu. */
+  function denseSearch(qvec, { model, limit = 30, titles = null, excludeLocal = true, onlyLocal = false } = {}) {
+    if (onlyLocal) return []; // dokumen lokal tidak punya vektor
+    if (vecCache.ver !== vecVer || vecCache.model !== model) {
+      vecCache = { ver: vecVer, model, items: qAllVecs.all(model).map((r) => ({ doc_id: r.doc_id, seq: r.seq, title: r.title, vec: fromBlob(r.vec) })) };
+    }
+    const tl = (Array.isArray(titles) ? titles : []).map((t) => String(t).trim().toLowerCase()).filter(Boolean);
+    const scored = [];
+    for (const it of vecCache.items) {
+      if (it.vec.length !== qvec.length) continue;
+      if (tl.length > 0 && !tl.some((t) => it.title.toLowerCase().includes(t))) continue;
+      let dot = 0;
+      for (let i = 0; i < qvec.length; i++) dot += qvec[i] * it.vec[i];
+      scored.push({ doc_id: it.doc_id, seq: it.seq, sim: dot });
+    }
+    scored.sort((a, b) => b.sim - a.sim);
+    const out = [];
+    for (const s of scored.slice(0, limit)) {
+      const row = q.neighbor.get(s.doc_id, s.seq);
+      if (row) out.push({ ...row, sim: s.sim, score: -s.sim });
+    }
+    return out;
+  }
+
+  /** Baris potongan menurut (docId, seq). */
+  function chunkRow(docId, seq) {
+    return q.neighbor.get(docId, seq) || null;
+  }
+
   function stats() {
     const t = q.totals.get();
     return { docs: Number(t.docs), chunks: Number(t.chunks), chars: Number(t.chars), driver: driver.name };
@@ -607,5 +712,5 @@ export async function openKbIndex({ file, log = console, chunkChars = 1000, over
     if (docs.length > 0) log.log?.(`📚 Indeks dokumen disusun ulang (${docs.length} dokumen): potongan ${defaults.chunkChars} karakter + overlap ${defaults.overlapChars}.`);
   }
 
-  return { upsertDoc, upsertDocFromText, removeDoc, listDocs, hasDocs, getDocText, getAllDocs, search, stats, close, driver: driver.name };
+  return { upsertDoc, upsertDocFromText, removeDoc, listDocs, hasDocs, getDocText, getAllDocs, search, candidates: fusedCandidates, pendingVectors, putVectors, vectorStats, denseSearch, chunkRow, stats, close, driver: driver.name };
 }

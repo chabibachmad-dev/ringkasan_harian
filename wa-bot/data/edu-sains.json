@@ -1,0 +1,1181 @@
+[
+ {
+  "id": "siklus-air",
+  "grade": [
+   3,
+   4,
+   5
+  ],
+  "topic": "Siklus Air",
+  "title": "Perjalanan Air: dari Laut ke Awan, Kembali ke Bumi",
+  "intro": "Halo teman-teman! Pernahkah kamu bertanya, hujan itu datangnya dari mana? Hari ini kita belajar siklus air.",
+  "points": [
+   {
+    "say": "Air di laut, sungai, dan danau dipanaskan oleh sinar Matahari, lalu berubah menjadi uap air yang naik ke udara. Peristiwa ini disebut penguapan.",
+    "board": [
+     "1. Penguapan",
+     "air → uap air (karena panas Matahari)"
+    ]
+   },
+   {
+    "say": "Di udara yang tinggi suhunya dingin. Uap air berubah menjadi titik-titik air kecil dan berkumpul membentuk awan. Peristiwa ini disebut pengembunan atau kondensasi.",
+    "board": [
+     "2. Pengembunan (kondensasi)",
+     "uap air → titik air → awan"
+    ]
+   },
+   {
+    "say": "Kalau titik air di awan sudah besar dan berat, air jatuh ke bumi sebagai hujan. Peristiwa ini disebut presipitasi.",
+    "board": [
+     "3. Presipitasi",
+     "air jatuh ke bumi: hujan"
+    ]
+   },
+   {
+    "say": "Air hujan mengalir ke sungai dan laut, atau meresap ke dalam tanah. Lalu perjalanan air dimulai lagi dari awal. Itulah mengapa disebut siklus, yang artinya berputar.",
+    "board": [
+     "4. Air mengalir dan meresap",
+     "lalu kembali menguap: siklus berulang"
+    ]
+   }
+  ],
+  "quiz": {
+   "q": "Perubahan uap air menjadi titik-titik air di awan disebut apa?",
+   "a": "Pengembunan (kondensasi)"
+  },
+  "tags": [
+   "siklus air",
+   "hujan",
+   "IPA"
+  ]
+ },
+ {
+  "id": "fotosintesis",
+  "grade": [
+   4,
+   5,
+   6
+  ],
+  "topic": "Fotosintesis",
+  "title": "Fotosintesis: Cara Tumbuhan Membuat Makanan",
+  "intro": "Halo teman-teman! Kita makan nasi dan sayur untuk mendapat tenaga. Tapi, bagaimana tumbuhan mendapat makanan? Yuk kita bahas fotosintesis.",
+  "points": [
+   {
+    "say": "Tumbuhan hijau membuat makanannya sendiri. Proses ini disebut fotosintesis. Foto artinya cahaya, dan sintesis artinya menyusun.",
+    "board": [
+     "Fotosintesis",
+     "tumbuhan membuat makanan sendiri"
+    ]
+   },
+   {
+    "say": "Bahan yang dibutuhkan ada tiga: air dari tanah yang diserap akar, gas karbon dioksida dari udara yang masuk lewat daun, dan cahaya Matahari.",
+    "board": [
+     "Bahan: air + karbon dioksida + cahaya",
+     "air: dari akar",
+     "karbon dioksida: dari udara"
+    ]
+   },
+   {
+    "say": "Di dalam daun ada zat hijau daun yang disebut klorofil. Klorofil menangkap cahaya Matahari untuk mengolah bahan tadi.",
+    "board": [
+     "Tempat: daun",
+     "klorofil = zat hijau daun"
+    ]
+   },
+   {
+    "say": "Hasilnya adalah makanan berupa gula atau glukosa, dan gas oksigen yang dilepaskan ke udara. Oksigen inilah yang kita hirup untuk bernapas.",
+    "board": [
+     "Hasil: glukosa + oksigen",
+     "oksigen dilepas ke udara"
+    ]
+   }
+  ],
+  "quiz": {
+   "q": "Gas apa yang dihasilkan tumbuhan saat fotosintesis?",
+   "a": "Oksigen"
+  },
+  "tags": [
+   "fotosintesis",
+   "tumbuhan"
+  ]
+ },
+ {
+  "id": "wujud-benda",
+  "grade": [
+   3,
+   4
+  ],
+  "topic": "Wujud Benda",
+  "title": "Tiga Wujud Benda dan Cara Berubahnya",
+  "intro": "Halo teman-teman! Es batu, air, dan uap ternyata zat yang sama. Hari ini kita belajar wujud benda.",
+  "points": [
+   {
+    "say": "Benda ada tiga wujud: padat, cair, dan gas. Benda padat bentuknya tetap, contohnya batu dan es. Benda cair bentuknya mengikuti wadahnya, contohnya air. Gas mengisi seluruh ruang, contohnya uap air dan udara.",
+    "board": [
+     "Wujud benda",
+     "padat: bentuk tetap",
+     "cair: mengikuti wadah",
+     "gas: mengisi ruang"
+    ]
+   },
+   {
+    "say": "Kalau es dipanaskan, es berubah menjadi air. Perubahan dari padat ke cair ini disebut mencair. Sebaliknya, air yang didinginkan menjadi es. Perubahan dari cair ke padat disebut membeku.",
+    "board": [
+     "padat → cair: mencair",
+     "cair → padat: membeku"
+    ],
+    "clear": true
+   },
+   {
+    "say": "Air yang dipanaskan akan menguap menjadi gas. Perubahan dari cair ke gas disebut menguap. Sebaliknya, uap yang dingin menjadi titik air. Perubahan dari gas ke cair disebut mengembun.",
+    "board": [
+     "cair → gas: menguap",
+     "gas → cair: mengembun"
+    ]
+   },
+   {
+    "say": "Ada juga yang langsung dari padat ke gas tanpa menjadi cair, disebut menyublim. Contohnya kapur barus yang lama-lama mengecil dan hilang.",
+    "board": [
+     "padat → gas: menyublim",
+     "contoh: kapur barus"
+    ]
+   }
+  ],
+  "quiz": {
+   "q": "Perubahan wujud dari cair menjadi padat disebut apa?",
+   "a": "Membeku"
+  },
+  "tags": [
+   "wujud benda",
+   "mencair",
+   "menguap"
+  ]
+ },
+ {
+  "id": "tata-surya",
+  "grade": [
+   5,
+   6
+  ],
+  "topic": "Tata Surya",
+  "title": "Mengenal Delapan Planet di Tata Surya",
+  "intro": "Halo teman-teman! Di malam hari kita sering melihat bintang. Hari ini kita berkenalan dengan keluarga Matahari yang disebut tata surya.",
+  "points": [
+   {
+    "say": "Tata surya terdiri dari Matahari sebagai pusatnya dan benda-benda langit yang mengelilinginya. Matahari adalah bintang yang menjadi sumber cahaya dan panas.",
+    "board": [
+     "Tata surya",
+     "pusatnya: Matahari (bintang)"
+    ]
+   },
+   {
+    "say": "Ada delapan planet yang mengelilingi Matahari. Urutannya dari yang paling dekat: Merkurius, Venus, Bumi, dan Mars.",
+    "board": [
+     "Planet dalam:",
+     "1 Merkurius  2 Venus",
+     "3 Bumi  4 Mars"
+    ]
+   },
+   {
+    "say": "Setelah Mars, ada Yupiter, Saturnus, Uranus, dan Neptunus. Yupiter adalah planet yang paling besar.",
+    "board": [
+     "Planet luar:",
+     "5 Yupiter  6 Saturnus",
+     "7 Uranus  8 Neptunus"
+    ]
+   },
+   {
+    "say": "Bumi adalah planet ketiga dari Matahari. Bumi satu-satunya planet yang kita ketahui punya kehidupan, karena ada air, udara, dan suhu yang cocok.",
+    "board": [
+     "Bumi = planet ketiga",
+     "ada air, udara, suhu cocok"
+    ]
+   }
+  ],
+  "quiz": {
+   "q": "Planet yang ketiga dari Matahari adalah?",
+   "a": "Bumi"
+  },
+  "tags": [
+   "tata surya",
+   "planet"
+  ]
+ },
+ {
+  "id": "rantai-makanan",
+  "grade": [
+   4,
+   5
+  ],
+  "topic": "Rantai Makanan",
+  "title": "Rantai Makanan: Siapa Makan Siapa?",
+  "intro": "Halo teman-teman! Di alam, makhluk hidup saling membutuhkan sebagai makanan. Hari ini kita belajar rantai makanan.",
+  "points": [
+   {
+    "say": "Rantai makanan adalah urutan makhluk hidup yang saling memakan. Awalnya selalu dari produsen, yaitu tumbuhan hijau yang membuat makanan sendiri.",
+    "board": [
+     "Rantai makanan",
+     "produsen = tumbuhan hijau"
+    ]
+   },
+   {
+    "say": "Hewan pemakan tumbuhan disebut konsumen tingkat satu, contohnya tikus. Hewan pemakan tikus disebut konsumen tingkat dua, contohnya ular. Hewan pemakan ular disebut konsumen tingkat tiga, contohnya elang.",
+    "board": [
+     "padi → tikus → ular → elang",
+     "produsen → konsumen 1 → 2 → 3"
+    ]
+   },
+   {
+    "say": "Jika makhluk hidup mati, pengurai seperti jamur dan bakteri mengubahnya menjadi zat hara di tanah. Zat hara ini dipakai lagi oleh tumbuhan.",
+    "board": [
+     "pengurai: jamur, bakteri",
+     "mengubah sisa jadi zat hara"
+    ]
+   },
+   {
+    "say": "Jadi, kalau satu bagian rantai hilang, bagian lain ikut terganggu. Karena itu kita harus menjaga keseimbangan alam.",
+    "board": [
+     "Jaga keseimbangan alam"
+    ]
+   }
+  ],
+  "quiz": {
+   "q": "Dalam rantai makanan padi, tikus, ular, dan elang, siapa produsennya?",
+   "a": "Padi"
+  },
+  "tags": [
+   "rantai makanan",
+   "ekosistem"
+  ]
+ },
+ {
+  "id": "magnet",
+  "grade": [
+   3,
+   4
+  ],
+  "topic": "Magnet",
+  "title": "Magnet: Menarik dan Menolak",
+  "intro": "Halo teman-teman! Pernahkah kamu melihat paku menempel di magnet? Yuk kita belajar tentang magnet.",
+  "points": [
+   {
+    "say": "Magnet adalah benda yang bisa menarik benda tertentu. Benda yang ditarik magnet disebut benda magnetis, contohnya besi, baja, dan nikel.",
+    "board": [
+     "Benda magnetis",
+     "besi, baja, nikel"
+    ]
+   },
+   {
+    "say": "Benda seperti plastik, kayu, kertas, dan kaca tidak ditarik magnet. Benda seperti ini disebut benda non-magnetis.",
+    "board": [
+     "Non-magnetis",
+     "plastik, kayu, kertas, kaca"
+    ]
+   },
+   {
+    "say": "Setiap magnet punya dua kutub, yaitu kutub utara dan kutub selatan. Gaya tarik magnet paling kuat berada di kutubnya.",
+    "board": [
+     "Dua kutub:",
+     "utara (U) dan selatan (S)"
+    ]
+   },
+   {
+    "say": "Kalau dua kutub yang berbeda didekatkan, magnet akan tarik-menarik. Kalau dua kutub yang sama didekatkan, magnet akan tolak-menolak.",
+    "board": [
+     "kutub berbeda: tarik-menarik",
+     "kutub sama: tolak-menolak"
+    ]
+   }
+  ],
+  "quiz": {
+   "q": "Jika dua kutub magnet yang sama didekatkan, apa yang terjadi?",
+   "a": "Tolak-menolak"
+  },
+  "tags": [
+   "magnet",
+   "gaya"
+  ]
+ },
+ {
+  "id": "bagian-tumbuhan",
+  "grade": [
+   2,
+   3
+  ],
+  "topic": "Bagian Tumbuhan",
+  "title": "Bagian-bagian Tumbuhan dan Tugasnya",
+  "intro": "Halo teman-teman! Tumbuhan punya banyak bagian, dan setiap bagian punya tugas masing-masing. Yuk kita kenali.",
+  "points": [
+   {
+    "say": "Akar menancap di tanah. Tugas akar adalah menyerap air dan zat hara dari dalam tanah, juga menopang tumbuhan agar tidak mudah roboh.",
+    "board": [
+     "Akar",
+     "menyerap air dan menopang"
+    ]
+   },
+   {
+    "say": "Batang mengangkut air dari akar ke daun, dan mengangkut makanan dari daun ke seluruh bagian tumbuhan. Batang juga menopang daun dan bunga.",
+    "board": [
+     "Batang",
+     "mengangkut air dan makanan"
+    ]
+   },
+   {
+    "say": "Daun adalah tempat tumbuhan membuat makanan dengan bantuan cahaya Matahari.",
+    "board": [
+     "Daun",
+     "tempat membuat makanan"
+    ]
+   },
+   {
+    "say": "Bunga adalah alat perkembangbiakan, dan dari bunga bisa tumbuh buah. Di dalam buah ada biji, yang bisa tumbuh menjadi tumbuhan baru.",
+    "board": [
+     "Bunga → buah → biji",
+     "biji tumbuh jadi tumbuhan baru"
+    ]
+   }
+  ],
+  "quiz": {
+   "q": "Bagian tumbuhan yang menyerap air dari tanah adalah?",
+   "a": "Akar"
+  },
+  "tags": [
+   "tumbuhan",
+   "akar",
+   "batang"
+  ]
+ },
+ {
+  "id": "bentuk-energi",
+  "grade": [
+   4,
+   5
+  ],
+  "topic": "Perubahan Energi",
+  "title": "Energi Bisa Berubah Bentuk",
+  "intro": "Halo teman-teman! Saat kita menyalakan lampu atau kipas angin, ada energi yang bekerja. Yuk kita belajar perubahan energi.",
+  "points": [
+   {
+    "say": "Energi tidak bisa dibuat dan tidak bisa dimusnahkan. Energi hanya bisa berubah dari satu bentuk ke bentuk lain.",
+    "board": [
+     "Energi tidak hilang",
+     "hanya berubah bentuk"
+    ]
+   },
+   {
+    "say": "Bentuk energi ada banyak, antara lain energi panas, cahaya, bunyi, listrik, dan gerak.",
+    "board": [
+     "panas, cahaya, bunyi",
+     "listrik, gerak"
+    ]
+   },
+   {
+    "say": "Pada setrika listrik, energi listrik berubah menjadi energi panas. Pada kipas angin, energi listrik berubah menjadi energi gerak.",
+    "board": [
+     "setrika: listrik → panas",
+     "kipas angin: listrik → gerak"
+    ]
+   },
+   {
+    "say": "Pada lampu, energi listrik berubah menjadi energi cahaya dan sedikit panas. Pada radio, energi listrik berubah menjadi energi bunyi.",
+    "board": [
+     "lampu: listrik → cahaya",
+     "radio: listrik → bunyi"
+    ]
+   }
+  ],
+  "quiz": {
+   "q": "Pada kipas angin, energi listrik berubah menjadi energi apa?",
+   "a": "Energi gerak"
+  },
+  "tags": [
+   "energi",
+   "listrik"
+  ]
+ },
+ {
+  "id": "gaya",
+  "grade": [
+   4,
+   5
+  ],
+  "topic": "Gaya",
+  "title": "Gaya: Dorong, Tarik, Gesek, dan Gravitasi",
+  "intro": "Halo teman-teman! Saat kita mendorong pintu atau menarik laci, kita sedang memakai gaya. Yuk kita belajar tentang gaya.",
+  "points": [
+   {
+    "say": "Gaya adalah dorongan atau tarikan. Gaya bisa membuat benda diam menjadi bergerak, mengubah arah gerak benda, atau mengubah bentuk benda.",
+    "board": [
+     "Gaya = dorongan atau tarikan",
+     "benda diam → bergerak",
+     "mengubah arah dan bentuk"
+    ]
+   },
+   {
+    "say": "Gaya gravitasi adalah gaya tarik Bumi. Karena gaya ini, buah yang matang jatuh ke bawah dan benda yang kita lempar ke atas akan jatuh kembali.",
+    "board": [
+     "Gaya gravitasi",
+     "menarik benda ke pusat Bumi"
+    ],
+    "clear": true
+   },
+   {
+    "say": "Gaya gesek terjadi ketika dua permukaan bersentuhan dan saling menahan. Gaya gesek membuat benda yang meluncur menjadi melambat dan berhenti.",
+    "board": [
+     "Gaya gesek",
+     "menghambat gerak benda"
+    ]
+   },
+   {
+    "say": "Gaya gesek ada manfaatnya, misalnya sol sepatu yang kasar agar tidak mudah terpeleset. Tapi pada mesin, gaya gesek diperkecil dengan pelumas.",
+    "board": [
+     "manfaat: sepatu tidak licin",
+     "mesin diberi pelumas"
+    ]
+   }
+  ],
+  "quiz": {
+   "q": "Gaya yang menarik benda jatuh ke bumi disebut gaya apa?",
+   "a": "Gaya gravitasi"
+  },
+  "tags": [
+   "gaya",
+   "gravitasi",
+   "gesek"
+  ]
+ },
+ {
+  "id": "cahaya",
+  "grade": [
+   5,
+   6
+  ],
+  "topic": "Sifat Cahaya",
+  "title": "Sifat-sifat Cahaya",
+  "intro": "Halo teman-teman! Kita bisa melihat benda karena ada cahaya. Hari ini kita belajar sifat-sifat cahaya.",
+  "points": [
+   {
+    "say": "Cahaya merambat lurus. Kamu bisa melihatnya ketika sinar Matahari masuk lewat celah dan membentuk garis lurus.",
+    "board": [
+     "1. Merambat lurus"
+    ]
+   },
+   {
+    "say": "Cahaya dapat dipantulkan. Cermin memantulkan cahaya sehingga kita bisa melihat bayangan diri kita.",
+    "board": [
+     "2. Dapat dipantulkan",
+     "contoh: cermin"
+    ]
+   },
+   {
+    "say": "Cahaya dapat dibiaskan, yaitu dibelokkan ketika berpindah dari satu zat ke zat lain. Contohnya, pensil dalam gelas berisi air terlihat bengkok.",
+    "board": [
+     "3. Dapat dibiaskan",
+     "contoh: pensil dalam air tampak bengkok"
+    ]
+   },
+   {
+    "say": "Cahaya juga dapat diuraikan menjadi banyak warna, seperti pada pelangi. Cahaya tidak dapat menembus benda gelap, sehingga terbentuk bayangan.",
+    "board": [
+     "4. Dapat diuraikan: pelangi",
+     "5. Tidak menembus benda gelap"
+    ]
+   }
+  ],
+  "quiz": {
+   "q": "Pensil dalam gelas berisi air tampak bengkok karena cahaya mengalami apa?",
+   "a": "Pembiasan"
+  },
+  "tags": [
+   "cahaya",
+   "cermin",
+   "pelangi"
+  ]
+ },
+ {
+  "id": "bunyi",
+  "grade": [
+   4,
+   5
+  ],
+  "topic": "Bunyi",
+  "title": "Bunyi: Dari Mana Datangnya?",
+  "intro": "Halo teman-teman! Kita bisa mendengar suara teman, musik, dan hujan. Bagaimana bunyi bisa sampai ke telinga kita? Yuk kita bahas.",
+  "points": [
+   {
+    "say": "Bunyi berasal dari benda yang bergetar. Kalau senar gitar dipetik, senar bergetar dan menghasilkan bunyi.",
+    "board": [
+     "Sumber bunyi: benda bergetar"
+    ]
+   },
+   {
+    "say": "Getaran itu merambat lewat zat perantara. Bunyi dapat merambat melalui zat padat, cair, dan gas. Biasanya kita mendengar bunyi lewat udara.",
+    "board": [
+     "Perambatan bunyi:",
+     "padat, cair, gas"
+    ]
+   },
+   {
+    "say": "Bunyi tidak dapat merambat di ruang hampa, yaitu ruang yang tidak ada udaranya.",
+    "board": [
+     "Ruang hampa: tidak ada bunyi"
+    ]
+   },
+   {
+    "say": "Bunyi bisa dipantulkan. Bunyi yang dipantulkan dan terdengar lagi disebut gema, misalnya saat kita berteriak di dalam gua atau lembah.",
+    "board": [
+     "Pemantulan bunyi → gema"
+    ]
+   }
+  ],
+  "quiz": {
+   "q": "Bunyi tidak dapat merambat melalui apa?",
+   "a": "Ruang hampa"
+  },
+  "tags": [
+   "bunyi",
+   "getaran"
+  ]
+ },
+ {
+  "id": "rotasi-revolusi",
+  "grade": [
+   5,
+   6
+  ],
+  "topic": "Rotasi dan Revolusi Bumi",
+  "title": "Rotasi dan Revolusi Bumi",
+  "intro": "Halo teman-teman! Kenapa ada siang dan malam? Kenapa ada musim? Jawabannya ada pada gerakan Bumi.",
+  "points": [
+   {
+    "say": "Bumi berputar pada porosnya. Gerakan ini disebut rotasi. Satu kali rotasi memerlukan waktu sekitar dua puluh empat jam, atau satu hari.",
+    "board": [
+     "Rotasi Bumi",
+     "berputar pada porosnya",
+     "satu putaran ≈ 24 jam"
+    ]
+   },
+   {
+    "say": "Akibat rotasi Bumi, terjadi pergantian siang dan malam. Bagian Bumi yang menghadap Matahari mengalami siang, sedangkan bagian yang membelakangi Matahari mengalami malam.",
+    "board": [
+     "Akibat rotasi:",
+     "pergantian siang dan malam"
+    ]
+   },
+   {
+    "say": "Bumi juga bergerak mengelilingi Matahari. Gerakan ini disebut revolusi. Satu kali revolusi memerlukan waktu sekitar tiga ratus enam puluh lima hari lebih sedikit, atau satu tahun.",
+    "board": [
+     "Revolusi Bumi",
+     "mengelilingi Matahari",
+     "satu putaran ≈ 1 tahun"
+    ],
+    "clear": true
+   },
+   {
+    "say": "Karena sumbu Bumi miring dan Bumi berrevolusi, terjadi pergantian musim di beberapa daerah, dan lamanya siang malam berbeda sepanjang tahun.",
+    "board": [
+     "Akibat revolusi:",
+     "pergantian musim"
+    ]
+   }
+  ],
+  "quiz": {
+   "q": "Akibat rotasi Bumi adalah?",
+   "a": "Pergantian siang dan malam"
+  },
+  "tags": [
+   "rotasi",
+   "revolusi",
+   "bumi"
+  ]
+ },
+ {
+  "id": "fase-bulan",
+  "grade": [
+   5,
+   6
+  ],
+  "topic": "Fase Bulan",
+  "title": "Mengapa Bentuk Bulan Berubah-ubah?",
+  "intro": "Halo teman-teman! Kadang Bulan tampak bulat penuh, kadang hanya sabit tipis. Kenapa bisa begitu? Yuk kita belajar fase Bulan.",
+  "points": [
+   {
+    "say": "Bulan tidak memancarkan cahaya sendiri. Bulan bersinar karena memantulkan cahaya Matahari.",
+    "board": [
+     "Bulan tidak punya cahaya sendiri",
+     "memantulkan cahaya Matahari"
+    ]
+   },
+   {
+    "say": "Bulan mengelilingi Bumi. Karena posisinya berubah, bagian Bulan yang tampak terang dari Bumi juga berubah-ubah. Itulah yang disebut fase Bulan.",
+    "board": [
+     "Bulan mengelilingi Bumi",
+     "bagian terang yang tampak berubah"
+    ]
+   },
+   {
+    "say": "Ketika seluruh bagian Bulan yang menghadap Bumi tampak terang, kita sebut Bulan purnama. Ketika bagian yang menghadap Bumi gelap, kita sebut Bulan baru.",
+    "board": [
+     "Purnama: bulat penuh",
+     "Bulan baru: hampir tak tampak"
+    ]
+   },
+   {
+    "say": "Fase di antara keduanya antara lain bulan sabit dan bulan separuh. Satu siklus fase Bulan berlangsung sekitar satu bulan.",
+    "board": [
+     "Bulan sabit, separuh",
+     "satu siklus ≈ satu bulan"
+    ]
+   }
+  ],
+  "quiz": {
+   "q": "Bulan tampak bersinar karena apa?",
+   "a": "Memantulkan cahaya Matahari"
+  },
+  "tags": [
+   "bulan",
+   "fase bulan"
+  ]
+ },
+ {
+  "id": "pencernaan",
+  "grade": [
+   5,
+   6
+  ],
+  "topic": "Sistem Pencernaan",
+  "title": "Perjalanan Makanan di Dalam Tubuh",
+  "intro": "Halo teman-teman! Setelah kita makan, ke mana perginya makanan itu? Yuk kita ikuti perjalanannya.",
+  "points": [
+   {
+    "say": "Pencernaan dimulai dari mulut. Gigi mengunyah makanan dan air liur membantu melunakkannya. Lalu makanan masuk ke kerongkongan.",
+    "board": [
+     "1. Mulut: mengunyah",
+     "2. Kerongkongan: mengantar"
+    ]
+   },
+   {
+    "say": "Dari kerongkongan, makanan masuk ke lambung. Di lambung, makanan diaduk dan dicerna dengan bantuan asam lambung.",
+    "board": [
+     "3. Lambung",
+     "makanan diaduk dan dicerna"
+    ]
+   },
+   {
+    "say": "Selanjutnya makanan masuk ke usus halus. Di sini sari makanan diserap oleh darah untuk dibawa ke seluruh tubuh.",
+    "board": [
+     "4. Usus halus",
+     "menyerap sari makanan"
+    ]
+   },
+   {
+    "say": "Sisa makanan masuk ke usus besar, tempat air diserap kembali. Ampas yang tersisa dibuang melalui anus.",
+    "board": [
+     "5. Usus besar: menyerap air",
+     "6. Anus: membuang ampas"
+    ]
+   }
+  ],
+  "quiz": {
+   "q": "Penyerapan sari makanan terutama terjadi di organ apa?",
+   "a": "Usus halus"
+  },
+  "tags": [
+   "pencernaan",
+   "tubuh manusia"
+  ]
+ },
+ {
+  "id": "panca-indera",
+  "grade": [
+   1,
+   2
+  ],
+  "topic": "Panca Indera",
+  "title": "Lima Indera Kita",
+  "intro": "Halo teman-teman! Kita punya lima alat indera untuk mengenal dunia. Yuk kita kenalan.",
+  "points": [
+   {
+    "say": "Mata adalah indera penglihat. Dengan mata kita bisa melihat warna dan bentuk.",
+    "board": [
+     "Mata → melihat"
+    ]
+   },
+   {
+    "say": "Telinga adalah indera pendengar. Dengan telinga kita bisa mendengar bunyi.",
+    "board": [
+     "Telinga → mendengar"
+    ]
+   },
+   {
+    "say": "Hidung adalah indera pencium. Lidah adalah indera pengecap, untuk merasakan manis, asin, asam, dan pahit.",
+    "board": [
+     "Hidung → mencium",
+     "Lidah → mengecap"
+    ]
+   },
+   {
+    "say": "Kulit adalah indera peraba. Dengan kulit kita bisa merasakan panas, dingin, halus, dan kasar. Jaga kelima indera kita dengan baik, ya.",
+    "board": [
+     "Kulit → meraba"
+    ]
+   }
+  ],
+  "quiz": {
+   "q": "Alat indera yang dipakai untuk mendengar adalah?",
+   "a": "Telinga"
+  },
+  "tags": [
+   "indera",
+   "tubuh"
+  ]
+ },
+ {
+  "id": "metamorfosis",
+  "grade": [
+   3,
+   4
+  ],
+  "topic": "Metamorfosis",
+  "title": "Metamorfosis: Dari Ulat Menjadi Kupu-kupu",
+  "intro": "Halo teman-teman! Ulat yang kecil bisa berubah menjadi kupu-kupu yang cantik. Perubahan ini disebut metamorfosis.",
+  "points": [
+   {
+    "say": "Metamorfosis adalah perubahan bentuk tubuh hewan dalam perjalanan hidupnya. Kupu-kupu mengalami metamorfosis sempurna dengan empat tahap.",
+    "board": [
+     "Metamorfosis sempurna",
+     "kupu-kupu: empat tahap"
+    ]
+   },
+   {
+    "say": "Tahap pertama adalah telur. Dari telur menetas menjadi ulat, yang disebut larva. Ulat makan banyak daun dan tumbuh besar.",
+    "board": [
+     "1. Telur",
+     "2. Ulat (larva)"
+    ]
+   },
+   {
+    "say": "Tahap ketiga adalah kepompong atau pupa. Di dalam kepompong, tubuh ulat berubah. Tahap keempat adalah kupu-kupu dewasa yang keluar dari kepompong.",
+    "board": [
+     "3. Kepompong (pupa)",
+     "4. Kupu-kupu dewasa"
+    ]
+   },
+   {
+    "say": "Katak juga mengalami metamorfosis. Dari telur menetas menjadi berudu, lalu tumbuh kaki, dan akhirnya menjadi katak dewasa.",
+    "board": [
+     "katak: telur → berudu → katak"
+    ]
+   }
+  ],
+  "quiz": {
+   "q": "Tahap setelah ulat pada kupu-kupu adalah?",
+   "a": "Kepompong (pupa)"
+  },
+  "tags": [
+   "metamorfosis",
+   "kupu-kupu",
+   "hewan"
+  ]
+ },
+ {
+  "id": "jenis-pemakan",
+  "grade": [
+   2,
+   3
+  ],
+  "topic": "Hewan Pemakan Tumbuhan dan Daging",
+  "title": "Herbivora, Karnivora, dan Omnivora",
+  "intro": "Halo teman-teman! Hewan punya makanan yang berbeda-beda. Berdasarkan makanannya, hewan dibagi menjadi tiga kelompok.",
+  "points": [
+   {
+    "say": "Herbivora adalah hewan pemakan tumbuhan. Contohnya sapi, kambing, dan kelinci.",
+    "board": [
+     "Herbivora = pemakan tumbuhan",
+     "sapi, kambing, kelinci"
+    ]
+   },
+   {
+    "say": "Karnivora adalah hewan pemakan daging. Contohnya harimau, singa, dan elang.",
+    "board": [
+     "Karnivora = pemakan daging",
+     "harimau, singa, elang"
+    ]
+   },
+   {
+    "say": "Omnivora adalah hewan pemakan tumbuhan dan juga daging. Contohnya ayam, bebek, dan beruang.",
+    "board": [
+     "Omnivora = pemakan keduanya",
+     "ayam, bebek, beruang"
+    ]
+   },
+   {
+    "say": "Ingat ya, nama kelompoknya diambil dari makanannya, bukan dari ukuran tubuh hewan.",
+    "board": [
+     "Kelompok mengikuti makanannya"
+    ]
+   }
+  ],
+  "quiz": {
+   "q": "Hewan pemakan daging disebut apa?",
+   "a": "Karnivora"
+  },
+  "tags": [
+   "herbivora",
+   "karnivora",
+   "omnivora"
+  ]
+ },
+ {
+  "id": "konduktor-isolator",
+  "grade": [
+   4,
+   5
+  ],
+  "topic": "Konduktor dan Isolator",
+  "title": "Penghantar dan Penyekat Listrik",
+  "intro": "Halo teman-teman! Kabel listrik terbuat dari logam, tapi dibungkus plastik. Kenapa begitu? Yuk kita cari tahu.",
+  "points": [
+   {
+    "say": "Konduktor adalah benda yang dapat menghantarkan listrik dan panas dengan baik. Contohnya tembaga, besi, dan aluminium.",
+    "board": [
+     "Konduktor: menghantarkan",
+     "tembaga, besi, aluminium"
+    ]
+   },
+   {
+    "say": "Isolator adalah benda yang tidak dapat menghantarkan listrik dengan baik. Contohnya plastik, karet, kaca, dan kayu kering.",
+    "board": [
+     "Isolator: tidak menghantarkan",
+     "plastik, karet, kaca, kayu kering"
+    ]
+   },
+   {
+    "say": "Kabel listrik bagian dalamnya terbuat dari logam, yaitu konduktor, supaya listrik bisa mengalir. Bagian luarnya dibungkus plastik, yaitu isolator, supaya aman saat disentuh.",
+    "board": [
+     "kabel: dalam = konduktor",
+     "luar = isolator (aman)"
+    ]
+   },
+   {
+    "say": "Pegangan panci dan gagang obeng sering terbuat dari plastik atau kayu karena isolator tidak mudah menghantarkan panas atau listrik ke tangan kita.",
+    "board": [
+     "gagang panci dan obeng",
+     "dibuat dari isolator"
+    ]
+   }
+  ],
+  "quiz": {
+   "q": "Mengapa kabel listrik dibungkus plastik?",
+   "a": "Karena plastik adalah isolator"
+  },
+  "tags": [
+   "listrik",
+   "konduktor",
+   "isolator"
+  ]
+ },
+ {
+  "id": "rangka-manusia",
+  "grade": [
+   5,
+   6
+  ],
+  "topic": "Rangka Manusia",
+  "title": "Rangka: Penopang dan Pelindung Tubuh",
+  "intro": "Halo teman-teman! Tanpa tulang, tubuh kita tidak bisa berdiri tegak. Yuk kita belajar tentang rangka manusia.",
+  "points": [
+   {
+    "say": "Rangka manusia punya tiga fungsi utama: menopang tubuh agar tegak, melindungi organ tubuh yang lunak, dan menjadi tempat melekatnya otot.",
+    "board": [
+     "Fungsi rangka:",
+     "menopang, melindungi",
+     "tempat otot melekat"
+    ]
+   },
+   {
+    "say": "Tulang tengkorak melindungi otak. Tulang rusuk melindungi jantung dan paru-paru.",
+    "board": [
+     "tengkorak → melindungi otak",
+     "tulang rusuk → jantung dan paru-paru"
+    ]
+   },
+   {
+    "say": "Tulang belakang menopang tubuh dan melindungi sumsum tulang belakang. Pada orang dewasa, jumlah tulang ada dua ratus enam buah.",
+    "board": [
+     "tulang belakang → menopang",
+     "orang dewasa: 206 tulang"
+    ]
+   },
+   {
+    "say": "Agar tulang kuat, kita perlu makan makanan yang mengandung kalsium seperti susu dan ikan, serta rajin berolahraga dan terkena sinar matahari pagi.",
+    "board": [
+     "tulang kuat: kalsium",
+     "olahraga dan sinar pagi"
+    ]
+   }
+  ],
+  "quiz": {
+   "q": "Tulang apa yang melindungi otak?",
+   "a": "Tulang tengkorak"
+  },
+  "tags": [
+   "rangka",
+   "tulang",
+   "tubuh manusia"
+  ]
+ },
+ {
+  "id": "jantung-darah",
+  "grade": [
+   5,
+   6
+  ],
+  "topic": "Peredaran Darah",
+  "title": "Jantung dan Peredaran Darah",
+  "intro": "Halo teman-teman! Letakkan tanganmu di dada. Kamu bisa merasakan jantungmu berdetak. Yuk kita belajar peredaran darah.",
+  "points": [
+   {
+    "say": "Jantung adalah organ yang memompa darah ke seluruh tubuh. Jantung bekerja terus tanpa henti, siang dan malam.",
+    "board": [
+     "Jantung: pompa darah"
+    ]
+   },
+   {
+    "say": "Darah mengalir melalui pembuluh darah. Pembuluh nadi membawa darah dari jantung ke seluruh tubuh. Pembuluh balik membawa darah kembali ke jantung.",
+    "board": [
+     "pembuluh nadi: dari jantung",
+     "pembuluh balik: ke jantung"
+    ]
+   },
+   {
+    "say": "Darah mengangkut oksigen dan sari makanan ke seluruh bagian tubuh, dan membawa sisa zat yang tidak diperlukan untuk dibuang.",
+    "board": [
+     "darah mengangkut:",
+     "oksigen dan sari makanan"
+    ]
+   },
+   {
+    "say": "Sel darah merah membawa oksigen. Sel darah putih melawan kuman penyebab penyakit. Olahraga teratur membuat jantung kita sehat.",
+    "board": [
+     "sel darah merah: oksigen",
+     "sel darah putih: melawan kuman"
+    ]
+   }
+  ],
+  "quiz": {
+   "q": "Organ yang memompa darah ke seluruh tubuh adalah?",
+   "a": "Jantung"
+  },
+  "tags": [
+   "jantung",
+   "darah",
+   "tubuh manusia"
+  ]
+ },
+ {
+  "id": "energi-terbarukan",
+  "grade": [
+   4,
+   5,
+   6
+  ],
+  "topic": "Sumber Energi",
+  "title": "Energi Terbarukan dan Tak Terbarukan",
+  "intro": "Halo teman-teman! Listrik di rumah kita berasal dari berbagai sumber energi. Hari ini kita belajar sumber energi yang ramah lingkungan.",
+  "points": [
+   {
+    "say": "Energi tak terbarukan adalah energi yang bisa habis dan tidak dapat diperbarui dalam waktu singkat. Contohnya batu bara, minyak bumi, dan gas alam.",
+    "board": [
+     "Tak terbarukan (bisa habis)",
+     "batu bara, minyak bumi, gas alam"
+    ]
+   },
+   {
+    "say": "Energi terbarukan adalah energi yang terus tersedia di alam. Contohnya energi Matahari, angin, air, dan panas bumi.",
+    "board": [
+     "Terbarukan (terus tersedia)",
+     "Matahari, angin, air, panas bumi"
+    ]
+   },
+   {
+    "say": "Panel surya mengubah cahaya Matahari menjadi listrik. Kincir angin memanfaatkan angin. Bendungan memanfaatkan aliran air untuk memutar turbin.",
+    "board": [
+     "panel surya: cahaya → listrik",
+     "kincir angin: angin",
+     "bendungan: aliran air"
+    ]
+   },
+   {
+    "say": "Memakai energi terbarukan membuat udara lebih bersih. Kita juga bisa ikut hemat energi, misalnya dengan mematikan lampu yang tidak dipakai.",
+    "board": [
+     "Hemat energi:",
+     "matikan lampu yang tak dipakai"
+    ]
+   }
+  ],
+  "quiz": {
+   "q": "Contoh sumber energi terbarukan adalah?",
+   "a": "Matahari, angin, air, atau panas bumi"
+  },
+  "tags": [
+   "energi",
+   "lingkungan"
+  ]
+ },
+ {
+  "id": "ekosistem",
+  "grade": [
+   4,
+   5
+  ],
+  "topic": "Ekosistem",
+  "title": "Ekosistem: Makhluk Hidup dan Lingkungannya",
+  "intro": "Halo teman-teman! Di kolam ada ikan, tumbuhan air, air, dan batu. Semuanya saling berhubungan. Itulah ekosistem.",
+  "points": [
+   {
+    "say": "Ekosistem adalah hubungan saling memengaruhi antara makhluk hidup dengan lingkungannya.",
+    "board": [
+     "Ekosistem",
+     "makhluk hidup + lingkungan"
+    ]
+   },
+   {
+    "say": "Komponen biotik adalah semua makhluk hidup, seperti tumbuhan, hewan, dan jamur.",
+    "board": [
+     "Biotik = makhluk hidup",
+     "tumbuhan, hewan, jamur"
+    ]
+   },
+   {
+    "say": "Komponen abiotik adalah benda tak hidup, seperti air, tanah, udara, batu, dan cahaya Matahari.",
+    "board": [
+     "Abiotik = benda tak hidup",
+     "air, tanah, udara, cahaya"
+    ]
+   },
+   {
+    "say": "Contoh ekosistem adalah kolam, sawah, hutan, dan laut. Jika salah satu komponennya rusak, komponen lain ikut terganggu.",
+    "board": [
+     "Contoh: kolam, sawah, hutan",
+     "jaga kelestarian lingkungan"
+    ]
+   }
+  ],
+  "quiz": {
+   "q": "Cahaya Matahari termasuk komponen biotik atau abiotik?",
+   "a": "Abiotik"
+  },
+  "tags": [
+   "ekosistem",
+   "lingkungan"
+  ]
+ },
+ {
+  "id": "pancasila",
+  "grade": [
+   3,
+   4,
+   5
+  ],
+  "topic": "Pancasila",
+  "title": "Lima Sila Pancasila",
+  "intro": "Halo teman-teman! Pancasila adalah dasar negara kita. Yuk kita hafalkan lima sila Pancasila.",
+  "points": [
+   {
+    "say": "Sila pertama: Ketuhanan Yang Maha Esa. Lambangnya bintang. Sila kedua: Kemanusiaan yang adil dan beradab. Lambangnya rantai.",
+    "board": [
+     "1. Ketuhanan Yang Maha Esa",
+     "2. Kemanusiaan yang adil dan beradab"
+    ]
+   },
+   {
+    "say": "Sila ketiga: Persatuan Indonesia. Lambangnya pohon beringin.",
+    "board": [
+     "3. Persatuan Indonesia",
+     "lambang: pohon beringin"
+    ]
+   },
+   {
+    "say": "Sila keempat: Kerakyatan yang dipimpin oleh hikmat kebijaksanaan dalam permusyawaratan atau perwakilan. Lambangnya kepala banteng.",
+    "board": [
+     "4. Kerakyatan yang dipimpin oleh",
+     "hikmat kebijaksanaan dalam",
+     "permusyawaratan/perwakilan",
+     "lambang: kepala banteng"
+    ],
+    "clear": true
+   },
+   {
+    "say": "Sila kelima: Keadilan sosial bagi seluruh rakyat Indonesia. Lambangnya padi dan kapas.",
+    "board": [
+     "5. Keadilan sosial bagi",
+     "seluruh rakyat Indonesia",
+     "lambang: padi dan kapas"
+    ]
+   }
+  ],
+  "quiz": {
+   "q": "Sila ketiga Pancasila berbunyi apa?",
+   "a": "Persatuan Indonesia"
+  },
+  "tags": [
+   "Pancasila",
+   "PPKn"
+  ]
+ },
+ {
+  "id": "benua-samudra",
+  "grade": [
+   4,
+   5
+  ],
+  "topic": "Benua dan Samudra",
+  "title": "Tujuh Benua dan Lima Samudra",
+  "intro": "Halo teman-teman! Bumi kita punya daratan yang sangat luas dan lautan yang sangat dalam. Yuk kita kenali benua dan samudra.",
+  "points": [
+   {
+    "say": "Ada tujuh benua di dunia: Asia, Afrika, Amerika Utara, Amerika Selatan, Antartika, Eropa, dan Australia.",
+    "board": [
+     "7 benua:",
+     "Asia, Afrika, Eropa, Australia",
+     "Amerika Utara, Amerika Selatan",
+     "Antartika"
+    ]
+   },
+   {
+    "say": "Benua yang paling luas adalah Asia. Indonesia terletak di benua Asia, di bagian Asia Tenggara.",
+    "board": [
+     "Terluas: Asia",
+     "Indonesia di Asia Tenggara"
+    ]
+   },
+   {
+    "say": "Ada lima samudra: Samudra Pasifik, Samudra Atlantik, Samudra Hindia, Samudra Selatan, dan Samudra Arktik. Samudra Pasifik adalah yang paling luas.",
+    "board": [
+     "5 samudra:",
+     "Pasifik, Atlantik, Hindia",
+     "Selatan, Arktik"
+    ],
+    "clear": true
+   },
+   {
+    "say": "Indonesia terletak di antara dua benua, yaitu Asia dan Australia, dan di antara dua samudra, yaitu Samudra Hindia dan Samudra Pasifik.",
+    "board": [
+     "Indonesia di antara:",
+     "benua Asia dan Australia",
+     "samudra Hindia dan Pasifik"
+    ]
+   }
+  ],
+  "quiz": {
+   "q": "Benua apa yang paling luas di dunia?",
+   "a": "Asia"
+  },
+  "tags": [
+   "geografi",
+   "benua",
+   "samudra"
+  ]
+ }
+]

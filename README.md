@@ -1294,3 +1294,33 @@ Lima kemampuan ini saling melengkapi; semuanya punya jalan mundur (kalau Jina ma
 **Aturan umum:** setiap blok KONTEKS DOKUMEN kini disertai larangan menebak: angka/tarif/batas yang tidak tertulis di potongan dokumen dijawab "tidak ditemukan di dokumen".
 
 **Batas yang perlu diketahui:** ambang `JINA_RERANK_MIN` (0.05) dan `JINA_DENSE_MIN` (0.4) belum dikalibrasi terhadap API sungguhan — lihat `/jina tes` dan ubah bila hasil terlalu longgar/ketat. PDF hasil scan tanpa teks tidak terbaca (butuh OCR lewat menu "PDF → MD").
+
+## Channel YouTube edukasi SD (`/edu`) -- video dibuat otomatis, kamu tinggal menyetujui
+
+Tiap hari (bawaan pukul 02:00) bot membuat SATU video "papan tulis digital" 60-120 detik untuk SD kelas 1-6, mengirimnya ke Telegram dengan tiga tombol (**Setujui & jadwalkan / Buat ulang / Buang**), dan hanya yang kamu setujui diunggah ke YouTube dengan jadwal tayang (bawaan pukul 16:00, satu video per hari).
+
+**Isi videonya**
+- *Matematika* (15 jenis soal, kelas 1-6: penjumlahan, pengurangan bersusun, perkalian, pembagian, keliling & luas, FPB/KPK, pecahan, kecepatan, volume, persen, rata-rata): soal dan jawabannya **dihitung program** (`edu-bank.js`), bukan ditulis AI, dan dicek ulang secara terpisah oleh tes. Bentuknya: contoh dijelaskan langkah demi langkah, lalu soal latihan dengan jeda "kerjakan sendiri", lalu kunci jawaban.
+- *IPA / pengetahuan umum*: 24 kartu fakta yang saya tulis dan periksa (`data/edu-sains.json`), ditambah kuis singkat. Menambah materi = menambah kartu di berkas itu (lihat bentuk kartu yang ada).
+- Tanpa gambar karakter: papan hijau, tulisan kapur muncul bertahap, narasi suara Gemini (`speakWav`), sampul otomatis, bab (chapter) YouTube otomatis.
+- Rotasi: kelas diputar agar semua kebagian, jenis matematika : sains = 2 : 1 (`EDU_MIX`), materi yang sama tidak diulang dalam 6 video terakhir.
+
+**Pasang (sekali)**
+1. Google Cloud Console → buat proyek → aktifkan **YouTube Data API v3** → *OAuth consent screen* (jenis External) → *Credentials* → **OAuth client ID** jenis **Desktop app**. Salin Client ID dan Client Secret ke `.env`: `YT_CLIENT_ID`, `YT_CLIENT_SECRET`.
+2. Ubah status aplikasi OAuth ke **In production** (bukan *Testing*). Dalam status *Testing* token Google kedaluwarsa tiap 7 hari dan unggahan akan berhenti. Layar "Google belum memverifikasi aplikasi ini" muncul untuk pemakaian pribadi; pilih *Advanced → lanjutkan*.
+3. Di laptop bot: `node youtube-auth.mjs`. Buka alamat yang dicetak, masuk dengan akun pemilik channel, setujui izin unggah. Tempel alamat hasil pengalihan ke terminal. Skrip menulis `YT_REFRESH_TOKEN` **langsung ke `.env`** (tidak dicetak, tidak perlu disalin ke chat). Izin yang diminta hanya `youtube.upload`: bot tidak bisa menghapus atau mengubah video lain.
+4. Isi `EDU_ENABLED=true` di `.env` (pengaturan lain di `.env.example`), restart bot, lalu di Telegram: `/edu youtube` (cek sambungan) dan `/edu buat` (draf pertama sekarang juga).
+5. Yang dibutuhkan: `GEMINI_API_KEYS` (suara), `ffmpeg`, dan font DejaVu (`sudo apt install ffmpeg fonts-dejavu-core`).
+
+**Perintah Telegram**: `/edu` (status), `/edu buat [kelas N] [matematika|sains]`, `/edu antrean`, `/edu setuju|buang <no>`, `/edu naskah <no>`, `/edu ulang <no>` (coba unggah lagi), `/edu youtube`, `/edu jeda` / `/edu lanjut`. Ini fitur Telegram (pemilik); di WhatsApp tidak ada.
+
+**Aturan main dan batas yang jujur**
+- **Selalu periksa sebelum menyetujui.** Bot mengirim kunci jawaban dan naskah, tetapi kamulah penyaring terakhir. Salah di video anak-anak merusak kepercayaan channel.
+- Kebijakan YouTube soal konten "tidak autentik" (massal/berpola) berlaku sejak Juli 2025. Video bertemplat yang diproduksi massal bisa dibatasi monetisasinya. Bot memberi variasi (15 jenis soal, 24 kartu, rotasi kelas), tapi menambah kartu fakta sendiri dan sesekali membuat video buatan tangan akan membuat channel lebih aman.
+- Narasi memakai suara AI: bot mengisi `containsSyntheticMedia` dan menulis catatan jujur di deskripsi (`YT_AI_DISCLOSURE=true`).
+- Konten anak: bawaan `YT_MADE_FOR_KIDS=true` (komentar dan iklan personalisasi dimatikan YouTube). Untuk channel anak ini aturannya memang begitu.
+- **Belum diuji langsung ke YouTube** (saya tidak punya kunci). Tes memakai YouTube palsu. YouTube mungkin mengunci unggahan dari proyek API yang belum diaudit menjadi *private*; jadwal tayang tidak akan jalan bila terkunci. Uji dengan SATU unggahan nyata (`/edu buat` → setujui) dan lihat di YouTube Studio. Bila terkunci, ajukan *API Services Audit* di dokumentasi YouTube.
+- Sampul khusus (thumbnail) hanya bisa dipasang akun yang sudah verifikasi telepon; bila belum, video tetap terjadwal dengan sampul otomatis YouTube.
+- Jatah unggah YouTube per hari (default 10.000 unit, 1 unggahan = 1.600 unit) cukup untuk 1-6 video/hari; bila habis, bot mencoba lagi besok.
+- Kuota suara Gemini gratis terbatas (sekitar 9-12 potong suara per video). Potongan yang sudah jadi disimpan di `edu-data/tts-cache`, jadi bila kuota habis di tengah jalan, bot melanjutkan dari sisanya 90 menit kemudian. Bila kuota harian terlalu kecil untuk 1 video/hari, pelankan jadwal atau tambah kunci Gemini.
+- Berkas hasil ada di `edu-data/` (diabaikan git). Video yang sudah terjadwal dihapus dari disk setelah `EDU_KEEP_DAYS` hari.

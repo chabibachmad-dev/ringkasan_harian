@@ -255,7 +255,7 @@ export function layoutPagesToMarkdown(pages) {
   return { markdown: parts.join("\n\n").trim(), tables, chars };
 }
 
-function run(cmd, args, { timeoutMs = 40_000, maxBuffer = 64 * 1024 * 1024 } = {}) {
+export function run(cmd, args, { timeoutMs = 40_000, maxBuffer = 64 * 1024 * 1024 } = {}) {
   return new Promise((resolve, reject) => {
     execFile(cmd, args, { timeout: timeoutMs, maxBuffer, encoding: "utf8" }, (err, stdout, stderr) => {
       if (err) {

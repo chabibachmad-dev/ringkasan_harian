@@ -64,6 +64,8 @@ import { createTelegram, readTelegramConfig } from "./telegram.js";
 import { createTranscriber, describeError, readSttConfig, voiceToCommand } from "./voice-input.js";
 import { audioOf, createWaTutor, readWaVoiceConfig } from "./wa-voice.js";
 import { createSpeaker, readTtsConfig } from "./voice-output.js";
+import { createEdu, createEduDefaults, readEduConfig } from "./edu-channel.js";
+import { createYoutube, readYoutubeConfig } from "./youtube.js";
 import { buildTutorSystemPrompt, buildTutorUserPrompt, parseTutorReply } from "./tutor.js";
 import { createAppAgentWorker } from "./app-agent.js";
 import { createFallbackChain, readFallbackConfig } from "./llm-fallback.js";
@@ -74,6 +76,7 @@ import { VOICE_LANGS, createGroupVoice, detectRequestedLang, detectTextOnlyReque
 import { formatForWhatsApp, detectPdfRequest, detectOfficeRequest, cleanAnswerForFile, titleForFile } from "./wa-format.js";
 import { buildDocx, buildXlsx, officeFileName, MIME_DOCX, MIME_XLSX } from "./office-doc.js";
 import { pdfBufferToMarkdown, PDF_MAX_BYTES } from "./pdf-extract.js";
+import { pdfBufferToPages, createPdfChatStore } from "./pdf-chat.js";
 import { PDF_QA_DEFAULT_MAX_CHARS, PDF_QA_LOCAL_MAX_CHARS, buildPdfContext, isPdfDoc, isReadQuestion, pdfAttachTag, pdfContextNote, pdfReadMessage, shouldReadPdf } from "./pdf-qa.js";
 import { createHumor, readHumorConfig } from "./humor.js";
 import { NO_OFFER_NOTE, stripHelpOffers } from "./insani.js";
@@ -98,9 +101,14 @@ import { createRegMonitor, readRegMonitorConfig } from "./reg-monitor.js";
 import { createKhatamReminder } from "./khatam.js";
 import { createPriorityQueue, PRIORITY } from "./ollama-queue.js";
 import { openKbIndex } from "./kb-index.js";
+import { createJina } from "./jina.js";
+import { createSbm, loadSbmData } from "./sbm.js";
+import { createHybridSearch, createEmbedWorker, parseJinaCommand, handleJinaCommand, describeJinaForStatus } from "./jina-rag.js";
 import { createKbIngestWorker, readKbConfig } from "./kb-ingest.js";
 import { createKbRetrievalWorker } from "./kb-retrieval.js";
 import { createDocFolderWorker } from "./doc-folder.js";
+import { createKomitmen, parseKomitmenCommand } from "./komitmen.js";
+import { createAcuanLibrary } from "./acuan-lib.js";
 import { guardDocAnswer } from "./docguard.js";
 import { createLocalDocs, parseDokumenCommand } from "./local-docs.js";
 import { createOps, readOpsConfig } from "./ops.js";
@@ -387,6 +395,9 @@ const TEXT_PROMPT_NOTE = `
 PERMINTAAN TEKS: penanya minta jawaban TERTULIS (bukan suara). Tulis jawaban lengkap sebagai teks biasa yang enak dibaca/disalin (boleh memakai daftar atau tabel); tidak perlu disesuaikan untuk dibacakan.`;
 
 // ---- Baca PDF di grup (lihat pdf-qa.js) ----
+// PDF di chat PRIBADI: bot membaca PDF yang dikirim lawan bicara (atau yang ia balas dengan pertanyaan). WA_DM_PDF_READ=off mematikan.
+const PDF_DM_READ = !/^(0|off|false|no|mati)$/i.test(String(process.env.WA_DM_PDF_READ ?? "on").trim());
+const DM_PDF_CAP_NOTE = `\n\nKEMAMPUAN PDF: kamu BISA membaca PDF yang dikirim lawan bicara di chat ini (sistem membaca seluruh halamannya lalu menaruh isinya di prompt). Jangan pernah bilang tidak bisa membaca PDF; kalau belum ada PDF, minta ia mengirim PDF-nya. Angka/aturan yang tidak ada di isi PDF atau konteks dokumen: katakan tidak ditemukan, jangan menebak.`;
 const PDF_GROUP_READ = !/^(0|off|false|no|mati)$/i.test(String(process.env.WA_GROUP_PDF_READ ?? "on").trim());
 const PDF_GROUP_MAX_CHARS = Math.max(2000, Number(process.env.WA_GROUP_PDF_MAX_CHARS) || PDF_QA_DEFAULT_MAX_CHARS);
 const PDF_GROUP_LOCAL_MAX_CHARS = Math.max(2000, Number(process.env.WA_GROUP_PDF_LOCAL_MAX_CHARS) || PDF_QA_LOCAL_MAX_CHARS + 3000);
@@ -429,12 +440,24 @@ function isGroupJid(jid) {
   return typeof jid === "string" && jid.endsWith("@g.us");
 }
 
+/** Blok prompt "ISI PDF" bila pesan ini melampirkan/membalas PDF (chat pribadi maupun grup); kosong bila tidak. */
+function buildPdfNote(jid, local) {
+  const p = waAccountContext.getStore()?.pdf;
+  if (!p) return "";
+  const maxChars = local ? PDF_GROUP_LOCAL_MAX_CHARS : PDF_GROUP_MAX_CHARS;
+  const ctx = p.entry ? pdfChat.contextFor(p.entry, p.question, { maxChars }) : buildPdfContext(p.markdown, p.question, { maxChars });
+  return pdfContextNote({ name: p.name, pages: p.pages, truncatedPages: p.truncatedPages, fromReply: p.fromReply, ctx, scope: isGroupJid(jid) ? "grup" : "chat pribadi", readPages: p.entry?.readPages || 0 });
+}
+
 function withGroupNote(basePrompt, jid, { local = false } = {}) {
   // Nomor kedua boleh punya nama bot sendiri (WA2_NAME): AI memperkenalkan diri dengan nama itu.
   const base = currentAccountId() === MAIN_ACCOUNT ? basePrompt : personaPrompt(basePrompt, wa2Config.botName);
   // Pengirim pesan terakhir = pemilik nomor (dikenali dari id pengirim, bukan dari isi pesan): AI tidak boleh menjawab "akan disampaikan ke pemilik".
   const ownerNote = waAccountContext.getStore()?.ownerAsker ? OWNER_ASKER_NOTE : "";
-  if (!isGroupJid(jid)) return `${base}${ownerNote}`;
+  if (!isGroupJid(jid)) {
+    const pdfN = buildPdfNote(jid, local);
+    return `${base}${ownerNote}${pdfN || (PDF_DM_READ && !pdfToolMissing ? DM_PDF_CAP_NOTE : "")}`;
+  }
   // Balasan grup berupa suara: bahasa jawaban dipaksa (/voice wag kor ...) atau diminta anggota grup ("jawab pakai bahasa Korea").
   const replyLang = waAccountContext.getStore()?.replyLang;
   const ctxFlags = waAccountContext.getStore();
@@ -461,11 +484,7 @@ function withGroupNote(basePrompt, jid, { local = false } = {}) {
   } catch (e) {
     console.error("Catatan kemampuan grup gagal disusun:", e instanceof Error ? e.message : String(e));
   }
-  let pdfNote = "";
-  if (ctxFlags?.pdf) {
-    const maxChars = local ? PDF_GROUP_LOCAL_MAX_CHARS : PDF_GROUP_MAX_CHARS;
-    pdfNote = pdfContextNote({ name: ctxFlags.pdf.name, pages: ctxFlags.pdf.pages, truncatedPages: ctxFlags.pdf.truncatedPages, fromReply: ctxFlags.pdf.fromReply, ctx: buildPdfContext(ctxFlags.pdf.markdown, ctxFlags.pdf.question, { maxChars }) });
-  }
+  const pdfNote = buildPdfNote(jid, local);
   return `${base}${GROUP_PROMPT_NOTE}${ownerNote || OWNER_CLAIM_NOTE}${capNote}${imageNote}${videoNote}${fileNote}${voiceNote}${pdfNote}${ctxFlags?.humorNote || ""}${ctxFlags?.retryNote ? `\n\n${ctxFlags.retryNote}` : ""}${replyLang ? langInstruction(replyLang) : ""}`;
 }
 
@@ -704,6 +723,33 @@ function rankKnowledgeChunks(docs, question, budgetChars) {
 // Indeks pencarian dokumen di laptop (SQLite FTS5, lihat kb-index.js / kb-ingest.js).
 // Diisi saat start; kalau gagal dibuka, RAG kembali ke cara lama (ambil dari Supabase).
 let kbIndex = null;
+// Pencarian hibrida (BM25 + Jina). Null bila Jina tidak aktif -- semua pemanggil kembali ke kbIndex.search.
+let hybridSearch = null;
+let jinaClient = null;
+let embedWorker = null;
+// Kalkulator SBM perjalanan dinas (sbm.js): angka dari tabel PMK 32/2025 di data/sbm-pmk32-2025.json, dihitung kode, bukan AI.
+// Dimatikan dengan SBM_ENABLED=false; bila berkas data tidak ada, fitur ini dilewati dan semua pertanyaan jatuh ke AI/dokumen.
+const sbmCalc = (() => {
+  if ((process.env.SBM_ENABLED || "true").toLowerCase() === "false") return null;
+  try {
+    const file = process.env.SBM_DATA_FILE || fileURLToPath(new URL("./data/sbm-pmk32-2025.json", import.meta.url));
+    const calc = createSbm({ data: loadSbmData(file) });
+    console.log(`🧮 Kalkulator SBM aktif (${calc.data.meta?.sumber || "PMK"}).`);
+    return calc;
+  } catch (e) {
+    console.warn("🧮 Kalkulator SBM tidak aktif:", e instanceof Error ? e.message : String(e));
+    return null;
+  }
+})();
+function sbmAnswer(key, text) {
+  if (!sbmCalc) return null;
+  try {
+    return sbmCalc.handle(key, text);
+  } catch (e) {
+    console.error("🧮 Kalkulator SBM gagal (dilewati, lanjut ke AI):", e instanceof Error ? e.message : String(e));
+    return null;
+  }
+}
 
 // Saring dokumen menurut potongan judul (mis. grup yang hanya boleh memakai surat tertentu). titles=null -> semua.
 function titleMatches(title, titles) {
@@ -719,7 +765,10 @@ async function fetchRelevantKnowledgeChunks(question, budgetChars, titles = null
   // cari di indeks itu dulu. Rekonsiliasi berkala menjamin isinya sama dengan
   // tabel knowledge_documents, jadi kalau indeks ada isinya, tak perlu ke Supabase.
   if (kbIndex && kbIndex.hasDocs()) {
-    return kbIndex.search(question, { budgetChars, maxChunks: 8, titles, excludeLocal: !includeLocal }).map(({ title, text }) => ({ title, text }));
+    const opts = { budgetChars, maxChunks: 8, titles, excludeLocal: !includeLocal };
+    // Jalur yang boleh dibaca penyedia luar (tanpa dokumen lokal) memakai pencarian hibrida Jina bila aktif; selainnya BM25 lokal.
+    const blocks = !includeLocal && hybridSearch ? await hybridSearch.search(question, opts) : kbIndex.search(question, opts);
+    return blocks.map(({ title, text }) => ({ title, text }));
   }
   const qWords = new Set(tokenizeForScoring(question));
   if (qWords.size === 0) return [];
@@ -786,10 +835,10 @@ async function fetchKnowledgeChunksForGemini(query, titles = null) {
   // Indeks lengkap di laptop (FTS5 + imbuhan, seluruh teks, ber-halaman) lebih baik daripada salinan Supabase yang
   // terpotong; pencari TF-IDF di bawah hanya cadangan bila indeks laptop tidak aktif/kosong.
   if (kbIndex && kbIndex.hasDocs()) {
-    return kbIndex
-      // excludeLocal: dokumen dari folder lokal laptop (id 'local:') tidak boleh dikirim ke Gemini/Groq/OpenRouter.
-      .search(query, { budgetChars: GEMINI_RAG_BUDGET_CHARS, maxChunks: GEMINI_RAG_MAX_CHUNKS, titles, excludeLocal: true })
-      .map((b) => ({ score: b.score, distinct: 0, title: b.title, text: b.text }));
+    // excludeLocal: dokumen dari folder lokal laptop (id 'local:') tidak boleh dikirim ke Gemini/Groq/OpenRouter.
+    const gOpts = { budgetChars: GEMINI_RAG_BUDGET_CHARS, maxChunks: GEMINI_RAG_MAX_CHUNKS, titles, excludeLocal: true };
+    const gBlocks = hybridSearch ? await hybridSearch.search(query, gOpts) : kbIndex.search(query, gOpts);
+    return gBlocks.map((b) => ({ score: b.score, distinct: 0, title: b.title, text: b.text }));
   }
   const baseTokens = [...new Set(tokenizeForScoring(query))];
   if (baseTokens.length === 0) return [];
@@ -915,11 +964,14 @@ if (webSearch.available()) console.log(`🔎 Pencarian web: ${webSearch.describe
 // akurat & tidak ngarang begitu konteksnya ditaruh jadi satu kesatuan
 // dengan pertanyaan, drpd dipisah jadi system message terpisah yang kadang
 // diabaikan model kecil).
+// Aturan "dilarang menebak angka": ditempel di setiap blok KONTEKS DOKUMEN supaya model (Ollama/Gemini/Groq/dll)
+// tidak mengisi tarif/batas/angka yang tidak tertulis di potongan dokumen dengan ingatan atau hitungan sendiri.
+export const DOC_NO_GUESS_RULE = "ATURAN: angka, tarif, batas, tanggal, atau pasal HANYA boleh disebut kalau tertulis di potongan dokumen di atas (sebut halamannya bila ada [Halaman n]). Kalau yang ditanyakan tidak tertulis di sana, jawab \"tidak ditemukan di dokumen\" -- jangan menebak, jangan menghitung sendiri, dan jangan memakai angka dari ingatan.";
 function buildGroundedUserMessage(originalText, docChunks, webResults) {
   const parts = [];
   if (docChunks.length > 0) {
     const docBlock = docChunks.map((c) => `[Dari dokumen: ${c.title}]\n${c.text}`).join("\n\n");
-    parts.push(`KONTEKS DOKUMEN (dari Dokumen Pengetahuan, dicarikan otomatis, mungkin relevan -- kalau tidak relevan, abaikan):\n${docBlock}`);
+    parts.push(`KONTEKS DOKUMEN (dari Dokumen Pengetahuan, dicarikan otomatis, mungkin relevan -- kalau tidak relevan, abaikan):\n${docBlock}\n${DOC_NO_GUESS_RULE}`);
   }
   if (webResults.length > 0) {
     const webBlock = webResults.map((r, i) => `${i + 1}. ${r.title} -- ${r.snippet}${r.url ? `\n   Sumber: ${r.url}` : ""}`).join("\n");
@@ -1098,7 +1150,7 @@ async function generateAutoReplyWithOllama(jid, { timeoutMs } = {}) {
   // Grup: obrolan santai tidak perlu dokumen/web (lihat GROUP_LOOKUP_RE).
   // Dokumen (pencarian lokal, murah) boleh selalu dicari di grup (WA_GROUP_DOCS); web (Bing) tetap hanya bila ada kata kunci.
   // Pertanyaan tentang PDF yang dilampirkan/dibalas: jawab dari isi PDF saja (tanpa cari web/dokumen lain yang tidak nyambung).
-  const pdfAsked = Boolean(isGroupJid(jid) && waAccountContext.getStore()?.pdf);
+  const pdfAsked = Boolean(waAccountContext.getStore()?.pdf);
   const lookupAllowed = !pdfAsked && (!isGroupJid(jid) || GROUP_LOOKUP_RE.test(searchQuestion));
   const docsAllowed = !pdfAsked && (lookupAllowed || (GROUP_DOCS_ALWAYS && searchQuestion.trim().split(/\s+/).length >= 3));
   const pinnedTitles = docTitlesFor(jid);
@@ -1751,7 +1803,7 @@ async function generateAutoReplyWithGemini(jid) {
   // hanya dicari kalau pesannya jelas butuh data (lihat GROUP_LOOKUP_RE).
   const pinnedTitles = docTitlesFor(jid);
   // Grup dengan dokumen "dikunci" (WA_GROUP_DOC_TITLES): jawaban HANYA dari dokumen itu, tanpa internet.
-  const pdfAsked = Boolean(isGroupJid(jid) && waAccountContext.getStore()?.pdf); // jawab dari isi PDF saja, tanpa cari web/dokumen lain
+  const pdfAsked = Boolean(waAccountContext.getStore()?.pdf); // jawab dari isi PDF saja, tanpa cari web/dokumen lain
   const webQuery = pdfAsked || pinnedTitles ? "" : !isGroupJid(jid) || GROUP_LOOKUP_RE.test(webQueryRaw) ? webQueryRaw : "";
   // Dokumen: di grup selalu dicari (pencarian lokal, murah) kecuali WA_GROUP_DOCS=keywords.
   const docQuery = pdfAsked ? "" : !isGroupJid(jid) || GROUP_DOCS_ALWAYS ? webQueryRaw : webQuery;
@@ -2134,6 +2186,13 @@ async function sendAutoReply(sock, jid, incomingText) {
     }
   } catch (err) {
     console.error(`Template jawaban gagal utk ${jid}, lanjut ke AI:`, err instanceof Error ? err.message : String(err));
+  }
+
+  // 1b) Hitungan SBM perjalanan dinas (uang harian, penginapan, tiket) dijawab kode dari tabel PMK, bukan AI.
+  const sbmDm = sbmAnswer(jid, incomingText);
+  if (sbmDm) {
+    await deliverAutoReplyText(sock, jid, { reply: sbmDm, tokensUsed: 0, costUsd: 0 }, "🧮 SBM");
+    return;
   }
 
   // Indikator "mengetik..." di WA -- murni kosmetik, tapi berguna terutama
@@ -3233,14 +3292,14 @@ async function handleGroupMessage(msg, sock) {
       ? { key: msg.key, message: content }
       : { key: { remoteJid: groupJid, id: ctx.stanzaId, participant: ctx.participant }, message: unwrapMessageContent(ctx.quotedMessage) };
     sock.sendPresenceUpdate("composing", groupJid).catch(() => {});
-    const loaded = await readGroupPdf(sock, { source, doc: pdfCandidate, cacheKey: (docAttached ? msg.key.id : ctx.stanzaId) ? `${groupJid}|${docAttached ? msg.key.id : ctx.stanzaId}` : "" });
+    const loaded = await readChatPdf(sock, { source, doc: pdfCandidate, cacheKey: (docAttached ? msg.key.id : ctx.stanzaId) ? `${groupJid}|${docAttached ? msg.key.id : ctx.stanzaId}` : "" });
     if (!loaded.ok) {
       sock.sendPresenceUpdate("paused", groupJid).catch(() => {});
       await replyGroupText(sock, groupJid, msg, subject, loaded.message);
       return;
     }
-    pdfCtx = { name: loaded.name, pages: loaded.pages, markdown: loaded.markdown, truncatedPages: loaded.truncated, fromReply: !docAttached, question: text };
-    console.log(`📄 [Baca PDF] "${loaded.name}" ${loaded.pages} hlm, ${loaded.markdown.length} huruf (${loaded.cached ? "dari simpanan" : "baru dibaca"})`);
+    pdfCtx = { name: loaded.name, pages: loaded.pages, entry: loaded.entry, truncatedPages: loaded.truncated, fromReply: !docAttached, question: text };
+    console.log(`📄 [Baca PDF] "${loaded.name}" ${loaded.pages} hlm, ${loaded.entry.chars} huruf, ${loaded.entry.readPages} hlm diindeks (${loaded.cached ? "dari simpanan" : "baru dibaca"})`);
   }
 
   // Permintaan membuat video ("bot, buatkan video ..."): dirakit pembuat video (gambar + suara + ffmpeg), bukan AI percakapan.
@@ -3289,8 +3348,11 @@ async function handleGroupMessage(msg, sock) {
   }
   // "Kamu bisa balas pakai suara?" = fakta tentang bot: dijawab langsung dari status fitur (tanpa AI), supaya tidak pernah salah/menyangkal.
   const voiceFact = !fileReq && !pdfCtx && !textOnly && detectVoiceQuestion(text) ? voiceCapabilityAnswer(groupCapabilityFlags()) : null;
-  let result = voiceFact ? { reply: voiceFact, tokensUsed: 0, costUsd: 0 } : null;
+  // Hitungan SBM perjalanan dinas: dijawab kode dari tabel PMK (angka + halaman), bukan AI.
+  const sbmFact = voiceFact || fileReq || pdfCtx ? null : sbmAnswer(senderKey, text);
+  let result = voiceFact ? { reply: voiceFact, tokensUsed: 0, costUsd: 0 } : sbmFact ? { reply: sbmFact, tokensUsed: 0, costUsd: 0 } : null;
   if (voiceFact) console.log("👥 Pertanyaan kemampuan suara: dijawab langsung dari status fitur.");
+  if (sbmFact) console.log("🧮 Pertanyaan SBM di grup: dijawab kalkulator dari tabel PMK.");
   try {
     if (!result) {
       try {
@@ -3475,19 +3537,59 @@ function pdfReadQuotaOk(who) {
   return true;
 }
 
-// Teks PDF yang sudah dibaca disimpan sebentar (per pesan PDF) supaya pertanyaan susulan pada PDF yang sama tidak mengunduh ulang.
+// PDF yang sudah dibaca disimpan sebentar (per pesan PDF) sebagai indeks sementara supaya pertanyaan susulan pada PDF yang sama
+// tidak mengunduh ulang. Semua halaman (sampai WA_PDF_MAX_PAGES, bawaan 300) masuk indeks; jawaban dikutip per halaman (pdf-chat.js).
 const PDF_CACHE_TTL_MS = 30 * 60 * 1000;
-const PDF_CACHE_MAX = 12;
-const pdfTextCache = new Map(); // "grup|idPesan" -> { at, name, pages, markdown, truncated }
+const PDF_CACHE_MAX = 8;
+const PDF_CHAT_PAGE_CAP = Math.min(400, Math.max(10, Number(process.env.WA_PDF_MAX_PAGES) || 300));
+const pdfChat = createPdfChatStore({ ttlMs: PDF_CACHE_TTL_MS, max: PDF_CACHE_MAX });
+
+/** Pesan chat pribadi yang melampirkan PDF (atau membalas PDF dengan pertanyaan baca) -> bahan untuk dibaca; null bila bukan. */
+function dmPdfCandidate(msg, text) {
+  if (!PDF_DM_READ) return null;
+  const content = unwrapMessageContent(msg.message);
+  if (!content) return null;
+  const attached = isPdfDoc(content.documentMessage) ? content.documentMessage : null;
+  const ctx = getMessageContextInfo(content);
+  const quoted = ctx?.quotedMessage ? unwrapMessageContent(ctx.quotedMessage)?.documentMessage || null : null;
+  const doc = attached || (isPdfDoc(quoted) ? quoted : null);
+  if (!doc) return null;
+  const question = attached ? String(attached.caption ?? "").trim() : String(text ?? "").trim();
+  if (!attached && !isReadQuestion(question)) return null; // membalas PDF dengan perintah lain: jalur biasa
+  const source = attached ? { key: msg.key, message: content } : { key: { remoteJid: msg.key.remoteJid, id: ctx.stanzaId, participant: ctx.participant }, message: unwrapMessageContent(ctx.quotedMessage) };
+  const tagged = `${question || "(menandai tanpa pertanyaan, ringkas dan jelaskan isi PDF itu)"} ${pdfAttachTag(doc.fileName, !attached)}`.trim();
+  return { doc, source, fromReply: !attached, question, text: tagged, cacheKey: `${msg.key.remoteJid}|${attached ? msg.key.id : ctx.stanzaId}` };
+}
+
+/** Baca PDF-nya lalu pasang di konteks balasan. false = sudah dijawab (gagal/jatah habis) -> jangan lanjut ke AI. */
+async function attachDmPdf(sock, jid, dmPdf, { owner = false } = {}) {
+  const say = (reply) => deliverAutoReplyText(sock, jid, { reply, tokensUsed: 0, costUsd: 0 }, "📄 PDF");
+  if (!owner && !pdfReadQuotaOk(jid)) {
+    await say(`Jatah baca PDF hari ini sudah habis (${PDF_GROUP_DAILY_MAX} kali per hari). Besok bisa lagi ya.`);
+    return false;
+  }
+  sock.sendPresenceUpdate("composing", jid).catch(() => {});
+  const loaded = await readChatPdf(sock, { source: dmPdf.source, doc: dmPdf.doc, cacheKey: dmPdf.cacheKey });
+  if (!loaded.ok) {
+    sock.sendPresenceUpdate("paused", jid).catch(() => {});
+    await say(loaded.message);
+    return false;
+  }
+  const st = waAccountContext.getStore();
+  if (st) st.pdf = { name: loaded.name, pages: loaded.pages, entry: loaded.entry, truncatedPages: loaded.truncated, fromReply: dmPdf.fromReply, question: dmPdf.question };
+  console.log(`📄 [Baca PDF/DM] "${loaded.name}" ${loaded.pages} hlm, ${loaded.entry.readPages} hlm diindeks (${loaded.cached ? "dari simpanan" : "baru dibaca"})`);
+  return true;
+}
 
 /**
- * Unduh PDF dari WhatsApp lalu ambil teksnya (pdftotext). -> { ok: true, name, pages, markdown, truncated, cached } atau { ok: false, message }.
- * Tidak pernah melempar galat; pesan gagal sudah jujur & siap dikirim ke grup. Dijalankan satu per satu (runFileJob).
+ * Unduh PDF dari WhatsApp lalu baca SEMUA halamannya (pdftotext) ke indeks sementara.
+ * -> { ok: true, name, pages (total), truncated, entry, cached } atau { ok: false, message }.
+ * Tidak pernah melempar galat; pesan gagal sudah jujur & siap dikirim. Dijalankan satu per satu (runFileJob).
  */
-async function readGroupPdf(sock, { source, doc, cacheKey }) {
+async function readChatPdf(sock, { source, doc, cacheKey }) {
   const name = String(doc?.fileName || "dokumen.pdf");
-  const hit = cacheKey ? pdfTextCache.get(cacheKey) : null;
-  if (hit && Date.now() - hit.at < PDF_CACHE_TTL_MS) return { ok: true, name: hit.name, pages: hit.pages, markdown: hit.markdown, truncated: hit.truncated, cached: true };
+  const hit = cacheKey ? pdfChat.get(cacheKey) : null;
+  if (hit) return { ok: true, name: hit.name, pages: hit.total, truncated: hit.truncated, entry: hit, cached: true };
   if (pdfToolMissing) return { ok: false, message: pdfReadMessage("notool") };
   if (Number(doc?.fileLength) > PDF_MAX_BYTES) return { ok: false, message: `PDF-nya terlalu besar (maks ${Math.round(PDF_MAX_BYTES / 1024 / 1024)} MB). Kirim versi yang lebih kecil atau pisahkan per bagian.` };
   return runFileJob(async () => {
@@ -3507,20 +3609,21 @@ async function readGroupPdf(sock, { source, doc, cacheKey }) {
     }
     let r;
     try {
-      r = await pdfBufferToMarkdown(buffer);
+      r = await pdfBufferToPages(buffer, { maxPages: PDF_CHAT_PAGE_CAP });
     } catch (e) {
       console.error(`📄 [Baca PDF] ${name}: ${e instanceof Error ? e.message : String(e)}`);
       if (e?.kind === "notool") pdfToolMissing = true;
       return { ok: false, message: pdfReadMessage(e?.kind) };
     }
     if (r.scanned) return { ok: false, message: pdfReadMessage("scanned") };
-    if (!r.markdown) return { ok: false, message: pdfReadMessage("empty") };
-    const entry = { at: Date.now(), name, pages: r.pages, markdown: r.markdown, truncated: r.truncated };
-    if (cacheKey) {
-      pdfTextCache.set(cacheKey, entry);
-      while (pdfTextCache.size > PDF_CACHE_MAX) pdfTextCache.delete(pdfTextCache.keys().next().value);
+    let entry;
+    try {
+      entry = await pdfChat.build(cacheKey, { name, pages: r.pages, total: r.total, truncated: r.truncated });
+    } catch (e) {
+      console.error(`📄 [Baca PDF] indeks sementara gagal untuk "${name}": ${e instanceof Error ? e.message : String(e)}`);
+      return { ok: false, message: pdfReadMessage("empty") };
     }
-    return { ok: true, ...entry, cached: false };
+    return { ok: true, name, pages: r.total, truncated: r.truncated, entry, cached: false };
   });
 }
 
@@ -4257,6 +4360,9 @@ async function handleIncoming(msg, sock) {
       }
     }
   }
+  // PDF di chat pribadi: dilampirkan (juga yang bersama keterangan), atau dibalas dengan pertanyaan -> dibaca semua halamannya lalu dijawab dengan kutipan halaman.
+  const dmPdf = !isSelfChat ? dmPdfCandidate(msg, text || "") : null;
+  if (dmPdf) text = dmPdf.text;
   if (!text) return;
 
   if (msg.pushName && !isSelfChat) {
@@ -4352,6 +4458,7 @@ async function handleIncoming(msg, sock) {
     }
     const contactEnabled = await isAutoReplyEnabledForContact(jid);
     if (contactEnabled) {
+      if (dmPdf && !(await attachDmPdf(sock, jid, dmPdf, { owner: isOwnerSender(msg, isSelfChat) }))) return;
       await sendAutoReply(sock, jid, text);
     } else {
       console.log(`🔕 Auto-reply dimatikan khusus utk ${jid}, dilewati.`);
@@ -4797,6 +4904,13 @@ async function buildBotStatusText() {
     const df = typeof docFolder !== "undefined" && docFolder ? docFolder.status() : null;
     lines.push(`📂 Dokumen lokal (khusus Ollama): ${df ? `${df.docs} dokumen .md di ${df.mdDir}${df.current ? ` • memproses ${df.current.file}` : ""}${df.lastError ? ` • error terakhir: ${df.lastError}` : ""}` : "mati"}`);
   }
+  try {
+    lines.push(describeJinaForStatus({ jina: jinaClient, hybrid: hybridSearch, index: kbIndex }));
+    const ac = acuanLib?.status();
+    lines.push(`📚 Acuan publik: ${ac ? (ac.enabled ? `${ac.docs} dokumen di ${ac.dir}${ac.lastError ? ` • ⚠️ ${ac.lastError}` : ""}` : "mati") : "indeks belum aktif"}`);
+  } catch (e) {
+    lines.push(`🧠 Jina/acuan: gagal dibaca (${String(e instanceof Error ? e.message : e).slice(0, 120)})`);
+  }
   lines.push(`🖼️ Pembuat gambar: ${imageGen.monitorText((ms) => `${formatClockInTimezone(ms)} ${WA_TIMEZONE_LABEL}`)}`);
   try {
     lines.push(`🎬 Pembuat video: ${videoGen.available() ? videoGen.describe().split("\n").slice(-1)[0] : "belum aktif"}`);
@@ -4811,6 +4925,7 @@ async function buildBotStatusText() {
   lines.push(`📅 Agenda grup: ${agenda.describe()}`);
   lines.push(`💾 Cadangan: ${backup.describe()}`);
   lines.push(`🩺 Kesehatan: ${health.describe()}`);
+  lines.push(`🎓 Channel edukasi: ${edu.describe()}`);
   lines.push(`✈️ Telegram: ${telegram.describe()}`);
   lines.push(`🎤 Pesan suara Telegram: ${transcriber.available() ? `aktif (${sttConfig.groqKeys.length ? `Groq Whisper ${sttConfig.groqModel}` : ""}${sttConfig.groqKeys.length && sttConfig.geminiKeys.length ? " + " : ""}${sttConfig.geminiKeys.length ? "cadangan Gemini" : ""})` : "mati (isi GROQ_API_KEYS atau GEMINI_API_KEYS)"}`);
   {
@@ -5592,6 +5707,28 @@ const skillAdmin = createSkillAdmin({ skills, confirm: (chatId, o) => ops.confir
 
 /** /ingat /catatan /lupa dan /penyedia dari WhatsApp (hanya pemilik, bukan grup). true = pesan sudah ditangani. */
 async function handleWaOwnerLocalCommands(sock, jid, text) {
+  const kcmd = parseKomitmenCommand(text);
+  if (kcmd) {
+    let out;
+    try {
+      out = komitmen.handle(kcmd);
+    } catch (e) {
+      out = `📋 Perintah komitmen gagal: ${String(e instanceof Error ? e.message : e).slice(0, 200)}`;
+    }
+    await sock.sendMessage(jid, { text: out }).catch((e) => console.error("💬 [WA/Komitmen] gagal kirim:", e instanceof Error ? e.message : String(e)));
+    return true;
+  }
+  const jcmd = parseJinaCommand(text);
+  if (jcmd) {
+    let out;
+    try {
+      out = await handleJinaCommand(jcmd, { jina: jinaClient, hybrid: hybridSearch, embedWorker, index: kbIndex });
+    } catch (e) {
+      out = `🧠 Perintah Jina gagal: ${String(e instanceof Error ? e.message : e).slice(0, 200)}`;
+    }
+    await sock.sendMessage(jid, { text: out }).catch((e) => console.error("💬 [WA/Jina] gagal kirim:", e instanceof Error ? e.message : String(e)));
+    return true;
+  }
   const mem = parseMemoryCommand(text);
   const prov = mem ? null : parseProviderCommand(text);
   if (!mem && !prov) return false;
@@ -5716,6 +5853,17 @@ async function handleWaDokumenCommand(sock, jid, text) {
   return true;
 }
 
+// Channel YouTube edukasi SD (edu-channel.js): video papan tulis dibuat otomatis, kamu setujui di Telegram, lalu diunggah terjadwal.
+const eduConfig = readEduConfig(process.env);
+const youtube = createYoutube({ config: readYoutubeConfig(process.env) });
+const edu = createEdu({
+  config: eduConfig,
+  speaker,
+  ...createEduDefaults({ config: eduConfig }),
+  youtube,
+  sendText: (text, opts) => telegram.sendOwner(text, opts),
+  sendFile: (file, caption) => telegram.sendOwnerFiles([file], caption)
+});
 const telegram = createTelegram({
   config: readTelegramConfig(process.env),
   deps: {
@@ -5730,6 +5878,7 @@ const telegram = createTelegram({
     regNow: (opts) => regMonitor.runNow(opts),
     status: () => buildBotStatusText(),
     localDocs,
+    edu,
     ops,
     stickers: {
       add: async (buffer) => {
@@ -5896,6 +6045,10 @@ async function mirrorToTelegram(text) {
     return false;
   }
 }
+setInterval(() => {
+  edu.check().catch(() => {});
+}, 60_000);
+console.log(`🎓 Channel edukasi: ${edu.describe()}`);
 telegram
   .start()
   .then((connected) => (connected ? ops.announceStartup((chatId, text) => telegram.send(chatId, text)) : false))
@@ -6005,7 +6158,20 @@ if (kbCfg.enabled) {
 
 // Gemini (chat aplikasi) membaca dokumen lewat indeks laptop ini: Edge Function menaruh pertanyaan di
 // kb_retrievals, worker ini menjawab dengan potongan teks (lihat kb-retrieval.js, migrations/0019).
-const kbRetrieval = kbIndex ? createKbRetrievalWorker({ supabase, index: kbIndex, env: process.env }) : null;
+if (kbIndex) {
+  try {
+    jinaClient = createJina({ env: process.env, log: console });
+    if (jinaClient.available()) {
+      hybridSearch = createHybridSearch({ index: kbIndex, jina: jinaClient, log: console, env: process.env });
+      embedWorker = createEmbedWorker({ index: kbIndex, jina: jinaClient, log: console });
+      console.log(`🧠 Jina aktif: ${jinaClient.cfg.keys.length} key • embedding ${jinaClient.cfg.embedEnabled ? jinaClient.cfg.embedModel : "mati"} • reranker ${jinaClient.cfg.rerankEnabled ? jinaClient.cfg.rerankModel : "mati"} • Reader ${jinaClient.cfg.readerEnabled ? "aktif" : "mati"}`);
+    }
+  } catch (err) {
+    console.error("🧠 Jina tidak aktif:", err instanceof Error ? err.message : String(err));
+    hybridSearch = null;
+  }
+}
+const kbRetrieval = kbIndex ? createKbRetrievalWorker({ supabase, index: kbIndex, env: process.env, search: (q, o) => (hybridSearch ? hybridSearch.search(q, o) : kbIndex.search(q, o)) }) : null;
 
 // Folder dokumen lokal (dokumen/peraturan-pdf -> dokumen/peraturan-md) + antrean "PDF → MD" dari aplikasi.
 // Isinya diindeks dengan id 'local:' dan HANYA bisa dijawab Ollama (lihat doc-folder.js / excludeLocal di kb-index.js).
@@ -6020,6 +6186,19 @@ const docFolder = kbIndex
       waitForIdle: () => ollamaQueue.waitForIdle()
     })
   : null;
+
+// Perpustakaan acuan PUBLIK (dokumen/acuan-publik: PMK 32/2025 dst.), seluruh halaman terindeks, id 'acuan:' (boleh cloud/Jina). Lihat acuan-lib.js.
+const acuanLib = kbIndex
+  ? createAcuanLibrary({
+      index: kbIndex,
+      env: process.env,
+      baseDir: fileURLToPath(new URL(".", import.meta.url)),
+      onIndexed: () => embedWorker?.kick?.()
+    })
+  : null;
+
+// /komitmen: checklist dari "Komitmen Bersama PPK" (dokumen internal -> HANYA dokumen local:, tanpa model/cloud/Jina). Lihat komitmen.js.
+const komitmen = createKomitmen({ getIndex: () => kbIndex });
 
 const appAgent = createAppAgentWorker({
   supabase,
@@ -6083,6 +6262,10 @@ appAgent.start().catch((err) => {
   console.error("Agen Ollama aplikasi gagal start:", err instanceof Error ? err.message : String(err));
 });
 kbRetrieval?.start();
+embedWorker?.start();
+acuanLib?.start().catch((err) => {
+  console.error("Acuan publik gagal start:", err instanceof Error ? err.message : String(err));
+});
 docFolder?.start().catch((err) => {
   console.error("Dokumen lokal gagal start:", err instanceof Error ? err.message : String(err));
 });
@@ -6095,7 +6278,9 @@ for (const sig of ["SIGINT", "SIGTERM"]) {
   process.on(sig, () => {
     kbIngest?.stop();
     docFolder?.stop();
+    acuanLib?.stop();
     kbRetrieval?.stop();
+    embedWorker?.stop();
     appAgent
       .stop()
       .catch(() => {})

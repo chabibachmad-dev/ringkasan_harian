@@ -1,0 +1,23 @@
+PATCH AYYUBI -- CHANNEL YOUTUBE EDUKASI (SD 1-6)
+=================================================
+Zip ini KUMULATIF: sudah memuat semua isi patch-ayyubi-baca-dokumen.zip dan patch-jina-status.zip
+(Jina, SBM, /komitmen, acuan publik, /status Jina). Cukup pasang zip ini saja, tidak perlu dua yang lain.
+
+Berkas BARU (di wa-bot/):
+  edu-bank.js            bank soal matematika (dihitung program) + pemilih materi + kartu sains
+  data/edu-sains.json    24 kartu fakta IPA / pengetahuan umum
+  edu-board.js           perakit video papan tulis (ffmpeg), sampul, bab
+  edu-channel.js         alur: buat harian -> setujui di Telegram -> unggah terjadwal
+  youtube.js             klien YouTube Data API v3 (unggah terjadwal)
+  youtube-auth.mjs       sekali jalan: membuat YT_REFRESH_TOKEN langsung ke .env
+  test-edu-bank.mjs  test-edu-board.mjs  test-edu-channel.mjs  test-youtube.mjs
+Berkas DIUBAH: index.js, telegram.js (/edu + tombol), voice-output.js (speakWav), package.json (skrip test),
+               README.md, .env.example, .gitignore
+
+Pasang di hub:
+  1. Timpa berkas di folder wa-bot (zip ini berisi path relatif dari wa-bot/).
+  2. sudo apt install ffmpeg fonts-dejavu-core    (bila belum)
+  3. node --check index.js && node --check telegram.js && npm test
+  4. Ikuti README bagian "Channel YouTube edukasi" (Google Cloud -> node youtube-auth.mjs).
+  5. Isi EDU_ENABLED=true di .env, restart bot, uji: /edu youtube  lalu  /edu buat
+Catatan: tanpa EDU_ENABLED=true fitur ini diam sepenuhnya. Kunci hanya di .env; jangan dikirim ke chat.

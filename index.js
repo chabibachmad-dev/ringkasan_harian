@@ -64,6 +64,8 @@ import { createTelegram, readTelegramConfig } from "./telegram.js";
 import { createTranscriber, describeError, readSttConfig, voiceToCommand } from "./voice-input.js";
 import { audioOf, createWaTutor, readWaVoiceConfig } from "./wa-voice.js";
 import { createSpeaker, readTtsConfig } from "./voice-output.js";
+import { createEdu, createEduDefaults, readEduConfig } from "./edu-channel.js";
+import { createYoutube, readYoutubeConfig } from "./youtube.js";
 import { buildTutorSystemPrompt, buildTutorUserPrompt, parseTutorReply } from "./tutor.js";
 import { createAppAgentWorker } from "./app-agent.js";
 import { createFallbackChain, readFallbackConfig } from "./llm-fallback.js";
@@ -4923,6 +4925,7 @@ async function buildBotStatusText() {
   lines.push(`📅 Agenda grup: ${agenda.describe()}`);
   lines.push(`💾 Cadangan: ${backup.describe()}`);
   lines.push(`🩺 Kesehatan: ${health.describe()}`);
+  lines.push(`🎓 Channel edukasi: ${edu.describe()}`);
   lines.push(`✈️ Telegram: ${telegram.describe()}`);
   lines.push(`🎤 Pesan suara Telegram: ${transcriber.available() ? `aktif (${sttConfig.groqKeys.length ? `Groq Whisper ${sttConfig.groqModel}` : ""}${sttConfig.groqKeys.length && sttConfig.geminiKeys.length ? " + " : ""}${sttConfig.geminiKeys.length ? "cadangan Gemini" : ""})` : "mati (isi GROQ_API_KEYS atau GEMINI_API_KEYS)"}`);
   {
@@ -5850,6 +5853,17 @@ async function handleWaDokumenCommand(sock, jid, text) {
   return true;
 }
 
+// Channel YouTube edukasi SD (edu-channel.js): video papan tulis dibuat otomatis, kamu setujui di Telegram, lalu diunggah terjadwal.
+const eduConfig = readEduConfig(process.env);
+const youtube = createYoutube({ config: readYoutubeConfig(process.env) });
+const edu = createEdu({
+  config: eduConfig,
+  speaker,
+  ...createEduDefaults({ config: eduConfig }),
+  youtube,
+  sendText: (text, opts) => telegram.sendOwner(text, opts),
+  sendFile: (file, caption) => telegram.sendOwnerFiles([file], caption)
+});
 const telegram = createTelegram({
   config: readTelegramConfig(process.env),
   deps: {
@@ -5864,6 +5878,7 @@ const telegram = createTelegram({
     regNow: (opts) => regMonitor.runNow(opts),
     status: () => buildBotStatusText(),
     localDocs,
+    edu,
     ops,
     stickers: {
       add: async (buffer) => {
@@ -6030,6 +6045,10 @@ async function mirrorToTelegram(text) {
     return false;
   }
 }
+setInterval(() => {
+  edu.check().catch(() => {});
+}, 60_000);
+console.log(`🎓 Channel edukasi: ${edu.describe()}`);
 telegram
   .start()
   .then((connected) => (connected ? ops.announceStartup((chatId, text) => telegram.send(chatId, text)) : false))

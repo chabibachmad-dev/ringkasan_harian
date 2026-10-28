@@ -292,5 +292,16 @@ export function createSpeaker({ config = readTtsConfig(), fetchImpl = globalThis
     return { ogg, text: say };
   }
 
-  return { available, speak, checkFfmpeg, resetFfmpegCheck: () => (ffmpegState = null), ffmpegState: () => ffmpegState };
+  /**
+   * Teks -> WAV mentah (Buffer) untuk dirakit ke video (channel edukasi). Tidak diubah ke OGG. opts = { voice, style }.
+   * Melempar Error dengan .quota = true bila kuota habis. null bila tak ada yang bisa diucapkan.
+   */
+  async function speakWav(text, opts = {}) {
+    const say = speakableText(text, config.maxChars);
+    if (!say) return null;
+    const wav = await synthWav(say, opts);
+    return { wav, text: say };
+  }
+
+  return { available, speak, speakWav, checkFfmpeg, resetFfmpegCheck: () => (ffmpegState = null), ffmpegState: () => ffmpegState };
 }

@@ -1,0 +1,669 @@
+<!doctype html>
+<html lang="id">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>Daily Insider</title>
+    <meta name="description" content="Asisten AI pribadi untuk ngobrol kapan saja." />
+
+    <link rel="manifest" href="manifest.webmanifest" />
+    <meta id="meta-theme-color" name="theme-color" content="#ffffff" />
+
+    <!-- Dukungan "Add to Home Screen" di iOS/Safari -->
+    <link rel="apple-touch-icon" href="icons/icon-192.png" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Daily Insider" />
+
+    <link rel="icon" href="icons/icon-192.png" />
+
+    <!-- Font monospace ala e-ink/"paper" (mengikuti gaya Snail OS) -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Amiri+Quran&family=Ubuntu+Mono:wght@400;700&display=swap"
+      rel="stylesheet"
+    />
+
+    <script type="module" crossorigin src="/assets/index-Bq3ek7yC.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-ntmixWBS.css">
+  </head>
+  <body>
+    <div id="app">
+      <!-- Beranda: menu daftar + thumbnail ke semua fitur -->
+      <section id="screen-home" class="screen">
+        <header class="topbar">
+          <h1 class="brand"><span data-i18n="brand">Daily Insider</span></h1>
+          <div class="topbar-actions">
+            <button id="lang-toggle" class="icon-btn" title="Ganti bahasa / Switch language" aria-label="Ganti bahasa">
+              <span id="lang-label">ID</span>
+            </button>
+            <button id="theme-toggle" class="icon-btn" title="Ganti tema" aria-label="Ganti tema">
+              <span id="theme-icon"></span>
+            </button>
+            <button id="settings-toggle" class="icon-btn" title="Pengaturan" aria-label="Pengaturan">
+              <span id="settings-toggle-icon"></span>
+            </button>
+          </div>
+        </header>
+
+        <main class="content">
+          <nav class="menu-grid" aria-label="Menu">
+            <button type="button" id="menu-chat" class="menu-item">
+              <span id="menu-chat-icon" class="menu-thumb"></span>
+              <span class="menu-caption" data-i18n="menu_s_chat">Chat AI</span>
+            </button>
+            <button type="button" id="menu-whatsapp" class="menu-item">
+              <span id="menu-whatsapp-icon" class="menu-thumb"></span>
+              <span class="menu-caption" data-i18n="menu_s_whatsapp">WhatsApp</span>
+            </button>
+            <button type="button" id="menu-prayer" class="menu-item">
+              <span id="menu-prayer-icon" class="menu-thumb"></span>
+              <span class="menu-caption" data-i18n="menu_s_prayer">Shalat</span>
+            </button>
+            <button type="button" id="menu-quran" class="menu-item">
+              <span id="menu-quran-icon" class="menu-thumb"></span>
+              <span class="menu-caption" data-i18n="menu_s_quran">Al-Qur'an</span>
+            </button>
+            <button type="button" id="menu-kb" class="menu-item">
+              <span id="menu-kb-icon" class="menu-thumb"></span>
+              <span class="menu-caption" data-i18n="menu_s_kb">Dokumen</span>
+            </button>
+            <button type="button" id="menu-qr" class="menu-item">
+              <span id="menu-qr-icon" class="menu-thumb"></span>
+              <span class="menu-caption" data-i18n="menu_s_qr">Template WA</span>
+            </button>
+            <button type="button" id="menu-keys" class="menu-item">
+              <span id="menu-keys-icon" class="menu-thumb"></span>
+              <span class="menu-caption" data-i18n="menu_s_keys">Status</span>
+            </button>
+            <button type="button" id="menu-about" class="menu-item">
+              <span id="menu-about-icon" class="menu-thumb"></span>
+              <span class="menu-caption" data-i18n="menu_s_about">Info</span>
+            </button>
+          </nav>
+        </main>
+
+        <footer class="footer">
+          <p data-i18n="footer_note">Asisten AI pribadi kamu.</p>
+        </footer>
+      </section>
+
+      <!-- Layar 1: daftar tanggal, mirip daftar chat WhatsApp -->
+      <section id="screen-list" class="screen" hidden>
+        <header class="topbar detail-topbar">
+          <div class="detail-topbar-row">
+            <button id="chats-back-btn" class="icon-btn" title="Kembali" aria-label="Kembali">←</button>
+            <h1 class="detail-title" data-i18n="menu_chat">Chat dengan AI</h1>
+          </div>
+        </header>
+
+        <main class="content">
+          <div class="search-bar">
+            <input
+              id="chat-search-input"
+              type="search"
+              autocomplete="off"
+              data-i18n-placeholder="search_placeholder"
+              placeholder="Cari obrolan…"
+            />
+          </div>
+
+          <section class="chat-list-section">
+            <div id="chat-list" class="chat-list"></div>
+            <div id="chat-list-status" class="status-text" hidden></div>
+            <p id="chat-list-retention-note" class="chat-retention-note" hidden></p>
+          </section>
+        </main>
+
+        <footer class="footer">
+          <p data-i18n="footer_note">
+            Asisten AI pribadi kamu.
+          </p>
+          <p id="token-usage-note" class="token-usage-note" hidden></p>
+        </footer>
+
+        <button type="button" id="new-chat-fab" class="fab" title="Obrolan baru" aria-label="Obrolan baru">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M12 5v14M5 12h14"></path>
+          </svg>
+        </button>
+      </section>
+
+      <!-- Layar 2: detail satu tanggal -- ringkasan berita tampil sebagai pesan pertama di obrolan -->
+      <section id="screen-detail" class="screen" hidden>
+        <header class="topbar detail-topbar">
+          <div class="detail-topbar-row">
+            <button id="back-btn" class="icon-btn" title="Kembali" aria-label="Kembali">←</button>
+            <h1 id="detail-date-title" class="detail-title"></h1>
+            <span id="detail-saved-badge" class="chat-saved-badge" hidden></span>
+            <span id="detail-kb-badge" class="chat-kb-badge" hidden></span>
+            <button id="chat-search-toggle" class="icon-btn" title="Cari di obrolan ini" aria-label="Cari di obrolan ini">
+              <span id="chat-search-toggle-icon"></span>
+            </button>
+          </div>
+          <div id="chat-search-bar" class="chat-search-bar" hidden>
+            <input
+              id="chat-in-search-input"
+              type="search"
+              autocomplete="off"
+              data-i18n-placeholder="in_chat_search_placeholder"
+              placeholder="Cari di obrolan ini…"
+            />
+            <span id="chat-search-count" class="chat-search-count"></span>
+            <button type="button" id="chat-search-prev" class="icon-btn icon-btn--small" title="Sebelumnya" aria-label="Sebelumnya">
+              <span id="chat-search-prev-icon"></span>
+            </button>
+            <button type="button" id="chat-search-next" class="icon-btn icon-btn--small" title="Berikutnya" aria-label="Berikutnya">
+              <span id="chat-search-next-icon"></span>
+            </button>
+            <button type="button" id="chat-search-close" class="icon-btn icon-btn--small" title="Tutup pencarian" aria-label="Tutup pencarian">
+              <span id="chat-search-close-icon"></span>
+            </button>
+          </div>
+        </header>
+
+        <main class="content">
+          <section id="chat-section" class="chat-card">
+            <div id="chat-messages" class="chat-messages">
+              <div id="chat-thread"></div>
+            </div>
+          </section>
+        </main>
+
+        <div id="chat-input-bar" class="chat-input-bar">
+          <div id="chat-status" class="status-text" hidden></div>
+
+          <div id="chat-locked-bar" class="chat-locked-bar" hidden>
+            <button type="button" id="chat-unlock-btn" class="chat-unlock-btn">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <rect x="4" y="11" width="16" height="9" rx="1.5"></rect>
+                <path d="M8 11V7a4 4 0 0 1 8 0v4"></path>
+              </svg>
+              <span data-i18n="chat_unlock_btn">Buka Diskusi</span>
+            </button>
+          </div>
+
+          <div id="chat-agent-bar" class="chat-agent-bar" role="radiogroup" data-i18n-aria-label="agent_label" aria-label="Agen AI" hidden>
+            <button type="button" class="chat-agent-pill" data-agent="auto" role="radio" aria-checked="true" data-i18n-title="agent_auto_hint" title="Gemini dulu; kalau gagal otomatis pakai Ollama">
+              <span data-i18n="agent_auto">Auto</span>
+            </button>
+            <button type="button" class="chat-agent-pill" data-agent="gemini" role="radio" aria-checked="false" data-i18n-title="agent_gemini_hint" title="Gemini (cloud, pakai API key)">
+              <span data-i18n="agent_gemini">Gemini</span>
+            </button>
+            <button type="button" class="chat-agent-pill" data-agent="ollama" role="radio" aria-checked="false" data-i18n-title="agent_ollama_hint" title="Ollama (model lokal di laptop, cocok untuk analisis dokumen)">
+              <span class="chat-agent-dot" aria-hidden="true"></span>
+              <span data-i18n="agent_ollama">Ollama</span>
+            </button>
+          </div>
+
+          <div id="chat-attachments" class="chat-attachments" hidden></div>
+
+          <form id="chat-form" class="chat-form" hidden>
+            <button type="button" id="chat-attach-btn" class="chat-attach-btn" aria-label="Lampirkan file" data-i18n-aria-label="attach_btn" data-i18n-title="attach_btn" title="Lampirkan file"></button>
+            <input type="file" id="chat-attach-input" accept=".pdf,.txt,.md,.csv,.json,.log,text/plain,application/pdf" hidden />
+            <textarea id="chat-input" rows="1"></textarea>
+            <button type="submit" id="chat-send-btn" class="chat-send-btn" aria-label="Kirim" title="Kirim">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                <path d="M2 21l21-9L2 3v7l15 2-15 2z"></path>
+              </svg>
+            </button>
+          </form>
+        </div>
+
+        <button
+          type="button"
+          id="scroll-bottom-btn"
+          class="scroll-bottom-btn"
+          title="Ke pesan terbaru"
+          aria-label="Ke pesan terbaru"
+        >
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M12 5v14M5 12l7 7 7-7"></path>
+          </svg>
+        </button>
+      </section>
+
+      <!-- Layar WhatsApp 1: daftar obrolan WA -- lihat wa-bot/README.md &
+           Edge Function `whatsapp`. Dibuka dari menu Pengaturan > WhatsApp. -->
+      <section id="screen-wa-list" class="screen" hidden>
+        <header class="topbar detail-topbar">
+          <div class="detail-topbar-row">
+            <button id="wa-list-back-btn" class="icon-btn" title="Kembali" aria-label="Kembali">←</button>
+            <h1 class="detail-title" data-i18n="wa_list_title">WhatsApp</h1>
+          </div>
+        </header>
+
+        <main class="content">
+          <section class="chat-list-section">
+            <div id="wa-list" class="chat-list"></div>
+            <div id="wa-list-status" class="status-text" hidden></div>
+          </section>
+        </main>
+
+        <button type="button" id="wa-new-chat-fab" class="fab" title="Mulai obrolan baru" aria-label="Mulai obrolan baru">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M12 5v14M5 12h14"></path>
+          </svg>
+        </button>
+      </section>
+
+      <!-- Layar WhatsApp 2: isi satu obrolan WA + balas -->
+      <section id="screen-wa-detail" class="screen" hidden>
+        <header class="topbar detail-topbar">
+          <div class="detail-topbar-row">
+            <button id="wa-detail-back-btn" class="icon-btn" title="Kembali" aria-label="Kembali">←</button>
+            <h1 id="wa-detail-title" class="detail-title"></h1>
+            <button id="wa-auto-reply-toggle" class="icon-btn" title="Auto-reply" aria-label="Auto-reply">
+              <span id="wa-auto-reply-toggle-icon"></span>
+            </button>
+          </div>
+        </header>
+
+        <main class="content">
+          <section class="chat-card">
+            <div class="chat-messages">
+              <div id="wa-thread"></div>
+            </div>
+          </section>
+        </main>
+
+        <div class="chat-input-bar">
+          <div id="wa-status" class="status-text" hidden></div>
+          <form id="wa-form" class="chat-form">
+            <textarea id="wa-input" rows="1"></textarea>
+            <button type="submit" id="wa-send-btn" class="chat-send-btn" aria-label="Kirim" title="Kirim">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                <path d="M2 21l21-9L2 3v7l15 2-15 2z"></path>
+              </svg>
+            </button>
+          </form>
+        </div>
+      </section>
+
+      <!-- Layar Jadwal Shalat: dihitung lokal (metode Kemenag RI) dari lokasi GPS. -->
+      <section id="screen-prayer" class="screen" hidden>
+        <header class="topbar detail-topbar">
+          <div class="detail-topbar-row">
+            <button id="prayer-back-btn" class="icon-btn" title="Kembali" aria-label="Kembali">←</button>
+            <h1 class="detail-title" data-i18n="prayer_title">Jadwal Shalat</h1>
+            <button id="prayer-refresh-btn" class="icon-btn" title="Perbarui lokasi" aria-label="Perbarui lokasi"><span id="prayer-refresh-icon"></span></button>
+          </div>
+        </header>
+        <main class="content" id="prayer-body"></main>
+      </section>
+
+      <!-- Layar Al-Qur'an: beranda (terakhir dibaca, surah/juz/bookmark) + pembaca per halaman mushaf. -->
+      <section id="screen-quran" class="screen" hidden>
+        <header class="topbar detail-topbar">
+          <div class="detail-topbar-row">
+            <button id="quran-back-btn" class="icon-btn" title="Kembali" aria-label="Kembali">←</button>
+            <h1 id="quran-title" class="detail-title" data-i18n="quran_title">Al-Qur'an</h1>
+            <span id="quran-font-controls" class="quran-font-controls" hidden>
+              <button type="button" id="quran-style-btn" class="icon-btn icon-btn--small" aria-label="Desain huruf" title="Desain huruf">ق</button>
+              <button type="button" id="quran-font-minus" class="icon-btn icon-btn--small" aria-label="Perkecil huruf" title="Perkecil huruf">A−</button>
+              <button type="button" id="quran-font-plus" class="icon-btn icon-btn--small" aria-label="Perbesar huruf" title="Perbesar huruf">A+</button>
+            </span>
+          </div>
+          <!-- Kontrol beranda Qur'an (terakhir dibaca, lompat halaman, tab, cari) -- ikut "membeku" di atas karena berada di dalam header sticky. -->
+          <div id="quran-home-controls" class="quran-controls" hidden></div>
+        </header>
+        <main class="content">
+          <div id="quran-home" class="quran-home"></div>
+          <div id="quran-reader" class="quran-reader" hidden>
+            <article id="quran-page-body" class="quran-page"></article>
+          </div>
+        </main>
+        <div id="quran-reader-bar" class="quran-bars" hidden>
+          <div id="quran-actions" class="quran-actions" hidden>
+            <span id="quran-actions-label" class="quran-actions-label"></span>
+            <button type="button" id="quran-act-tafsir" class="quran-act quran-act--primary" data-i18n="quran_tafsir">Terjemah &amp; Tafsir</button>
+            <button type="button" id="quran-act-bookmark" class="quran-act"></button>
+            <button type="button" id="quran-act-last" class="quran-act" data-i18n="quran_mark_last">Terakhir dibaca</button>
+            <button type="button" id="quran-act-copy" class="quran-act" data-i18n="quran_copy">Salin</button>
+            <button type="button" id="quran-act-close" class="quran-act" data-i18n="quran_close">Tutup</button>
+          </div>
+          <div class="quran-nav">
+            <button type="button" id="quran-nav-prev" class="secondary-btn" data-i18n="quran_prev">‹ Sebelumnya</button>
+            <span class="quran-nav-page">
+              <input id="quran-page-input" type="number" inputmode="numeric" min="1" max="604" aria-label="Halaman" />
+              <span id="quran-page-total"></span>
+            </span>
+            <button type="button" id="quran-nav-next" class="secondary-btn" data-i18n="quran_next">Berikutnya ›</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- Popup kode akses -->
+      <dialog id="chat-code-dialog" class="chat-code-dialog">
+        <form id="chat-code-form" class="chat-code-form-modal">
+          <h2 data-i18n="chat_code_title">Kode Akses</h2>
+          <p id="chat-locked-text" data-i18n="chat_code_prompt">
+            Fitur ini pribadi. Masukkan kode akses untuk membukanya.
+          </p>
+          <input id="chat-code-input" type="password" inputmode="numeric" autocomplete="off" />
+          <p id="chat-code-error" class="chat-code-error" hidden></p>
+          <div class="chat-code-dialog-actions">
+            <button type="button" id="chat-code-cancel" class="secondary-btn" data-i18n="chat_code_cancel">Batal</button>
+            <button type="submit" class="primary-btn" data-i18n="chat_code_submit">Buka</button>
+          </div>
+        </form>
+      </dialog>
+
+      <!-- Popup mulai obrolan WA baru dari aplikasi (bukan nunggu pesan masuk
+           duluan) -- lihat wa-new-chat-fab & handler-nya di main.js. Nomornya
+           dinormalisasi jadi JID (mis. "6281234567890@s.whatsapp.net") lalu
+           pesan pertamanya dikirim lewat action "send" yang sama dengan
+           balasan biasa -- Edge Function-nya memang sudah generik (terima
+           jid apa saja), jadi tidak perlu endpoint baru. -->
+      <dialog id="wa-new-chat-dialog" class="chat-code-dialog">
+        <form id="wa-new-chat-form" class="chat-code-form-modal">
+          <h2 data-i18n="wa_new_chat_title">Obrolan WhatsApp Baru</h2>
+          <p data-i18n="wa_new_chat_phone_label">Nomor WhatsApp</p>
+          <input
+            id="wa-new-chat-phone"
+            type="tel"
+            inputmode="tel"
+            autocomplete="off"
+            data-i18n-placeholder="wa_new_chat_phone_placeholder"
+            placeholder="08561234567 / +6285612345xx"
+          />
+          <p data-i18n="wa_new_chat_message_label">Pesan pertama</p>
+          <textarea
+            id="wa-new-chat-message"
+            rows="3"
+            data-i18n-placeholder="wa_new_chat_message_placeholder"
+            placeholder="Tulis pesan pertama…"
+          ></textarea>
+          <p id="wa-new-chat-error" class="chat-code-error" hidden></p>
+          <div class="chat-code-dialog-actions">
+            <button type="button" id="wa-new-chat-cancel" class="secondary-btn" data-i18n="chat_code_cancel">Batal</button>
+            <button type="submit" class="primary-btn" data-i18n="wa_new_chat_submit">Mulai & Kirim</button>
+          </div>
+        </form>
+      </dialog>
+
+      <!-- Menu titik-3 per-chat: sematkan / ubah judul / download PDF / detail / hapus -->
+      <dialog id="chat-options-dialog" class="sheet-dialog">
+        <div class="sheet-card">
+          <p id="chat-options-title" class="sheet-title"></p>
+
+          <button type="button" id="chat-options-pin" class="sheet-action">
+            <span id="chat-options-pin-icon" class="sheet-action-icon"></span>
+            <span id="chat-options-pin-label"></span>
+          </button>
+          <button type="button" id="chat-options-save" class="sheet-action">
+            <span id="chat-options-save-icon" class="sheet-action-icon"></span>
+            <span id="chat-options-save-label"></span>
+          </button>
+          <button type="button" id="chat-options-kb" class="sheet-action">
+            <span id="chat-options-kb-icon" class="sheet-action-icon"></span>
+            <span id="chat-options-kb-label"></span>
+          </button>
+          <button type="button" id="chat-options-rename" class="sheet-action">
+            <span id="chat-options-rename-icon" class="sheet-action-icon"></span>
+            <span data-i18n="chat_options_rename">Ubah judul</span>
+          </button>
+          <button type="button" id="chat-options-pdf" class="sheet-action">
+            <span id="chat-options-pdf-icon" class="sheet-action-icon"></span>
+            <span data-i18n="chat_options_pdf">Download PDF</span>
+          </button>
+          <button type="button" id="chat-options-detail" class="sheet-action">
+            <span id="chat-options-detail-icon" class="sheet-action-icon"></span>
+            <span data-i18n="chat_options_detail">Detail</span>
+          </button>
+          <button type="button" id="chat-options-delete" class="sheet-action sheet-action--danger">
+            <span id="chat-options-delete-icon" class="sheet-action-icon"></span>
+            <span data-i18n="chat_options_delete">Hapus chat</span>
+          </button>
+
+          <button type="button" id="chat-options-cancel" class="sheet-cancel" data-i18n="chat_options_cancel">Batal</button>
+        </div>
+      </dialog>
+
+      <!-- Menu titik-3 per-PESAN di dalam obrolan: salin / hapus pesan.
+           "Hapus pesan" cuma ditampilkan (lihat main.js) kalau pesannya dari
+           saya sendiri -- balasan AI cuma bisa disalin, tidak bisa dihapus
+           satuan (server juga menolak permintaan itu). -->
+      <dialog id="message-options-dialog" class="sheet-dialog">
+        <div class="sheet-card">
+          <button type="button" id="message-options-copy" class="sheet-action">
+            <span id="message-options-copy-icon" class="sheet-action-icon"></span>
+            <span data-i18n="chat_msg_options_copy">Salin pesan</span>
+          </button>
+          <button type="button" id="message-options-delete" class="sheet-action sheet-action--danger">
+            <span id="message-options-delete-icon" class="sheet-action-icon"></span>
+            <span data-i18n="chat_msg_options_delete">Hapus pesan</span>
+          </button>
+
+          <button type="button" id="message-options-cancel" class="sheet-cancel" data-i18n="chat_msg_options_cancel">Batal</button>
+        </div>
+      </dialog>
+
+      <!-- Popup ubah judul chat -->
+      <dialog id="rename-dialog" class="chat-code-dialog">
+        <form id="rename-form" class="chat-code-form-modal">
+          <h2 data-i18n="rename_title">Ubah Judul</h2>
+          <input
+            id="rename-input"
+            type="text"
+            maxlength="80"
+            autocomplete="off"
+            data-i18n-placeholder="rename_placeholder"
+            placeholder="Judul chat"
+          />
+          <div class="chat-code-dialog-actions">
+            <button type="button" id="rename-cancel" class="secondary-btn" data-i18n="rename_cancel">Batal</button>
+            <button type="submit" class="primary-btn" data-i18n="rename_save">Simpan</button>
+          </div>
+        </form>
+      </dialog>
+
+      <!-- Popup detail chat: total percakapan, mulai chat, chat terakhir -->
+      <dialog id="chat-detail-dialog" class="chat-code-dialog">
+        <div class="chat-code-form-modal">
+          <h2 id="chat-detail-title"></h2>
+          <p id="chat-detail-empty" data-i18n="detail_none" hidden>Belum ada percakapan di diskusi ini.</p>
+          <div id="chat-detail-stats" class="chat-detail-stats">
+            <div class="chat-detail-stat">
+              <span class="chat-detail-stat-label" data-i18n="detail_total">Total percakapan</span>
+              <span id="chat-detail-total" class="chat-detail-stat-value"></span>
+            </div>
+            <div class="chat-detail-stat">
+              <span class="chat-detail-stat-label" data-i18n="detail_start">Mulai chat</span>
+              <span id="chat-detail-start" class="chat-detail-stat-value"></span>
+            </div>
+            <div class="chat-detail-stat">
+              <span class="chat-detail-stat-label" data-i18n="detail_last">Chat terakhir</span>
+              <span id="chat-detail-last" class="chat-detail-stat-value"></span>
+            </div>
+          </div>
+          <div class="chat-code-dialog-actions">
+            <button type="button" id="chat-detail-close" class="primary-btn" data-i18n="detail_close">Tutup</button>
+          </div>
+        </div>
+      </dialog>
+
+      <!-- Menu Pengaturan: dokumen pengetahuan / ubah kode / keluar chat / detail aplikasi -->
+      <dialog id="settings-dialog" class="sheet-dialog">
+        <div class="sheet-card">
+          <p class="sheet-title" data-i18n="settings_title">Pengaturan</p>
+
+          <button type="button" id="settings-change-code-btn" class="sheet-action">
+            <span id="settings-change-code-icon" class="sheet-action-icon"></span>
+            <span data-i18n="settings_change_code">Ubah kode chat</span>
+          </button>
+          <button type="button" id="settings-logout-btn" class="sheet-action">
+            <span id="settings-logout-icon" class="sheet-action-icon"></span>
+            <span data-i18n="settings_logout">Keluar chat</span>
+          </button>
+
+          <button type="button" id="settings-cancel-btn" class="sheet-cancel" data-i18n="chat_options_cancel">Batal</button>
+        </div>
+      </dialog>
+
+      <!-- Dialog Dokumen Pengetahuan: upload PDF peraturan/referensi supaya AI
+           baca dari sini duluan, + daftar dokumen yang sudah diupload. -->
+      <!-- Pilihan desain huruf Qur'an -->
+      <dialog id="quran-style-dialog" class="kb-dialog">
+        <div class="kb-dialog-card">
+          <h2 data-i18n="quran_style_title">Desain huruf Qur'an</h2>
+          <p class="kb-intro" data-i18n="quran_style_intro">Pilih tampilan huruf untuk membaca. Pilihan diingat di perangkat ini.</p>
+          <div id="quran-style-options" class="quran-style-options"></div>
+          <div class="chat-code-dialog-actions">
+            <button type="button" id="quran-style-close" class="primary-btn" data-i18n="quran_close">Tutup</button>
+          </div>
+        </div>
+      </dialog>
+
+      <!-- Terjemahan & tafsir satu ayat (halaman Qur'an) -->
+      <dialog id="quran-tafsir-dialog" class="kb-dialog">
+        <div class="kb-dialog-card quran-tafsir-card">
+          <h2 id="quran-tafsir-title"></h2>
+          <p id="quran-tafsir-arabic" class="quran-tafsir-arabic" lang="ar" dir="rtl"></p>
+          <div id="quran-tafsir-body" class="quran-tafsir-body"></div>
+          <div class="chat-code-dialog-actions">
+            <button type="button" id="quran-tafsir-retry" class="secondary-btn" hidden data-i18n="quran_tafsir_retry">Coba lagi</button>
+            <button type="button" id="quran-tafsir-close" class="primary-btn" data-i18n="quran_close">Tutup</button>
+          </div>
+        </div>
+      </dialog>
+
+      <dialog id="kb-dialog" class="kb-dialog">
+        <div class="kb-dialog-card">
+          <h2 data-i18n="kb_title">Dokumen Pengetahuan</h2>
+          <p class="kb-intro" data-i18n="kb_intro">
+            Upload PDF (atau .txt/.md/.csv) peraturan atau referensi lain — utuh, tanpa batas jumlah halaman. Laptop
+            mengubahnya jadi teks dan membuat indeks pencarian supaya AI bisa menjawab dari dokumen ini duluan.
+          </p>
+
+          <form id="kb-upload-form" class="kb-upload-form">
+            <input
+              id="kb-title-input"
+              type="text"
+              maxlength="150"
+              autocomplete="off"
+              data-i18n-placeholder="kb_title_placeholder"
+              placeholder="Judul dokumen (mis. Permen Keuangan No. 1 Tahun 2024)"
+            />
+            <input id="kb-file-input" type="file" accept="application/pdf,.pdf,.txt,.md,.csv,text/plain" />
+            <button type="submit" id="kb-upload-btn" class="primary-btn" data-i18n="kb_upload_btn">Upload</button>
+          </form>
+          <p id="kb-upload-status" class="kb-upload-status" hidden></p>
+
+          <div id="kb-doc-list" class="kb-doc-list"></div>
+          <p id="kb-doc-list-empty" class="status-text" data-i18n="kb_empty" hidden>Belum ada dokumen yang diupload.</p>
+
+          <div class="chat-code-dialog-actions">
+            <button type="button" id="kb-close-btn" class="primary-btn" data-i18n="detail_close">Tutup</button>
+          </div>
+        </div>
+      </dialog>
+
+      <!-- Dialog Template Jawaban WA: pesan WA masuk yang cocok dgn kata kunci
+           dijawab langsung dari template (AI tidak dipanggil). Dibaca bot
+           wa-bot/ dari tabel wa_quick_replies. -->
+      <dialog id="qr-dialog" class="kb-dialog">
+        <div class="kb-dialog-card">
+          <h2 data-i18n="qr_title">Template Jawaban WA</h2>
+          <p class="kb-intro" data-i18n="qr_intro">
+            Pesan WhatsApp masuk yang mengandung salah satu kata kunci akan dijawab langsung dengan template ini, tanpa
+            memanggil AI -- lebih cepat, hemat kuota, dan jawabannya selalu sama. Hanya berlaku untuk pesan pendek.
+          </p>
+
+          <form id="qr-form" class="kb-upload-form">
+            <input
+              id="qr-title-input"
+              type="text"
+              maxlength="100"
+              autocomplete="off"
+              data-i18n-placeholder="qr_title_placeholder"
+              placeholder="Nama template (mis. Jam layanan)"
+            />
+            <input
+              id="qr-keywords-input"
+              type="text"
+              autocomplete="off"
+              data-i18n-placeholder="qr_keywords_placeholder"
+              placeholder="Kata kunci, pisahkan koma"
+            />
+            <textarea
+              id="qr-reply-input"
+              class="qr-reply-input"
+              rows="4"
+              maxlength="3000"
+              data-i18n-placeholder="qr_reply_placeholder"
+              placeholder="Isi jawaban yang dikirim otomatis…"
+            ></textarea>
+            <div class="chat-code-dialog-actions">
+              <button type="button" id="qr-cancel-edit-btn" class="secondary-btn" data-i18n="qr_cancel_edit" hidden>Batal ubah</button>
+              <button type="submit" id="qr-save-btn" class="primary-btn" data-i18n="qr_save_btn">Simpan</button>
+            </div>
+          </form>
+          <p id="qr-status" class="kb-upload-status" hidden></p>
+
+          <div id="qr-list" class="kb-doc-list qr-list"></div>
+          <p id="qr-list-empty" class="status-text" data-i18n="qr_empty" hidden>Belum ada template jawaban.</p>
+
+          <div class="chat-code-dialog-actions">
+            <button type="button" id="qr-close-btn" class="primary-btn" data-i18n="detail_close">Tutup</button>
+          </div>
+        </div>
+      </dialog>
+
+      <!-- Dialog Status API Gemini: pemakaian & status habis/aktif tiap API
+           key hari ini (dicatat bot wa-bot/ & Edge Function chat). -->
+      <dialog id="keys-dialog" class="kb-dialog">
+        <div class="kb-dialog-card">
+          <h2 data-i18n="sys_title">Status Sistem</h2>
+          <p class="kb-intro" data-i18n="sys_intro">Kondisi bot di laptop, WhatsApp, Ollama, dan antreannya.</p>
+          <div id="sys-status" class="sys-status"></div>
+
+          <h3 class="sys-subtitle" data-i18n="sys_gemini">Kuota API Gemini</h3>
+          <p class="kb-intro" data-i18n="keys_intro">
+            Pemakaian tiap API key hari ini, dihitung dari panggilan yang tercatat di sistem ini (bot WhatsApp + chat di
+            aplikasi). Angkanya perkiraan -- pemakaian di luar aplikasi ini tidak ikut terhitung.
+          </p>
+
+          <div id="keys-list" class="kb-doc-list keys-list"></div>
+          <p id="keys-status" class="status-text" hidden></p>
+          <p id="keys-reset-note" class="kb-doc-meta"></p>
+
+          <div class="chat-code-dialog-actions">
+            <button type="button" id="keys-refresh-btn" class="secondary-btn" data-i18n="keys_refresh">Muat ulang</button>
+            <button type="button" id="keys-close-btn" class="primary-btn" data-i18n="detail_close">Tutup</button>
+          </div>
+        </div>
+      </dialog>
+
+      <!-- Dialog Detail Aplikasi -->
+      <dialog id="about-dialog" class="chat-code-dialog">
+        <div class="chat-code-form-modal">
+          <h2 data-i18n="about_title">Detail Aplikasi</h2>
+          <p data-i18n="about_desc">
+            Asisten AI pribadi dengan riwayat obrolan, sinkron lintas perangkat lewat kode akses yang sama, export PDF,
+            dan Dokumen Pengetahuan (PDF referensi) sendiri.
+          </p>
+          <div class="chat-detail-stats">
+            <div class="chat-detail-stat">
+              <span class="chat-detail-stat-label" data-i18n="about_chats_label">Obrolan tersimpan (HP ini)</span>
+              <span id="about-chats-count" class="chat-detail-stat-value"></span>
+            </div>
+            <div class="chat-detail-stat">
+              <span class="chat-detail-stat-label" data-i18n="about_kb_label">Dokumen pengetahuan</span>
+              <span id="about-kb-count" class="chat-detail-stat-value"></span>
+            </div>
+            <div class="chat-detail-stat">
+              <span class="chat-detail-stat-label" data-i18n="about_code_label">Status kode akses</span>
+              <span id="about-code-status" class="chat-detail-stat-value"></span>
+            </div>
+          </div>
+          <div class="chat-code-dialog-actions">
+            <button type="button" id="about-close-btn" class="primary-btn" data-i18n="detail_close">Tutup</button>
+          </div>
+        </div>
+      </dialog>
+    </div>
+
+  </body>
+</html>

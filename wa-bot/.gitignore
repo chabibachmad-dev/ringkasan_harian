@@ -24,3 +24,6 @@ kb/
 
 # Stiker yang dipelajari bot humor (WA_STICKER_DIR)
 data-stiker/
+
+# Channel edukasi: video, suara, dan status (dibuat otomatis)
+edu-data/
