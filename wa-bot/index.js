@@ -102,6 +102,8 @@ import { createKhatamReminder } from "./khatam.js";
 import { createPriorityQueue, PRIORITY } from "./ollama-queue.js";
 import { openKbIndex } from "./kb-index.js";
 import { arsipConfig, createArsip, arsipCitationNote } from "./arsip-pdf.js";
+import { NO_FABRICATION_RULES, allowedUrlsFromContext, guardReply, isEmptyAfterGuard } from "./reply-guard.js";
+import { REPLY_GUARD_SAFE_TEXT, guardedGenerate } from "./reply-flow.js";
 import { BOS_FALLBACK, createTanyaBosGate, neutralizeOwnerMarks, ownerGroupConfig, ownerGroupNote, plainSenderName, resolveTanyaBos, tanyaBosNote } from "./owner-group.js";
 import { createJina } from "./jina.js";
 import { createSbm, loadSbmData } from "./sbm.js";
@@ -1590,7 +1592,26 @@ function buildWebQuery(userTexts) {
   return (wordCount(last) < 8 && prevUsable ? `${prev} ${last}` : last).slice(0, 200);
 }
 
-async function geminiGenerateWithRotation(
+// URL yang boleh muncul di balasan = baris "Sumber:" pada blok HASIL PENCARIAN WEB + URL yang ditulis pengguna di percakapan.
+function urlsAllowedIn(contents) {
+  const texts = (contents || []).map((c) => c?.parts?.map((x) => x?.text ?? "").join("") ?? "");
+  const userUrls = (contents || []).filter((c) => c?.role !== "model").flatMap((c) => (c?.parts?.map((x) => x?.text ?? "").join("") ?? "").match(/https?:\/\/[^\s<>()\[\]"'`]+/gi) ?? []);
+  return [...allowedUrlsFromContext(texts), ...userUrls.map((u) => u.replace(/[.,;:!?)\]}"'»”’]+$/, ""))];
+}
+
+function geminiGenerateWithRotation(systemText, contents, opts = {}) {
+  return guardedGenerate({
+    core: geminiGenerateCore,
+    extractText: extractGeminiText,
+    search: (q) => webSearch.search(q, GEMINI_WEB_MAX_RESULTS),
+    ground: (text, results) => buildGroundedUserMessage(text, [], results),
+    systemText,
+    contents,
+    opts
+  });
+}
+
+async function geminiGenerateCore(
   systemText,
   contents,
   { useSearch = true, webQuery = "", docChunks = [], pinnedDocs = false, docMiss = false, route = "", timeoutMs = GEMINI_TIMEOUT_MS_LONG } = {}
@@ -1630,12 +1651,13 @@ async function geminiGenerateWithRotation(
   // internet: tanpa ini model menjawab angka/aturan dari ingatan lamanya
   // dengan nada yakin (bisa salah/usang).
   const systemNoSearch =
-    `${systemWithDate}\n\nCATATAN: untuk balasan ini kamu hanya berpegang pada dokumen yang ada di percakapan. Untuk peraturan, tarif, angka resmi, atau hal lain yang bisa sudah berubah, JANGAN menyebut angka/aturan dengan yakin dari ingatan (angka yang tertulis di KONTEKS DOKUMEN atau ISI PDF boleh dipakai) -- katakan terus terang kamu belum bisa memastikannya dan sebut dokumen apa yang dibutuhkan (mis. PDF peraturannya, atau nomor dan tahun peraturan yang dimaksud). JANGAN pernah menyinggung internet, koneksi, pencarian online, atau gangguan teknis; jangan menyuruh cek JDIH/situs kecuali penanya memintanya.`;
+    `${systemWithDate}\n\nCATATAN: untuk balasan ini kamu hanya berpegang pada dokumen yang ada di percakapan. Untuk peraturan, tarif, angka resmi, atau hal lain yang bisa sudah berubah, JANGAN menyebut angka/aturan dengan yakin dari ingatan (angka yang tertulis di KONTEKS DOKUMEN atau ISI PDF boleh dipakai) -- katakan terus terang kamu belum bisa memastikannya dan sebut dokumen apa yang dibutuhkan (mis. PDF peraturannya, atau nomor dan tahun peraturan yang dimaksud). JANGAN pernah menyinggung internet, koneksi, pencarian online, atau gangguan teknis; jangan menyuruh cek JDIH/situs kecuali penanya memintanya.\n\n${NO_FABRICATION_RULES}`;
   const systemWithWeb =
-    `${systemWithDate}\n\nCATATAN: Google Search sedang tidak tersedia, jadi sistem mencarikan HASIL PENCARIAN WEB (judul + cuplikan, sebagian dengan baris "Sumber: URL") dan melampirkannya di pesan terakhir. Jadikan itu acuan utama untuk fakta/angka/aturan terbaru dan sebut sumbernya singkat (nama situs/judul) kalau relevan. Cuplikan sering terpotong: kalau belum cukup untuk memastikan angka atau aturan resmi, katakan terus terang dan sarankan cek sumber resmi. Boleh menyebut URL HANYA yang tertulis persis di baris "Sumber:"; jangan mengarang link/URL.`;
+    `${systemWithDate}\n\nCATATAN: Google Search sedang tidak tersedia, jadi sistem mencarikan HASIL PENCARIAN WEB (judul + cuplikan, sebagian dengan baris "Sumber: URL") dan melampirkannya di pesan terakhir. Jadikan itu acuan utama untuk fakta/angka/aturan terbaru dan sebut sumbernya singkat (nama situs/judul) kalau relevan. Cuplikan sering terpotong: kalau belum cukup untuk memastikan angka atau aturan resmi, katakan terus terang dan sarankan cek sumber resmi. Boleh menyebut URL HANYA yang tertulis persis di baris "Sumber:"; jangan mengarang link/URL.\n\n${NO_FABRICATION_RULES}`;
   // Payload jalur tanpa Google Search: dihitung malas & maksimal 1x per
   // panggilan (kalau rotasi key mengulang, Bing tidak dicari ulang).
   let noSearchPayload = null;
+  let googleGrounded = false; // true = jawaban memakai Google Search (sumbernya tidak kita pegang -> URL tidak disaring)
   const getNoSearchPayload = async () => {
     if (noSearchPayload) return noSearchPayload;
     noSearchPayload = { system: systemNoSearch, contents: withDocsContents };
@@ -1678,6 +1700,7 @@ async function geminiGenerateWithRotation(
         } else {
           try {
             data = await callGeminiWithRetry(systemWithDate, withDocsContents, true, 1, apiKey, timeoutMs);
+            googleGrounded = true;
           } catch (err) {
             // Jatah HARIAN key ini habis: coba lagi tanpa internet di key yang sama
             // percuma, langsung rotasi. (429 jenis lain, mis. limit khusus jalur
@@ -1732,7 +1755,7 @@ async function geminiGenerateWithRotation(
         attempted += 1;
         const data = await runGemini();
         console.log(`⏱️ [AI] dijawab Gemini dalam ${secs(t0)} (${chainLabel})`);
-        return Object.assign(data, { _provider: "gemini" });
+        return Object.assign(data, { _provider: "gemini", _allowedUrls: googleGrounded ? undefined : urlsAllowedIn((noSearchPayload || { contents: withDocsContents }).contents) });
       }
       // groq / openrouter ("cadangan" = semua penyedia cadangan sesuai LLM_FALLBACK_ORDER)
       if (!llmFallback.available() || (step !== "cadangan" && !llmFallback.has(step))) continue;
@@ -1750,7 +1773,7 @@ async function geminiGenerateWithRotation(
         ...(route ? { timeoutMs: 20_000, maxTries: 3 } : {})
       });
       console.log(`⏱️ [AI] dijawab ${r.provider}/${r.model} dalam ${secs(t0)} (${chainLabel}${geminiErr ? `; Gemini gagal: ${String(geminiErr.message || geminiErr).slice(0, 100)}` : ""})`);
-      return { candidates: [{ content: { parts: [{ text: r.text }] } }], usageMetadata: { totalTokenCount: 0 }, _provider: `${r.provider}/${r.model}` };
+      return { candidates: [{ content: { parts: [{ text: r.text }] } }], usageMetadata: { totalTokenCount: 0 }, _provider: `${r.provider}/${r.model}`, _allowedUrls: urlsAllowedIn(p.contents) };
     } catch (err) {
       lastErr = err;
       if (step === "gemini") geminiErr = err;
@@ -2122,6 +2145,10 @@ async function deliverAutoReplyText(sock, jid, result, logLabel = "🤖 Auto-rep
   // Tabel markdown -> tampilan yang terbaca di gelembung WhatsApp (jangan sampai perapian menggagalkan pengiriman).
   // Penanda [[TANYA_BOS]] tidak pernah boleh sampai ke WhatsApp (jalur mana pun).
   if (/\[\[\s*TANYA_BOS/i.test(result.reply)) result = { ...result, reply: result.reply.replace(/\s*\[\[\s*TANYA_BOS\s*\]\]\s*/gi, " ").trim() || BOS_FALLBACK };
+  { // pintu terakhir: tag kontrol (termasuk [[...]] yang sudah diproses di atas) tidak pernah sampai ke WhatsApp
+    const g = guardReply(result.reply, { doubleBracket: true });
+    result = { ...result, reply: isEmptyAfterGuard(g) ? REPLY_GUARD_SAFE_TEXT : g.text };
+  }
   let outText = result.reply;
   try {
     outText = formatForWhatsApp(result.reply) || result.reply;
@@ -3461,6 +3488,7 @@ async function handleGroupMessage(msg, sock) {
     gate: tanyaBosGate
   });
   result = { ...result, reply: bos.reply || BOS_FALLBACK };
+  { const g = guardReply(result.reply, { doubleBracket: true }); result = { ...result, reply: isEmptyAfterGuard(g) ? REPLY_GUARD_SAFE_TEXT : g.text }; }
   if (bos.mentions.length) console.log(`👥 [${subject}] tidak bisa menjawab; pemilik ditandai (${bos.mentions[0]}).`);
   // Diminta berkas (PDF/Excel/Word): kirim jawaban sebagai berkas. Gagal membuatnya -> tetap dikirim sebagai teks.
   if (fileReq && (await deliverGroupFile(sock, groupJid, fileReq.format, result.reply, { quoted: msg, waName: subject || null, result, hint: fileHint }))) return;
@@ -4937,7 +4965,8 @@ async function generateTelegramReply(history) {
   const raw = extractGeminiText(data).trim();
   if (!raw) throw new Error("Respons AI tidak berisi teks.");
   const guarded = docChunks.length > 0 ? guardDocAnswer(raw, docChunks) : null;
-  return guarded ? guarded.reply : raw;
+  const g = guardReply(guarded ? guarded.reply : raw, { doubleBracket: true });
+  return isEmptyAfterGuard(g) ? REPLY_GUARD_SAFE_TEXT : g.text;
 }
 
 // Teks /status di Telegram: kondisi bot sekilas (tanpa membuka rahasia: key hanya dihitung, tidak ditampilkan).
