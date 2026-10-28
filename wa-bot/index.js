@@ -973,7 +973,7 @@ if (webSearch.available()) console.log(`🔎 Pencarian web: ${webSearch.describe
 // diabaikan model kecil).
 // Aturan "dilarang menebak angka": ditempel di setiap blok KONTEKS DOKUMEN supaya model (Ollama/Gemini/Groq/dll)
 // tidak mengisi tarif/batas/angka yang tidak tertulis di potongan dokumen dengan ingatan atau hitungan sendiri.
-export const DOC_NO_GUESS_RULE = "ATURAN: angka, tarif, batas, tanggal, atau pasal HANYA boleh disebut kalau tertulis di potongan dokumen di atas (sebut halamannya bila ada [Halaman n]). Kalau yang ditanyakan tidak tertulis di sana, jawab \"tidak ditemukan di dokumen\" -- jangan menebak, jangan menghitung sendiri, dan jangan memakai angka dari ingatan.";
+export const DOC_NO_GUESS_RULE = "ATURAN: angka, tarif, batas, tanggal, atau pasal HANYA boleh disebut kalau tertulis di potongan dokumen di atas (sebut halamannya bila ada [Halaman n]). Kalau yang ditanyakan tidak tertulis di sana, jawab \"tidak ditemukan di dokumen\" -- jangan menebak, jangan menghitung sendiri, dan jangan memakai angka dari ingatan. ANGKA UANG: tulis setiap nominal rupiah LENGKAP dengan satuan seperti di dokumen (\"Rp200.000\" atau \"Rp200 ribu\"); jangan pernah membuang digit atau satuan (\"Rp200\" untuk Rp200.000 itu salah). Kalau tabel bersatuan ribuan/juta, konversikan secara konsisten untuk SEMUA baris atau tulis satuannya di setiap baris; jangan campur format antarbaris. Kalau satuan tabel tidak terlihat di bagian yang terbaca, katakan \"satuan di tabel tidak terlihat di bagian yang terbaca\" dan jangan menebak. Tanda * hanya berpasangan untuk menebalkan; jangan menaruh * sendirian di dekat angka.";
 function buildGroundedUserMessage(originalText, docChunks, webResults) {
   const parts = [];
   if (docChunks.length > 0) {

@@ -111,6 +111,52 @@ export function renderTableForWhatsApp(headers, rows, { monoMax = WA_MONO_MAX } 
   return cards.join("\n\n");
 }
 
+/**
+ * Buang tanda * yang tidak berpasangan pada satu baris ("*Rp200." -> "Rp200."), supaya WhatsApp tidak menampilkannya mentah dan
+ * tidak salah menebalkan. Dipertahankan: bullet "* " di awal baris, * di antara dua huruf/angka ("2*3"), dan * yang berdiri sendiri (" * ").
+ */
+export function dropStrayStars(line) {
+  const lead = /^\s*(?:\*\s+)?/.exec(line)[0];
+  const body = line.slice(lead.length);
+  if (!body.includes("*")) return line;
+  const out = [];
+  let pending = -1; // indeks di `out` untuk * pembuka yang menunggu penutup
+  for (let i = 0; i < body.length; i++) {
+    const ch = body[i];
+    if (ch !== "*") {
+      out.push(ch);
+      continue;
+    }
+    let j = i;
+    while (body[j] === "*") j++;
+    const run = j - i;
+    const prev = body[i - 1];
+    const next = body[j];
+    i = j - 1;
+    if (run >= 2) continue; // ** yang tak sempat jadi pasangan (sudah diubah ke * bila berpasangan)
+    if (prev && next && /[\p{L}\p{N}]/u.test(prev) && /[\p{L}\p{N}]/u.test(next)) {
+      out.push("*"); // operator/singkatan di tengah kata
+      continue;
+    }
+    const canOpen = Boolean(next) && !/\s/.test(next);
+    const canClose = Boolean(prev) && !/\s/.test(prev);
+    if (pending >= 0 && canClose) {
+      out.push("*");
+      pending = -1;
+    } else if (canOpen) {
+      if (pending >= 0) out[pending] = ""; // pembuka sebelumnya tak pernah ditutup
+      pending = out.length;
+      out.push("*");
+    } else if (canClose) {
+      continue; // penutup tanpa pembuka
+    } else {
+      out.push("*"); // berdiri sendiri (" * "): biarkan
+    }
+  }
+  if (pending >= 0) out[pending] = "";
+  return lead + out.join("");
+}
+
 /** Bagian di luar blok kode: **tebal** -> *tebal*, "## Judul" -> *Judul*, garis --- dibuang, [teks](url) -> teks (url). */
 function normalizeInline(text) {
   return text
@@ -118,12 +164,12 @@ function normalizeInline(text) {
     .map((line) => {
       let l = line;
       const heading = /^\s{0,3}#{1,6}\s+(.+?)\s*#*\s*$/.exec(l);
-      if (heading) return `*${heading[1].replace(/\*\*(.+?)\*\*/g, "$1").replace(/\*(.+?)\*/g, "$1")}*`;
+      if (heading) return `*${heading[1].replace(/\*\*(.+?)\*\*/g, "$1").replace(/\*(.+?)\*/g, "$1").replace(/\*/g, "")}*`;
       if (/^\s*(?:-{3,}|\*{3,}|_{3,})\s*$/.test(l)) return "";
       l = l.replace(/\*\*(?=\S)(.+?)(?<=\S)\*\*/g, "*$1*");
       l = l.replace(/(?<![\w_])__(?=\S)(.+?)(?<=\S)__(?![\w_])/g, "*$1*");
       l = l.replace(/\[([^\]\n]+)\]\((https?:\/\/[^)\s]+)\)/g, "$1 ($2)");
-      return l;
+      return dropStrayStars(l);
     })
     .join("\n");
 }

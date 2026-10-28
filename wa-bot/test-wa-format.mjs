@@ -1,7 +1,7 @@
 // Tes perapian balasan WhatsApp (tabel, tebal, judul) + pengenalan "jadikan PDF". Jalankan: node test-wa-format.mjs
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import { formatForWhatsApp, detectPdfRequest, detectOfficeRequest, liftAsciiTables, cleanAnswerForFile, titleForFile, parseTableAt, splitRow, renderTableForWhatsApp, WA_MONO_MAX } from "./wa-format.js";
+import { dropStrayStars, formatForWhatsApp, detectPdfRequest, detectOfficeRequest, liftAsciiTables, cleanAnswerForFile, titleForFile, parseTableAt, splitRow, renderTableForWhatsApp, WA_MONO_MAX } from "./wa-format.js";
 
 let n = 0;
 const ok = (name) => console.log(`  ✓ ${name}`) || n++;
@@ -195,5 +195,18 @@ ok("index.js: AI diberi catatan khusus PDF/Word/Excel (tanpa sapaan, tabel markd
   assert.match(dTxt, /rememberReplySource\(/, "sumber balasan diingat untuk 'jadikan pdf'");
 }
 ok("index.js: balasan teks dirapikan (dengan cadangan bila gagal) dan sumbernya diingat");
+
+// --- tanda * tidak berpasangan dibuang (bug "*Rp200." di grup)
+{
+  assert.equal(formatForWhatsApp("Pagu s.d. Rp1 miliar: *Rp200."), "Pagu s.d. Rp1 miliar: Rp200.", "pembuka tanpa penutup dibuang");
+  assert.equal(formatForWhatsApp("Pagu s.d. Rp1 miliar: Rp200.000*"), "Pagu s.d. Rp1 miliar: Rp200.000", "penutup tanpa pembuka dibuang");
+  assert.equal(formatForWhatsApp("*Pagu Rp1 miliar: *Rp200.000.\n*Pagu Rp10 miliar: *Rp440.000."), "Pagu Rp1 miliar: Rp200.000.\nPagu Rp10 miliar: Rp440.000.", "dua pembuka berturut-turut, tiap baris dibersihkan sendiri");
+  assert.equal(formatForWhatsApp("Honor *Rp200.000* dan **Rp440.000**"), "Honor *Rp200.000* dan *Rp440.000*", "pasangan yang benar tetap utuh");
+  assert.equal(formatForWhatsApp("* Pagu: *Rp200.000*\n* Rp440.000"), "* Pagu: *Rp200.000*\n* Rp440.000", "bullet '* ' di awal baris tetap");
+  assert.equal(dropStrayStars("hitung 2*3 = 6 dan a * b"), "hitung 2*3 = 6 dan a * b", "operator kali tidak disentuh");
+  assert.equal(formatForWhatsApp("```\n*Rp200.\n```"), "```\n*Rp200.\n```", "isi blok kode tidak disentuh");
+  assert.equal(formatForWhatsApp("## Judul *Rp200"), "*Judul Rp200*", "judul tetap lewat jalur judul");
+}
+ok("tanda * tidak berpasangan dibuang; pasangan, bullet, operator, dan blok kode dipertahankan");
 
 console.log(`\nSemua ${n} kelompok tes format WhatsApp lulus ✅`);

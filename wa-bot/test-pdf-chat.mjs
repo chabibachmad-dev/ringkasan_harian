@@ -83,6 +83,19 @@ const buf = Buffer.from("%PDF-1.7\n....");
   store.clear();
 }
 
+// ---- angka uang: potongan tabel bernilai lengkap + aturan satuan ada di catatan (bug "Rp200" untuk Rp200.000)
+{
+  const table = "4.2   Bendahara Penerimaan\n 4.2.1   Nilai pagu dana s.d. Rp1 miliar   OB   Rp200.000\n 4.2.2   Nilai pagu dana di atas Rp1 miliar s.d. Rp10 miliar   OB   Rp440.000\n 4.2.5   Nilai pagu dana di atas Rp500 miliar   OB   Rp1.720.000\n" + FILLER;
+  const pages = Array.from({ length: 40 }, (_, i) => ({ page: i + 1, text: i === 4 ? `(dalam ribuan rupiah)\n${table}` : `${i + 1}\n${FILLER}` }));
+  const st = createPdfChatStore();
+  const en = await st.build("u", { name: "SBM.pdf", pages, total: 40, truncated: false });
+  const cx = st.contextFor(en, "honor bendahara penerimaan berapa?", { maxChars: 3000 });
+  check(cx.mode === "retrieved" && /Rp200\.000/.test(cx.text) && /Rp1\.720\.000/.test(cx.text) && /\(dalam ribuan rupiah\)|Rp440\.000/.test(cx.text), "potongan tabel membawa nominal lengkap (Rp200.000, Rp1.720.000)");
+  const nt = pdfContextNote({ name: "SBM.pdf", pages: 40, ctx: cx, readPages: 40 });
+  check(/ANGKA UANG/.test(nt) && /Rp200\.000/.test(nt) && /SEMUA baris/.test(nt) && /satuan di tabel tidak terlihat di bagian yang terbaca/.test(nt) && /jangan campur format/.test(nt), "catatan PDF memuat aturan satuan uang konsisten");
+  st.clear();
+}
+
 // ---- systemNoSearch tidak boleh curhat soal internet
 {
   const src = fs.readFileSync(new URL("./index.js", import.meta.url), "utf8");
