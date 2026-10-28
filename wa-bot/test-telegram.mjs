@@ -79,6 +79,18 @@ const msg = (chat, text, extra = {}) => ({ update_id: 1, message: { chat: { id: 
 }
 {
   const f = fakeApi();
+  const calls = [];
+  const tgA = createTelegram({ config: cfg(), deps: { chat: async () => "x", arsip: { handle: (arg, o) => { calls.push([arg, o.chatId]); return `arsip:${arg}`; } } }, fetchImpl: f, log: quiet });
+  await tgA.handleUpdate(msg(111, "/arsip"));
+  await tgA.handleUpdate(msg(111, "/arsip hapus 3 ya"));
+  check(f.texts(111).join("|") === "arsip:|arsip:hapus 3 ya" && calls[1][0] === "hapus 3 ya" && calls[1][1] === "111", "/arsip diteruskan ke modul arsip beserta argumennya");
+  const f2 = fakeApi();
+  const tgB = createTelegram({ config: cfg(), deps: { chat: async () => "x" }, fetchImpl: f2, log: quiet });
+  await tgB.handleUpdate(msg(111, "/arsip"));
+  check(/belum aktif/.test(f2.texts(111)[0]), "/arsip tanpa modul: pesan jelas, bukan galat");
+}
+{
+  const f = fakeApi();
   const ran = [];
   const tg = createTelegram({ config: cfg(), deps: { chat: async () => { ran.push("chat"); return "x"; } }, fetchImpl: f, log: quiet });
   await tg.handleUpdate(msg(222, "halo bot"));
@@ -88,6 +100,7 @@ const msg = (chat, text, extra = {}) => ({ update_id: 1, message: { chat: { id: 
   check(f.calls.filter((c) => c.method === "sendMessage").length === 0, "keamanan: id pemilik di grup tetap diabaikan (hanya chat pribadi)");
   await tg.handleUpdate(msg(111, "/start"));
   check(f.texts(111)[0].includes("Ayyubi") && f.texts(111)[0].includes("/simab"), "pemilik: /start menampilkan bantuan");
+  check(f.texts(111)[0].length <= 3500 && f.texts(111)[0].includes("/arsip"), "HELP memuat /arsip dan tetap di bawah MAX_TEXT (3500)");
   await tg.handleUpdate(msg(111, "/id"));
   check(f.texts(111)[1].includes("111"), "pemilik: /id");
   await tg.handleUpdate({ update_id: 4, message: { chat: { id: 111, type: "private" }, photo: [{}] } });

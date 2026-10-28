@@ -1,0 +1,21 @@
+PATCH AYYUBI: arsip PDF grup (PDF yang diunggah di grup disimpan & diindeks otomatis, dijawab tanpa melampirkan PDF)
+
+PASANG
+1. Pastikan perbaikan respons PDF sebelumnya sudah terpasang. Cadangkan:  cp index.js index.js.bak ; cp kb-index.js kb-index.js.bak
+2. Timpa file yang sama dari patch ini (index.js, kb-index.js, pdf-qa.js, telegram.js, package.json, .gitignore, .env.example, README.md).
+3. (Opsional) .env: ARSIP_ENABLED=true, ARSIP_DIR=arsip-dokumen, ARSIP_PEMBERITAHUAN=on — semua bawaan sudah begitu, tak perlu diisi.
+4. Tes:  node --check index.js && npm test   (khusus arsip: node test-arsip-pdf.mjs)
+5. Restart bot (pm2 restart wa-bot). Folder arsip-dokumen/ dibuat sendiri; tak ada migrasi database.
+
+CARA PAKAI
+- Bagikan PDF di grup  -> otomatis diarsipkan; satu kali per grup bot memberi tahu (hanya di grup yang boleh dijawab bot).
+- Di grup yang sama, tanpa melampirkan PDF:  "bot, tunjangan golongan IV di KMK 296 berapa?"  -> dijawab dari arsip + sitasi (dari <berkas>, dibagikan <pengirim> tgl <tanggal>, hlm N)
+- "bot, bandingkan KMK 296 dengan PMK 32"  -> dua dokumen arsip ikut dibaca
+- Telegram:  /arsip  |  /arsip daftar [grup]  |  /arsip cari <kata>  |  /arsip hapus <no>  (lalu: /arsip hapus <no> ya)
+
+FILE BARU: arsip-pdf.js, test-arsip-pdf.mjs, PATCH-AYYUBI-ARSIP-PDF.txt
+FILE DIUBAH: index.js (hook arsip, status), kb-index.js (opsi docIds, loadDriver diekspor), pdf-qa.js (kata "tersimpan di arsip"),
+             telegram.js (/arsip, HELP dipadatkan: 3376 < 3500), test-telegram.mjs, package.json, .gitignore, .env.example, README.md
+
+PRIVASI: arsip hanya BM25 lokal (id local:arsip:<sha>, tak pernah di-embed/ke Jina); arsip grup hanya dipakai di grup yang sama; pemilik boleh lintas grup.
+CATATAN: potongan arsip yang relevan ikut ke penyedia AI balasan grup yang aktif (seperti PDF terlampir); pengindeksan & pencarian tetap lokal.

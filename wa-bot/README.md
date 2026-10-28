@@ -1324,3 +1324,35 @@ Tiap hari (bawaan pukul 02:00) bot membuat SATU video "papan tulis digital" 60-1
 - Jatah unggah YouTube per hari (default 10.000 unit, 1 unggahan = 1.600 unit) cukup untuk 1-6 video/hari; bila habis, bot mencoba lagi besok.
 - Kuota suara Gemini gratis terbatas (sekitar 9-12 potong suara per video). Potongan yang sudah jadi disimpan di `edu-data/tts-cache`, jadi bila kuota habis di tengah jalan, bot melanjutkan dari sisanya 90 menit kemudian. Bila kuota harian terlalu kecil untuk 1 video/hari, pelankan jadwal atau tambah kunci Gemini.
 - Berkas hasil ada di `edu-data/` (diabaikan git). Video yang sudah terjadwal dihapus dari disk setelah `EDU_KEEP_DAYS` hari.
+
+## Arsip PDF grup (disimpan otomatis, dijawab tanpa melampirkan PDF)
+
+Setiap PDF yang diunggah di grup WhatsApp tempat bot berada (nomor utama; nomor kedua diabaikan) langsung diunduh, dibaca, dan disimpan **permanen di laptop**, tanpa diminta. Grup hanya perlu menanyakannya nanti, tanpa mengirim ulang PDF-nya.
+
+**Penyimpanan** (`ARSIP_DIR`, bawaan `wa-bot/arsip-dokumen/`, masuk `.gitignore`)
+- `<sha256>.pdf` — berkas asli; `indeks.sqlite` — indeks teks (BM25 + batang kata, per halaman) dan metadata.
+- Dedup menurut sha256: berkas yang sama dikirim lagi (di grup mana pun) hanya menambah baris asal-usul, tanpa membaca/mengindeks ulang.
+- Metadata: sha256, nama berkas, ukuran, jumlah halaman, status (`terindeks` / `scan` / `gagal` / `terlalu besar`), grup (jid + nama), pengirim (nama + jid), id pesan, waktu.
+- PDF hasil scan (tanpa teks) dicatat tetapi tidak diindeks. Batas ukuran `PDF_MAX_BYTES`, batas halaman `WA_PDF_MAX_PAGES` (sama dengan baca-PDF di chat).
+- Semuanya berjalan di latar belakang lewat antrean berkas (berurutan). Galat hanya masuk log; balasan biasa tidak terganggu dan grup tidak pernah menerima galat teknis.
+
+**Privasi**
+- Isi arsip hanya dicari dengan BM25 lokal. Dokumen diindeks dengan id `local:arsip:<sha>`, jadi lapisan embedding tidak pernah membuat atau menerima vektor untuknya — tidak ada yang dikirim ke Jina atau layanan embedding mana pun (dan jalur `excludeLocal` untuk Gemini/Groq/OpenRouter tidak melihatnya).
+- Arsip suatu grup **hanya** dipakai di grup yang sama (setiap pencarian dibatasi ke berkas yang pernah dibagikan di grup itu). Tidak muncul di grup lain atau chat pribadi. Pemilik boleh mencari lintas grup lewat `/arsip cari`.
+- Pemberitahuan satu kali per grup (dicatat di `bot_state`, kunci `arsip_notice:<jid grup>`), hanya di grup yang memang boleh dijawab bot, saat PDF pertama diarsipkan: *"PDF yang dibagikan di grup ini disimpan di komputer kantor agar bisa dibaca ulang. Mau dihapus? Hubungi pemilik bot."* Matikan dengan `ARSIP_PEMBERITAHUAN=off`.
+
+**Pemakaian di grup** — pertanyaan (bot dipanggil) yang tidak melampirkan/membalas PDF tetapi:
+1. menyebut nomor peraturan (mis. "KMK 296", "PMK 32") — dicocokkan ke nama berkas dan teks halaman pertama; atau
+2. menyebut nama berkasnya; atau
+3. jelas bertanya isi dokumen ("peraturan/dokumen/pasal ... ") — dicari BM25 di arsip grup itu (kata umum seperti "peraturan" saja tidak cukup),
+
+dijawab dari arsip dengan aturan yang sama seperti PDF terlampir (anti-tebak, `DOC_NO_GUESS_RULE`) dan sitasi *"(dari <nama berkas>, dibagikan <pengirim> tgl <tanggal>, hlm N)"*. Permintaan membandingkan ("bandingkan KMK 296 dengan PMK 32") mengikutkan dua dokumen arsip lewat mekanisme PDF pembanding. Bila tidak ada yang cocok, alur balasan biasa berjalan seperti sebelumnya.
+
+**Perintah pemilik (Telegram)**
+- `/arsip` — ringkasan (jumlah berkas, ukuran, per grup); `/arsip daftar [grup]` — daftar bernomor; `/arsip cari <kata>` — cari lintas grup;
+- `/arsip hapus <no>` — meminta konfirmasi, lalu `/arsip hapus <no> ya` menghapus berkas asli + indeks + metadata. Berkas yang dihapus bisa diarsipkan lagi bila dikirim ulang.
+- `/status` memuat satu baris arsip (jumlah berkas & ukuran).
+
+**.env** (semua opsional): `ARSIP_ENABLED` (bawaan `true`), `ARSIP_DIR` (bawaan `arsip-dokumen`), `ARSIP_PEMBERITAHUAN` (bawaan `on`).
+
+Catatan: jawaban dari arsip memakai mesin balasan grup yang aktif (sama seperti PDF yang dilampirkan di grup), jadi bila mesinnya Gemini/Groq/OpenRouter, potongan dokumen yang relevan untuk pertanyaan itu ikut dikirim ke penyedia tersebut — hanya pencarian/pengindeksan yang dijamin lokal. Tes: `node test-arsip-pdf.mjs`.

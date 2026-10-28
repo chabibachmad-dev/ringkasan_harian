@@ -234,7 +234,7 @@ export function coverageOf(text, tokens) {
   return n;
 }
 
-async function loadDriver() {
+export async function loadDriver() {
   try {
     const m = await import("node:sqlite");
     if (m.DatabaseSync) return { name: "node:sqlite", open: (f) => new m.DatabaseSync(f) };
@@ -445,9 +445,12 @@ export async function openKbIndex({ file, log = console, chunkChars = 1000, over
   }
 
   // Kandidat potongan hasil RRF (kata persis + batang kata). Dasar untuk search() dan pencarian hibrida (jina-rag.js).
-  function fusedCandidates(question, { maxChunks = 8, titles = null, excludeLocal = false, onlyLocal = false, limit = Math.max(maxChunks * 5, 30) } = {}) {
+  function fusedCandidates(question, { maxChunks = 8, titles = null, excludeLocal = false, onlyLocal = false, docIds = null, limit = Math.max(maxChunks * 5, 30) } = {}) {
     const tokens = tokenizeQuery(question);
     if (tokens.length === 0) return [];
+    // docIds: batasi ke dokumen tertentu (arsip PDF grup: hanya berkas milik grup penanya). Daftar kosong = tidak ada yang boleh dibaca.
+    const ids = Array.isArray(docIds) ? docIds.map(String) : null;
+    if (ids && ids.length === 0) return [];
     // Dua pencarian digabung dengan Reciprocal Rank Fusion:
     //   A. teks asli (kata persis / awalan) -- tepat untuk istilah, nomor pasal, angka;
     //   B. batang kata (stem) -- menjembatani imbuhan: menyetor ~ setoran ~ penyetoran.
@@ -455,17 +458,18 @@ export async function openKbIndex({ file, log = console, chunkChars = 1000, over
     const titleLike = (Array.isArray(titles) ? titles : []).map((t) => String(t).trim().toLowerCase()).filter(Boolean).map((t) => `%${t}%`);
     const filtered = (ftsTable, prep) => {
       // excludeLocal: dokumen dari folder lokal laptop (id 'local:...') TIDAK PERNAH ikut ke penyedia cloud (Gemini/Groq/OpenRouter).
-      if (titleLike.length === 0 && !excludeLocal && !onlyLocal) return prep;
+      if (titleLike.length === 0 && !excludeLocal && !onlyLocal && !ids) return prep;
       const conds = [];
       if (titleLike.length > 0) conds.push(`(${titleLike.map(() => "lower(d.title) like ?").join(" or ")})`);
       if (excludeLocal) conds.push("d.id not like 'local:%'");
       // onlyLocal: hanya dokumen folder lokal (untuk perintah /dokumen milik pemilik).
       if (onlyLocal) conds.push("d.id like 'local:%'");
+      if (ids) conds.push(`d.id in (${ids.map(() => "?").join(",")})`);
       const sql = `select c.doc_id as doc_id, d.title as title, c.page as page, c.seq as seq, c.text as text, c.ov as ov, c.toc as toc, c.head as head, c.bad as bad, bm25(${ftsTable}) as score
        from ${ftsTable} join chunks c on c.id = ${ftsTable}.rowid join docs d on d.id = c.doc_id
        where ${ftsTable} match ? and ${conds.join(" and ")} order by bm25(${ftsTable}) limit ?`;
       const stmt = db.prepare(sql);
-      return { all: (match, lim) => stmt.all(match, ...titleLike, lim) };
+      return { all: (match, lim) => stmt.all(match, ...titleLike, ...(ids || []), lim) };
     };
     let rowsA = [];
     let rowsB = [];
@@ -506,10 +510,10 @@ export async function openKbIndex({ file, log = console, chunkChars = 1000, over
   //      (dan 2 potongan sesudah hasil #1) ikut disertakan (daftar yang berlanjut ke potongan berikutnya tidak terpotong);
   //   3. potongan yang bersebelahan digabung jadi satu blok berurutan (awalan overlap dibuang).
   // opts.rows: kandidat yang sudah diurutkan pemanggil (pencarian hibrida + reranker); saring cakupan kata dilewati.
-  function search(question, { budgetChars = 5000, maxChunks = 8, neighbors = true, minCoverage = defaults.minCoverage, titles = null, excludeLocal = false, onlyLocal = false, rows: preRows = null } = {}) {
+  function search(question, { budgetChars = 5000, maxChunks = 8, neighbors = true, minCoverage = defaults.minCoverage, titles = null, excludeLocal = false, onlyLocal = false, docIds = null, rows: preRows = null } = {}) {
     const tokens = tokenizeQuery(question);
     if (tokens.length === 0 && !preRows) return [];
-    const rows = preRows || fusedCandidates(question, { maxChunks, titles, excludeLocal, onlyLocal });
+    const rows = preRows || fusedCandidates(question, { maxChunks, titles, excludeLocal, onlyLocal, docIds });
     if (rows.length === 0) return [];
     const wantToc = TOC_QUERY_RE.test(String(question || ""));
 

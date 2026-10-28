@@ -101,6 +101,7 @@ import { createRegMonitor, readRegMonitorConfig } from "./reg-monitor.js";
 import { createKhatamReminder } from "./khatam.js";
 import { createPriorityQueue, PRIORITY } from "./ollama-queue.js";
 import { openKbIndex } from "./kb-index.js";
+import { arsipConfig, createArsip, arsipCitationNote } from "./arsip-pdf.js";
 import { createJina } from "./jina.js";
 import { createSbm, loadSbmData } from "./sbm.js";
 import { createHybridSearch, createEmbedWorker, parseJinaCommand, handleJinaCommand, describeJinaForStatus } from "./jina-rag.js";
@@ -450,7 +451,9 @@ function buildPdfNote(jid, local) {
   const budget = sib ? Math.floor(maxChars / 2) : maxChars;
   const ctx = p.entry ? pdfChat.contextFor(p.entry, p.question, { maxChars: budget }) : buildPdfContext(p.markdown, p.question, { maxChars: budget });
   const compare = sib ? { name: sib.name, pages: sib.total, ctx: pdfChat.contextFor(sib, p.question, { maxChars: budget }) } : null;
-  return pdfContextNote({ name: p.name, pages: p.pages, truncatedPages: p.truncatedPages, fromReply: p.fromReply, ctx, compare, scope: isGroupJid(jid) ? "grup" : "chat pribadi", readPages: p.entry?.readPages || 0 });
+  const note = pdfContextNote({ name: p.name, pages: p.pages, truncatedPages: p.truncatedPages, fromReply: p.fromReply, archived: Boolean(p.arsip), ctx, compare, scope: isGroupJid(jid) ? "grup" : "chat pribadi", readPages: p.entry?.readPages || 0 });
+  // Dokumen dari arsip grup: sitasi "dari <berkas>, dibagikan <pengirim> tgl <tanggal>, hlm N" + aturan anti-tebak yang sama dengan dokumen lain.
+  return p.arsip ? `${note}${arsipCitationNote(p.arsip)}\n${DOC_NO_GUESS_RULE}` : note;
 }
 
 function withGroupNote(basePrompt, jid, { local = false } = {}) {
@@ -3306,6 +3309,21 @@ async function handleGroupMessage(msg, sock) {
     console.log(`📄 [Baca PDF] "${loaded.name}" ${loaded.pages} hlm, ${loaded.entry.chars} huruf, ${loaded.entry.readPages} hlm diindeks (${loaded.cached ? "dari simpanan" : "baru dibaca"})`);
   }
 
+  // Arsip PDF grup: tanpa PDF terlampir/dibalas, tetapi menyebut peraturan/dokumen yang pernah dibagikan di grup INI -> jawab dari arsip.
+  // Galat apa pun hanya dicatat; alur balasan biasa jalan terus.
+  if (!pdfCtx && !pdfCandidate && !photo && arsip && text && !fileReq && !docEdit && !animReq && !editReq && !looksLikeMediaRequest(text)) {
+    try {
+      pdfCtx = await arsipPdfContext(groupJid, text);
+      if (pdfCtx && !pdfReadQuotaOk(msg.key.participant || sender)) {
+        await replyGroupText(sock, groupJid, msg, subject, `Jatah baca PDF untukmu hari ini sudah habis (${PDF_GROUP_DAILY_MAX} kali per hari). Besok bisa lagi ya.`);
+        return;
+      }
+    } catch (e) {
+      pdfCtx = null;
+      console.error("📦 [Arsip] pencarian di arsip gagal (lanjut tanpa arsip):", e instanceof Error ? e.message : String(e));
+    }
+  }
+
   // Permintaan membuat video ("bot, buatkan video ..."): dirakit pembuat video (gambar + suara + ffmpeg), bukan AI percakapan.
   if (!pdfCtx && (videoGen.groupEnabled() || videoGen.storyGroupEnabled())) {
     const videoReq = videoGen.detect(text);
@@ -3583,6 +3601,63 @@ async function attachDmPdf(sock, jid, dmPdf, { owner = false } = {}) {
   if (st) st.pdf = { name: loaded.name, pages: loaded.pages, entry: loaded.entry, truncatedPages: loaded.truncated, fromReply: dmPdf.fromReply, question: dmPdf.question, cacheKey: dmPdf.cacheKey };
   console.log(`📄 [Baca PDF/DM] "${loaded.name}" ${loaded.pages} hlm, ${loaded.entry.readPages} hlm diindeks (${loaded.cached ? "dari simpanan" : "baru dibaca"})`);
   return true;
+}
+
+// ---------------------------------------------------------------- ARSIP PDF GRUP (lihat arsip-pdf.js)
+const looksLikeMediaRequest = (t) => Boolean((imageGen.groupEnabled() && imageGen.detect(t)) || ((videoGen.groupEnabled() || videoGen.storyGroupEnabled()) && videoGen.detect(t)));
+
+/** PDF yang diunggah di grup -> diunduh, dibaca, disimpan di laptop (berurutan lewat runFileJob). Tidak menunggu, tidak melempar galat. */
+function archiveGroupPdf(sock, msg, jid) {
+  if (!arsip || !isGroupJid(jid) || (sock.waAccount?.id ?? MAIN_ACCOUNT) !== MAIN_ACCOUNT || !msg.message) return; // nomor kedua/ketiga diabaikan
+  const content = unwrapMessageContent(msg.message);
+  const doc = content?.documentMessage;
+  if (!isPdfDoc(doc)) return;
+  const source = { key: msg.key, message: content };
+  runFileJob(async () => {
+    const groupName = await getGroupSubject(sock, jid).catch(() => "");
+    const sender = msg.key.fromMe ? "pemilik bot" : msg.pushName || "anggota grup";
+    const r = await arsip.ingest({
+      fileName: doc.fileName || "dokumen.pdf",
+      size: Number(doc.fileLength) || 0,
+      groupJid: jid,
+      groupName: groupName || "",
+      senderName: sender,
+      senderJid: msg.key.participant || msg.key.participantAlt || "",
+      messageId: msg.key.id || "",
+      download: async () => {
+        let lastErr = null;
+        for (let attempt = 0; attempt < 2; attempt++) {
+          try {
+            return await downloadMediaMessage(source, "buffer", {}, { logger: pino({ level: "silent" }), reuploadRequest: sock.updateMediaMessage });
+          } catch (e) {
+            lastErr = e;
+            await new Promise((res) => setTimeout(res, 700));
+          }
+        }
+        throw lastErr;
+      }
+    });
+    if (r.status !== "duplikat-pesan") console.log(`📦 [Arsip] "${doc.fileName || "dokumen.pdf"}" dari ${groupName || jid}: ${r.status}${r.duplicate ? " (sudah ada, hanya asal-usul ditambah)" : ""}${r.pages ? `, ${r.pages} hlm` : ""}`);
+    // Pemberitahuan sekali per grup, hanya di grup yang memang boleh dijawab bot.
+    if (r.stored && AUTO_REPLY_ACTIVE && groupRulesFor(sock).enabled && isGroupAllowed(jid, groupName, sock) && (await arsip.claimNotice(jid))) {
+      await replyGroupText(sock, jid, msg, groupName, arsip.noticeText);
+    }
+  }).catch((e) => console.error("📦 [Arsip] gagal (diabaikan, balasan biasa tak terganggu):", e instanceof Error ? e.message : String(e)));
+}
+
+/** Cari dokumen arsip GRUP INI yang dimaksud pertanyaan -> konteks PDF (sama seperti PDF terlampir) atau null. */
+async function arsipPdfContext(groupJid, question) {
+  const hit = arsip.lookup(groupJid, question, { max: isBroadRequest(question) ? 2 : 1 });
+  if (!hit) return null;
+  let entry = null;
+  let primary = null;
+  for (const d of hit.docs.slice().reverse()) {
+    // dokumen pembanding dibangun lebih dulu; dokumen utama terakhir (pdfChat.siblings -> pembanding)
+    entry = await pdfChat.build(`${groupJid}|arsip:${d.sha}`, { name: d.name, pages: d.pages, total: d.total, truncated: d.pages.length < d.total });
+    primary = d;
+  }
+  console.log(`📦 [Arsip] pertanyaan dijawab dari arsip grup (${hit.via}): ${hit.docs.map((d) => `"${d.name}"`).join(", ")}`);
+  return { name: primary.name, pages: primary.total, entry, truncatedPages: primary.pages.length < primary.total, fromReply: false, question, cacheKey: `${groupJid}|arsip:${primary.sha}`, arsip: hit.docs };
 }
 
 /**
@@ -4305,6 +4380,9 @@ async function handleIncoming(msg, sock) {
     }
   }
 
+  // Arsip PDF grup: PDF yang diunggah di grup (siapa pun, termasuk pemilik) diarsipkan di latar belakang, tanpa diminta. Nomor utama saja.
+  archiveGroupPdf(sock, msg, jid);
+
   // Pesan yang KITA kirim sendiri (fromMe) KE KONTAK LAIN juga muncul lewat
   // event ini -- sudah dicatat duluan waktu diproses dari antrian "pending"
   // (lihat processPendingOutgoing), jadi di sini cukup dilewati supaya tidak
@@ -4904,6 +4982,11 @@ async function buildBotStatusText() {
 
   const kb = kbIndex?.stats?.();
   lines.push(`📚 Dokumen: ${kb ? `${kb.docs} dokumen, ${kb.chunks} potongan (indeks laptop)` : "indeks laptop belum aktif"}`);
+  try {
+    lines.push(arsip ? arsip.statusLine() : "📦 Arsip PDF grup: mati");
+  } catch {
+    lines.push("📦 Arsip PDF grup: gagal dibaca");
+  }
   {
     const df = typeof docFolder !== "undefined" && docFolder ? docFolder.status() : null;
     lines.push(`📂 Dokumen lokal (khusus Ollama): ${df ? `${df.docs} dokumen .md di ${df.mdDir}${df.current ? ` • memproses ${df.current.file}` : ""}${df.lastError ? ` • error terakhir: ${df.lastError}` : ""}` : "mati"}`);
@@ -5046,6 +5129,18 @@ const botStateStore = {
     if (error) throw new Error(error.message);
   }
 };
+// Arsip PDF grup (ARSIP_ENABLED/ARSIP_DIR/ARSIP_PEMBERITAHUAN): indeks BM25 lokal sendiri, tidak pernah ke Jina. Lihat arsip-pdf.js.
+const arsipCfg = arsipConfig(process.env, fileURLToPath(new URL(".", import.meta.url)));
+let arsip = null;
+if (arsipCfg.enabled) {
+  try {
+    arsip = await createArsip({ dir: arsipCfg.dir, state: botStateStore, notice: arsipCfg.notice, maxPages: PDF_CHAT_PAGE_CAP, timeZone: WA_TIMEZONE, log: console });
+    console.log(`📦 Arsip PDF grup aktif: ${arsip.statusLine().replace("📦 Arsip PDF grup: ", "")} di ${arsipCfg.dir}`);
+  } catch (err) {
+    console.error("📦 Arsip PDF grup tidak aktif:", err instanceof Error ? err.message : String(err));
+    arsip = null;
+  }
+}
 // Urutan penyedia AI untuk balasan WA/grup (2 jalur: santai & akurat), bisa diubah lewat /urutan. Lihat ai-route.js.
 const aiRoute = createAiRoute({
   state: botStateStore,
@@ -5882,6 +5977,7 @@ const telegram = createTelegram({
     regNow: (opts) => regMonitor.runNow(opts),
     status: () => buildBotStatusText(),
     localDocs,
+    arsip: arsip ? { handle: (arg, o) => arsip.handle(arg, { ...o, onRemove: () => pdfChat.clear() }) } : null,
     edu,
     ops,
     stickers: {

@@ -27,3 +27,6 @@ data-stiker/
 
 # Channel edukasi: video, suara, dan status (dibuat otomatis)
 edu-data/
+
+# Arsip PDF grup WhatsApp (berkas asli <sha256>.pdf + indeks.sqlite): isi pribadi grup, hanya di laptop
+arsip-dokumen/

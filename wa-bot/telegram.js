@@ -141,15 +141,16 @@ const HELP = [
   "Ketik biasa untuk ngobrol dengan AI (Gemini, bisa cari web & Dokumen Pengetahuan).",
   "🎤 Kirim PESAN SUARA (tahan tombol mikrofon) untuk ngobrol atau merekam SiMAB: bot menuliskan apa yang ia dengar, lalu menjalankannya seperti pesan teks. Contoh saat merekam: \"Pembelian ATK, tanggal 5 Oktober 2026, jumlah satu juta lima ratus ribu rupiah\".",
   "🔊 Balasan suara: /suara auto (default: dibalas suara bila kamu kirim suara), /suara on (selalu), /suara off. Butuh ffmpeg di laptop bot.",
-  "🎙️ Latihan ngobrol Inggris: /speak [topik] — kirim suara berbahasa Inggris, tutor membalas dengan SUARA SAJA (tanpa teks; /koreksi = koreksi terakhir, /teks on = dengan teks). Ngobrol santai berbahasa Indonesia: /speak id [topik]. Akhiri: /selesai atau ucapkan perpisahan.",
+  "🎙️ Latihan Inggris: /speak [topik] — kirim suara berbahasa Inggris, tutor membalas dengan SUARA SAJA (/koreksi = koreksi terakhir, /teks on = dengan teks). Santai berbahasa Indonesia: /speak id [topik]. Akhiri: /selesai.",
   "",
   "Perintah:",
   "/simab <perintah>  — SiMAB (pagu, cek, perjadin, sbm, rpd, rekam). Boleh juga tulis \"simab ...\" tanpa garis miring.",
   "Pilihan SiMAB muncul sebagai tombol (mengetik angka/kata tetap bisa).",
-  "/status  — kondisi bot: WhatsApp, key Gemini, token hari ini, Ollama, dokumen",
+  "/status  — kondisi bot: WhatsApp, key Gemini, token, Ollama, dokumen, arsip",
   "/ringkasan  — ringkasan percakapan WhatsApp hari ini",
   "/peraturan  — pantau peraturan terbaru (\"/peraturan semua\" = tampilkan semua hasil)",
   "/dokumen <pertanyaan>  — tanya dari dokumen lokal di laptop, dijawab Ollama. \"/dokumen\" saja = daftar dokumen",
+  "/arsip  — arsip PDF grup WA di laptop: ringkasan; daftar [grup]; cari <kata>; hapus <no>",
   "/pasar  — IHSG, emas dunia (Rp/gram), dan kurs USD/IDR (alias /emas, /ihsg); otomatis tiap pagi hari kerja",
   "/ingatkan <waktu> <teks>  — pengingat pribadi (contoh: /ingatkan besok 09:00 kirim SPJ);  /pengingat  — daftar / batal <nomor>;  /ibadah  — juz harian, hadits, ayat",
   "/kesehatan  — periksa Ollama, disk, memori, WhatsApp, basis data, dan cadangan sekarang",
@@ -169,8 +170,7 @@ const HELP = [
   "/ingat <teks>  — simpan catatan pribadi (hanya di laptop);  /catatan [kata]  — daftar/cari;  /lupa <nomor|semua>  — hapus",
   "/sistem  — kondisi laptop bot (pm2, disk, RAM, Ollama); /log /restart /deploy /migrasi: lihat /ops (OPS_ENABLED=true)",
   "/baru  — mulai obrolan baru (lupakan konteks sebelumnya)",
-  "/speak [topik]  — latihan Inggris dengan tutor (suara);  /speak id [topik]  — santai berbahasa Indonesia;  /selesai  — akhiri",
-  "/id  — tampilkan id chat ini"
+    "/id  — tampilkan id chat ini"
 ].join("\n");
 
 // ---------------------------------------------------------------- modul
@@ -182,6 +182,7 @@ const HELP = [
  *   status?()                         -> Promise<string>   teks kondisi bot (/status)
  *   ops?: { handle(name, arg, {chatId, viaVoice, send}) -> Promise<string|undefined> }   perintah laptop (ops.js)
  *   localDocs?: { ask(q)->Promise<{reply}>, list()->string }   tanya-jawab dokumen lokal (/dokumen), dijawab Ollama
+ *   arsip?: { handle(arg, {chatId}) -> string }   arsip PDF grup WhatsApp di laptop (arsip-pdf.js, /arsip)
  *   memory?: { handle({name:"ingat"|"catatan"|"lupa", arg}) -> string }   catatan pribadi pemilik (owner-memory.js), hanya dibaca Ollama lokal
  *   reminders?: { handle({name:"ingatkan"|"pengingat", arg}) -> string }   pengingat pribadi (reminders.js)
  *   health?: { report() -> Promise<string> }   papan kesehatan bot (health.js)
@@ -1135,6 +1136,16 @@ Suara khusus satu grup: /suara grup wanita <nama grup> • /suara grup (daftar) 
       return;
     }
 
+    if (name === "arsip") {
+      const ar = deps.arsip;
+      if (!ar) return void (await reply("Arsip PDF grup belum aktif di bot ini (ARSIP_ENABLED=false atau gagal dibuka — lihat log)."));
+      try {
+        return void (await reply(await ar.handle(arg, { chatId })));
+      } catch (e) {
+        return void (await reply(`⚠️ Arsip gagal dibaca: ${String(e?.message || e).slice(0, 200)}`));
+      }
+    }
+
     if (name === "edu" || name === "channel" || name === "yt") {
       const edu = deps.edu;
       if (!edu) return void (await reply("Channel edukasi belum terpasang di bot ini."));
@@ -1408,7 +1419,7 @@ Suara khusus satu grup: /suara grup wanita <nama grup> • /suara grup (daftar) 
   }
 
   const HANDLER_DEADLINE_MS = 10 * 60_000;
-  const FAST_COMMANDS = new Set(["dokumen", "dok", "doc", "status", "id", "help", "start", "ingat", "catatan", "lupa", "memori", "note", "penyedia", "provider", "skill", "skil", "lokal", "tanya", "pasar", "emas", "ihsg", "ingatkan", "remind", "pengingat", "reminder", "cadangan", "backup", "kesehatan", "sehat", "health", "urutan", "route", "rute", "nodin", "notadinas", "kas", "laporankas", "voice", "wa2", "nomor2", "grup", "group", "gambar", "image", "img", "video", "vidio", "vid", "metaai", "env", "stopmotion", "stop_motion", "edit", "ubah", "musik", "music", "edu", "channel", "yt"]);
+  const FAST_COMMANDS = new Set(["dokumen", "dok", "doc", "arsip", "status", "id", "help", "start", "ingat", "catatan", "lupa", "memori", "note", "penyedia", "provider", "skill", "skil", "lokal", "tanya", "pasar", "emas", "ihsg", "ingatkan", "remind", "pengingat", "reminder", "cadangan", "backup", "kesehatan", "sehat", "health", "urutan", "route", "rute", "nodin", "notadinas", "kas", "laporankas", "voice", "wa2", "nomor2", "grup", "group", "gambar", "image", "img", "video", "vidio", "vid", "metaai", "env", "stopmotion", "stop_motion", "edit", "ubah", "musik", "music", "edu", "channel", "yt"]);
   function isFastUpdate(u) {
     const m = u?.message;
     if (!m) return false;
@@ -1525,6 +1536,7 @@ Suara khusus satu grup: /suara grup wanita <nama grup> • /suara grup (daftar) 
           { command: "ringkasan", description: "Ringkasan percakapan WhatsApp hari ini" },
           { command: "peraturan", description: "Pantau peraturan terbaru" },
           { command: "dokumen", description: "Tanya dari dokumen lokal di laptop (dijawab Ollama)" },
+          { command: "arsip", description: "Arsip PDF grup WhatsApp di laptop (ringkasan, daftar, cari, hapus)" },
           { command: "ingatkan", description: "Pengingat pribadi: /ingatkan besok 09:00 kirim SPJ; /pengingat" },
           { command: "ibadah", description: "Pengingat ibadah: juz harian, hadits, ayat (/ibadah mulai juz 2)" },
           { command: "edu", description: "Channel YouTube edukasi: draf video, setujui, jadwal tayang" },
