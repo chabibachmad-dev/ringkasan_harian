@@ -60,6 +60,21 @@ const withMarkers = (pages) => pages.map((p) => `[Halaman ${p.page}]\n${String(p
 /** Pertanyaan umum (bukan mencari fakta tertentu): ringkas, isi, tentang apa. */
 const OVERVIEW_RE = /\b(?:ringkas(?:kan)?|ringkasan|rangkum(?:kan)?|intisari|inti|simpul(?:kan)?|kesimpulan|tentang\s+apa|isi(?:nya)?|gambaran|overview|summar\w*|jelaskan\s+(?:pdf|dokumen|file|berkas|ini)|apa\s+(?:ini|itu))\b/i;
 const PLACEHOLDER = /^\(menandai/;
+/** Permintaan luas atas seluruh dokumen (membandingkan, matriks, rekap, perubahan): tidak bisa dicari lewat kata kunci, pakai cuplikan merata. */
+const BROAD_RE = /\b(?:bandingkan|membandingkan|dibandingkan|banding|perbandingan|komparasi|matriks|matrix|rekap(?:itulasi)?|perubahan|berubah|perbedaan|beda|selisih|seluruh\s+isi|semua\s+isi|keseluruhan|secara\s+lengkap|poin[-\s]?poin\s+(?:utama|penting))\b/i;
+export const isBroadRequest = (q) => BROAD_RE.test(String(q ?? ""));
+
+const CLEAN_STOP = new Set(
+  "yang dan di ke dari untuk dengan pada ini itu atau adalah akan bisa tolong bot dong ya yah nih sih aja saja dalam oleh sebagai juga ada apa siapa kapan berapa mana kenapa mengapa bagaimana gimana buatkan buat bikin bikinkan antara tentang pdf file berkas dokumen kmk pmk perpres permen peraturan keputusan menteri keuangan tahun nomor no nomer".split(" ")
+);
+/** Kueri dibersihkan dari kata sambung dan nomor peraturan/tahun supaya BM25 tidak tersesat oleh "KMK 296/2026". */
+export function cleanQuery(q) {
+  return String(q ?? "")
+    .toLowerCase()
+    .split(/[^\p{L}\p{N}]+/u)
+    .filter((w) => w.length >= 3 && !/^\d+$/.test(w) && !CLEAN_STOP.has(w))
+    .join(" ");
+}
 
 export function createPdfChatStore({ ttlMs = 30 * 60_000, max = 8, now = () => Date.now(), openIndex = openKbIndex } = {}) {
   const cache = new Map(); // key -> { at, entry }
@@ -108,10 +123,16 @@ export function createPdfChatStore({ ttlMs = 30 * 60_000, max = 8, now = () => D
   function contextFor(entry, question, { maxChars = 36_000 } = {}) {
     const q = String(question ?? "").trim();
     const total = entry.fullText.length;
-    if (total <= maxChars) return { text: entry.fullText, mode: "full", totalChars: total, shownChars: total, coverage: 1, pages: [] };
-    const overview = !q || PLACEHOLDER.test(q) || OVERVIEW_RE.test(q);
+    const broad = isBroadRequest(q);
+    if (total <= maxChars) return { text: entry.fullText, mode: "full", totalChars: total, shownChars: total, coverage: 1, pages: [], broad };
+    const overview = !q || PLACEHOLDER.test(q) || OVERVIEW_RE.test(q) || broad;
     if (!overview) {
-      const blocks = entry.index.search(q, { budgetChars: maxChars, maxChunks: 12, excludeLocal: false });
+      const search = (k) => entry.index.search(k, { budgetChars: maxChars, maxChunks: 12, excludeLocal: false });
+      let blocks = search(q);
+      if (blocks.length === 0) {
+        const cleaned = cleanQuery(q);
+        if (cleaned && cleaned !== q.toLowerCase()) blocks = search(cleaned);
+      }
       if (blocks.length > 0) {
         const text = blocks.map((b) => b.text).join("\n\n[… bagian lain dilewati …]\n\n");
         const pages = [...new Set([...text.matchAll(/\[Halaman (\d+)\]/g)].map((m) => Number(m[1])))].sort((a, b) => a - b);
@@ -119,10 +140,24 @@ export function createPdfChatStore({ ttlMs = 30 * 60_000, max = 8, now = () => D
       }
       return { text: "(tidak ada bagian PDF yang cocok dengan pertanyaan ini)", mode: "none", totalChars: total, shownChars: 0, coverage: 0, pages: [] };
     }
-    const c = buildPdfContext(entry.fullText, q, { maxChars });
+    // kueri dikosongkan: buildPdfContext tidak boleh memilih "relevan" dari kata kunci permintaan luas
+    const c = buildPdfContext(entry.fullText, broad ? "" : q, { maxChars });
     const pages = [...new Set([...c.text.matchAll(/\[Halaman (\d+)\]/g)].map((m) => Number(m[1])))].sort((a, b) => a - b);
-    return { ...c, mode: "sampled", pages };
+    return { ...c, mode: "sampled", pages, broad };
   }
 
-  return { build, get, contextFor, size: () => cache.size, clear: () => [...cache.keys()].forEach(drop) };
+  /** PDF lain di obrolan yang sama ("<jid>|<id pesan>") yang masih tersimpan, terbaru dulu; tanpa memperpanjang TTL. */
+  function siblings(key) {
+    const k = String(key ?? "");
+    const i = k.lastIndexOf("|");
+    if (i < 0) return [];
+    const prefix = k.slice(0, i + 1);
+    const t = now();
+    return [...cache]
+      .filter(([ck, v]) => ck !== k && ck.startsWith(prefix) && t - v.at <= ttlMs)
+      .sort((a, b) => b[1].at - a[1].at)
+      .map(([, v]) => v.entry);
+  }
+
+  return { build, get, contextFor, siblings, size: () => cache.size, clear: () => [...cache.keys()].forEach(drop) };
 }

@@ -76,7 +76,7 @@ import { VOICE_LANGS, createGroupVoice, detectRequestedLang, detectTextOnlyReque
 import { formatForWhatsApp, detectPdfRequest, detectOfficeRequest, cleanAnswerForFile, titleForFile } from "./wa-format.js";
 import { buildDocx, buildXlsx, officeFileName, MIME_DOCX, MIME_XLSX } from "./office-doc.js";
 import { pdfBufferToMarkdown, PDF_MAX_BYTES } from "./pdf-extract.js";
-import { pdfBufferToPages, createPdfChatStore } from "./pdf-chat.js";
+import { pdfBufferToPages, createPdfChatStore, isBroadRequest } from "./pdf-chat.js";
 import { PDF_QA_DEFAULT_MAX_CHARS, PDF_QA_LOCAL_MAX_CHARS, buildPdfContext, isPdfDoc, isReadQuestion, pdfAttachTag, pdfContextNote, pdfReadMessage, shouldReadPdf } from "./pdf-qa.js";
 import { createHumor, readHumorConfig } from "./humor.js";
 import { NO_OFFER_NOTE, stripHelpOffers } from "./insani.js";
@@ -445,8 +445,12 @@ function buildPdfNote(jid, local) {
   const p = waAccountContext.getStore()?.pdf;
   if (!p) return "";
   const maxChars = local ? PDF_GROUP_LOCAL_MAX_CHARS : PDF_GROUP_MAX_CHARS;
-  const ctx = p.entry ? pdfChat.contextFor(p.entry, p.question, { maxChars }) : buildPdfContext(p.markdown, p.question, { maxChars });
-  return pdfContextNote({ name: p.name, pages: p.pages, truncatedPages: p.truncatedPages, fromReply: p.fromReply, ctx, scope: isGroupJid(jid) ? "grup" : "chat pribadi", readPages: p.entry?.readPages || 0 });
+  // Permintaan luas + ada PDF lain di obrolan yang sama: ikutkan sebagai pembanding, anggaran karakter dibagi dua.
+  const sib = p.entry && p.cacheKey && isBroadRequest(p.question) ? pdfChat.siblings(p.cacheKey)[0] : null;
+  const budget = sib ? Math.floor(maxChars / 2) : maxChars;
+  const ctx = p.entry ? pdfChat.contextFor(p.entry, p.question, { maxChars: budget }) : buildPdfContext(p.markdown, p.question, { maxChars: budget });
+  const compare = sib ? { name: sib.name, pages: sib.total, ctx: pdfChat.contextFor(sib, p.question, { maxChars: budget }) } : null;
+  return pdfContextNote({ name: p.name, pages: p.pages, truncatedPages: p.truncatedPages, fromReply: p.fromReply, ctx, compare, scope: isGroupJid(jid) ? "grup" : "chat pribadi", readPages: p.entry?.readPages || 0 });
 }
 
 function withGroupNote(basePrompt, jid, { local = false } = {}) {
@@ -1617,7 +1621,7 @@ async function geminiGenerateWithRotation(
   // internet: tanpa ini model menjawab angka/aturan dari ingatan lamanya
   // dengan nada yakin (bisa salah/usang).
   const systemNoSearch =
-    `${systemWithDate}\n\nCATATAN: untuk balasan ini akses pencarian internet SEDANG TIDAK TERSEDIA. Untuk peraturan, tarif, angka resmi, atau hal lain yang bisa sudah berubah, JANGAN menyebut angka/aturan dengan yakin dari ingatan (angka yang tertulis di KONTEKS DOKUMEN boleh dipakai) -- katakan terus terang kamu belum bisa memastikan versi terbarunya dan sarankan cek sumber resmi (mis. PMK/situs Kemenkeu).`;
+    `${systemWithDate}\n\nCATATAN: untuk balasan ini kamu hanya berpegang pada dokumen yang ada di percakapan. Untuk peraturan, tarif, angka resmi, atau hal lain yang bisa sudah berubah, JANGAN menyebut angka/aturan dengan yakin dari ingatan (angka yang tertulis di KONTEKS DOKUMEN atau ISI PDF boleh dipakai) -- katakan terus terang kamu belum bisa memastikannya dan sebut dokumen apa yang dibutuhkan (mis. PDF peraturannya, atau nomor dan tahun peraturan yang dimaksud). JANGAN pernah menyinggung internet, koneksi, pencarian online, atau gangguan teknis; jangan menyuruh cek JDIH/situs kecuali penanya memintanya.`;
   const systemWithWeb =
     `${systemWithDate}\n\nCATATAN: Google Search sedang tidak tersedia, jadi sistem mencarikan HASIL PENCARIAN WEB (judul + cuplikan, sebagian dengan baris "Sumber: URL") dan melampirkannya di pesan terakhir. Jadikan itu acuan utama untuk fakta/angka/aturan terbaru dan sebut sumbernya singkat (nama situs/judul) kalau relevan. Cuplikan sering terpotong: kalau belum cukup untuk memastikan angka atau aturan resmi, katakan terus terang dan sarankan cek sumber resmi. Boleh menyebut URL HANYA yang tertulis persis di baris "Sumber:"; jangan mengarang link/URL.`;
   // Payload jalur tanpa Google Search: dihitung malas & maksimal 1x per
@@ -3298,7 +3302,7 @@ async function handleGroupMessage(msg, sock) {
       await replyGroupText(sock, groupJid, msg, subject, loaded.message);
       return;
     }
-    pdfCtx = { name: loaded.name, pages: loaded.pages, entry: loaded.entry, truncatedPages: loaded.truncated, fromReply: !docAttached, question: text };
+    pdfCtx = { name: loaded.name, pages: loaded.pages, entry: loaded.entry, truncatedPages: loaded.truncated, fromReply: !docAttached, question: text, cacheKey: loaded.cacheKey };
     console.log(`📄 [Baca PDF] "${loaded.name}" ${loaded.pages} hlm, ${loaded.entry.chars} huruf, ${loaded.entry.readPages} hlm diindeks (${loaded.cached ? "dari simpanan" : "baru dibaca"})`);
   }
 
@@ -3576,7 +3580,7 @@ async function attachDmPdf(sock, jid, dmPdf, { owner = false } = {}) {
     return false;
   }
   const st = waAccountContext.getStore();
-  if (st) st.pdf = { name: loaded.name, pages: loaded.pages, entry: loaded.entry, truncatedPages: loaded.truncated, fromReply: dmPdf.fromReply, question: dmPdf.question };
+  if (st) st.pdf = { name: loaded.name, pages: loaded.pages, entry: loaded.entry, truncatedPages: loaded.truncated, fromReply: dmPdf.fromReply, question: dmPdf.question, cacheKey: dmPdf.cacheKey };
   console.log(`📄 [Baca PDF/DM] "${loaded.name}" ${loaded.pages} hlm, ${loaded.entry.readPages} hlm diindeks (${loaded.cached ? "dari simpanan" : "baru dibaca"})`);
   return true;
 }
@@ -3589,7 +3593,7 @@ async function attachDmPdf(sock, jid, dmPdf, { owner = false } = {}) {
 async function readChatPdf(sock, { source, doc, cacheKey }) {
   const name = String(doc?.fileName || "dokumen.pdf");
   const hit = cacheKey ? pdfChat.get(cacheKey) : null;
-  if (hit) return { ok: true, name: hit.name, pages: hit.total, truncated: hit.truncated, entry: hit, cached: true };
+  if (hit) return { ok: true, name: hit.name, pages: hit.total, truncated: hit.truncated, entry: hit, cached: true, cacheKey };
   if (pdfToolMissing) return { ok: false, message: pdfReadMessage("notool") };
   if (Number(doc?.fileLength) > PDF_MAX_BYTES) return { ok: false, message: `PDF-nya terlalu besar (maks ${Math.round(PDF_MAX_BYTES / 1024 / 1024)} MB). Kirim versi yang lebih kecil atau pisahkan per bagian.` };
   return runFileJob(async () => {
@@ -3623,7 +3627,7 @@ async function readChatPdf(sock, { source, doc, cacheKey }) {
       console.error(`📄 [Baca PDF] indeks sementara gagal untuk "${name}": ${e instanceof Error ? e.message : String(e)}`);
       return { ok: false, message: pdfReadMessage("empty") };
     }
-    return { ok: true, name, pages: r.total, truncated: r.truncated, entry, cached: false };
+    return { ok: true, name, pages: r.total, truncated: r.truncated, entry, cached: false, cacheKey };
   });
 }
 

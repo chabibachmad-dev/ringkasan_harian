@@ -3,6 +3,7 @@
 import fs from "node:fs";
 import { pdfBufferToPages, createPdfChatStore } from "./pdf-chat.js";
 import { pdfContextNote } from "./pdf-qa.js";
+import { isBroadRequest, cleanQuery } from "./pdf-chat.js";
 
 let fails = 0;
 const check = (c, m) => { if (!c) { fails++; console.log("FAIL:", m); } else console.log("ok:", m); };
@@ -50,6 +51,43 @@ const buf = Buffer.from("%PDF-1.7\n....");
   check(store.size() <= 2, "cache dibatasi (max 2)");
   store.clear();
   check(store.size() === 0, "clear membuang & menutup indeks");
+}
+
+// ---- permintaan luas, kueri bersih, siblings
+{
+  const r = await pdfBufferToPages(buf, { exec: fakePdf(120) });
+  const store = createPdfChatStore({ ttlMs: 1000, max: 4 });
+  const entry = await store.build("g@g.us|A", { name: "KMK 296.pdf", pages: r.pages, total: r.total });
+  const q = "bisa buatkan matriks perubahan antara KMK 296/2026 ini dengan PMK 32 Tahun 2025 tentang SBM 2026?";
+  check(isBroadRequest(q) && !isBroadRequest("berapa tarif sewa genset 450 KVA?"), "isBroadRequest: matriks perubahan luas, tarif spesifik bukan");
+  const c = store.contextFor(entry, q, { maxChars: 6000 });
+  check(c.mode === "sampled" && c.broad === true && /\[Halaman \d+\]/.test(c.text), "permintaan luas pada PDF besar: sampled, bukan none");
+  check(cleanQuery(q) === "matriks perubahan sbm", `cleanQuery membuang KMK/PMK/tahun/angka (${cleanQuery(q)})`);
+  check(!/\b(kmk|pmk|tahun|2025|296)\b/.test(cleanQuery("KMK 296/2026 dan PMK 32 Tahun 2025 genset")), "cleanQuery tanpa nomor peraturan");
+  const retry = store.contextFor(entry, "KMK 296/2026 PMK 32 Tahun 2025 tarif sewa genset", { maxChars: 6000 });
+  check(retry.mode === "retrieved" && /31\.770\.000/.test(retry.text), "kueri bernomor peraturan: dicoba ulang dengan kueri bersih, ketemu");
+  const none = store.contextFor(entry, "bagaimana resep rendang padang yang enak sekali", { maxChars: 6000 });
+  check(none.mode === "none", "fakta yang tidak ada di PDF tetap none (anti-tebak)");
+  const none2 = store.contextFor(entry, "resep rendang padang menurut PMK 32 Tahun 2025", { maxChars: 6000 });
+  check(none2.mode === "none", "kueri bernomor peraturan tapi faktanya tidak ada: tetap none");
+  await store.build("g@g.us|B", { name: "PMK 32.pdf", pages: r.pages.slice(0, 5), total: 5 });
+  await store.build("lain@g.us|C", { name: "lain.pdf", pages: r.pages.slice(0, 5), total: 5 });
+  const sib = store.siblings("g@g.us|A");
+  check(sib.length === 1 && sib[0].name === "PMK 32.pdf", "siblings: PDF lain di obrolan yang sama saja");
+  check(store.siblings("lain@g.us|C").length === 0 && store.siblings("tanpa-pemisah").length === 0, "siblings: obrolan lain/kunci tak valid kosong");
+  const note = pdfContextNote({ name: "KMK 296.pdf", pages: 120, ctx: c, compare: { name: "PMK 32.pdf", pages: 5, ctx: { text: "[Halaman 1] isi pembanding" } }, readPages: 120 });
+  check(/PDF PEMBANDING/.test(note) && /<<<ISI_PDF_PEMBANDING>>>/.test(note) && /isi pembanding/.test(note), "catatan memuat blok PDF PEMBANDING");
+  const solo = pdfContextNote({ name: "KMK 296.pdf", pages: 120, ctx: c, readPages: 120 });
+  check(/poin-poin berhalaman/.test(solo) && /mengirim PDF-nya di grup/.test(solo) && /JANGAN menyinggung internet/.test(solo) && /JANGAN mengarang/.test(solo), "permintaan luas: instruksi poin berhalaman, minta kirim PDF pembanding, larang internet");
+  check(!/LUAS/.test(pdfContextNote({ name: "x.pdf", ctx: { ...c, broad: false } })), "bukan permintaan luas: tanpa catatan luas");
+  store.clear();
+}
+
+// ---- systemNoSearch tidak boleh curhat soal internet
+{
+  const src = fs.readFileSync(new URL("./index.js", import.meta.url), "utf8");
+  const m = /const systemNoSearch =\s*`([\s\S]*?)`;/.exec(src);
+  check(Boolean(m) && !/SEDANG TIDAK TERSEDIA/.test(m[1]) && /JANGAN pernah menyinggung internet/.test(m[1]), "systemNoSearch tidak lagi memuat 'SEDANG TIDAK TERSEDIA'");
 }
 
 // ---- catatan prompt
