@@ -1,0 +1,8 @@
+PATCH AYYUBI -- PENJAGA BALASAN (anti tag bocor & anti link karangan)
+=====================================================================
+Berkas BARU saja (tidak menimpa apa pun, aman untuk hub yang sudah diubah Claude Code):
+  wa-bot/reply-guard.js          penjaga: buang [SEARCH]..[/SEARCH], saring URL di luar baris "Sumber:", aturan prompt
+  wa-bot/test-reply-guard.mjs    tes (jalankan: node test-reply-guard.mjs)
+
+PENTING: modul ini baru "alat". Belum terpasang ke jalur balasan di index.js
+(index.js hub berbeda dari salinan awan, jadi tidak ditimpa). Langkah pasang ada di prompt Claude Code terpisah.
