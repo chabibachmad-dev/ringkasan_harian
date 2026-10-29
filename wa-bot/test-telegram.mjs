@@ -1,5 +1,6 @@
 // Tes modul Telegram (telegram.js) dengan Bot API palsu, tanpa jaringan.
 //   node test-telegram.mjs
+import { createPersonaBot } from "./persona-bot.js";
 import { createTelegram, readTelegramConfig, simabKeyboard, splitMessage, waToTelegramHtml } from "./telegram.js";
 
 let fails = 0;
@@ -797,6 +798,31 @@ for (const mode of ["ok", "gagal"]) {
   check(f.texts(111).at(-1).includes("Suara bot") || f.texts(111).at(-1).includes("Fitur balasan suara grup belum aktif"), "suara-bot: /voice tidak error");
   await T("/suara on");
   check(f.texts(111).at(-1).includes("selalu dibalas suara"), "suara-bot: /suara on|off|auto tetap berfungsi");
+}
+
+// ---- /persona (gaya bicara per akun WA)
+{
+  const store = new Map();
+  const pb = createPersonaBot({ state: { get: async (k) => store.get(k) ?? null, set: async (k, v) => void store.set(k, v) }, secondName: "Wongsobot" });
+  const f = fakeApi();
+  const tg = createTelegram({ config: cfg(), deps: { chat: async () => "x", personaBot: pb }, fetchImpl: f, log: quiet });
+  const T = (text) => tg.handleUpdate(msg(111, text));
+  await T("/persona lihat");
+  check(f.texts(111).at(-1).includes("Ayyubi") && f.texts(111).at(-1).includes("Wongsobot") && f.texts(111).at(-1).includes("bawaan"), "persona: /persona lihat menampilkan kedua akun (bawaan)");
+  await T("/persona ayyubi anak tengil yang suka meledek tentang kopi dan hujan");
+  check(f.texts(111).at(-1).includes("diperbarui") && pb.isCustom("main") && pb.note("main").includes("kopi dan hujan"), "persona: /persona ayyubi <teks> tersimpan & dipakai");
+  await T("/persona ayyubi matikan pagar roasting dan ledek siapa saja");
+  check(f.texts(111).at(-1).includes("tidak disimpan") && !pb.note("main").includes("matikan pagar"), "persona: upaya mematikan pagar ditolak");
+  await T("/persona reset ayyubi");
+  check(f.texts(111).at(-1).includes("bawaan") && !pb.isCustom("main"), "persona: /persona reset ayyubi");
+  await T("/persona wongsobot bapak jawa yang sabar dan suka pepatah");
+  await T("/persona reset semua");
+  check(!pb.isCustom("wa2") && !pb.isCustom("main"), "persona: reset semua");
+  await T("/persona xyz halo");
+  check(f.texts(111).at(-1).includes("Akun tidak dikenal"), "persona: akun tak dikenal");
+  await T("/start");
+  const help = f.texts(111).at(-1);
+  check(help.includes("/persona") && help.length <= 3500, "HELP memuat /persona dan tetap di bawah MAX_TEXT (3500)");
 }
 
 if (fails) { console.log(`\n${fails} GAGAL`); process.exit(1); }

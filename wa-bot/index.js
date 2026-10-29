@@ -83,6 +83,8 @@ import { NO_OFFER_NOTE, stripHelpOffers } from "./insani.js";
 import { OWNER_ASKER_NOTE, OWNER_CLAIM_NOTE, OWNER_DEFLECT_FALLBACK, OWNER_DEFLECT_FIX, buildCapabilityNote, buildVoiceReplyNote, correctionAnswer, deflectsToOwner, denyingCapability, detectVoiceQuestion, senderLabel, voiceCapabilityAnswer } from "./capabilities.js";
 import { detectEditRequest, replaceInText, replaceInDocx, docxToMarkdown, numberDiff, buildEditPrompt, buildEditUserMessage, unwrapFence, hasESignature, AI_EDIT_MAX_CHARS } from "./doc-edit.js";
 import { createPersonaVoice } from "./persona-voice.js";
+import { createPersonaBot } from "./persona-bot.js";
+import { isGraveTopic } from "./ngobrol.js";
 import { buildPdf, titleFromText, pdfFileName } from "./pdf-doc.js";
 import { overlayReplacePdf } from "./pdf-overlay.js";
 import { MAIN_ACCOUNT, SECOND_ACCOUNT, acctFields, createAccountRouter, isPairedCreds, isStalePairing, pairingInstructions, personaPrompt, readSecondAccountConfig } from "./wa-accounts.js";
@@ -449,6 +451,15 @@ function isGroupJid(jid) {
   return typeof jid === "string" && jid.endsWith("@g.us");
 }
 
+/** Blok gaya bicara akun yang sedang aktif (persona-bot.js); ledekan dimatikan bila pertanyaannya serius (store.serious). */
+function buildPersonaNote() {
+  try {
+    return personaBot.note(currentAccountId(), { serious: Boolean(waAccountContext.getStore()?.serious) });
+  } catch {
+    return "";
+  }
+}
+
 /** Blok prompt "ISI TAUTAN" (hasil baca link/video di pesan ini atau pesan yang dibalas); kosong bila tidak ada. */
 function buildLinkNote() {
   const st = waAccountContext.getStore();
@@ -477,7 +488,7 @@ function withGroupNote(basePrompt, jid, { local = false } = {}) {
   const ownerNote = waAccountContext.getStore()?.ownerAsker ? OWNER_ASKER_NOTE : "";
   if (!isGroupJid(jid)) {
     const pdfN = buildPdfNote(jid, local);
-    return `${base}${ownerNote}${pdfN || (PDF_DM_READ && !pdfToolMissing ? DM_PDF_CAP_NOTE : "")}${buildLinkNote()}`;
+    return `${base}${ownerNote}${pdfN || (PDF_DM_READ && !pdfToolMissing ? DM_PDF_CAP_NOTE : "")}${buildLinkNote()}${buildPersonaNote()}`;
   }
   // Balasan grup berupa suara: bahasa jawaban dipaksa (/voice wag kor ...) atau diminta anggota grup ("jawab pakai bahasa Korea").
   const replyLang = waAccountContext.getStore()?.replyLang;
@@ -508,7 +519,7 @@ function withGroupNote(basePrompt, jid, { local = false } = {}) {
   const pdfNote = buildPdfNote(jid, local);
   // Nomor utama saja: pemilik dipanggil "Bos" & dipatuhi; untuk orang lain, bot boleh menandai pemilik bila tidak tahu.
   const bosNote = currentAccountId() !== MAIN_ACCOUNT ? "" : ctxFlags?.ownerAsker ? ownerGroupNote(ownerGroupCfg.panggilan) : ownerGroupCfg.tanyaBos ? tanyaBosNote(ownerGroupCfg.panggilan) : "";
-  return `${base}${GROUP_PROMPT_NOTE}${ownerNote || OWNER_CLAIM_NOTE}${bosNote}${capNote}${imageNote}${videoNote}${fileNote}${voiceNote}${pdfNote}${buildLinkNote()}${ctxFlags?.humorNote || ""}${ctxFlags?.retryNote ? `\n\n${ctxFlags.retryNote}` : ""}${replyLang ? langInstruction(replyLang) : ""}`;
+  return `${base}${GROUP_PROMPT_NOTE}${ownerNote || OWNER_CLAIM_NOTE}${bosNote}${capNote}${imageNote}${videoNote}${fileNote}${voiceNote}${pdfNote}${buildLinkNote()}${buildPersonaNote()}${ctxFlags?.humorNote || ""}${ctxFlags?.retryNote ? `\n\n${ctxFlags.retryNote}` : ""}${replyLang ? langInstruction(replyLang) : ""}`;
 }
 
 // Buang awalan "Nama: " & baris "(mengutip: ...)" supaya pencarian dokumen/web
@@ -1179,6 +1190,7 @@ async function generateAutoReplyWithOllama(jid, { timeoutMs } = {}) {
   const pinnedTitles = docTitlesFor(jid);
   const docChunks = docsAllowed ? await fetchRelevantKnowledgeChunks(searchQuestion, RAG_CONTEXT_BUDGET_CHARS, pinnedTitles, { includeLocal: DOC_LOCAL_WA_CONTACTS }) : [];
   const topScore = docChunks[0]?.score ?? 0;
+  { const st = waAccountContext.getStore(); if (st) st.serious = pdfAsked || docChunks.length > 0 || NEEDS_ACCURATE_FIGURES_RE.test(searchQuestion) || isGraveTopic(searchQuestion); }
   const webResults = !lookupAllowed || pinnedTitles || topScore >= RAG_STRONG_MATCH_SCORE ? [] : await webSearch.search(searchQuestion, WEB_SEARCH_MAX_RESULTS, { snippetChars: 220 });
 
   // Log diagnostik ringan (BUKAN isi lengkap dokumen/pertanyaan, cuma
@@ -1892,6 +1904,7 @@ async function generateAutoReplyWithGemini(jid) {
   // Jalur: obrolan biasa = "santai" (cepat dulu), pertanyaan angka/aturan/dokumen/internet = "akurat" (Gemini dulu). Lihat ai-route.js & /urutan.
   const lastIncoming = stripGroupMeta(jid, contents.filter((c) => c.role === "user").at(-1)?.parts?.[0]?.text ?? "");
   const route = classifyRoute({ text: lastIncoming, pinnedDocs: Boolean(pinnedTitles), docChunks: docChunks.length, webQuery, accurateRe: NEEDS_ACCURATE_FIGURES_RE });
+  { const st = waAccountContext.getStore(); if (st) st.serious = route === "akurat" || pdfAsked || docChunks.length > 0 || isGraveTopic(lastIncoming); } // pagar roasting: topik serius = tanpa ledekan
   const data = await geminiGenerateWithRotation(withGroupNote(WA_BASE_SYSTEM_PROMPT, jid), contents, {
     webQuery,
     docChunks,
@@ -5277,6 +5290,9 @@ const aiRoute = createAiRoute({
 aiRoute.load().then(() => console.log(`🔀 Urutan AI balasan WA: ${aiRoute.describe()}`)).catch(() => {});
 
 // Suara per bot (Ayyubi / bot nomor kedua): /suara daftar|coba|pakai dari Telegram, tersimpan di bot_state. Lihat persona-voice.js.
+// Kepribadian (gaya bicara) per akun, terpisah dari suara: lihat persona-bot.js (/persona di Telegram).
+const personaBot = createPersonaBot({ state: botStateStore, secondName: wa2Config.enabled ? wa2Config.botName || wa2Config.label || "" : "", secondEnabled: wa2Config.enabled });
+personaBot.load().catch(() => {});
 const personaVoice = createPersonaVoice({ state: botStateStore, env: process.env, secondName: wa2Config.enabled ? wa2Config.botName || wa2Config.label || "Nomor 2" : "", secondEnabled: wa2Config.enabled });
 personaVoice.load().catch(() => {});
 
@@ -6182,6 +6198,7 @@ const telegram = createTelegram({
     speak: speaker.available() ? (text, opts) => speaker.speak(text, opts) : null,
     personaVoice,
     voiceCheck: checkVoiceOutput,
+    personaBot,
     simab,
     summary: () => buildDailySummaryText(zonedParts(Date.now(), WA_TIMEZONE).dateStr, { allowAi: true }),
     regNow: (opts) => regMonitor.runNow(opts),

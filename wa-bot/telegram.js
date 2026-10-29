@@ -139,9 +139,9 @@ const HELP = [
   "Halo, ini Ayyubi di Telegram.",
   "",
   "Ketik biasa untuk ngobrol dengan AI (Gemini, bisa cari web & Dokumen Pengetahuan).",
-  "🎤 Kirim PESAN SUARA (tahan tombol mikrofon) untuk ngobrol atau merekam SiMAB: bot menuliskan apa yang ia dengar, lalu menjalankannya seperti pesan teks. Contoh saat merekam: \"Pembelian ATK, tanggal 5 Oktober 2026, jumlah satu juta lima ratus ribu rupiah\".",
+  "🎤 Kirim PESAN SUARA (tahan tombol mikrofon) untuk ngobrol atau merekam SiMAB: bot menuliskan yang ia dengar lalu menjalankannya seperti teks. Contoh saat merekam: \"Pembelian ATK, tanggal 5 Oktober 2026, jumlah satu juta lima ratus ribu rupiah\".",
   "🔊 Balasan suara: /suara auto (default: dibalas suara bila kamu kirim suara), /suara on (selalu), /suara off. Butuh ffmpeg di laptop bot.",
-  "🎙️ Latihan Inggris: /speak [topik] — kirim suara berbahasa Inggris, tutor membalas dengan SUARA SAJA (/koreksi = koreksi terakhir, /teks on = dengan teks). Santai berbahasa Indonesia: /speak id [topik]. Akhiri: /selesai.",
+  "🎙️ Latihan Inggris: /speak [topik] — kirim suara berbahasa Inggris, tutor membalas SUARA SAJA (/koreksi, /teks on). Indonesia: /speak id [topik]. Akhiri: /selesai.",
   "",
   "Perintah:",
   "/simab <perintah>  — SiMAB (pagu, cek, perjadin, sbm, rpd, rekam). Boleh juga tulis \"simab ...\" tanpa garis miring.",
@@ -156,6 +156,7 @@ const HELP = [
   "/kesehatan  — periksa Ollama, disk, memori, WhatsApp, basis data, dan cadangan sekarang",
   "/edu  — channel YouTube edukasi (setujui draf video; /edu bantuan)",
   "/voice wag on|off|id|eng|kor|arb|jawa  — balasan grup WA berupa suara/teks + bahasa suara",
+  "/persona  — gaya bicara bot WA: lihat, ayyubi/wongsobot <teks>, reset",
   "/wa2  — nomor WhatsApp kedua (status, kode, qr)",
   "/grup  — grup WA yang dijawab bot: lihat, semua, tambah, hapus",
   "/humor  — humor per grup WA: pantun harian, roasting ringan, balas chat acak, chat otomatis, mode latihan",
@@ -673,6 +674,27 @@ Suara khusus satu grup: /suara grup wanita <nama grup> • /suara grup (daftar) 
   }
 
   /** /voice: pusat pengaturan suara. /voice wag on|off = balasan grup WhatsApp suara/teks; /voice tg ... = sama dengan /suara. */
+  /** /persona lihat | ayyubi <teks> | wongsobot <teks> | reset <akun|semua>: gaya bicara per akun WA (persona-bot.js). */
+  async function handlePersona(chatId, arg) {
+    const pb = deps.personaBot;
+    if (!pb) return void (await send(chatId, "Pengaturan persona tidak tersedia di versi bot ini."));
+    const cmd = pb.parse(arg);
+    if (cmd.kind === "error") return void (await send(chatId, cmd.message));
+    if (cmd.kind === "show") return void (await send(chatId, `🎭 Kepribadian bot\n${pb.describe()}\n\nUbah: /persona ayyubi <teks> • /persona wongsobot <teks>\nKembali ke bawaan: /persona reset <akun|semua>\nPagar roasting & aturan jujur selalu berlaku, tidak bisa dimatikan.`));
+    if (cmd.kind === "reset") {
+      const list = cmd.who === "all" ? ["main", "wa2"] : [cmd.who];
+      const out = [];
+      for (const w of list) out.push(`${pb.label(w)}${(await pb.reset(w)).saved ? "" : " (gagal disimpan: berlaku sampai bot restart)"}`);
+      return void (await send(chatId, `🎭 Persona dikembalikan ke bawaan: ${out.join(", ")}.`));
+    }
+    try {
+      const r = await pb.set(cmd.who, cmd.text);
+      return void (await send(chatId, `🎭 Persona ${pb.label(cmd.who)} diperbarui${r.saved ? "" : " (gagal disimpan: berlaku sampai bot restart)"}:\n${r.value}\n\nPagar roasting dan aturan jujur tetap ikut.`));
+    } catch (e) {
+      return void (await send(chatId, `Persona tidak disimpan: ${e instanceof Error ? e.message : String(e)}.`));
+    }
+  }
+
   async function handleVoiceHub(chatId, arg) {
     const cmd = parseVoiceArg(arg);
     const gv = deps.groupVoice;
@@ -1041,6 +1063,7 @@ Suara khusus satu grup: /suara grup wanita <nama grup> • /suara grup (daftar) 
       return void (await reply(s.text ? "📝 Balasan tutor sekarang juga ditulis. /teks off untuk suara saja." : "🔊 Balasan tutor sekarang suara saja. /teks on bila mau teks juga."));
     }
     if (name === "suara") return handleVoiceCommand(chatId, arg);
+    if (name === "persona") return handlePersona(chatId, arg);
     if (name === "voice") return handleVoiceHub(chatId, arg);
     if (name === "env") {
       if (!deps.env) return void (await reply("Pengaturan .env dari Telegram tidak tersedia di versi bot ini."));
@@ -1563,6 +1586,7 @@ Suara khusus satu grup: /suara grup wanita <nama grup> • /suara grup (daftar) 
           { command: "speak", description: "Ngobrol dengan tutor suara: Inggris, atau \"/speak id\" Indonesia" },
           { command: "selesai", description: "Akhiri sesi Speaking" },
           { command: "suara", description: "Balasan suara + pilih suara tiap bot (daftar/coba/pakai)" },
+          { command: "persona", description: "Gaya bicara tiap bot WA (lihat/ayyubi/wongsobot/reset)" },
           { command: "help", description: "Bantuan" }
         ]
       }).catch(() => {});
