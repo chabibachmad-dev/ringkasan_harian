@@ -95,6 +95,7 @@ import { qrToPng } from "./qr-png.js";
 import { createGroupList } from "./group-list.js";
 import { createVideoGen, readVideoConfig, videoSentNote, photoVideoSentNote, storySentNote, morphSentNote, VIDEO_TEXT } from "./video-gen.js";
 const VIDEO_NOPHOTO_TEXT = VIDEO_TEXT.nophoto;
+import { askVisionChain, buildImageSystem, isMentionedIn, isTasteQuestion, shouldAnswerImage, MSG_DOWNLOAD_FAIL, MSG_EMPTY, MSG_VISION_FAIL } from "./image-qa.js";
 import { IMAGE_QA_SYSTEM, buildImageQaPrompt, looksLikeImageQuestion, readVisualConfig, webpFirstFrame } from "./visual.js";
 import { createImageGen, readImageConfig, imageSentNote, quotedImageNote, prepareEditInput, KIND_TEXT as IMAGE_KIND_TEXT } from "./image-gen.js";
 import { createEnvEditor } from "./env-edit.js";
@@ -1492,14 +1493,14 @@ function markGeminiKeyExhausted(key, err) {
 // (balasan WA terasa "lama banget"). Balasan WA/grup memakai batas pendek; ringkasan & tugas lain memakai yang panjang.
 const GEMINI_TIMEOUT_MS_LONG = Number(process.env.GEMINI_TIMEOUT_MS) || 90_000;
 const GEMINI_WA_TIMEOUT_MS = Number(process.env.GEMINI_WA_TIMEOUT_MS) || 25_000;
-async function callGeminiOnce(systemText, contents, withTools, apiKey, timeoutMs = GEMINI_TIMEOUT_MS_LONG) {
+async function callGeminiOnce(systemText, contents, withTools, apiKey, timeoutMs = GEMINI_TIMEOUT_MS_LONG, model = GEMINI_MODEL) {
   const body = JSON.stringify({
     system_instruction: { parts: [{ text: systemText }] },
     contents,
     ...(withTools ? { tools: [{ google_search: {} }] } : {}),
     generationConfig: { temperature: 0.6 }
   });
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${apiKey}`;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
   let res;
   try {
     res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body, signal: AbortSignal.timeout(timeoutMs) });
@@ -3139,7 +3140,7 @@ async function handleGroupMessage(msg, sock) {
   const ownUserParts = ownJids.map((j) => j.split("@")[0]);
 
   // --- Apakah bot dipanggil? (murni lokal & murah, belum menyentuh DB/jaringan)
-  const mentioned = (ctx?.mentionedJid ?? []).some((j) => ownJids.includes(normalizeJidSuffix(j)));
+  const mentioned = isMentionedIn(content, ownJids, normalizeJidSuffix); // teks, gambar, video, dokumen, audio, stiker
   const mentionedInText = ownUserParts.some((u) => u && rawText.includes(`@${u}`));
   let triggered = GROUP_MENTION_TRIGGER && (mentioned || mentionedInText);
 
@@ -3235,7 +3236,8 @@ async function handleGroupMessage(msg, sock) {
   const editReq = !animReq && imageGen.groupEnabled() ? imageGen.detectEdit(text, { hasImage: Boolean(photo || quotedImage) }) : null;
   // Bot dipanggil + foto/gambar/stiker yang dikutip: kalau terdengar bertanya tentang gambarnya ("ini apa?", "bacain tulisannya"), bot melihat & menjawab.
   const quotedSticker = !photo && ctx?.quotedMessage ? unwrapMessageContent(ctx.quotedMessage)?.stickerMessage || null : null;
-  if ((photo || quotedImage || quotedSticker) && !editReq && !animReq && looksLikeImageQuestion(text)) {
+  // Gambar yang dilampirkan bersama sebutan bot SELALU dijawab (dulu hanya bila kata-katanya cocok daftar, mis. "logo paling bagus yang mana?" lolos diam-diam).
+  if ((photo || quotedImage || quotedSticker) && !editReq && !animReq && shouldAnswerImage({ attached: Boolean(photo), quoted: Boolean(quotedImage || quotedSticker), text, looksLikeQuestion: looksLikeImageQuestion })) {
     const qSource = photo ? { key: msg.key, message: content } : { key: { remoteJid: groupJid, id: ctx.stanzaId, participant: ctx.participant }, message: unwrapMessageContent(ctx.quotedMessage) };
     await answerGroupImageQuestion(sock, msg, groupJid, { source: qSource, kind: quotedSticker ? "stiker" : "gambar", question: text, who: `${groupJid}|${msg.key.participant || sender}` });
     return;
@@ -5831,6 +5833,24 @@ async function geminiVision({ system, user, image }) {
   const data = await geminiGenerateWithRotation(system, [{ role: "user", parts: [{ text: user }, { inline_data: { mime_type: image.mime || "image/jpeg", data: Buffer.from(image.buffer).toString("base64") } }] }], { useSearch: false });
   return extractGeminiText(data);
 }
+// Model penglihat cadangan (semua Gemini multimodal): GEMINI_MODEL dulu, lalu GEMINI_VISION_FALLBACK_MODELS (pisah koma), tiap model mencoba semua key.
+const VISION_FALLBACK_MODELS = (process.env.GEMINI_VISION_FALLBACK_MODELS || "gemini-3.5-flash").split(",").map((x) => x.trim()).filter((x) => x && x !== GEMINI_MODEL);
+function geminiVisionModel(model) {
+  return async ({ system, user, image }) => {
+    if (GEMINI_API_KEYS.length === 0) throw new Error("GEMINI_API_KEYS belum diisi");
+    const contents = [{ role: "user", parts: [{ text: user }, { inline_data: { mime_type: image.mime || "image/jpeg", data: Buffer.from(image.buffer).toString("base64") } }] }];
+    let last = null;
+    for (const key of GEMINI_API_KEYS) {
+      try {
+        return extractGeminiText(await callGeminiOnce(system, contents, false, key, GEMINI_WA_TIMEOUT_MS, model));
+      } catch (e) {
+        last = e;
+      }
+    }
+    throw last || new Error("tidak ada key Gemini");
+  };
+}
+const visionChain = () => [{ name: GEMINI_MODEL, run: geminiVision }, ...VISION_FALLBACK_MODELS.map((m) => ({ name: m, run: geminiVisionModel(m) }))];
 async function downloadVisualMedia(sk, source, maxBytes) {
   let lastErr = null;
   for (let attempt = 0; attempt < 2; attempt++) {
@@ -5967,18 +5987,27 @@ async function answerGroupImageQuestion(sock, msg, groupJid, { source, kind, que
   } catch (e) {
     console.error("👁️ Gagal mengunduh gambar:", describeError(e));
   }
-  if (!buffer) return say("Gambarnya tidak bisa kubuka (terlalu besar atau sudah kedaluwarsa). Coba kirim ulang ya 🙏");
-  let out = "";
+  if (!buffer) return say(MSG_DOWNLOAD_FAIL);
+  const taste = isTasteQuestion(question);
+  let persona = "";
   try {
-    out = await geminiVision({ system: IMAGE_QA_SYSTEM, user: buildImageQaPrompt(question), image: { buffer, mime: kind === "stiker" ? "image/webp" : (source.message?.imageMessage?.mimetype || "image/jpeg") } });
-  } catch (e) {
-    console.error("👁️ AI penglihatan gagal:", describeError(e));
-    return say("Maaf, aku belum bisa melihat gambarnya sekarang (AI-nya sedang bermasalah). Coba sebentar lagi ya 🙏");
+    persona = personaBot.note(acct, { mode: personaBot.groupMode(await getGroupSubject(sock, groupJid)) });
+  } catch {
+    /* tanpa persona tetap menjawab */
   }
-  const text = String(out || "").replace(/https?:\/\/\S+/g, "").replace(/@\d{5,}/g, "").trim().slice(0, 700);
-  if (!text) return say("Aku melihatnya, tapi bingung mau bilang apa 😅");
-  console.log(`👁️ [${groupJid}] menjawab pertanyaan tentang ${kind}.`);
-  await say(text);
+  const r = await askVisionChain({
+    visions: visionChain(),
+    system: buildImageSystem({ taste, persona }),
+    user: buildImageQaPrompt(question),
+    image: { buffer, mime: kind === "stiker" ? "image/webp" : (source.message?.imageMessage?.mimetype || "image/jpeg") },
+    maxChars: taste ? 900 : 700
+  });
+  if (!r.ok) {
+    console.error(`👁️ AI penglihatan gagal (semua model): ${r.errors.join(" | ")}`);
+    return say(r.reason === "empty" ? MSG_EMPTY : MSG_VISION_FAIL);
+  }
+  console.log(`👁️ [${groupJid}] menjawab pertanyaan tentang ${kind}${taste ? " (selera)" : ""} (${r.model}).`);
+  await say(r.text);
 }
 
 const humor = createHumor({
