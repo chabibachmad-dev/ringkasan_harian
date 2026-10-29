@@ -84,6 +84,7 @@ import { OWNER_ASKER_NOTE, OWNER_CLAIM_NOTE, OWNER_DEFLECT_FALLBACK, OWNER_DEFLE
 import { detectEditRequest, replaceInText, replaceInDocx, docxToMarkdown, numberDiff, buildEditPrompt, buildEditUserMessage, unwrapFence, hasESignature, AI_EDIT_MAX_CHARS } from "./doc-edit.js";
 import { createPersonaVoice } from "./persona-voice.js";
 import { createPersonaBot } from "./persona-bot.js";
+import { createBotChain } from "./bot-chain.js";
 import { isGraveTopic } from "./ngobrol.js";
 import { buildPdf, titleFromText, pdfFileName } from "./pdf-doc.js";
 import { overlayReplacePdf } from "./pdf-overlay.js";
@@ -3105,11 +3106,18 @@ const groupLastAskAt = new Map(); // "grup|pengirim" -> ms
 async function handleGroupMessage(msg, sock) {
   if (!groupRulesFor(sock).enabled || !AUTO_REPLY_ACTIVE) return;
   const groupJid = msg.key.remoteJid;
+  // Pesan dari akun bot kita yang lain (Ayyubi <-> Wongsobot) boleh disahut, tapi rantainya dibatasi; pesan manusia mereset hitungan.
+  const fromBot = !msg.key.fromMe && senderUserParts(msg).some((p) => p !== groupJid.split("@")[0] && ourBotUsers().has(p));
+  const chain = botChain.note(groupJid, { id: msg.key.id, fromBot });
+  if (fromBot && botChain.blocked(groupJid)) {
+    if (chain.fresh) console.log(`🤖↔🤖 [${groupJid}] rantai balasan antar-bot ${chain.count} > ${botChain.config.max}: tidak menyahut sampai ada manusia yang bicara.`);
+    return;
+  }
   const content = unwrapMessageContent(msg.message);
   if (!content) return;
   // Stiker, atau gambar TANPA keterangan: tidak pernah memanggil bot. Hanya dibaca bila /humor lihat menyala di grup ini (baca gambar & stiker).
   if (!msg.key.fromMe && (content.stickerMessage || (content.imageMessage && !String(content.imageMessage.caption ?? "").trim()))) {
-    await observeHumorMedia(sock, msg, content, groupJid, { caption: "" }).catch((e) => console.error("👁️ Baca gambar/stiker gagal:", e instanceof Error ? e.message : String(e)));
+    if (!fromBot) await observeHumorMedia(sock, msg, content, groupJid, { caption: "" }).catch((e) => console.error("👁️ Baca gambar/stiker gagal:", e instanceof Error ? e.message : String(e)));
     return;
   }
   // Voice note di grup tidak bisa me-mention bot; yang dihitung memanggil bot = voice note yang membalas (reply) pesan bot.
@@ -3164,6 +3172,7 @@ async function handleGroupMessage(msg, sock) {
     if (botMsg && botMsg.length > 0) triggered = true;
   }
   if (groupVideo && !triggered) return; // video dengan keterangan biasa: tetap diabaikan seperti sebelumnya
+  if (fromBot && !triggered) return; // pesan bot lain yang tidak menyapa kita: tidak jadi bahan obrolan/roasting spontan (cegah banjir antar-bot)
   // Mode humor (/humor): hanya di grup yang menyalakannya. (1) "bot jangan roasting aku" dihormati, dipanggil atau tidak;
   // (2) obrolan grup dibaca sebentar di memori (roasting spontan, balasan acak, konteks 15 chat; tidak disimpan ke database).
   const humorAcct = currentAccountId();
@@ -3197,6 +3206,11 @@ async function handleGroupMessage(msg, sock) {
     return;
   }
   humor.noteTriggered(currentAccountId(), groupJid); // habis dipanggil: jangan langsung bercanda/roasting
+  if (fromBot) {
+    const wait = botChain.delayMs(); // menyahut bot lain: jeda acak agar wajar
+    console.log(`🤖↔🤖 [${subject || "?"}] menyahut bot lain (rantai ke-${chain.count}/${botChain.config.max}) setelah ${(wait / 1000).toFixed(1)} dtk.`);
+    await new Promise((resolve) => setTimeout(resolve, wait));
+  }
 
   const sender = plainSenderName(msg.pushName) || "Anggota grup"; // nama tampilan tak boleh memalsukan "(pemilik)"
   const ownerAsker = isOwnerSender(msg, false); // pemilik nomor yang bertanya di grup
@@ -5295,6 +5309,10 @@ aiRoute.load().then(() => console.log(`🔀 Urutan AI balasan WA: ${aiRoute.desc
 // Kepribadian (gaya bicara) per akun, terpisah dari suara: lihat persona-bot.js (/persona di Telegram).
 const personaBot = createPersonaBot({ state: botStateStore, secondName: wa2Config.enabled ? wa2Config.botName || wa2Config.label || "" : "", secondEnabled: wa2Config.enabled });
 personaBot.load().catch(() => {});
+// Rantai balasan antar-bot (Ayyubi <-> Wongsobot): dibatasi BOT_CHAIN_MAX, dijeda acak 3-10 detik. Lihat bot-chain.js.
+const botChain = createBotChain();
+/** Nomor (bagian sebelum @) semua akun bot kita yang tersambung: pesan dari akun itu di grup = pesan bot lain, bukan manusia. */
+const ourBotUsers = () => new Set(activeSocks().flatMap((sk) => getOwnJids(sk)).map((j) => j.split("@")[0].split(":")[0]));
 const personaVoice = createPersonaVoice({ state: botStateStore, env: process.env, secondName: wa2Config.enabled ? wa2Config.botName || wa2Config.label || "Nomor 2" : "", secondEnabled: wa2Config.enabled });
 personaVoice.load().catch(() => {});
 
