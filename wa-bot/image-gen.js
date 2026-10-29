@@ -117,6 +117,62 @@ export function detectImageRequest(text) {
   return { prompt: keepNoun && prompt === noun ? "" : prompt };
 }
 
+// Variasi permintaan yang tidak memakai "buatkan gambar ...": "gambarkan/desainkan logo ...", "lihat hasil gambarmu untuk logo ...".
+const DESIGN_VERB = "gambarkan|gambarin|desain(?:kan|in)?|lukis(?:kan)?|rancang(?:kan)?|sketsakan";
+const DESIGN_RE = new RegExp(`^(?:${FILLER}[\\s,]+)*(?:${DESIGN_VERB})\\s+(?:(?:sebuah|satu|1|untuk(?:ku| saya| aku)?|dong|ya)\\s+)*(${NOUN})(nya)?\\b(.*)$`, "is");
+const SHOW_VERB = "lihat(?:kan)?|liat(?:in)?|tampilkan|perlihatkan|tunjukkan|kirim(?:kan)?|mana|cek";
+const SHOW_NOUN = "gambar|logo|poster|ilustrasi|desain|sketsa|banner|meme";
+// "hasil gambarmu" / "gambar buatanmu" / "logomu": jelas merujuk karya BOT (bukan "kirim gambarnya" yang merujuk gambar lain).
+const SHOW_RE = new RegExp(`^(?:${FILLER}[\\s,]+)*(?:${SHOW_VERB})\\s+(?:(?:dong|ya|hasil|karya)\\s+)*(?:(?:${SHOW_NOUN})(?:mu|-mu|\\s+(?:buatanmu|buatan kamu|kamu|yang (?:kamu|km) buat))|hasil\\s+(?:${SHOW_NOUN})(?:nya)?)\\b(.*)$`, "is");
+const SHOW_FOLLOWUP_RE = new RegExp(`^(?:${FILLER}[\\s,]+)*(?:${SHOW_VERB})\\s+(?:(?:dong|ya|hasil|karya)\\s+)*(?:${SHOW_NOUN})(?:nya|\\s+(?:itu|tadi))?\\b(.*)$`, "is");
+const CLAIMS_IMAGE_RE = /\b(?:gambar|logo|poster|ilustrasi|desain|sketsa|banner|meme)\b/i;
+
+/** Ambil deskripsi dari ekor kalimat "…untuk logo djkn itu" -> "logo djkn". "" bila tidak ada. */
+function subjectFromTail(tail) {
+  const m = /\b(?:untuk|tentang|mengenai|soal|dari|bertema)\s+(.{3,})$/is.exec(String(tail ?? "").trim());
+  if (!m) return "";
+  return cleanPrompt(m[1].replace(/\s+(?:itu|tadi|tersebut|ya|dong)\s*[.!?]*$/i, ""));
+}
+
+/**
+ * Pengenal LONGGAR: dipakai setelah detectImageRequest gagal. -> { prompt, loose:true } atau null.
+ * prompt "" = jelas ingin melihat/membuat gambar tetapi tidak ada deskripsi (pemanggil mengajari pola / bertanya).
+ * quotedBotText = teks pesan bot yang DIBALAS (bila ada): membalas pesan bot yang menyebut gambar + meminta "lihat/mana/kirim" dihitung permintaan.
+ */
+export function detectImageIntent(text, { quotedBotText = "" } = {}) {
+  const strict = detectImageRequest(text);
+  if (strict) return strict;
+  const t = String(text ?? "").replace(/\s+/g, " ").trim();
+  if (!t || /^\//.test(t)) return null;
+  const design = DESIGN_RE.exec(t);
+  if (design) {
+    const noun = design[1].toLowerCase();
+    const rest = design[2] ? "" : design[3] || "";
+    const keepNoun = !["gambar", "image", "picture"].includes(noun);
+    const prompt = cleanPrompt(`${keepNoun ? noun + " " : ""}${rest}`.trim());
+    return { prompt: keepNoun && prompt === noun ? "" : prompt, loose: true };
+  }
+  const show = SHOW_RE.exec(t);
+  if (show) return { prompt: subjectFromTail(show[1]), loose: true };
+  if (quotedBotText && CLAIMS_IMAGE_RE.test(quotedBotText)) {
+    const f = SHOW_FOLLOWUP_RE.exec(t);
+    if (f) return { prompt: subjectFromTail(f[1]), loose: true };
+  }
+  return null;
+}
+
+// Lembaga/logo resmi: boleh sebagai KONSEP, tidak boleh meniru persis, dan balasan diberi keterangan.
+const OFFICIAL_ORG_RE = /\b(?:djkn|kemenkeu|kementerian|djp|djbc|djpb|dja|djppr|bpk|bpkp|kpk|ojk|bi|bank indonesia|polri|tni|kejaksaan|mahkamah|pemda|pemprov|pemkot|pemkab|pemerintah|garuda|lambang negara|bumn|kpknl|kanwil|dpr|mpr)\b/i;
+const EMBLEM_RE = /\b(?:logo|lambang|emblem|stempel|cap|kop|seragam|badge)\b/i;
+export const UNOFFICIAL_CAPTION = "Konsep tidak resmi: ini hanya ide desain buatan AI, bukan logo resmi dan jangan dipakai sebagai logo instansi.";
+/** Prompt meminta logo/lambang lembaga resmi? */
+export function officialLogoRequest(prompt) {
+  const p = String(prompt ?? "");
+  return OFFICIAL_ORG_RE.test(p) && EMBLEM_RE.test(p);
+}
+/** Prompt yang dikirim ke generator untuk logo lembaga resmi: konsep orisinal, bukan tiruan. */
+export const conceptPrompt = (prompt) => `${String(prompt ?? "").trim()} (original conceptual design, clearly NOT a replica of any official logo or emblem, no official seals)`;
+
 /** Rapikan deskripsi: buang kata sambung pembuka ("tentang", "dari", "yang") dan tanda baca di ujung. */
 export function cleanPrompt(raw) {
   let p = String(raw ?? "").replace(/\s+/g, " ").trim();
@@ -944,5 +1000,5 @@ export function createImageGen({ state = null, config = readImageConfig({}), fet
     geminiRest = 0;
   }
 
-  return { available, canEdit, load, groupEnabled, setGroup, reserve, generate, make, makeEdit, editImage, describe, parseCommand, reconfigure, monitor, monitorText, detect: detectImageRequest, detectEdit: detectEditRequest, problem: promptProblem };
+  return { available, canEdit, load, groupEnabled, setGroup, reserve, generate, make, makeEdit, editImage, describe, parseCommand, reconfigure, monitor, monitorText, detect: detectImageRequest, detectIntent: detectImageIntent, officialLogo: officialLogoRequest, detectEdit: detectEditRequest, problem: promptProblem };
 }

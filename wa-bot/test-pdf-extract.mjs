@@ -132,7 +132,7 @@ ok("PDF sungguhan 2 halaman (pdftotext): tabel 70 baris utuh, satu tabel, bisa d
   assert.match(src, /if \(docAttached && !readPdf && !docEdit && !\(fileReq && fileReq\.format !== "pdf"\)\) return;/, "dokumen (selain PDF yang ditanyakan) tanpa perintah Excel/Word/ubah isi diabaikan");
   const iDoc = src.indexOf('if (fileReq && fileReq.format !== "pdf" && (docAttached || quotedDoc))');
   const iOnly = src.indexOf("if (fileReq?.only)");
-  const iImg = src.indexOf("const imageReq = imageGen.detect(text)");
+  const iImg = src.indexOf("const imageReq = imageGen.detectIntent(text");
   const iAI = src.indexOf("result = await generateAutoReply(groupJid);");
   assert.ok(iDoc > 0 && iDoc < iOnly && iOnly < iImg && iImg < iAI, "urutan: konversi dokumen -> 'jadikan X' -> gambar -> AI");
   assert.match(src, /fileQuotaOk\(msg\.key\.participant \|\| sender\)/);

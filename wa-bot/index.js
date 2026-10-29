@@ -97,7 +97,7 @@ import { createVideoGen, readVideoConfig, videoSentNote, photoVideoSentNote, sto
 const VIDEO_NOPHOTO_TEXT = VIDEO_TEXT.nophoto;
 import { askVisionChain, buildImageSystem, isMentionedIn, isTasteQuestion, shouldAnswerImage, MSG_DOWNLOAD_FAIL, MSG_EMPTY, MSG_VISION_FAIL } from "./image-qa.js";
 import { IMAGE_QA_SYSTEM, buildImageQaPrompt, looksLikeImageQuestion, readVisualConfig, webpFirstFrame } from "./visual.js";
-import { createImageGen, readImageConfig, imageSentNote, quotedImageNote, prepareEditInput, KIND_TEXT as IMAGE_KIND_TEXT } from "./image-gen.js";
+import { createImageGen, readImageConfig, imageSentNote, quotedImageNote, conceptPrompt, UNOFFICIAL_CAPTION, prepareEditInput, KIND_TEXT as IMAGE_KIND_TEXT } from "./image-gen.js";
 import { createEnvEditor } from "./env-edit.js";
 import { createMetaAi, readMetaAiConfig, parseMetaAiArg, unsafeTarget } from "./meta-ai.js";
 import { createWebSearch, readSearchConfig } from "./web-search.js";
@@ -383,7 +383,7 @@ KONTEKS GRUP: pesan ini datang dari GRUP WhatsApp (mis. grup keluarga), bukan ch
 // membuat gambar" lalu menyarankan DALL-E/Midjourney, padahal gambar tadi dibuat bot ini sendiri).
 const IMAGE_PROMPT_NOTE = `
 
-KEMAMPUAN GAMBAR: kamu (bot ini) BISA membuat gambar sendiri lewat pembuat gambar bawaan. Cara memintanya: anggota grup menulis "bot, buatkan gambar <deskripsi>" (mis. "bot, buatkan gambar kucing memakai topi astronot"); gambarnya dikirim langsung ke grup. JANGAN pernah mengatakan kamu tidak bisa membuat atau mengirim gambar, dan JANGAN menyarankan layanan lain (DALL-E, Midjourney, Stable Diffusion, dll). Foto bisa diedit: anggota grup mengirim foto dengan keterangan "bot, ubah jadi hitam putih" (atau membalas foto itu dengan "bot, edit foto ini jadi ...", termasuk gambar buatan bot); hasilnya dikirim ke grup. Kamu sendiri tidak bisa melihat isi foto yang dikirim anggota. Kalau ada yang minta gambar tetapi kalimatnya belum memakai pola itu, ajari pola di atas dengan singkat. Kamu juga BISA mengirim jawaban sebagai berkas PDF: anggota cukup menulis "bot, ... dalam bentuk PDF" atau membalas jawabanmu dengan "bot, jadikan pdf"; jangan pernah bilang tidak bisa membuat PDF. Hasil juga bisa dikirim sebagai Word atau Excel ("bot, ... dalam bentuk Excel", atau balas jawabanmu dengan "bot, jadikan excel/word"); dan kalau ada anggota membagikan file PDF di grup, anggota bisa membalas file itu dengan "bot, convert ke excel" atau "bot, jadikan word" (khusus PDF yang berisi teks, bukan hasil scan). Baris riwayat berawalan "🖼️" atau kutipan berawalan "[GAMBAR" berarti BOT INI SENDIRI yang membuat dan mengirim gambar itu: jelaskan sesuai deskripsi permintaannya (kamu tidak bisa melihat pikselnya, jadi katakan "itu gambar yang tadi kubuat sesuai permintaan: ..." dan jangan mengarang detail yang tidak ada di deskripsi).`;
+KEMAMPUAN GAMBAR: kamu (bot ini) BISA membuat gambar sendiri lewat pembuat gambar bawaan. Cara memintanya: anggota grup menulis "bot, buatkan gambar <deskripsi>" (mis. "bot, buatkan gambar kucing memakai topi astronot"); gambarnya dikirim langsung ke grup. JANGAN pernah mengatakan kamu tidak bisa membuat atau mengirim gambar, dan JANGAN menyarankan layanan lain (DALL-E, Midjourney, Stable Diffusion, dll). Foto bisa diedit: anggota grup mengirim foto dengan keterangan "bot, ubah jadi hitam putih" (atau membalas foto itu dengan "bot, edit foto ini jadi ...", termasuk gambar buatan bot); hasilnya dikirim ke grup. Kamu sendiri tidak bisa melihat isi foto yang dikirim anggota. Kalau ada yang minta gambar tetapi kalimatnya belum memakai pola itu, ajari pola di atas dengan singkat. Kamu juga BISA mengirim jawaban sebagai berkas PDF: anggota cukup menulis "bot, ... dalam bentuk PDF" atau membalas jawabanmu dengan "bot, jadikan pdf"; jangan pernah bilang tidak bisa membuat PDF. Hasil juga bisa dikirim sebagai Word atau Excel ("bot, ... dalam bentuk Excel", atau balas jawabanmu dengan "bot, jadikan excel/word"); dan kalau ada anggota membagikan file PDF di grup, anggota bisa membalas file itu dengan "bot, convert ke excel" atau "bot, jadikan word" (khusus PDF yang berisi teks, bukan hasil scan). Baris riwayat berawalan "🖼️" atau kutipan berawalan "[GAMBAR" berarti BOT INI SENDIRI yang membuat dan mengirim gambar itu: jelaskan sesuai deskripsi permintaannya (kamu tidak bisa melihat pikselnya, jadi katakan "itu gambar yang tadi kubuat sesuai permintaan: ..." dan jangan mengarang detail yang tidak ada di deskripsi). ATURAN KERAS: jawabanmu sendiri TIDAK PERNAH membawa gambar. Jangan menulis "berikut gambarnya", "gambar sudah kukirim", atau penanda seperti "🖼️ (...)" / "[GAMBAR ...]" kecuali kamu mengutip catatan riwayat yang memang ada; penanda itu dibuat sistem hanya saat gambar sungguh terkirim. Kalau seseorang minta dilihatkan atau dibuatkan gambar dan tidak ada yang terkirim, jangan berpura-pura: ajari pola "bot, buatkan gambar <deskripsi>" atau tanya satu kalimat apa yang mau digambar.`;
 
 // Bila pembuat video aktif untuk grup: AI percakapan harus tahu bot bisa membuat video (jangan bilang tidak bisa / menyarankan aplikasi lain).
 const VIDEO_PROMPT_NOTE = `
@@ -3483,7 +3483,7 @@ async function handleGroupMessage(msg, sock) {
 
   // Permintaan membuat gambar ("bot, buatkan gambar ..."): ditangani pembuat gambar, bukan AI percakapan.
   if (!pdfCtx && imageGen.groupEnabled()) {
-    const imageReq = imageGen.detect(text);
+    const imageReq = imageGen.detectIntent(text, { quotedBotText: repliedToOwn && quotedText && !quotedText.startsWith("[") ? quotedText : "" });
     if (imageReq) {
       await handleImageRequestWa(sock, groupJid, imageReq, { kind: "group", who: msg.key.participant || sender, quoted: msg, waName: subject || null, record: true });
       return;
@@ -3779,7 +3779,7 @@ async function attachDmPdf(sock, jid, dmPdf, { owner = false } = {}) {
 }
 
 // ---------------------------------------------------------------- ARSIP PDF GRUP (lihat arsip-pdf.js)
-const looksLikeMediaRequest = (t) => Boolean((imageGen.groupEnabled() && imageGen.detect(t)) || ((videoGen.groupEnabled() || videoGen.storyGroupEnabled()) && videoGen.detect(t)));
+const looksLikeMediaRequest = (t) => Boolean((imageGen.groupEnabled() && imageGen.detectIntent(t)) || ((videoGen.groupEnabled() || videoGen.storyGroupEnabled()) && videoGen.detect(t)));
 
 /** PDF yang diunggah di grup -> diunduh, dibaca, disimpan di laptop (berurutan lewat runFileJob). Tidak menunggu, tidak melempar galat. */
 function archiveGroupPdf(sock, msg, jid) {
@@ -4228,13 +4228,26 @@ async function handleImageRequestWa(sock, jid, req, { kind = "owner", who = "", 
   boss.think(`${edit ? "Permintaan edit foto" : "Permintaan gambar"} di ${chatLabel(jid, waName || "")}`);
   boss.handoff("gambar", "pesan", "Menyerahkan permintaan ke studio gambar");
   studio.work(edit ? "Mengedit foto" : "Menggambar", 40);
+  // Permintaan "lihat hasil gambarmu" tanpa deskripsi: tidak ada gambar yang bisa ditampilkan, jangan berpura-pura.
+  if (req.loose && !req.prompt && !edit) {
+    clearInterval(timer);
+    sock.sendPresenceUpdate("paused", jid).catch(() => {});
+    studio.fail("Tidak ada deskripsi");
+    boss.fail("Gambar tidak jadi");
+    const txt = "Belum ada gambar yang kubuat di sini. Kalau mau dibuatkan, tulis: bot, buatkan gambar <deskripsi>. Atau ceritakan satu kalimat saja: mau digambar apa?";
+    const sent = await send({ text: txt });
+    await note(txt, sent);
+    return;
+  }
+  // Logo/lambang lembaga resmi: hanya sebagai konsep orisinal, bukan tiruan; balasan diberi keterangan.
+  const unofficial = !edit && imageGen.officialLogo(req.prompt);
   let out;
   try {
     if (edit) {
       const src = await loadEditSource(sock, edit.source);
       out = src.error ? src : await imageGen.makeEdit(req.prompt, src.prepared, kind, who);
     } else {
-      out = await imageGen.make(req.prompt, kind, who);
+      out = await imageGen.make(unofficial ? conceptPrompt(req.prompt) : req.prompt, kind, who);
     }
   } finally {
     clearInterval(timer);
@@ -4254,6 +4267,7 @@ async function handleImageRequestWa(sock, jid, req, { kind = "owner", who = "", 
   boss.work("Mengirim gambar", 85);
   const { buffer, mime, model } = out.image;
   const sent = await send({ image: buffer, mimetype: mime || "image/png" });
+  if (sent && unofficial) { const cap = await send({ text: UNOFFICIAL_CAPTION }); await note(UNOFFICIAL_CAPTION, cap); }
   boss.done("Gambar terkirim");
   console.log(`🖼️ Gambar dibuat (${model}, ${Math.round(buffer.length / 1024)} KB) untuk ${jid}: ${String(req.prompt).slice(0, 60)}`);
   await note(imageSentNote(req.prompt, { edit: Boolean(edit) }), sent);
@@ -4424,7 +4438,7 @@ async function handleWaVideoCommand(sock, jid, msg, text) {
 /** Pemilik meminta gambar di chat pribadi ("buatkan gambar ..." / "/gambar ..."). true = ditangani. */
 async function handleWaImageCommand(sock, jid, msg, text) {
   if (!imageGen.available()) return false;
-  const req = imageGen.detect(text);
+  const req = imageGen.detectIntent(text);
   if (!req) return false;
   await handleImageRequestWa(sock, jid, req, { kind: "owner", quoted: msg });
   return true;

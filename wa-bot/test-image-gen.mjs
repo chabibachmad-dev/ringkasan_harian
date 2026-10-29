@@ -565,8 +565,8 @@ ok("Telegram: /gambar status, saklar grup, kirim foto, deskripsi ditolak, tanpa 
   const idx = fs.readFileSync(new URL("./index.js", import.meta.url), "utf8");
   const grp = idx.slice(idx.indexOf("async function handleGroupMessage"), idx.indexOf("async function deliverAutoReplyVoice"));
   assert.match(grp, /imageGen\.groupEnabled\(\)/, "grup: hanya bila diizinkan");
-  assert.ok(grp.indexOf("isAutoReplyEnabledForContact") < grp.indexOf("imageGen.detect(text)"), "grup: setelah cek izin kontak & jeda");
-  assert.ok(grp.indexOf("imageGen.detect(text)") < grp.indexOf("generateAutoReply(groupJid)"), "gambar ditangani sebelum AI percakapan");
+  assert.ok(grp.indexOf("isAutoReplyEnabledForContact") < grp.indexOf("imageGen.detectIntent(text"), "grup: setelah cek izin kontak & jeda");
+  assert.ok(grp.indexOf("imageGen.detectIntent(text") < grp.indexOf("generateAutoReply(groupJid)"), "gambar ditangani sebelum AI percakapan");
   assert.match(grp, /kind: "group"/);
   const own = idx.slice(idx.indexOf("handleWaKasCommand(sock, jid, text))) return;"), idx.indexOf("Tutor suara (/speak"));
   assert.match(own, /isOwnerSender\(msg, isSelfChat\) && !isGroupJid\(jid\) && \(await handleWaImageCommand/, "chat pribadi: hanya pemilik");
@@ -800,7 +800,7 @@ ok("Telegram edit foto: foto+keterangan, /edit, balas foto, perintah tanpa foto/
   assert.match(grp, /if \(photo && !editReq && !animReq\) return;/, "foto dengan keterangan biasa tetap diabaikan");
   assert.match(grp, /imageGen\.groupEnabled\(\) \? imageGen\.detectEdit\(text, \{ hasImage: Boolean\(photo \|\| quotedImage\) \}\)/, "edit hanya bila fitur gambar grup aktif");
   assert.ok(grp.indexOf("isAutoReplyEnabledForContact") < grp.indexOf("if (editReq && !docEdit && !readPdf) {"), "edit setelah cek izin kontak");
-  assert.ok(grp.indexOf("if (editReq && !docEdit && !readPdf) {") < grp.indexOf("imageGen.detect(text)"), "edit dicek sebelum pembuatan gambar & AI");
+  assert.ok(grp.indexOf("if (editReq && !docEdit && !readPdf) {") < grp.indexOf("imageGen.detectIntent(text"), "edit dicek sebelum pembuatan gambar & AI");
   assert.ok(grp.indexOf("if (editReq && !docEdit && !readPdf) {") < grp.indexOf("generateAutoReply(groupJid)"));
   assert.match(grp, /edit: \{ source \}/);
   assert.match(grp, /ctx\.stanzaId/, "membalas foto: unduh foto yang dikutip");
@@ -813,5 +813,47 @@ ok("Telegram edit foto: foto+keterangan, /edit, balas foto, perintah tanpa foto/
   assert.match(idx, /editPhoto: async \(buffer, prompt\) =>[\s\S]{0,700}imageGen\.makeEdit\(prompt, prepared, "owner"\)/, "Telegram: edit foto memakai jatah pemilik");
 }
 ok("index.js: foto di grup hanya diproses bila perintah edit, setelah izin, sebelum AI; catatan riwayat edit dikenali");
+
+// --- variasi permintaan, klaim palsu, logo resmi, kegagalan jujur
+{
+  const { detectImageIntent, officialLogoRequest, conceptPrompt, UNOFFICIAL_CAPTION } = await import("./image-gen.js");
+  const I = (t, o) => detectImageIntent(t, o);
+  assert.equal(I("coba lihat hasil gambarmu untuk logo djkn itu")?.prompt, "logo djkn");
+  assert.equal(I("gambarkan logo kopi susu")?.prompt, "logo kopi susu");
+  assert.equal(I("coba desainkan poster seminar")?.prompt, "poster seminar");
+  assert.equal(I("tampilkan hasil gambarmu")?.prompt, "");
+  assert.equal(I("buatkan poster seminar")?.prompt, "poster seminar");
+  assert.equal(I("mana gambarnya?", { quotedBotText: "Berikut gambar logo DJKN" })?.loose, true);
+  assert.equal(I("mana gambarnya?"), null);
+  assert.equal(I("kirim gambarnya dong"), null);
+  assert.equal(I("gambarkan situasi di kantor"), null);
+  assert.equal(I("lihat hasil rapat kemarin"), null);
+  assert.ok(officialLogoRequest("logo djkn") && !officialLogoRequest("logo kopi susu") && !officialLogoRequest("gedung djkn"));
+  assert.match(conceptPrompt("logo djkn"), /NOT a replica/);
+  assert.match(UNOFFICIAL_CAPTION, /^Konsep tidak resmi/);
+  const { guardReply, stripFakeImageClaims, NO_IMAGE_SENT_TEXT } = await import("./reply-guard.js");
+  for (const bad of ["Berikut gambar logo DJKN yang diminta, warna hijau.\n🖼️ (gambar logo DJKN)", "Ini hasilnya\n[GAMBAR logo djkn]", "Gambar sudah kukirim ya!", "🖼️ [BOT mengirim GAMBAR buatan AI sesuai permintaan: \"x\"]"]) {
+    const g = guardReply(bad);
+    assert.equal(g.imageClaim, true, bad);
+    assert.ok(!/🖼|\[GAMBAR|berikut gambar|sudah kukirim/i.test(g.text.replace(NO_IMAGE_SENT_TEXT, "")), g.text);
+    assert.ok(g.text.includes(NO_IMAGE_SENT_TEXT));
+  }
+  assert.equal(guardReply("Logo itu biasanya berwarna hijau.").imageClaim, false);
+  assert.equal(guardReply("Gambaran umum anggaran tahun ini naik.").text, "Gambaran umum anggaran tahun ini naik.");
+  assert.equal(stripFakeImageClaims("halo").text, "halo");
+  // prompt sistem melarang klaim
+  const idx = fs.readFileSync(new URL("./index.js", import.meta.url), "utf8");
+  assert.match(idx, /TIDAK PERNAH membawa gambar/);
+  assert.match(idx, /imageGen\.detectIntent\(t\)/);
+  // jalur penanganan: tanpa deskripsi jujur; generator gagal -> pesan galat apa adanya; logo resmi diberi keterangan konsep
+  assert.match(idx, /Belum ada gambar yang kubuat di sini/);
+  assert.match(idx, /send\(\{ text: UNOFFICIAL_CAPTION \}\)/);
+  assert.match(idx, /conceptPrompt\(req\.prompt\)/);
+  // generator tiruan: gagal -> error jujur, tanpa gambar
+  const failing = createImageGen({ state: mem(), config: { ...readImageConfig({}), keys: ["k"] }, fetchImpl: async () => res(500, { error: { message: "boom" } }), log: silent });
+  const out = await failing.make("logo kopi", "group", "u1");
+  assert.ok(out.error && !out.image && !/berikut gambar/i.test(out.error));
+}
+ok("variasi permintaan gambar, penyaring klaim/penanda palsu, logo resmi, kegagalan jujur");
 
 console.log(`\n${n} kelompok tes lulus ✅`);
