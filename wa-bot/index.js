@@ -452,9 +452,11 @@ function isGroupJid(jid) {
 }
 
 /** Blok gaya bicara akun yang sedang aktif (persona-bot.js); ledekan dimatikan bila pertanyaannya serius (store.serious). */
-function buildPersonaNote() {
+function buildPersonaNote(jid) {
   try {
-    return personaBot.note(currentAccountId(), { serious: Boolean(waAccountContext.getStore()?.serious) });
+    const st = waAccountContext.getStore();
+    // chat pribadi = santai; grup memakai mode per grup (tak dikenal = resmi)
+    return personaBot.note(currentAccountId(), { serious: Boolean(st?.serious), mode: isGroupJid(jid) ? personaBot.groupMode(st?.groupSubject || "") : "santai" });
   } catch {
     return "";
   }
@@ -488,7 +490,7 @@ function withGroupNote(basePrompt, jid, { local = false } = {}) {
   const ownerNote = waAccountContext.getStore()?.ownerAsker ? OWNER_ASKER_NOTE : "";
   if (!isGroupJid(jid)) {
     const pdfN = buildPdfNote(jid, local);
-    return `${base}${ownerNote}${pdfN || (PDF_DM_READ && !pdfToolMissing ? DM_PDF_CAP_NOTE : "")}${buildLinkNote()}${buildPersonaNote()}`;
+    return `${base}${ownerNote}${pdfN || (PDF_DM_READ && !pdfToolMissing ? DM_PDF_CAP_NOTE : "")}${buildLinkNote()}${buildPersonaNote(jid)}`;
   }
   // Balasan grup berupa suara: bahasa jawaban dipaksa (/voice wag kor ...) atau diminta anggota grup ("jawab pakai bahasa Korea").
   const replyLang = waAccountContext.getStore()?.replyLang;
@@ -519,7 +521,7 @@ function withGroupNote(basePrompt, jid, { local = false } = {}) {
   const pdfNote = buildPdfNote(jid, local);
   // Nomor utama saja: pemilik dipanggil "Bos" & dipatuhi; untuk orang lain, bot boleh menandai pemilik bila tidak tahu.
   const bosNote = currentAccountId() !== MAIN_ACCOUNT ? "" : ctxFlags?.ownerAsker ? ownerGroupNote(ownerGroupCfg.panggilan) : ownerGroupCfg.tanyaBos ? tanyaBosNote(ownerGroupCfg.panggilan) : "";
-  return `${base}${GROUP_PROMPT_NOTE}${ownerNote || OWNER_CLAIM_NOTE}${bosNote}${capNote}${imageNote}${videoNote}${fileNote}${voiceNote}${pdfNote}${buildLinkNote()}${buildPersonaNote()}${ctxFlags?.humorNote || ""}${ctxFlags?.retryNote ? `\n\n${ctxFlags.retryNote}` : ""}${replyLang ? langInstruction(replyLang) : ""}`;
+  return `${base}${GROUP_PROMPT_NOTE}${ownerNote || OWNER_CLAIM_NOTE}${bosNote}${capNote}${imageNote}${videoNote}${fileNote}${voiceNote}${pdfNote}${buildLinkNote()}${buildPersonaNote(jid)}${ctxFlags?.humorNote || ""}${ctxFlags?.retryNote ? `\n\n${ctxFlags.retryNote}` : ""}${replyLang ? langInstruction(replyLang) : ""}`;
 }
 
 // Buang awalan "Nama: " & baris "(mengutip: ...)" supaya pencarian dokumen/web
@@ -5913,7 +5915,7 @@ async function answerGroupImageQuestion(sock, msg, groupJid, { source, kind, que
 }
 
 const humor = createHumor({
-  persona: (acct, opts) => personaBot.note(acct, opts),
+  persona: (acct, opts) => personaBot.note(acct, { serious: opts?.serious, mode: personaBot.groupMode(opts?.groupName || "") }),
   state: strictStateStore,
   media: humorMedia,
   ai: AUTO_REPLY_ACTIVE ? humorAi : null,

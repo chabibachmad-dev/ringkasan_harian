@@ -452,9 +452,9 @@ export function createHumor({ persona = null, state = null, ai = null, send = nu
   const busy = new Set();
   const label = (a) => labels[a] || (a === SECOND ? "Nomor 2" : "Nomor utama");
   // Gaya bicara akun (persona-bot.js) untuk obrolan spontan; pagar roasting ikut di dalamnya. Gagal/kosong = tanpa tambahan.
-  const personaNoteFor = (account, opts) => {
+  const personaNoteFor = (account, opts, key = "") => {
     try {
-      return persona ? persona(account === SECOND ? SECOND : MAIN, opts) || "" : "";
+      return persona ? persona(account === SECOND ? SECOND : MAIN, { ...opts, groupName: data.groups?.[key]?.name || "" }) || "" : "";
     } catch {
       return "";
     }
@@ -1620,7 +1620,7 @@ Label menentukan kapan stiker dipakai.`;
       allowReaction: Boolean(react && entry.msg) && !isQ,
       stickerTags,
       question: isQ,
-      personaNote: personaNoteFor(account, { serious: isQ || isGraveTopic(entry.text) }),
+      personaNote: personaNoteFor(account, { serious: isQ || isGraveTopic(entry.text) }, key),
       after: isQ ? (() => { const b = ctxBuf.get(key) || []; const i = b.indexOf(entry); return i >= 0 ? b.slice(i + 1).filter((m) => !m.isBot).slice(0, 4).map((m) => ({ name: m.name, text: m.text })) : []; })() : []
     });
     let text = null;
@@ -1766,7 +1766,7 @@ Label menentukan kapan stiker dipakai.`;
           occasions: kind.needsOccasion || i === 0 ? occasions.slice(0, 3) : [],
           memberNote: kind.needsMember && member ? `${memberNote} Anggota yang dimaksud: ${callName(key, member.ids, member.name)}.` : "",
           styleNote,
-          personaNote: personaNoteFor(key.split("|")[0], { serious: false }),
+          personaNote: personaNoteFor(key.split("|")[0], { serious: false }, key),
           fewShot
         });
         try {
@@ -1806,7 +1806,7 @@ Label menentukan kapan stiker dipakai.`;
     const name = callName(key, who.ids, who.name);
     let text = null;
     if (ai) {
-      const { system, user } = buildSapaPrompt({ kind: { id: "ultah", prompt: `mengucapkan selamat ulang tahun yang hangat, singkat, dan ringan kepada ${name} (sebut namanya), dengan doa baik yang umum` }, weekday: lp.weekday, part: partOfDay(lp.minutes), styleNote: describeStyle(styles[key]), fewShot: fewShotNote(feedbacks[key]), personaNote: personaNoteFor(account, { serious: true }) });
+      const { system, user } = buildSapaPrompt({ kind: { id: "ultah", prompt: `mengucapkan selamat ulang tahun yang hangat, singkat, dan ringan kepada ${name} (sebut namanya), dengan doa baik yang umum` }, weekday: lp.weekday, part: partOfDay(lp.minutes), styleNote: describeStyle(styles[key]), fewShot: fewShotNote(feedbacks[key]), personaNote: personaNoteFor(account, { serious: true }, key) });
       try {
         const v = validateChat(await ai({ system, user, temperature: 0.9, maxTokens: 120 }), { maxLen: 300 });
         if (v.ok && v.text.toLowerCase().includes(name.toLowerCase().slice(0, 3))) text = v.text;

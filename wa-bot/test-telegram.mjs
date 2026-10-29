@@ -818,6 +818,12 @@ for (const mode of ["ok", "gagal"]) {
   await T("/persona wongsobot bapak jawa yang sabar dan suka pepatah");
   await T("/persona reset semua");
   check(!pb.isCustom("wa2") && !pb.isCustom("main"), "persona: reset semua");
+  await T("/persona grup santai Jafung AiPBN");
+  check(f.texts(111).at(-1).includes("mode santai") && pb.groupMode("Jafung AiPBN") === "santai", "persona: /persona grup santai <nama>");
+  await T("/persona grup");
+  check(f.texts(111).at(-1).includes("Jafung AiPBN: santai"), "persona: /persona grup menampilkan daftar");
+  await T("/persona grup hapus Jafung AiPBN");
+  check(pb.groupMode("Jafung AiPBN") === "resmi", "persona: /persona grup hapus");
   await T("/persona xyz halo");
   check(f.texts(111).at(-1).includes("Akun tidak dikenal"), "persona: akun tak dikenal");
   await T("/start");

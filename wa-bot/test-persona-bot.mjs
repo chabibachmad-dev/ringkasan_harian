@@ -1,5 +1,5 @@
 // Tes kepribadian per akun (persona-bot.js).   node test-persona-bot.mjs
-import { createPersonaBot, cleanPersona, PERSONA_MAX, DEFAULT_PERSONA, ROASTING_FENCE, SERIOUS_FENCE, COMMON_FENCE } from "./persona-bot.js";
+import { createPersonaBot, cleanPersona, MODE_TEXT, DEFAULT_GROUP_MODE, PERSONA_MAX, DEFAULT_PERSONA, ROASTING_FENCE, SERIOUS_FENCE, COMMON_FENCE } from "./persona-bot.js";
 import { readFileSync } from "node:fs";
 import { buildReplyPrompt, buildSapaPrompt, SAPA_KINDS } from "./ngobrol.js";
 
@@ -57,9 +57,40 @@ check(pb.parse("budi halo").kind === "error" && pb.parse("ayyubi").kind === "err
 
 // terpisah dari /suara & terpasang di index.js
 const idx = readFileSync(new URL("./index.js", import.meta.url), "utf8");
-check(/buildPersonaNote\(\)\}\$\{ctxFlags\?\.humorNote/.test(idx) && /buildLinkNote\(\)\}\$\{buildPersonaNote\(\)\}`;/.test(idx), "index.js: persona dipasang di prompt grup DAN chat pribadi");
+check(/buildPersonaNote\(jid\)\}\$\{ctxFlags\?\.humorNote/.test(idx) && /buildLinkNote\(\)\}\$\{buildPersonaNote\(jid\)\}`;/.test(idx), "index.js: persona dipasang di prompt grup DAN chat pribadi");
 check(/personaBot\.note\(currentAccountId\(\)/.test(idx) && /st\.serious =/.test(idx), "index.js: persona dipilih dari akun aktif; penanda topik serius diisi");
 check(!/persona-bot/.test(readFileSync(new URL("./persona-voice.js", import.meta.url), "utf8")), "persona-voice.js (/suara) tidak tersentuh");
+
+// ---- mode keusilan per grup (santai / resmi)
+{
+  const store = mem();
+  const pm = createPersonaBot({ state: store, secondName: "Wongsobot" });
+  await pm.load();
+  check(pm.groupMode("Grup Baru Entah") === "resmi" && pm.groupMode("") === "resmi" && DEFAULT_GROUP_MODE === "resmi", "grup baru/tak dikenal = resmi");
+  const sant = pm.note("main", { mode: "santai" });
+  const resm = pm.note("main", { mode: "resmi" });
+  check(sant !== resm && sant.includes(MODE_TEXT.main.santai) && resm.includes(MODE_TEXT.main.resmi) && !sant.includes(MODE_TEXT.main.resmi), "santai vs resmi menghasilkan prompt berbeda");
+  check(/CAPSLOCK/.test(sant) && /MAKSIMAL satu kalimat/.test(resm) && /tanpa capslock/.test(resm), "santai boleh capslock/ceplas-ceplos; resmi usil maks. satu kalimat");
+  check(pm.note("main").includes(MODE_TEXT.main.santai), "chat pribadi (tanpa mode) = santai");
+  check(pm.note("wa2", { mode: "santai" }) !== pm.note("wa2", { mode: "resmi" }), "mode juga berlaku untuk Wongsobot");
+  for (const [who, mode] of [["main", "santai"], ["main", "resmi"], ["main", undefined]]) check(pm.note(who, { mode }).includes(ROASTING_FENCE) && pm.note(who, { mode }).includes(COMMON_FENCE), `pagar roasting & pagar umum ikut di mode ${mode ?? "pribadi"}`);
+  check(pm.note("main", { mode: "santai", serious: true }).includes(MODE_TEXT.main.resmi) && pm.note("main", { mode: "santai", serious: true }).includes(SERIOUS_FENCE), "topik serius memaksa nada resmi walau grup santai");
+  check(/fisik/.test(ROASTING_FENCE) && /SARA/.test(ROASTING_FENCE) && /keluarga/.test(ROASTING_FENCE) && /kesehatan/.test(ROASTING_FENCE) && /bertanya serius/.test(ROASTING_FENCE) && /mode santai/.test(ROASTING_FENCE), "pagar mencakup fisik, SARA, keluarga, kesehatan, orang yang bertanya serius");
+  const s1 = await pm.setGroup("Jafung AiPBN", "santai");
+  check(s1.saved && pm.groupMode("🔥 Jafung AiPBN 2026 ✨") === "santai" && pm.groupMode("Grup lain") === "resmi", "setGroup santai; pencocokan nama longgar (emoji/huruf besar diabaikan)");
+  await pm.setGroup("Jafung", "resmi");
+  check(pm.groupMode("Jafung AiPBN") === "santai", "potongan nama paling panjang menang");
+  check((await pm.setGroup("ab", "santai").then(() => null, (e) => e))?.message.includes("terlalu pendek") && (await pm.setGroup("Grup X Y", "gila").then(() => null, (e) => e))?.message.includes("santai atau resmi"), "nama terlalu pendek / mode tak sah ditolak");
+  const pm2 = createPersonaBot({ state: store, secondName: "Wongsobot" });
+  await pm2.load();
+  check(pm2.groupMode("Jafung AiPBN") === "santai" && JSON.parse(store.m.get("persona_bot_groups")).some((x) => x.label === "Jafung AiPBN" && x.mode === "santai"), "mode grup tersimpan di bot_state dan dimuat ulang");
+  check(pm2.describeGroups().includes("Jafung AiPBN: santai"), "daftar grup");
+  await pm2.removeGroup("Jafung AiPBN");
+  check(pm2.groupMode("Jafung AiPBN") === "resmi", "hapus aturan: grup kembali resmi");
+  check(pm.parse("grup santai Jafung AiPBN").kind === "gset" && pm.parse("grup resmi Keluarga Besar").mode === "resmi" && pm.parse("grup").kind === "glist" && pm.parse("grup hapus Jafung").kind === "gdel" && pm.parse("grup gila X").kind === "error" && pm.parse("grup santai").kind === "error", "parse: /persona grup ...");
+  const idxs = readFileSync(new URL("./index.js", import.meta.url), "utf8");
+  check(/personaBot\.groupMode\(st\?\.groupSubject/.test(idxs) && /: "santai" \}\)/.test(idxs), "index.js: grup memakai mode per grup, chat pribadi santai");
+}
 
 // obrolan spontan (ngobrol.js / humor.js)
 {
@@ -78,7 +109,7 @@ check(!/persona-bot/.test(readFileSync(new URL("./persona-voice.js", import.meta
   check(r1.system.includes("ATURAN KERAS") && r1.system.includes("ejekan fisik"), "aturan keselamatan obrolan spontan tetap ada");
   const hum = readFileSync(new URL("./humor.js", import.meta.url), "utf8");
   check((hum.match(/personaNote: personaNoteFor\(/g) || []).length === 3, "humor.js: balasan, sapaan, dan ucapan ulang tahun memakai persona");
-  check(/persona: \(acct, opts\) => personaBot\.note\(acct, opts\)/.test(idx0()), "index.js: createHumor menerima persona");
+  check(/persona: \(acct, opts\) => personaBot\.note\(acct, \{[^}]*groupMode\(opts\?\.groupName/.test(idx0()), "index.js: createHumor menerima persona");
 }
 function idx0() { return readFileSync(new URL("./index.js", import.meta.url), "utf8"); }
 

@@ -139,7 +139,7 @@ const HELP = [
   "Halo, ini Ayyubi di Telegram.",
   "",
   "Ketik biasa untuk ngobrol dengan AI (Gemini, bisa cari web & Dokumen Pengetahuan).",
-  "🎤 Kirim PESAN SUARA (tahan tombol mikrofon) untuk ngobrol atau merekam SiMAB: bot menuliskan yang ia dengar lalu menjalankannya seperti teks. Contoh saat merekam: \"Pembelian ATK, tanggal 5 Oktober 2026, jumlah satu juta lima ratus ribu rupiah\".",
+  "🎤 Kirim PESAN SUARA (tahan tombol mikrofon) untuk ngobrol atau merekam SiMAB: bot menuliskan yang ia dengar lalu menjalankannya seperti teks. Contoh: \"Pembelian ATK, 5 Oktober 2026, satu juta lima ratus ribu rupiah\".",
   "🔊 Balasan suara: /suara auto (default: dibalas suara bila kamu kirim suara), /suara on (selalu), /suara off. Butuh ffmpeg di laptop bot.",
   "🎙️ Latihan Inggris: /speak [topik] — kirim suara berbahasa Inggris, tutor membalas SUARA SAJA (/koreksi, /teks on). Indonesia: /speak id [topik]. Akhiri: /selesai.",
   "",
@@ -156,7 +156,7 @@ const HELP = [
   "/kesehatan  — periksa Ollama, disk, memori, WhatsApp, basis data, dan cadangan sekarang",
   "/edu  — channel YouTube edukasi (setujui draf video; /edu bantuan)",
   "/voice wag on|off|id|eng|kor|arb|jawa  — balasan grup WA berupa suara/teks + bahasa suara",
-  "/persona  — gaya bicara bot WA: lihat, ayyubi/wongsobot <teks>, reset",
+  "/persona  — gaya bot WA: lihat, <bot> <teks>, grup santai|resmi <nama>, reset",
   "/wa2  — nomor WhatsApp kedua (status, kode, qr)",
   "/grup  — grup WA yang dijawab bot: lihat, semua, tambah, hapus",
   "/humor  — humor per grup WA: pantun harian, roasting ringan, balas chat acak, chat otomatis, mode latihan",
@@ -681,6 +681,19 @@ Suara khusus satu grup: /suara grup wanita <nama grup> • /suara grup (daftar) 
     const cmd = pb.parse(arg);
     if (cmd.kind === "error") return void (await send(chatId, cmd.message));
     if (cmd.kind === "show") return void (await send(chatId, `🎭 Kepribadian bot\n${pb.describe()}\n\nUbah: /persona ayyubi <teks> • /persona wongsobot <teks>\nKembali ke bawaan: /persona reset <akun|semua>\nPagar roasting & aturan jujur selalu berlaku, tidak bisa dimatikan.`));
+    if (cmd.kind === "glist") return void (await send(chatId, `🎭 Mode keusilan per grup\n${pb.describeGroups()}\n\nSantai: /persona grup santai <nama grup>  •  Resmi: /persona grup resmi <nama grup>  •  Hapus: /persona grup hapus <nama grup>\nGrup yang tidak terdaftar = resmi; chat pribadi = santai. Pagar roasting berlaku di semua mode.`));
+    if (cmd.kind === "gset") {
+      try {
+        const r = await pb.setGroup(cmd.label, cmd.mode);
+        return void (await send(chatId, `🎭 Grup "${r.label}" sekarang mode ${r.mode}${r.replaced ? " (diperbarui)" : ""}${r.saved ? "" : " (gagal disimpan: berlaku sampai bot restart)"}.`));
+      } catch (e) {
+        return void (await send(chatId, `Mode grup tidak disimpan: ${e instanceof Error ? e.message : String(e)}.`));
+      }
+    }
+    if (cmd.kind === "gdel") {
+      const r = await pb.removeGroup(cmd.label);
+      return void (await send(chatId, r.removed ? `🎭 Aturan mode untuk grup "${cmd.label}" dihapus; grup itu kembali resmi.` : `Tidak ada aturan mode untuk grup "${cmd.label}". Lihat daftar: /persona grup`));
+    }
     if (cmd.kind === "reset") {
       const list = cmd.who === "all" ? ["main", "wa2"] : [cmd.who];
       const out = [];
