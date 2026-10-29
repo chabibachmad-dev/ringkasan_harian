@@ -3,6 +3,7 @@
 //
 // Yang dicadangkan (sumber diatur di index.js):
 //   memori.sqlite, pengingat.sqlite   disalin dengan VACUUM INTO (salinan konsisten walau bot sedang menulis) lalu diperiksa integritasnya
+//   agenda.sqlite, ibadah.sqlite, pengetahuan.sqlite   (agenda grup, pengingat ibadah, gudang tebakan) -- dicadangkan bila fiturnya aktif
 //   skills/                           resep skill (.md)
 //   auth_session/                     sesi WhatsApp (tanpa ini harus pairing ulang); creds.json diperiksa utuh, bila terbaca setengah ditulis disalin ulang
 //   .env                              HANYA bila BACKUP_INCLUDE_ENV=true (berisi key rahasia; bawaan tidak ikut)

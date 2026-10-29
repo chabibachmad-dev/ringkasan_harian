@@ -149,14 +149,15 @@ const HELP = [
   "/status  — kondisi bot: WhatsApp, key Gemini, token, Ollama, dokumen, arsip",
   "/ringkasan  — ringkasan percakapan WhatsApp hari ini",
   "/peraturan  — pantau peraturan terbaru (\"/peraturan semua\" = tampilkan semua hasil)",
-  "/dokumen <pertanyaan>  — tanya dari dokumen lokal di laptop, dijawab Ollama. \"/dokumen\" saja = daftar dokumen",
+  "/dokumen <pertanyaan>  — tanya dari dokumen lokal di laptop, dijawab Ollama; tanpa isi = daftar dokumen",
   "/arsip  — arsip PDF grup WA di laptop: ringkasan; daftar [grup]; cari <kata>; hapus <no>",
   "/pasar  — IHSG, emas dunia (Rp/gram), dan kurs USD/IDR (alias /emas, /ihsg); otomatis tiap pagi hari kerja",
   "/ingatkan <waktu> <teks>  — pengingat pribadi (contoh: /ingatkan besok 09:00 kirim SPJ);  /pengingat  — daftar / batal <nomor>;  /ibadah  — juz harian, hadits, ayat",
-  "/kesehatan  — periksa Ollama, disk, memori, WhatsApp, basis data, dan cadangan sekarang",
+  "/kesehatan  — periksa Ollama, disk, memori, WhatsApp, basis data, cadangan",
   "/edu  — channel YouTube edukasi (setujui draf video; /edu bantuan)",
   "/voice wag on|off|id|eng|kor|arb|jawa  — balasan grup WA berupa suara/teks + bahasa suara",
   "/persona  — gaya bot WA: lihat, <bot> <teks>, grup santai|resmi <nama>, reset",
+  "/tebak  — gudang tebak-tebakan (tambah, impor, daftar, menunggu)",
   "/wa2  — nomor WhatsApp kedua (status, kode, qr)",
   "/grup  — grup WA yang dijawab bot: lihat, semua, tambah, hapus",
   "/humor  — humor per grup WA: pantun harian, roasting ringan, balas chat acak, chat otomatis, mode latihan",
@@ -164,12 +165,12 @@ const HELP = [
   "/kas  — laporan kas bulanan: konfirmasi angka, submit, simpan (/kas bantuan)",
   "/nodin  — konsep Nota Dinas LPJ (PDF + Word), otomatis tiap tanggal 1 (/nodin cek)",
   "/urutan  — lihat/ubah urutan AI balasan WhatsApp & grup (contoh: /urutan santai groq,gemini,ollama;  /urutan reset)",
-  "/cadangan  — status cadangan otomatis (memori, pengingat, skill, sesi WhatsApp);  /cadangan sekarang  — buat sekarang",
+  "/cadangan  — status cadangan otomatis (memori, pengingat, skill, sesi WA);  /cadangan sekarang  — buat sekarang",
   "/lokal <pesan>  — ngobrol dengan Ollama LOKAL (alias /tanya), tidak keluar dari laptop;  /lokal baru  — lupakan percakapan",
   "/skill  — daftar skill buatanmu;  /skill <nama> <teks>  — jalankan (Ollama lokal);  /skill baru|lihat|hapus <nama>",
-  "/penyedia  — status tiap penyedia AI (Gemini, Groq, OpenRouter, Ollama): berhasil/gagal, key yang istirahat",
+  "/penyedia  — status penyedia AI (Gemini, Groq, OpenRouter, Ollama): berhasil/gagal, key istirahat",
   "/ingat <teks>  — simpan catatan pribadi (hanya di laptop);  /catatan [kata]  — daftar/cari;  /lupa <nomor|semua>  — hapus",
-  "/sistem  — kondisi laptop bot (pm2, disk, RAM, Ollama); /log /restart /deploy /migrasi: lihat /ops (OPS_ENABLED=true)",
+  "/sistem  — kondisi laptop bot (pm2, disk, RAM, Ollama); /log /restart /deploy /migrasi: lihat /ops",
   "/baru  — mulai obrolan baru (lupakan konteks sebelumnya)",
     "/id  — tampilkan id chat ini"
 ].join("\n");
@@ -866,6 +867,18 @@ Suara khusus satu grup: /suara grup wanita <nama grup> • /suara grup (daftar) 
       if (out) await send(chatId, out).catch(() => {});
       return;
     }
+    if (data.startsWith("tb:") && deps.tebak) {
+      // tombol usulan tebakan dari grup (tebakan.js): tb:ok:<id> setujui / tb:no:<id> tolak
+      await clearKeyboard(chatId, cb.message.message_id);
+      let out;
+      try {
+        out = await deps.tebak.decide(data.slice(3));
+      } catch (e) {
+        out = `⚠️ ${String(e?.message || e).slice(0, 300)}`;
+      }
+      if (out) await send(chatId, out).catch(() => {});
+      return;
+    }
     if (data.startsWith("ed:") && deps.edu) {
       // tombol draf video edukasi (edu-channel.js): ed:ok:<id> setujui / ed:again:<id> buat ulang / ed:no:<id> buang
       await clearKeyboard(chatId, cb.message.message_id);
@@ -1077,6 +1090,15 @@ Suara khusus satu grup: /suara grup wanita <nama grup> • /suara grup (daftar) 
     }
     if (name === "suara") return handleVoiceCommand(chatId, arg);
     if (name === "persona") return handlePersona(chatId, arg);
+    if (name === "tebak") {
+      if (!deps.tebak) return void (await reply("Gudang tebakan belum aktif di bot ini."));
+      try {
+        const out = await deps.tebak.handle(arg);
+        return void (await send(chatId, out.text, { markup: out.markup || null }));
+      } catch (e) {
+        return void (await reply(`⚠️ Gudang tebakan gagal: ${String(e?.message || e).slice(0, 200)}`));
+      }
+    }
     if (name === "voice") return handleVoiceHub(chatId, arg);
     if (name === "env") {
       if (!deps.env) return void (await reply("Pengaturan .env dari Telegram tidak tersedia di versi bot ini."));
@@ -1600,6 +1622,7 @@ Suara khusus satu grup: /suara grup wanita <nama grup> • /suara grup (daftar) 
           { command: "selesai", description: "Akhiri sesi Speaking" },
           { command: "suara", description: "Balasan suara + pilih suara tiap bot (daftar/coba/pakai)" },
           { command: "persona", description: "Gaya bicara tiap bot WA (lihat/ayyubi/wongsobot/reset)" },
+          { command: "tebak", description: "Gudang tebak-tebakan & pengetahuan (tambah/impor/daftar/menunggu)" },
           { command: "help", description: "Bantuan" }
         ]
       }).catch(() => {});

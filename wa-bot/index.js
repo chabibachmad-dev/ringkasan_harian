@@ -130,6 +130,7 @@ import { handleMemoryCommand, openOwnerMemory, parseMemoryCommand } from "./owne
 import { createReminders, openReminderStore, parseReminderCommand } from "./reminders.js";
 import { buildExplainPrompt, createIbadah, openIbadahStore } from "./ibadah.js";
 import { createAgenda, openAgendaStore } from "./agenda.js";
+import { answerFromStore, decideUsulan, handleTebakCommand, openPengetahuan, parseGroupCommand as parseTebakanCommand, saveFromGroup, usulanNotice } from "./tebakan.js";
 import { createBackup, parseBackupCommand, readBackupConfig } from "./backup.js";
 import { backupCheck, createHealth, createRestartTracker, databaseCheck, diskCheck, memoryCheck, ollamaCheck, parseHealthCommand, readHealthConfig, whatsappCheck } from "./health.js";
 
@@ -3192,6 +3193,18 @@ async function handleGroupMessage(msg, sock) {
       humor.observe(humorAcct, groupJid, { name: msg.pushName || "", ids: humorIds, text: rawText, isOwner: isOwnerSender(msg, false), msg, triggered, repliedToBot: repliedToOwn, quotedOther, quotedText: quotedPlain.startsWith("[") ? "" : quotedPlain });
     }
   }
+  // Tebak-tebakan aktif di grup ini: pesan anggota diperiksa sebagai jawaban DULU (sebelum jadwal/AI), supaya "catet ya bos, Kangturu" tidak jadi tugas untuk pemilik.
+  if (pengetahuan && !msg.key.fromMe && !fromBot && !photo && !docAttached && !groupAudio && !groupVideo && pengetahuan.hasGame(groupJid)) {
+    const tbSubject = await getGroupSubject(sock, groupJid);
+    if (isGroupAllowed(groupJid, tbSubject, sock)) {
+      const verdict = pengetahuan.checkMessage(groupJid, text, { acct: currentAccountId(), name: plainSenderName(msg.pushName) || "" });
+      if (verdict) {
+        console.log(`🎲 [${tbSubject || "?"}] ${verdict.finished ? "tebakan selesai" : "tanggapan tebakan"}: ${text.slice(0, 40)}`);
+        await replyGroupText(sock, groupJid, msg, tbSubject, verdict.reply);
+        if (verdict.claimed) return;
+      }
+    }
+  }
   if (!triggered) {
     // Kalimat biasa yang tampak jelas seperti pengumuman jadwal ("besok rapat jam 9"): bot menawarkan mencatatnya (tanpa AI, tanpa menyimpan obrolan).
     if (!photo && !docAttached && !groupAudio && agenda.mightOffer(rawText)) offerAgendaFromChat(sock, msg, groupJid, rawText).catch((e) => console.error("📅 Tawaran jadwal gagal:", e instanceof Error ? e.message : String(e)));
@@ -3308,6 +3321,28 @@ async function handleGroupMessage(msg, sock) {
   if (!(await isAutoReplyEnabledForContact(groupJid))) {
     console.log(`🔕 Auto-reply dimatikan khusus utk grup ${groupJid}, dilewati.`);
     return;
+  }
+
+  // Gudang tebakan: "tebak-tebakan dong", "simpan" (balas tebakan), dan pertanyaan yang cocok dengan catatan aktif -- dijawab dari catatan lokal, tanpa AI.
+  if (pengetahuan && !photo && !docAttached && !readPdf) {
+    const tbCmd = parseTebakanCommand(text, { quotedText: quotedText && !quotedText.startsWith("[") ? quotedText : "" });
+    let tbReply = null;
+    if (tbCmd?.kind === "start") {
+      tbReply = pengetahuan.startGame(groupJid, { acct: currentAccountId(), asker: sender }).reply;
+    } else if (tbCmd?.kind === "save") {
+      const saved = saveFromGroup(pengetahuan, quotedText, { isOwner: isOwnerSender(msg, false), sender, grup: subject || "" });
+      tbReply = saved.reply;
+      if (saved.usulan && telegramCanNotify()) {
+        const note = usulanNotice(saved.usulan);
+        telegram.sendOwner(note.text, { markup: note.markup }).catch((e) => console.error("🎲 Usulan tebakan gagal dikabarkan:", e instanceof Error ? e.message : String(e)));
+      }
+    } else if (!pengetahuan.activeGame(groupJid)) {
+      tbReply = answerFromStore(pengetahuan, text);
+    }
+    if (tbReply) {
+      await replyGroupText(sock, groupJid, msg, subject, tbReply);
+      return;
+    }
   }
 
   // Jadwal kantor (catat / tanya "ada jadwal apa hari ini" / hapus / pindah / jawab tawaran "mau dicatat?"): dijawab dari catatan lokal, tanpa AI.
@@ -5539,6 +5574,19 @@ setInterval(() => {
 }, 60_000);
 console.log(`📅 Agenda grup: ${agenda.describe()}`);
 
+// Gudang pengetahuan + tebak-tebakan grup (tebakan.js): SQLite lokal, tanpa AI. Data awal dari data/tebakan-awal.txt lewat "/tebak impor-awal".
+const TEBAKAN_FILE = process.env.TEBAKAN_FILE?.trim() || fileURLToPath(new URL("./pengetahuan.sqlite", import.meta.url));
+const TEBAKAN_AWAL_FILE = process.env.TEBAKAN_AWAL_FILE?.trim() || fileURLToPath(new URL("./data/tebakan-awal.txt", import.meta.url));
+let pengetahuan = null;
+if (!["0", "false", "off", "tidak", "no"].includes(String(process.env.TEBAKAN_ENABLED ?? "true").trim().toLowerCase())) {
+  try {
+    pengetahuan = await openPengetahuan({ file: TEBAKAN_FILE, ttlMin: Number(process.env.TEBAKAN_TTL_MIN) || 15 });
+    if (pengetahuan) console.log(`🎲 Gudang tebakan: AKTIF (${pengetahuan.counts().aktif || 0} aktif, ${pengetahuan.counts().menunggu || 0} menunggu)`);
+  } catch (e) {
+    console.error("🎲 Gudang tebakan tidak bisa dibuka:", e instanceof Error ? e.message : String(e));
+  }
+}
+
 // Cadangan otomatis tiap malam (catatan, pengingat, skill, sesi WhatsApp) ke folder bertanggal di laptop. Lihat backup.js.
 const BOT_DIR = fileURLToPath(new URL(".", import.meta.url));
 const backupConfig = readBackupConfig(process.env);
@@ -5549,6 +5597,7 @@ const backup = createBackup({
     { name: "pengingat", kind: "sqlite", path: REMINDERS_FILE },
     ...(ibadahStore ? [{ name: "pengingat ibadah", kind: "sqlite", path: IBADAH_FILE }] : []),
     ...(agendaStore ? [{ name: "agenda grup", kind: "sqlite", path: AGENDA_FILE }] : []),
+    ...(pengetahuan ? [{ name: "gudang tebakan", kind: "sqlite", path: TEBAKAN_FILE }] : []),
     { name: "skill", kind: "dir", path: fileURLToPath(new URL("./skills", import.meta.url)) },
     { name: "sesi WhatsApp", kind: "auth", path: path.resolve("auth_session") }, // sama dengan useMultiFileAuthState("auth_session")
     ...(WA2_ACCOUNT_DEF ? [{ name: "sesi WhatsApp nomor 2", kind: "auth", path: path.resolve(WA2_ACCOUNT_DEF.authDir) }] : []),
@@ -6236,6 +6285,7 @@ const telegram = createTelegram({
       }
     },
     memory: { handle: (cmd) => handleMemoryCommand(ownerMemory, cmd) },
+    tebak: pengetahuan ? { handle: (arg) => handleTebakCommand(pengetahuan, arg, { awalFile: TEBAKAN_AWAL_FILE }), decide: (data) => decideUsulan(pengetahuan, data) } : null,
     skills,
     skillAdmin,
     market: { report: async () => (await marketBrief.report()).text, diagnose: () => marketBrief.diagnose() },

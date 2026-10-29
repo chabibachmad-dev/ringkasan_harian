@@ -30,6 +30,7 @@ edu-data/
 wa-bot/memori.sqlite*
 wa-bot/pengingat.sqlite*
 wa-bot/agenda.sqlite*
+wa-bot/pengetahuan.sqlite*
 wa-bot/ibadah.sqlite*
 wa-bot/.health-starts.json
 wa-bot/skills/.terhapus/

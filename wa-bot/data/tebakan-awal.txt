@@ -1,0 +1,116 @@
+# Gudang awal tebak-tebakan & pengetahuan umum untuk Ayyubi / Wongsobot.
+# Format tiap baris (dipisah tanda |):  kategori | pertanyaan | jawaban | petunjuk (boleh kosong)
+# Jawaban alternatif yang sama-sama benar dipisah tanda "/".  Baris berawalan # diabaikan.
+# Semua baris sudah diperiksa isinya; tetap boleh dihapus/diubah lewat /tebak hapus.
+
+hewan | Hewan asal Australia yang pemalas dan suka rebahan di pohon? | Koala | Makanannya daun eukaliptus
+hewan | Hewan asal Australia yang melompat dan membawa anaknya di kantung perut? | Kanguru | Namanya mirip "kangaroo"
+hewan | Hewan darat tercepat di dunia? | Cheetah | Kucing besar berbintik
+hewan | Mamalia terbesar di dunia? | Paus biru | Tinggalnya di laut
+hewan | Burung yang tidak bisa terbang dan jadi lambang Selandia Baru? | Kiwi | Namanya sama dengan nama buah
+hewan | Hewan yang bisa mengubah warna kulitnya? | Bunglon/Kameleon | Jago berkamuflase
+hewan | Hewan malam yang bisa terbang tapi bukan burung? | Kelelawar | Tidurnya menggantung
+hewan | Hewan berbelalai yang tubuhnya sangat besar? | Gajah | Telinganya lebar
+hewan | Hewan yang sering tidur sambil berdiri dan biasa ditunggangi? | Kuda | Suaranya meringkik
+hewan | Kadal terbesar di dunia yang hidup di Pulau Komodo? | Komodo/Biawak komodo | Namanya sama dengan nama pulaunya
+hewan | Burung yang tidak bisa terbang tapi jago berenang dan terkenal di Antartika? | Penguin | Jalannya bergoyang
+hewan | Hewan laut berlengan delapan? | Gurita | Bisa menyemprotkan tinta
+hewan | Serangga yang menghasilkan madu? | Lebah | Hidup di sarang berbentuk segi enam
+hewan | Hewan penghasil benang sutra? | Ulat sutra | Memakan daun murbei
+hewan | Hewan yang dijuluki raja hutan? | Singa | Jantannya punya surai
+hewan | Hewan amfibi yang namanya dibaca sama dari depan dan dari belakang? | Katak/Kodok | Suaranya "kung kung"
+
+logika | Apa yang punya gigi tapi tidak bisa menggigit? | Sisir | Dipakai di depan cermin
+logika | Apa yang punya kepala dan ekor tapi tidak punya badan? | Koin/Uang logam | Dilempar untuk undian
+logika | Apa yang punya mata tapi tidak bisa melihat? | Jarum | Dipakai menjahit
+logika | Apa yang punya tangan tapi tidak bisa bertepuk? | Jam | Menunjukkan waktu
+logika | Apa yang punya leher tapi tidak punya kepala? | Botol | Tempat minum
+logika | Apa yang punya banyak tuts/kunci tapi tidak bisa membuka pintu? | Piano/Keyboard | Bisa dimainkan
+logika | Apa yang makin basah justru makin mengeringkan? | Handuk | Dipakai setelah mandi
+logika | Apa yang selalu akan datang tapi tidak pernah tiba? | Besok | Selalu satu hari lagi
+logika | Semakin banyak diambil, semakin besar. Apa itu? | Lubang | Digali dengan cangkul
+logika | Apa yang selalu naik tapi tidak pernah turun? | Umur | Bertambah tiap tahun
+logika | Apa yang bisa kamu tangkap tapi tidak bisa kamu lempar? | Pilek/Flu | Bikin bersin
+logika | Apa yang bisa pecah tanpa disentuh? | Janji | Dibuat lalu diingkari
+logika | Apa yang bisa berjalan terus tapi tidak punya kaki? | Waktu | Tidak bisa dihentikan
+logika | Apa yang bisa terbang tanpa sayap dan menangis tanpa mata? | Awan | Dari sinilah hujan turun
+logika | Aku punya kota tapi tidak punya rumah, punya hutan tapi tanpa pohon, punya sungai tapi tanpa air. Apakah aku? | Peta | Dipakai agar tidak tersesat
+logika | Apa yang selalu ada di depanmu tapi tidak bisa kamu lihat? | Masa depan | Belum terjadi
+logika | Apa yang muncul sekali dalam "menit", dua kali dalam "momen", dan tidak pernah dalam "seribu tahun"? | Huruf M | Lihat ejaannya
+logika | Ayam apa yang tidak bisa berkokok? | Ayam goreng | Sudah di piring
+logika | Kenapa ayam menyeberang jalan? | Untuk sampai ke seberang | Jawabannya memang sesederhana itu
+logika | Apa yang selalu naik saat hujan turun? | Payung | Dibuka di atas kepala
+logika | Kalau kamu memilikiku, kamu ingin membaginya. Tapi begitu dibagi, kamu tak lagi memilikiku. Apakah aku? | Rahasia | Jangan bilang siapa-siapa
+logika | Kata apa yang jika dibaca terbalik menjadi "rusak"? | Kasur | Tempat tidur
+logika | Kata apa yang jika dibaca terbalik menjadi nama umbi-umbian? | Ibu | Panggilan untuk orang tua perempuan
+
+hitungan | Ada 3 apel, kamu ambil 2. Berapa apel yang kamu punya? | Dua | Yang kamu ambil, itu yang kamu punya
+hitungan | Berapa kali kamu bisa mengurangi 10 dari 100? | Sekali | Setelah itu angkanya bukan 100 lagi
+hitungan | Dokter memberi 3 pil untuk diminum tiap setengah jam. Berapa lama sampai semuanya habis? | Satu jam | Pil pertama diminum langsung
+hitungan | Kamu berlari lalu menyalip orang yang ada di posisi kedua. Sekarang kamu posisi berapa? | Kedua | Bukan pertama
+hitungan | Mana yang lebih berat: 1 kg kapas atau 1 kg besi? | Sama beratnya | Sama-sama 1 kg
+hitungan | Berapa hasil 2 + 2 × 2? | 6 | Kali dulu baru tambah
+hitungan | Berapa bulan dalam setahun yang punya 28 hari? | Semua/Dua belas | Februari bukan satu-satunya
+hitungan | Budi punya 5 anak: Lala, Lele, Lili, Lolo, dan yang kelima? | Lulu | Perhatikan urutan huruf vokalnya
+hitungan | Sebutkan dua bilangan yang jika dikalikan dengan dirinya sendiri hasilnya tetap sama! | 0 dan 1 | Bilangan terkecil
+hitungan | Berapa jumlah sisi segitiga ditambah sisi persegi? | 7 | Tiga ditambah empat
+hitungan | Ada berapa jam dalam seminggu? | 168 | 24 dikali 7
+hitungan | Berapa kali angka 9 muncul kalau kamu menulis angka dari 1 sampai 100? | 20 | Hitung angka satuan dan puluhannya
+
+umum | Gunung tertinggi di Indonesia? | Puncak Jaya | Ada di Papua
+umum | Sungai terpanjang di Indonesia? | Kapuas | Mengalir di Kalimantan Barat
+umum | Danau terdalam di Indonesia? | Danau Matano | Ada di Sulawesi Selatan
+umum | Siapa presiden pertama Republik Indonesia? | Soekarno | Proklamator
+umum | Kapan proklamasi kemerdekaan Indonesia dibacakan? | 17 Agustus 1945 | Hari Kemerdekaan
+umum | Apa lambang sila ketiga Pancasila? | Pohon beringin | Sila Persatuan Indonesia
+umum | Apa nama rumah adat Minangkabau? | Rumah Gadang | Atapnya seperti tanduk kerbau
+umum | Alat musik bambu khas Jawa Barat yang digoyangkan? | Angklung | Sudah diakui UNESCO
+umum | Candi Buddha terbesar di dunia yang ada di Magelang? | Borobudur | Dibangun abad ke-8
+umum | Kota apa yang dijuluki Kota Pahlawan? | Surabaya | Ada Tugu Pahlawan
+umum | Kota apa yang dijuluki Kota Kembang? | Bandung | Ibu kota Jawa Barat
+umum | Kota apa yang dijuluki Kota Hujan? | Bogor | Dekat Jakarta
+umum | Kota apa yang dijuluki Kota Apel? | Malang | Di Jawa Timur
+umum | Pulau apa yang dijuluki Pulau Dewata? | Bali | Banyak pura
+umum | Makanan khas Yogyakarta yang terbuat dari nangka muda? | Gudeg | Manis dan dimasak lama
+umum | Masakan Padang dari daging sapi yang dimasak santan lama sampai kering? | Rendang | Sering disebut makanan terenak dunia
+umum | Apa ibu kota Australia? | Canberra | Bukan Sydney, bukan Melbourne
+umum | Apa ibu kota Brasil? | Brasilia | Bukan Rio de Janeiro
+umum | Apa ibu kota Jepang? | Tokyo | Dulu bernama Edo
+umum | Apa mata uang Jepang? | Yen | Lambangnya ¥
+umum | Planet terbesar di tata surya? | Jupiter | Punya bintik merah raksasa
+umum | Planet yang paling dekat dengan matahari? | Merkurius | Planet terkecil
+umum | Zat hijau pada daun yang dipakai untuk fotosintesis? | Klorofil | Membuat daun berwarna hijau
+umum | Gas yang kita hirup untuk bernapas? | Oksigen | Lambangnya O
+umum | Apa rumus kimia air? | H2O | Dua hidrogen, satu oksigen
+umum | Apa satuan kuat arus listrik? | Ampere | Lambangnya A
+umum | Benua terkecil di dunia? | Australia | Tempat koala dan kanguru
+umum | Samudra terluas di dunia? | Pasifik | Berbatasan dengan Indonesia
+umum | Tarian Bali yang dibawakan puluhan penari pria duduk melingkar sambil berseru "cak cak cak"? | Kecak | Terkenal di Uluwatu
+umum | Kapan Hari Sumpah Pemuda diperingati? | 28 Oktober | Ikrar tahun 1928
+umum | Kapan Hari Pahlawan diperingati? | 10 November | Mengenang pertempuran di Surabaya
+
+keuangan | Apa kepanjangan APBN? | Anggaran Pendapatan dan Belanja Negara | Ditetapkan dengan undang-undang
+keuangan | Apa kepanjangan DJKN? | Direktorat Jenderal Kekayaan Negara | Unit di Kementerian Keuangan
+keuangan | Apa kepanjangan KPKNL? | Kantor Pelayanan Kekayaan Negara dan Lelang | Vertikal DJKN di daerah
+keuangan | Apa kepanjangan LRA? | Laporan Realisasi Anggaran | Membandingkan anggaran dan realisasinya
+keuangan | Apa kepanjangan LO dalam laporan keuangan pemerintah? | Laporan Operasional | Berbasis akrual
+keuangan | Apa kepanjangan CaLK? | Catatan atas Laporan Keuangan | Menjelaskan angka di laporan
+keuangan | Apa kepanjangan BMN? | Barang Milik Negara | Aset negara berwujud
+keuangan | Sebutkan persamaan dasar akuntansi! | Aset = Kewajiban + Ekuitas | Neraca harus seimbang
+keuangan | Apa kepanjangan SPM? | Surat Perintah Membayar | Diterbitkan setelah SPP
+keuangan | Apa kepanjangan SPP? | Surat Permintaan Pembayaran | Diajukan sebelum SPM
+keuangan | Apa kepanjangan KPA? | Kuasa Pengguna Anggaran | Pejabat yang diberi kuasa mengelola anggaran satker
+keuangan | Apa kepanjangan SAKTI? | Sistem Aplikasi Keuangan Tingkat Instansi | Aplikasi keuangan satker
+keuangan | Apa kepanjangan DIPA? | Daftar Isian Pelaksanaan Anggaran | Dokumen pelaksanaan anggaran
+keuangan | Apa kepanjangan PNBP? | Penerimaan Negara Bukan Pajak | Contohnya biaya layanan pemerintah
+keuangan | Apa kepanjangan LKPP? | Laporan Keuangan Pemerintah Pusat | Disusun oleh Kementerian Keuangan
+keuangan | Apa kepanjangan UP dalam pengelolaan kas satker? | Uang Persediaan | Dipegang bendahara
+keuangan | Apa kepanjangan PPK dalam pengadaan? | Pejabat Pembuat Komitmen | Menandatangani kontrak
+keuangan | Apa kepanjangan SKP bagi ASN? | Sasaran Kinerja Pegawai | Dinilai tiap tahun
+keuangan | Apa kepanjangan LPSE? | Layanan Pengadaan Secara Elektronik | Tempat tender
+keuangan | Apa kepanjangan BAS? | Bagan Akun Standar | Daftar kode akun
+keuangan | Tahun anggaran di Indonesia berlangsung dari tanggal berapa sampai berapa? | 1 Januari sampai 31 Desember | Sama dengan tahun kalender
+
+canda | Apa yang paling cepat habis saat tanggal tua? | Uang/Saldo/Gaji | Bikin dompet kering
+canda | Kenapa laptop tidak pernah kedinginan? | Karena banyak Windows-nya | Perhatikan nama sistem operasinya
+canda | Apa persamaan bendahara dan penjaga gawang? | Sama-sama menjaga supaya tidak kebobolan | Soal pengamanan
