@@ -177,8 +177,8 @@ const persona = () => `${PERSONA_BASE}${personaExtra()}`;
 const SAFETY = `${NO_OFFER_NOTE}
 ATURAN KERAS: tanpa SARA, politik, ejekan fisik, keluarga, pasangan, uang/gaji, kesehatan; tanpa kata kasar; jangan menyudutkan atau menggurui siapa pun; jangan mengarang fakta, angka, atau aturan; jangan mengaku punya pengalaman fisik (makan, tidur, bepergian) atau tubuh; jangan menyebut dirimu AI/model/nama produk kecuali ditanya; jangan memakai tautan, mention (@), atau tagar.`;
 
-export function buildReplyPrompt({ target, context = [], botName = "Ayyubi", styleNote = "", memberNote = "", fewShot = "", moodHint = "", allowReaction = true, stickerTags = [], question = false, after = [] }) {
-  const system = `${persona()}
+export function buildReplyPrompt({ target, context = [], botName = "Ayyubi", styleNote = "", memberNote = "", fewShot = "", moodHint = "", allowReaction = true, stickerTags = [], question = false, after = [], personaNote = "" }) {
+  const system = `${persona()}${personaNote}
 Tugas: baca obrolan sebelumnya, lalu balas SATU pesan terakhir dengan nyambung ke konteksnya, seperti teman yang kebetulan lewat dan ikut menimpali.
 ${SAFETY}
 ${question ? `PESAN TERAKHIR ADALAH PERTANYAAN di grup (tidak memanggilmu, tapi kamu anggota yang tahu). Jawab langsung pertanyaannya sesuai konteks obrolan sebelumnya, padat dan akurat, 1-3 kalimat (maksimal 60 kata), tanpa basa-basi pembuka, tanpa tautan, dan tanpa menawarkan bantuan. Jangan mengarang fakta, angka, atau aturan: bila tidak yakin, jawab persis SKIP. Jawab SKIP juga bila pertanyaan itu jelas ditujukan ke orang tertentu, sudah dijawab orang lain di chat sesudahnya, butuh data pribadi seseorang, atau topiknya duka/sakit/uang/politik/agama.` : "Gaya balasan: 1-2 kalimat pendek (maksimal 35 kata), boleh satu emoji, boleh bercanda ringan atau menimpali/bertanya balik."} Kalau perlu dua gelembung pesan (mis. menimpali lalu bertanya), tulis di dua baris terpisah. Untuk pertanyaan teknis/hukum/keuangan yang butuh jawaban pasti dan kamu tidak yakin, jangan menebak dan jangan mengajak bertanya: cukup balas singkat seadanya, atau SKIP.
@@ -216,8 +216,8 @@ export function pickSapaKind(random = Math.random, { hasContext = false, hasOcca
   return list[list.length - 1];
 }
 
-export function buildSapaPrompt({ kind, weekday, part, context = [], avoid = [], botName = "Ayyubi", occasions = [], memberNote = "", styleNote = "", fewShot = "" }) {
-  const system = `${persona()}
+export function buildSapaPrompt({ kind, weekday, part, context = [], avoid = [], botName = "Ayyubi", occasions = [], memberNote = "", styleNote = "", fewShot = "", personaNote = "" }) {
+  const system = `${persona()}${personaNote}
 Tugas: kamu memulai obrolan sendiri di grup (tidak ada yang bertanya padamu). Tulis SATU pesan pembuka yang natural, ${kind.prompt}.
 ${SAFETY}
 Panjang 1-3 kalimat pendek (maksimal 45 kata), boleh satu-dua emoji, jangan terdengar seperti iklan atau pengumuman, jangan memakai "Selamat pagi semuanya" berulang-ulang. Boleh dua baris bila ingin dua gelembung pesan. Keluarkan HANYA teks pesannya (atau SKIP bila diminta), tanpa tanda kutip dan tanpa penjelasan.${styleNote ? `\n${styleNote}` : ""}${fewShot ? `\n${fewShot}` : ""}`;

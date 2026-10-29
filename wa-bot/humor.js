@@ -428,7 +428,7 @@ export function parseHumorArg(arg, { secondAliases = [] } = {}) {
  *   listGroups(account) -> Promise<[{ id, subject, allowed }] | null>    grup yang diikuti nomor itu
  *   labels, secondEnabled, timeZone, config, now, random, log, timer(fn, ms)
  */
-export function createHumor({ state = null, ai = null, send = null, react = null, review = null, media = null, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), listGroups = null, labels = {}, secondEnabled = false, timeZone = "Asia/Makassar", config = readHumorConfig({}), now = () => Date.now(), random = Math.random, log = console, timer = (fn, ms) => setTimeout(fn, ms) } = {}) {
+export function createHumor({ persona = null, state = null, ai = null, send = null, react = null, review = null, media = null, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), listGroups = null, labels = {}, secondEnabled = false, timeZone = "Asia/Makassar", config = readHumorConfig({}), now = () => Date.now(), random = Math.random, log = console, timer = (fn, ms) => setTimeout(fn, ms) } = {}) {
   let data = { groups: {}, optout: {}, noreply: {}, members: {}, nolearn: {} };
   let sched = { pantun: {}, roast: {}, sapa: {}, balas: {}, reaksi: {}, vision: {}, stiker: {} };
   let styles = {}; // key -> hitungan gaya grup (hanya angka, tanpa isi chat)
@@ -451,6 +451,14 @@ export function createHumor({ state = null, ai = null, send = null, react = null
   const lastSpontAt = new Map(); // key -> kapan bot terakhir bicara sendiri di grup itu (pantun/roast/balas/sapa)
   const busy = new Set();
   const label = (a) => labels[a] || (a === SECOND ? "Nomor 2" : "Nomor utama");
+  // Gaya bicara akun (persona-bot.js) untuk obrolan spontan; pagar roasting ikut di dalamnya. Gagal/kosong = tanpa tambahan.
+  const personaNoteFor = (account, opts) => {
+    try {
+      return persona ? persona(account === SECOND ? SECOND : MAIN, opts) || "" : "";
+    } catch {
+      return "";
+    }
+  };
   const keyOf = (account, jid) => `${account === SECOND ? SECOND : MAIN}|${jid}`;
   const accounts = () => (secondEnabled ? [MAIN, SECOND] : [MAIN]);
 
@@ -1612,6 +1620,7 @@ Label menentukan kapan stiker dipakai.`;
       allowReaction: Boolean(react && entry.msg) && !isQ,
       stickerTags,
       question: isQ,
+      personaNote: personaNoteFor(account, { serious: isQ || isGraveTopic(entry.text) }),
       after: isQ ? (() => { const b = ctxBuf.get(key) || []; const i = b.indexOf(entry); return i >= 0 ? b.slice(i + 1).filter((m) => !m.isBot).slice(0, 4).map((m) => ({ name: m.name, text: m.text })) : []; })() : []
     });
     let text = null;
@@ -1757,6 +1766,7 @@ Label menentukan kapan stiker dipakai.`;
           occasions: kind.needsOccasion || i === 0 ? occasions.slice(0, 3) : [],
           memberNote: kind.needsMember && member ? `${memberNote} Anggota yang dimaksud: ${callName(key, member.ids, member.name)}.` : "",
           styleNote,
+          personaNote: personaNoteFor(key.split("|")[0], { serious: false }),
           fewShot
         });
         try {
@@ -1796,7 +1806,7 @@ Label menentukan kapan stiker dipakai.`;
     const name = callName(key, who.ids, who.name);
     let text = null;
     if (ai) {
-      const { system, user } = buildSapaPrompt({ kind: { id: "ultah", prompt: `mengucapkan selamat ulang tahun yang hangat, singkat, dan ringan kepada ${name} (sebut namanya), dengan doa baik yang umum` }, weekday: lp.weekday, part: partOfDay(lp.minutes), styleNote: describeStyle(styles[key]), fewShot: fewShotNote(feedbacks[key]) });
+      const { system, user } = buildSapaPrompt({ kind: { id: "ultah", prompt: `mengucapkan selamat ulang tahun yang hangat, singkat, dan ringan kepada ${name} (sebut namanya), dengan doa baik yang umum` }, weekday: lp.weekday, part: partOfDay(lp.minutes), styleNote: describeStyle(styles[key]), fewShot: fewShotNote(feedbacks[key]), personaNote: personaNoteFor(account, { serious: true }) });
       try {
         const v = validateChat(await ai({ system, user, temperature: 0.9, maxTokens: 120 }), { maxLen: 300 });
         if (v.ok && v.text.toLowerCase().includes(name.toLowerCase().slice(0, 3))) text = v.text;

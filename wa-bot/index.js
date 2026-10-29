@@ -5913,6 +5913,7 @@ async function answerGroupImageQuestion(sock, msg, groupJid, { source, kind, que
 }
 
 const humor = createHumor({
+  persona: (acct, opts) => personaBot.note(acct, opts),
   state: strictStateStore,
   media: humorMedia,
   ai: AUTO_REPLY_ACTIVE ? humorAi : null,

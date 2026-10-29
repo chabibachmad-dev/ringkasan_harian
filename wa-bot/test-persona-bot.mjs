@@ -1,6 +1,7 @@
 // Tes kepribadian per akun (persona-bot.js).   node test-persona-bot.mjs
 import { createPersonaBot, cleanPersona, PERSONA_MAX, DEFAULT_PERSONA, ROASTING_FENCE, SERIOUS_FENCE, COMMON_FENCE } from "./persona-bot.js";
 import { readFileSync } from "node:fs";
+import { buildReplyPrompt, buildSapaPrompt, SAPA_KINDS } from "./ngobrol.js";
 
 let fails = 0;
 const check = (c, m) => { if (!c) { fails++; console.log("FAIL:", m); } else console.log("ok:", m); };
@@ -59,6 +60,27 @@ const idx = readFileSync(new URL("./index.js", import.meta.url), "utf8");
 check(/buildPersonaNote\(\)\}\$\{ctxFlags\?\.humorNote/.test(idx) && /buildLinkNote\(\)\}\$\{buildPersonaNote\(\)\}`;/.test(idx), "index.js: persona dipasang di prompt grup DAN chat pribadi");
 check(/personaBot\.note\(currentAccountId\(\)/.test(idx) && /st\.serious =/.test(idx), "index.js: persona dipilih dari akun aktif; penanda topik serius diisi");
 check(!/persona-bot/.test(readFileSync(new URL("./persona-voice.js", import.meta.url), "utf8")), "persona-voice.js (/suara) tidak tersentuh");
+
+// obrolan spontan (ngobrol.js / humor.js)
+{
+  const noteA = pb.note("main");
+  const noteW = pb.note("wa2");
+  const r1 = buildReplyPrompt({ target: { name: "Budi", text: "wkwk lucu" }, personaNote: noteA });
+  check(r1.system.includes("GAYA BICARA (kepribadian Ayyubi)") && r1.system.includes(ROASTING_FENCE), "balasan spontan: persona + pagar roasting Ayyubi ikut di prompt");
+  const r2 = buildReplyPrompt({ target: { name: "Budi", text: "wkwk lucu" }, personaNote: noteW });
+  check(r2.system.includes("kepribadian Wongsobot") && !r2.system.includes("PAGAR ROASTING"), "balasan spontan: akun kedua memakai Wongsobot");
+  const r3 = buildReplyPrompt({ target: { name: "Budi", text: "berapa tarif?" }, question: true, personaNote: pb.note("main", { serious: true }) });
+  check(r3.system.includes(SERIOUS_FENCE), "balasan spontan untuk pertanyaan: ledekan dimatikan");
+  check(!buildReplyPrompt({ target: { name: "Budi", text: "hai" } }).system.includes("GAYA BICARA"), "tanpa persona: prompt lama tidak berubah");
+  const kind = SAPA_KINDS[0];
+  const s1 = buildSapaPrompt({ kind, weekday: "Senin", part: "pagi", personaNote: noteW });
+  check(s1.system.includes("kepribadian Wongsobot"), "sapaan spontan memakai persona akun");
+  check(r1.system.includes("ATURAN KERAS") && r1.system.includes("ejekan fisik"), "aturan keselamatan obrolan spontan tetap ada");
+  const hum = readFileSync(new URL("./humor.js", import.meta.url), "utf8");
+  check((hum.match(/personaNote: personaNoteFor\(/g) || []).length === 3, "humor.js: balasan, sapaan, dan ucapan ulang tahun memakai persona");
+  check(/persona: \(acct, opts\) => personaBot\.note\(acct, opts\)/.test(idx0()), "index.js: createHumor menerima persona");
+}
+function idx0() { return readFileSync(new URL("./index.js", import.meta.url), "utf8"); }
 
 console.log(fails ? `\n${fails} GAGAL` : "\nSemua tes persona lolos.");
 process.exit(fails ? 1 : 0);
