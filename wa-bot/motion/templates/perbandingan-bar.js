@@ -6,10 +6,13 @@ export default {
   id: "perbandingan-bar",
   nama: "Perbandingan Batang",
   hari: 4,
+  jalur: "fakta",
   tema: "ink",
   musik: { bpm: 108, akor: [[55, [55, 59, 62]], [52, [52, 55, 59]], [48, [48, 52, 55]], [50, [50, 54, 57]]], kick: true, hat: true },
   petunjukIsi: `{"judul":"...","satuan":"...","item":[{"label":"...","nilai":0}],"desimal":0,"kesimpulan":"..."}  // 3-5 item; label pendek; nilai bilangan; satuan pendek (misal "km/jam"); kesimpulan 1 kalimat`,
   contoh: { judul: "Siapa paling cepat?", satuan: "km/jam", item: [{ label: "Sepeda", nilai: 25 }, { label: "Mobil di kota", nilai: 60 }, { label: "Kereta cepat", nilai: 350 }, { label: "Pesawat", nilai: 900 }], desimal: 0, kesimpulan: "Pesawat 36 kali lebih cepat daripada sepeda!" },
+
+  angkaKunci(c) { return c.item.map((x) => String(x.nilai)); },
 
   rapikan(raw) {
     const gal = [];
@@ -23,8 +26,8 @@ export default {
   narasi(c) {
     return `${c.judul} ${c.item.map((x) => `${x.label}, ${fmtAngka(x.nilai, c.desimal)} ${c.satuan}`).join(". ")}. ${c.kesimpulan}`;
   },
-  bangun(c) {
-    const th = THEMES[this.tema], n = c.item.length, maks = Math.max(...c.item.map((x) => x.nilai));
+  bangun(c, opsi = {}) {
+    const th = THEMES[opsi.tema || this.tema], n = c.item.length, maks = Math.max(...c.item.map((x) => x.nilai));
     const t0 = 3.6, gp = 1.6, tEnd = t0 + n * gp + 0.4, dur = tEnd + 0.9 + 5.2;
     const pitch = n <= 3 ? 150 : n === 4 ? 130 : 112, y0 = 480;
     const idxMaks = c.item.findIndex((x) => x.nilai === maks);

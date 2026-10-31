@@ -6,6 +6,7 @@ export default {
   id: "proses-tahapan",
   nama: "Proses Bertahap",
   hari: 5,
+  jalur: "fakta",
   tema: "ocean",
   musik: { bpm: 92, akor: [[53, [53, 57, 60]], [55, [55, 59, 62]], [57, [57, 60, 64]], [50, [50, 53, 57]]], kick: false, hat: true },
   petunjukIsi: `{"judul":"...","tahap":["...","...","..."],"siklus":false,"keterangan":"..."}  // 3-5 tahap, tiap tahap <= 45 huruf; siklus=true bila prosesnya berputar kembali ke awal; keterangan 1 kalimat penutup`,
@@ -19,8 +20,8 @@ export default {
   narasi(c) {
     return `${c.judul} ${c.tahap.map((x, i) => `Pertama, ${x}.`.replace("Pertama", ["Pertama", "Kedua", "Ketiga", "Keempat", "Kelima"][i])).join(" ")} ${c.siklus ? "Lalu semuanya berulang lagi. " : ""}${c.keterangan}`;
   },
-  bangun(c) {
-    const th = THEMES[this.tema], n = c.tahap.length;
+  bangun(c, opsi = {}) {
+    const th = THEMES[opsi.tema || this.tema], n = c.tahap.length;
     const t0 = 3.6, gp = 2.6, tEnd = t0 + n * gp, dur = tEnd + (c.siklus ? 1.6 : 0.6) + 5.2;
     const pitch = n <= 3 ? 170 : n === 4 ? 140 : 118, h = pitch - 22, y0 = 450;
     const sfx = efek([0.6, "whoosh", { gain: 0.3 }]);

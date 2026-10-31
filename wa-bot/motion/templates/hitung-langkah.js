@@ -5,7 +5,8 @@ import { S, hasil } from "./util.js";
 export default {
   id: "hitung-langkah",
   nama: "Hitung Langkah demi Langkah",
-  hari: 2,
+  hari: null,
+  jalur: "pelajaran",
   tema: "plum",
   musik: { bpm: 96, akor: [[52, [52, 55, 59]], [57, [57, 60, 64]], [53, [53, 57, 60]], [55, [55, 59, 62]]], kick: false, hat: true },
   petunjukIsi: `{"judul":"...","soal":"...","langkah":[{"ekspresi":"...","catatan":"..."}],"hasil":"..."}  // 2-3 langkah; ekspresi pendek (misal "24 ÷ 4 = 6"); catatan 1 kalimat pendek; hasil jawaban akhir pendek`,
@@ -22,8 +23,8 @@ export default {
   narasi(c) {
     return `${c.judul}. ${c.soal} Yuk kita hitung pelan-pelan. ${c.langkah.map((l, i) => `Langkah ${i + 1}. ${l.catatan || l.ekspresi}`).join(" ")} Jadi hasilnya ${c.hasil}.`;
   },
-  bangun(c) {
-    const th = THEMES[this.tema], n = c.langkah.length;
+  bangun(c, opsi = {}) {
+    const th = THEMES[opsi.tema || this.tema], n = c.langkah.length;
     const t0 = 4.0, gp = 3.4, tHasil = t0 + n * gp + 0.4, dur = tHasil + 5.2;
     const sfx = efek([0.5, "whoosh", { gain: 0.3 }]);
     for (let i = 0; i < n; i++) sfx.push({ t: t0 + i * gp, k: "whoosh", gain: 0.2 }, { t: t0 + i * gp + 0.9, k: "pop", f: 700 + 100 * i, gain: 0.55 });

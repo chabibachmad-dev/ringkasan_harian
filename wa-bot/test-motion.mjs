@@ -3,13 +3,14 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { SEMUA, HARIAN, templatUntuk, ambilTemplat } from "./motion/templates/index.js";
-import { ekstrakJson, buatIsi, cekSatuHitungan, cekPola, periksaIsi } from "./motion/content.js";
+import { SEMUA, HARIAN, templatUntuk, ambilTemplat, temaMinggu } from "./motion/templates/index.js";
+import { ekstrakJson, buatIsi, buatIsiFakta, angkaAdaDiSumber, periksaRamahKeluarga, cekSatuHitungan, cekPola, periksaIsi } from "./motion/content.js";
 import { metaShorts } from "./motion/youtube-meta.js";
 import { sintesisAudio, SR } from "./motion/audio.js";
 import { rencanaWaktu } from "./motion/render.js";
 import { W, H, THEMES, fmtAngka, bungkus, siapkanFont } from "./motion/engine.js";
 import * as T from "./motion/tema-mingguan.js";
+import * as WA from "./motion/perintah-wa.js";
 
 let fails = 0;
 const check = (c, m) => { if (!c) { fails++; console.log("FAIL:", m); } else console.log("ok:", m); };
@@ -17,8 +18,16 @@ const check = (c, m) => { if (!c) { fails++; console.log("FAIL:", m); } else con
 // 1. daftar templat & rotasi harian
 check(HARIAN.length === 7, "ada 7 templat harian");
 check(new Set(HARIAN.map((t) => t.hari)).size === 7, "tiap hari punya templat berbeda");
-check(templatUntuk("2026-11-02").id === "kuis-kilat", "Senin = kuis-kilat");
-check(templatUntuk("2026-11-08").id === "pola-angka", "Minggu = pola-angka");
+check(templatUntuk("2026-11-02").id === "fakta-angka", "Senin = fakta-angka");
+check(templatUntuk("2026-11-08").id === "cerita-fakta", "Minggu = cerita-fakta");
+check(HARIAN.every((t) => t.jalur === "fakta"), "semua templat rotasi harian berjalur fakta");
+check(SEMUA.filter((t) => t.hari === null).every((t) => ["pelajaran", "khusus"].includes(t.jalur)), "templat di luar rotasi berjalur pelajaran/khusus");
+{
+  const tgl = (n) => `2026-11-${String(n).padStart(2, "0")}`; const pekan1 = [2, 3, 4, 5, 6, 7, 8].map((d) => temaMinggu(templatUntuk(tgl(d)), tgl(d))), pekan2 = [9, 10, 11, 12, 13, 14, 15].map((d) => temaMinggu(templatUntuk(tgl(d)), tgl(d)));
+  check(new Set(pekan1).size === 7 && new Set(pekan2).size === 7, "warna: dalam satu pekan tiap hari berwarna beda");
+  check(pekan1.every((x, i) => x !== pekan2[i]), "warna: tiap templat berganti warna di pekan berikutnya");
+  const tp0 = templatUntuk(tgl(2)); check(temaMinggu(tp0, tgl(2)) === temaMinggu(tp0, tgl(8)), "warna: satu templat, satu pekan, satu warna");
+}
 check(new Set(HARIAN.map((t) => t.tema)).size === 7, "tiap templat punya tema warna berbeda");
 check(SEMUA.every((t) => THEMES[t.tema]), "semua tema warna terdaftar");
 
@@ -28,7 +37,7 @@ for (const t of SEMUA) {
   check(r.ok, `${t.id}: contoh lolos validasi`);
   check(periksaIsi(t.id, r.isi).length === 0, `${t.id}: contoh lolos pemeriksaan hitungan`);
   const sp = t.bangun(r.isi);
-  check(sp.durasi >= 14 && sp.durasi <= 24, `${t.id}: durasi ${sp.durasi.toFixed(1)} dtk wajar untuk Shorts`);
+  check(sp.durasi >= 14 && sp.durasi <= 26, `${t.id}: durasi ${sp.durasi.toFixed(1)} dtk wajar untuk Shorts`);
   check(sp.efek.every((e) => e.t >= 0 && e.t <= sp.durasi), `${t.id}: waktu efek di dalam durasi`);
   check(typeof t.narasi(r.isi) === "string" && t.narasi(r.isi).length > 20, `${t.id}: narasi tersusun`);
 }
@@ -42,6 +51,9 @@ check(!bar.rapikan({ ...bar.contoh, item: bar.contoh.item.slice(0, 2) }).ok, "ba
 check(!bar.rapikan({ ...bar.contoh, item: bar.contoh.item.map((x) => ({ ...x, nilai: 0 })) }).ok, "bar: semua nilai nol ditolak");
 check(!mit.rapikan({ mitos: "x" }).ok, "mitos: isi tidak lengkap ditolak");
 check(!pola.rapikan({ ...pola.contoh, deret: ["1", "2"] }).ok, "pola: deret terlalu pendek ditolak");
+check(!ambilTemplat("peringkat").rapikan({ ...ambilTemplat("peringkat").contoh, item: ambilTemplat("peringkat").contoh.item.slice(0, 2) }).ok, "peringkat: harus 3 item");
+check(!ambilTemplat("garis-waktu").rapikan({ ...ambilTemplat("garis-waktu").contoh, peristiwa: ambilTemplat("garis-waktu").contoh.peristiwa.slice(0, 2) }).ok, "garis-waktu: minimal 3 peristiwa");
+check(!ambilTemplat("cerita-fakta").rapikan({ ...ambilTemplat("cerita-fakta").contoh, bagian: ["satu", "dua"] }).ok, "cerita-fakta: minimal 3 bagian");
 check(!fa.rapikan({ ...fa.contoh, angka: "abc" }).ok, "fakta: angka bukan bilangan ditolak");
 check(fa.rapikan({ ...fa.contoh, angka: "8.849" }).isi.angka === 8849, "fakta: angka berformat Indonesia dibaca benar");
 check(kuis.rapikan({ ...kuis.contoh, pertanyaan: "x".repeat(500) }).isi.pertanyaan.length <= 170, "teks terlalu panjang dipotong");
@@ -74,25 +86,59 @@ let gagal = false; try { ekstrakJson("tidak ada json"); } catch { gagal = true; 
   check(err && /Gagal membuat isi/.test(err.message), "buatIsi: melempar galat bila semua percobaan gagal");
 }
 
+// 6b. fakta bersumber (anti karangan)
+check(angkaAdaDiSumber(8849, "Puncaknya setinggi 8.849 meter di atas laut") === true, "angka: format titik ribuan ditemukan");
+check(angkaAdaDiSumber(8849, "Height: 8,849 m") === true && angkaAdaDiSumber(8849, "tinggi 8849 m") === true, "angka: format koma/polos ditemukan");
+check(angkaAdaDiSumber(3.14, "nilai pi sekitar 3,14") === true, "angka: desimal koma ditemukan");
+check(angkaAdaDiSumber("390 km/jam", "kecepatan mencapai 390 km/jam saat menukik") === true, "angka: nilai berteks");
+check(angkaAdaDiSumber(9000, "tinggi 8.849 meter") === false, "angka: tidak ada di sumber terdeteksi");
+check(angkaAdaDiSumber("banyak", "apa saja") === true, "bukan angka: tidak diperiksa");
+check(periksaRamahKeluarga({ a: "Dia ingin membunuh nyamuk" }).length === 1 && periksaRamahKeluarga({ a: "Kucing suka tidur" }).length === 0, "filter ramah keluarga");
+{
+  const ev = { judul: "Gunung Everest", url: "https://a.example.org/everest", teks: "Gunung Everest memiliki tinggi 8.849 meter di atas permukaan laut dan berada di pegunungan Himalaya antara Nepal dan Tiongkok." };
+  const ev2 = { judul: "Everest Facts", url: "https://b.example.com/facts", teks: "Mount Everest stands 8,849 m above sea level, the highest mountain on Earth, first climbed in 1953 by Hillary and Norgay." };
+  const sama = { judul: "Salinan", url: "https://a.example.org/lain", teks: ev.teks };
+  const cari = async () => [ev, ev2];
+  const fa = ambilTemplat("fakta-angka");
+  const baik = { ...fa.contoh, judul: "Seberapa tinggi Gunung Everest?", angka: 8849, hook: "Setinggi apa?", dasar: "Sumber 1 dan 2", sumber: [1, 2] };
+  const r = await buatIsiFakta({ llm: async () => JSON.stringify(baik), cari, templatId: "fakta-angka", topik: "Everest" });
+  check(r.percobaan === 1 && r.sumber.length === 2 && r.sumber[0].url.startsWith("https://"), "fakta: lolos dengan 2 sumber dan angka cocok");
+  let n = 0; const balasan = [JSON.stringify({ ...baik, angka: 9100 }), JSON.stringify({ ...baik, sumber: [1] }), JSON.stringify(baik)]; const prompts = [];
+  const r2 = await buatIsiFakta({ llm: async (p) => { prompts.push(p); return balasan[n++]; }, cari, templatId: "fakta-angka", topik: "Everest" });
+  check(r2.percobaan === 3 && /tidak tertulis di sumber/.test(prompts[1]) && /minimal 2 sumber/.test(prompts[2]), "fakta: angka karangan dan sumber kurang ditolak lalu diperbaiki");
+  let e1 = null; try { await buatIsiFakta({ llm: async () => JSON.stringify(baik), cari: async () => [ev, sama], templatId: "fakta-angka", topik: "x" }); } catch (e) { e1 = e; } check(e1 && /Sumber kurang/.test(e1.message), "fakta: dua sumber dari situs yang sama ditolak");
+  let e2 = null; try { await buatIsiFakta({ llm: async () => JSON.stringify({ tidakCukup: true }), cari, templatId: "fakta-angka", topik: "x" }); } catch (e) { e2 = e; } check(e2 && /tidak cukup/.test(e2.message), "fakta: AI menolak mengarang -> galat");
+  let e3 = null; try { await buatIsiFakta({ llm: async () => JSON.stringify({ ...baik, judul: "Pembunuhan misterius" }), cari, templatId: "fakta-angka", topik: "x", maksCoba: 2 }); } catch (e) { e3 = e; } check(e3 && /ramah keluarga/.test(e3.message), "fakta: topik tidak ramah keluarga ditolak");
+  let e4 = null; try { await buatIsiFakta({ llm: async () => "{}", templatId: "fakta-angka", topik: "x" }); } catch (e) { e4 = e; } check(e4 && /fungsi cari/.test(e4.message), "fakta: tanpa fungsi cari ditolak");
+  const garis = ambilTemplat("garis-waktu"), sg = [{ judul: "NASA", url: "https://x.example/n", teks: "Sputnik 1 diluncurkan pada 1957, manusia pertama ke luar angkasa pada 1961, Apollo 11 mendarat di Bulan tahun 1969, misi terakhir 1972." }, { judul: "Space", url: "https://y.example/s", teks: "Timeline: 1957 Sputnik; 1961 Gagarin; 1969 Apollo 11; 1972 Apollo 17 mission ended lunar landings." }];
+  const gw = { ...garis.contoh, hook: "Dari mana mulai?", dasar: "NASA", sumber: [1, 2] };
+  const rg = await buatIsiFakta({ llm: async () => JSON.stringify(gw), cari: async () => sg, templatId: "garis-waktu", topik: "Bulan" });
+  check(rg.isi.peristiwa.length === 4, "fakta: garis waktu dengan tahun cocok lolos");
+  let e5 = null; try { await buatIsiFakta({ llm: async () => JSON.stringify({ ...gw, peristiwa: [...gw.peristiwa.slice(0, 3), { tahun: "1980", teks: "Karangan." }] }), cari: async () => sg, templatId: "garis-waktu", topik: "Bulan", maksCoba: 1 }); } catch (e) { e5 = e; } check(e5 && /1980/.test(e5.message), "fakta: tahun karangan terdeteksi");
+}
+
 // 7. tema mingguan
 check(T.senenBerikut(new Date(2026, 9, 31)) === "2026-11-02", "Sabtu 31 Okt -> Senin 2 Nov");
 check(T.senenBerikut(new Date(2026, 10, 2)) === "2026-11-09", "Senin -> Senin pekan depan");
 {
   const mg = T.susunMinggu("2026-11-02");
-  check(mg.length === 7 && mg[0].templat === "kuis-kilat" && mg[6].templat === "pola-angka" && mg[6].tanggal === "2026-11-08", "susunMinggu: 7 hari, Senin–Minggu");
+  check(mg.length === 7 && mg[0].templat === "fakta-angka" && mg[6].templat === "cerita-fakta" && mg[6].tanggal === "2026-11-08", "susunMinggu: 7 hari, Senin–Minggu");
   check(T.rentangTeks("2026-11-02") === "2–8 November 2026", "rentang tanggal teks");
   const u0 = await T.usulkanMinggu({ senen: "2026-11-02" });
-  check(u0.hari.length === 7 && new Set(u0.hari.map((x) => x.topik)).size === 7 && u0.hari.every((x) => x.sumber === "bank"), "usulan tanpa AI memakai bank, 7 topik unik");
+  check(u0.hari.length === 7 && new Set(u0.hari.map((x) => x.topik)).size === 7 && u0.hari.every((x) => x.sumber === "bank"), "usulan tanpa AI memakai bank, 7 topik Short unik");
+  check(new Set(u0.hari.map((x) => x.pelajaran.topik)).size === 7 && u0.hari.every((x) => x.pelajaran.sumber === "bank"), "usulan juga berisi 7 topik video pelajaran unik");
   const u1 = await T.usulkanMinggu({ senen: "2026-11-02", temaOwner: [{ teks: "Planet Mars" }, { teks: "Hewan laut" }] });
   check(u1.hari[0].topik === "Planet Mars" && u1.hari[0].sumber === "owner" && u1.hari[1].topik === "Hewan laut", "tema pemilik dipakai lebih dulu");
-  const llm = async () => JSON.stringify([1, 2, 3, 4, 5, 6, 7].map((n) => ({ hari: n, topik: `Topik AI ${n}` })));
+  const llm = async () => JSON.stringify([1, 2, 3, 4, 5, 6, 7].map((n) => ({ hari: n, fakta: `Fakta AI ${n}`, pelajaran: `Pelajaran AI ${n}` })));
   const u2 = await T.usulkanMinggu({ llm, senen: "2026-11-02", temaOwner: [{ teks: "Planet Mars" }] });
-  check(u2.hari[0].sumber === "owner" && u2.hari[1].topik === "Topik AI 2" && u2.hari[1].sumber === "ai", "AI mengisi hari yang kosong");
+  check(u2.hari[0].sumber === "owner" && u2.hari[1].topik === "Fakta AI 2" && u2.hari[1].sumber === "ai" && u2.hari[1].pelajaran.topik === "Pelajaran AI 2", "AI mengisi hari yang kosong di kedua jalur");
+  const u2b = await T.usulkanMinggu({ llm, senen: "2026-11-02", temaOwner: [{ teks: "Matematika pasar", jalur: "pelajaran" }] });
+  check(u2b.hari[0].pelajaran.topik === "Matematika pasar" && u2b.hari[0].pelajaran.sumber === "owner" && u2b.hari[0].sumber === "ai", "tema pelajaran pemilik masuk jalur pelajaran saja");
   const u3 = await T.usulkanMinggu({ llm: async () => { throw new Error("mati"); }, senen: "2026-11-02" });
   check(u3.hari.every((x) => x.sumber === "bank"), "AI gagal -> jatuh ke bank cadangan");
-  const u4 = await T.usulkanMinggu({ senen: "2026-11-02", riwayat: [T.BANK_TEMA["kuis-kilat"][0]] });
-  check(u4.hari[0].topik !== T.BANK_TEMA["kuis-kilat"][0], "topik yang sudah pernah dipakai dihindari");
-  check(T.formatUsulan(u0).includes("Senin — Kuis Kilat") && T.formatUsulan(u0).includes("setuju"), "format pesan usulan");
+  const u4 = await T.usulkanMinggu({ senen: "2026-11-02", riwayat: [T.BANK_TEMA["fakta-angka"][0]] });
+  check(u4.hari[0].topik !== T.BANK_TEMA["fakta-angka"][0], "topik yang sudah pernah dipakai dihindari");
+  check(T.formatUsulan(u0).includes("Short (Fakta Angka)") && T.formatUsulan(u0).includes("Video pelajaran:") && T.formatUsulan(u0).includes("setuju"), "format pesan usulan memuat dua jalur");
   check(T.tombolUsulan("2026-11-02").inline_keyboard[0][0].callback_data === "tema:setuju:2026-11-02", "tombol usulan");
 
   const P = T.parsePerintah;
@@ -103,7 +149,10 @@ check(T.senenBerikut(new Date(2026, 10, 2)) === "2026-11-09", "Senin -> Senin pe
   const tk = P("tukar 2 5"); check(tk.aksi === "tukar" && tk.a === 2 && tk.b === 5, "perintah: tukar");
   check(P("tukar selasa dengan jumat").b === 5, "perintah: tukar dengan nama hari");
   check(P("hapus 4").aksi === "hapus" && P("hapus 4").hari === 4, "perintah: hapus");
-  const tm = P("tema: dinosaurus; gunung berapi"); check(tm.aksi === "tema" && tm.daftar.length === 2, "perintah: tema banyak");
+  const tm = P("tema: dinosaurus; gunung berapi"); check(tm.aksi === "tema" && tm.daftar.length === 2 && tm.jalur === "fakta", "perintah: tema banyak");
+  const tp = P("tema pelajaran: pecahan"); check(tp.aksi === "tema" && tp.jalur === "pelajaran" && tp.daftar[0] === "pecahan", "perintah: tema pelajaran");
+  const gp = P("pelajaran 3: siklus air"); check(gp.aksi === "gantiPelajaran" && gp.hari === 3 && gp.topik === "siklus air", "perintah: ganti pelajaran");
+  check(P("video kamis: magnet").aksi === "gantiPelajaran" && P("video kamis: magnet").hari === 4, "perintah: video + nama hari");
   check(P("ganti 9: x").aksi === "bebas", "hari tidak valid jatuh ke bebas");
   check(P("hari kamis tolong lebih mudah").aksi === "bebas", "kalimat bebas");
 
@@ -111,18 +160,21 @@ check(T.senenBerikut(new Date(2026, 10, 2)) === "2026-11-09", "Senin -> Senin pe
   let r = await T.terapkan({ state: st, perintah: P("ganti 3: Planet Mars") });
   check(r.berubah && r.state.usulan.hari[2].topik === "Planet Mars" && r.state.usulan.hari[2].sumber === "owner" && st.usulan.hari[2].topik !== "Planet Mars", "ganti: hanya salinan yang berubah");
   const a0 = r.state.usulan.hari[0].topik, b0 = r.state.usulan.hari[4].topik; r = await T.terapkan({ state: r.state, perintah: P("tukar 1 5") });
-  check(r.state.usulan.hari[0].topik === b0 && r.state.usulan.hari[4].topik === a0 && r.state.usulan.hari[0].templat === "kuis-kilat", "tukar: topik bertukar, templat tetap");
+  check(r.state.usulan.hari[0].topik === b0 && r.state.usulan.hari[4].topik === a0 && r.state.usulan.hari[0].templat === "fakta-angka", "tukar: topik bertukar, templat tetap");
+  r = await T.terapkan({ state: r.state, perintah: P("pelajaran 2: Magnet") }); check(r.berubah && r.state.usulan.hari[1].pelajaran.topik === "Magnet" && r.state.usulan.hari[1].pelajaran.sumber === "owner", "ganti pelajaran: jalur pelajaran berubah, Short tidak");
   r = await T.terapkan({ state: r.state, perintah: P("hapus 4") }); check(r.berubah && r.state.usulan.hari[3].topik, "hapus: diganti topik baru");
-  r = await T.terapkan({ state: r.state, perintah: P("tema: Dinosaurus; Gunung berapi") }); check(r.state.temaOwner.length === 2, "tema: masuk antrean pemilik");
+  r = await T.terapkan({ state: r.state, perintah: P("tema: Dinosaurus; Gunung berapi") }); check(r.state.temaOwner.length === 2 && r.state.temaOwner[0].jalur === "fakta", "tema: masuk antrean pemilik");
+  r = await T.terapkan({ state: r.state, perintah: P("tema pelajaran: Rantai makanan") }); check(r.state.temaOwner.length === 3 && r.state.temaOwner[2].jalur === "pelajaran", "tema pelajaran: antrean terpisah");
   r = await T.terapkan({ state: r.state, perintah: P("daftar tema") }); check(/Dinosaurus/.test(r.pesan), "daftar tema ditampilkan");
-  r = await T.terapkan({ state: r.state, perintah: P("ulang"), llm: null }); check(r.state.usulan.hari[2].topik === "Planet Mars" && r.state.usulan.status === "diusulkan", "ulang: tema pemilik dipertahankan");
+  r = await T.terapkan({ state: r.state, perintah: P("ulang"), llm: null }); check(r.state.usulan.hari[2].topik === "Planet Mars" && r.state.usulan.hari[1].pelajaran.topik === "Magnet" && r.state.usulan.status === "diusulkan", "ulang: tema pemilik di kedua jalur dipertahankan");
   r = await T.terapkan({ state: r.state, perintah: P("setuju") }); check(r.state.usulan.status === "disetujui" && r.state.usulan.disetujuiOleh === "owner", "setuju");
-  const llmBebas = async () => JSON.stringify([{ hari: 5, topik: "Daur ulang sampah" }]);
+  const llmBebas = async () => JSON.stringify([{ hari: 5, fakta: "Daur ulang sampah" }]);
   r = await T.terapkan({ state: r.state, perintah: P("hari jumat bahas lingkungan"), llm: llmBebas }); check(r.berubah && r.state.usulan.hari[4].topik === "Daur ulang sampah", "revisi bebas lewat AI");
   r = await T.terapkan({ state: { usulan: null, temaOwner: [], riwayat: [] }, perintah: P("setuju") }); check(!r.berubah && /Belum ada usulan/.test(r.pesan), "setuju tanpa usulan ditolak halus");
   const oto = T.setujuiOtomatis({ usulan: u0 }); check(oto.usulan.status === "disetujui" && oto.usulan.disetujuiOleh === "otomatis", "setujuiOtomatis");
   check(T.temaUntuk(oto, "2026-11-03").topik === u0.hari[1].topik && T.temaUntuk(oto, "2027-01-01").status === "tidak-ada", "temaUntuk per tanggal");
   check(T.teaserBesok(oto, "2026-11-02") === u0.hari[1].topik, "teaser besok");
+  check(T.teaserPelajaran(oto, "2026-11-02") === u0.hari[0].pelajaran.topik, "teaser pelajaran hari ini");
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "tema-")); const berkas = path.join(tmp, "x", "tema.json");
   T.simpanState(berkas, oto); check(JSON.stringify(T.muatState(berkas)) === JSON.stringify(oto), "simpan dan muat state"); check(T.muatState(path.join(tmp, "tidak-ada.json")).usulan === null, "muat berkas tidak ada -> state kosong");
   fs.rmSync(tmp, { recursive: true, force: true });
@@ -130,7 +182,8 @@ check(T.senenBerikut(new Date(2026, 10, 2)) === "2026-11-09", "Senin -> Senin pe
 
 // 8. metadata YouTube
 {
-  const t = ambilTemplat("mitos-fakta"), m = metaShorts({ templatId: t.id, isi: t.contoh, hook: "Mitos atau fakta?", topik: "Wortel dan mata" });
+  const t = ambilTemplat("mitos-fakta"), m = metaShorts({ templatId: t.id, isi: t.contoh, hook: "Mitos atau fakta?", topik: "Wortel dan mata", sumber: [{ judul: "Contoh", url: "https://a.example/x" }], linkVideo: "https://youtu.be/abc" });
+  check(m.deskripsi.includes("Sumber:") && m.deskripsi.includes("https://a.example/x") && m.deskripsi.includes("https://youtu.be/abc"), "deskripsi memuat sumber dan tautan video pelajaran");
   check(m.judul.length <= 100 && m.judul.endsWith("#Shorts"), "judul <= 100 huruf dan ber-#Shorts");
   check(m.madeForKids === true && m.containsSyntheticMedia === true && m.deskripsi.includes("#Shorts"), "metadata anak-anak + media sintetis");
   const m2 = metaShorts({ templatId: "kuis-kilat", isi: { ...ambilTemplat("kuis-kilat").contoh, pertanyaan: "p".repeat(300) }, hook: "x" });
@@ -193,6 +246,117 @@ else {
     let galat = null; try { await renderVideo({ templatId: "tidak-ada", isi: {}, keluar: path.join(tmp, "z.mp4") }); } catch (e) { galat = e; } check(galat, "render: templat tidak dikenal melempar galat");
     fs.rmSync(tmp, { recursive: true, force: true });
   }
+}
+
+// 13. permintaan video lewat WhatsApp
+{
+  const k = (t, o) => WA.kenaliPerintah(t, o);
+  check(k("halo apa kabar") === null && k("video itu bagus ya") === null && k("") === null, "wa: obrolan biasa bukan perintah");
+  let p = k("buatkan video tentang gunung tertinggi di dunia");
+  check(p && p.topik === "gunung tertinggi di dunia" && p.templatId === null && p.suara && !p.hd, "wa: perintah alami + topik");
+  p = k("/video peringkat: 3 hewan tercepat");
+  check(p && p.slash && p.templatId === "peringkat" && p.topik === "3 hewan tercepat", "wa: /video jenis: topik");
+  p = k("bikin video mitos tentang makan wortel bikin mata tajam ya");
+  check(p && p.templatId === "mitos-fakta" && p.topik === "makan wortel bikin mata tajam", "wa: jenis mitos + penutup 'ya' dibuang");
+  p = k("@628123456789 buatin video motion graphic proses terjadinya hujan tanpa suara hd");
+  check(p && p.templatId === "proses-tahapan" && p.topik === "terjadinya hujan" && p.suara === false && p.hd === true, "wa: mention dibuang, tanpa suara, hd");
+  p = k("Ayyubi, buatkan video kuis: perkalian 7 dan 8", { namaBot: "Ayyubi" });
+  check(p && p.templatId === "kuis-kilat" && p.topik === "perkalian 7 dan 8", "wa: nama bot di depan dibuang");
+  p = k("buat video fakta unik kucing");
+  check(p && p.templatId === "fakta-angka" && /fakta unik kucing/.test(p.topik), "wa: kata 'fakta' tetap di topik");
+  check(k("/video").bantuan === false && k("/video").topik === "" && k("/video bantuan").bantuan === true, "wa: /video kosong dan bantuan");
+  check(WA.teksBantuan().includes("/video"), "wa: teks bantuan memuat contoh");
+
+  const g = WA.izinVideo;
+  check(g({ adalahPemilik: true }).ok && g({ adalahPemilik: true }).bebasBatas, "wa izin: pemilik selalu boleh");
+  check(!g({ adalahPemilik: false, grup: "g1@g.us", pengirim: "a" }).ok, "wa izin: orang lain ditolak secara bawaan");
+  check(g({ adalahPemilik: false, grup: "g1@g.us", pengirim: "a", konfig: { izinGrup: ["g1@g.us"] } }).ok, "wa izin: grup yang diizinkan");
+  check(g({ adalahPemilik: false, pengirim: "a", konfig: { izinPengirim: ["a"] } }).ok && g({ adalahPemilik: false, pengirim: "z", konfig: { izinSemua: true } }).ok, "wa izin: pengirim diizinkan / izinSemua");
+  const kfg = WA.konfigDariEnv({ WA_VIDEO_SEMUA: "1", WA_VIDEO_GRUP: "a@g.us, b@g.us", WA_VIDEO_MAKS_HARIAN: "5" });
+  check(kfg.izinSemua && kfg.izinGrup.length === 2 && kfg.maksHarian === 5 && kfg.selangMenit === 10, "wa: konfigDariEnv");
+
+  const pb = WA.buatPembatas({ selangMenit: 10, maksHarian: 2 }), t0 = Date.UTC(2026, 10, 2, 1, 0, 0);
+  check(pb.cek("a", t0).ok, "wa batas: permintaan pertama lolos");
+  pb.catat("a", t0);
+  check(!pb.cek("a", t0 + 5 * 60e3).ok && pb.cek("a", t0 + 11 * 60e3).ok, "wa batas: selang 10 menit");
+  pb.catat("a", t0 + 11 * 60e3);
+  check(!pb.cek("a", t0 + 40 * 60e3).ok && /besok/.test(pb.cek("a", t0 + 40 * 60e3).alasan), "wa batas: maksimal per hari");
+  check(pb.cek("a", t0 + 24 * 3600e3).ok && pb.cek("b", t0).ok, "wa batas: hari berikutnya dan pengirim lain bebas");
+
+  const an = WA.buatAntrean({ maksTunggu: 1 }), urutan = [];
+  const lambat = (n, ms) => an.jalankan(async () => { await new Promise((r) => setTimeout(r, ms)); urutan.push(n); return n; });
+  const a1 = lambat(1, 30), a2 = lambat(2, 5);
+  check(an.panjang === 2 && an.penuh(), "wa antrean: satu berjalan + satu menunggu = penuh");
+  await Promise.all([a1, a2]);
+  check(urutan.join() === "1,2" && an.panjang === 0, "wa antrean: dikerjakan berurutan satu-satu");
+  let gal = null; try { await an.jalankan(async () => { throw new Error("x"); }); } catch (e) { gal = e; }
+  check(gal && (await an.jalankan(async () => 7)) === 7, "wa antrean: galat satu tugas tidak menghentikan antrean");
+
+  // alur penuh dengan AI/pencarian/render tiruan
+  const ev = { judul: "Gunung Everest", url: "https://a.example.org/everest", teks: "Gunung Everest memiliki tinggi 8.849 meter di atas permukaan laut dan berada di pegunungan Himalaya antara Nepal dan Tiongkok." };
+  const ev2 = { judul: "Everest Facts", url: "https://b.example.com/facts", teks: "Mount Everest stands 8,849 m above sea level, the highest mountain on Earth, first climbed in 1953 by Hillary and Norgay." };
+  const fa = ambilTemplat("fakta-angka");
+  const baik = { ...fa.contoh, judul: "Seberapa tinggi Gunung Everest?", angka: 8849, hook: "Setinggi apa?", dasar: "Everest setinggi 8.849 meter.", sumber: [1, 2] };
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "mwa-"));
+  const kirim = { teks: [], video: [] };
+  const dasar = () => ({
+    teks: "buatkan video tentang Gunung Everest", pengirim: "628111@s.whatsapp.net", adalahPemilik: true, grup: null, disebut: false, sekarang: Date.UTC(2026, 10, 2, 1, 0, 0),
+    deps: { llm: async () => JSON.stringify(baik), cari: async () => [ev, ev2], tts: async () => { const f = path.join(tmp, "n.wav"); fs.writeFileSync(f, "x"); return f; } },
+    kirimTeks: async (x) => kirim.teks.push(x), kirimVideo: async (b, ket) => kirim.video.push({ b, ket, ada: fs.existsSync(b) }),
+    antrean: WA.buatAntrean(), pembatas: WA.buatPembatas(), konfig: {}, folder: tmp,
+    renderFn: async (a) => { fs.writeFileSync(a.keluar, "mp4"); return { berkas: a.keluar, durasi: 22 }; }
+  });
+  let ok = await WA.tanganiPesanWa(dasar());
+  check(ok === true && kirim.video.length === 1 && kirim.video[0].ada, "wa alur: pemilik di chat pribadi -> video terkirim");
+  check(/Seberapa tinggi Gunung Everest/.test(kirim.video[0].ket) && /Sumber:/.test(kirim.video[0].ket) && /a\.example\.org/.test(kirim.video[0].ket), "wa alur: keterangan memuat judul, dasar, sumber");
+  check(!fs.existsSync(kirim.video[0].b) && !fs.existsSync(path.join(tmp, "n.wav")), "wa alur: berkas video dan narasi sementara dibersihkan");
+  check(kirim.teks.length === 1 && /sedang dibuat/.test(kirim.teks[0]), "wa alur: ada konfirmasi 'sedang dibuat'");
+  const n0 = kirim.teks.length + kirim.video.length;
+  check((await WA.tanganiPesanWa({ ...dasar(), teks: "besok libur ya" })) === false && kirim.teks.length + kirim.video.length === n0, "wa alur: obrolan biasa tidak ditangani (false)");
+  check((await WA.tanganiPesanWa({ ...dasar(), grup: "g@g.us", disebut: false })) === false, "wa alur: di grup tanpa disebut/tanpa slash diabaikan");
+  kirim.teks.length = 0; kirim.video.length = 0;
+  check((await WA.tanganiPesanWa({ ...dasar(), grup: "g@g.us", disebut: false, teks: "/video fakta Gunung Everest" })) === true && kirim.video.length === 1, "wa alur: di grup dengan /video diproses");
+  kirim.teks.length = 0; kirim.video.length = 0;
+  await WA.tanganiPesanWa({ ...dasar(), adalahPemilik: false, grup: "g@g.us", disebut: true });
+  check(kirim.video.length === 0 && /hanya untuk pemilik/.test(kirim.teks[0]), "wa alur: bukan pemilik di grup tak diizinkan -> ditolak sopan");
+  kirim.teks.length = 0; kirim.video.length = 0;
+  const d2 = { ...dasar(), adalahPemilik: false, grup: "g@g.us", disebut: true, konfig: { izinGrup: ["g@g.us"] } };
+  await WA.tanganiPesanWa(d2); await WA.tanganiPesanWa(d2);
+  check(kirim.video.length === 1 && /Tunggu sekitar/.test(kirim.teks[kirim.teks.length - 1]), "wa alur: anggota grup dibatasi selang waktu");
+  kirim.teks.length = 0; kirim.video.length = 0;
+  await WA.tanganiPesanWa({ ...dasar(), deps: { ...dasar().deps, cari: async () => [ev] } });
+  check(kirim.video.length === 0 && /tidak menemukan sumber/.test(kirim.teks[kirim.teks.length - 1]), "wa alur: sumber kurang -> tidak membuat, pesan ramah");
+  kirim.teks.length = 0; kirim.video.length = 0;
+  await WA.tanganiPesanWa({ ...dasar(), teks: "buatkan video tentang pembunuhan" });
+  check(kirim.video.length === 0 && /ramah keluarga/.test(kirim.teks[0]), "wa alur: topik tidak ramah keluarga ditolak sebelum diproses");
+  kirim.teks.length = 0; kirim.video.length = 0;
+  await WA.tanganiPesanWa({ ...dasar(), deps: { ...dasar().deps, tts: async () => { throw new Error("tts mati"); } } });
+  check(kirim.video.length === 1 && /musik saja/.test(kirim.video[0].ket), "wa alur: TTS gagal -> video tetap terkirim tanpa narasi + catatan");
+  // hari Sabtu (garis-waktu) tapi isi AI cocok untuk fakta-angka -> pakai templat cadangan
+  kirim.teks.length = 0; kirim.video.length = 0;
+  await WA.tanganiPesanWa({ ...dasar(), sekarang: Date.UTC(2026, 10, 7, 1, 0, 0) });
+  check(kirim.video.length === 1, "wa alur: templat hari ini tak cocok -> jatuh ke templat cadangan, video tetap jadi");
+  kirim.teks.length = 0; kirim.video.length = 0;
+  const pen = dasar(); pen.antrean = { penuh: () => true, panjang: 4, jalankan: async () => {} };
+  await WA.tanganiPesanWa(pen);
+  check(kirim.video.length === 0 && /penuh/.test(kirim.teks[0]), "wa alur: antrean penuh ditolak sopan");
+  kirim.teks.length = 0;
+  await WA.tanganiPesanWa({ ...dasar(), teks: "/video" });
+  check(/Cara minta video/.test(kirim.teks[0]), "wa alur: /video tanpa topik menampilkan bantuan");
+  // pelajaran (tanpa web) memakai buatIsi
+  kirim.teks.length = 0; kirim.video.length = 0;
+  const kq = ambilTemplat("kuis-kilat");
+  await WA.tanganiPesanWa({ ...dasar(), teks: "/video kuis: perkalian 7 dan 8", deps: { llm: async () => JSON.stringify({ ...kq.contoh, hook: "Coba tebak!", dasar: "7x8=56" }), tts: null } });
+  check(kirim.video.length === 1 && /Isi dibuat AI/.test(kirim.video[0].ket), "wa alur: kuis tanpa web jalan + catatan pemeriksaan");
+  fs.rmSync(tmp, { recursive: true, force: true });
+  // render sungguhan (bila tersedia): pastikan keluarannya video asli lewat jalur WA
+  let cvOk = true; try { await import("@napi-rs/canvas"); } catch { cvOk = false; }
+  if (cvOk && spawnSync("ffmpeg", ["-version"]).status === 0) {
+    const tmp2 = fs.mkdtempSync(path.join(os.tmpdir(), "mwa2-"));
+    const h = await WA.buatVideoWa({ perintah: WA.kenaliPerintah("/video fakta Gunung Everest"), llm: async () => JSON.stringify(baik), cari: async () => [ev, ev2], folder: tmp2, skala: 0.3, tanggal: "2026-11-02" });
+    check(fs.existsSync(h.berkas) && fs.statSync(h.berkas).size > 5000 && h.durasi > 18, `wa render sungguhan: ${h.durasi.toFixed(1)} dtk, ${(fs.statSync(h.berkas).size / 1e3).toFixed(0)} KB`);
+    fs.rmSync(tmp2, { recursive: true, force: true });
+  } else console.log("lewati wa render sungguhan: canvas/ffmpeg tidak ada");
 }
 
 console.log(fails ? `\n${fails} tes GAGAL` : "\nSemua tes motion lolos");

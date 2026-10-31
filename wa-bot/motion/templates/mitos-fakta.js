@@ -7,7 +7,8 @@ const T_STAMP = 4.4, T_FLIP = 7.4, T_STAMP2 = 8.6, T_PENJ = 9.6;
 export default {
   id: "mitos-fakta",
   nama: "Mitos atau Fakta",
-  hari: 6,
+  hari: 3,
+  jalur: "fakta",
   tema: "wine",
   musik: { bpm: 112, akor: [[57, [57, 60, 64]], [55, [55, 59, 62]], [53, [53, 57, 60]], [52, [52, 56, 59]]], kick: true, hat: true },
   petunjukIsi: `{"mitos":"...","fakta":"...","penjelasan":"..."}  // mitos = anggapan keliru yang populer (1 kalimat); fakta = versi yang benar (1 kalimat); penjelasan 1-2 kalimat`,
@@ -18,8 +19,8 @@ export default {
     return hasil({ mitos: S(raw, "mitos", 120, gal), fakta: S(raw, "fakta", 140, gal), penjelasan: S(raw, "penjelasan", 240, gal) }, gal);
   },
   narasi(c) { return `Mitos atau fakta? Banyak orang bilang, ${c.mitos} ... Ternyata itu mitos! Faktanya, ${c.fakta} ${c.penjelasan}`; },
-  bangun(c) {
-    const th = THEMES[this.tema], dur = 18.5;
+  bangun(c, opsi = {}) {
+    const th = THEMES[opsi.tema || this.tema], dur = 18.5;
     const sfx = efek([0.6, "whoosh", { gain: 0.3 }], [1.0, "pop", { f: 700, gain: 0.5 }], [T_STAMP, "thud", { gain: 0.9 }], [T_STAMP + 0.5, "buzz", { gain: 0.3 }],
       [T_FLIP, "whoosh", { gain: 0.3 }], [T_STAMP2, "thud", { gain: 0.8 }], [T_STAMP2 + 0.05, "chime", { gain: 0.45 }], [T_PENJ, "whoosh", { gain: 0.25 }]);
     const cx = 48, cy = 330, cw = 624, ch = 410;

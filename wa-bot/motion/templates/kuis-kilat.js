@@ -8,7 +8,8 @@ const T_REVEAL = 11.4;
 export default {
   id: "kuis-kilat",
   nama: "Kuis Kilat",
-  hari: 1, // 0=Minggu ... 6=Sabtu
+  hari: null,
+  jalur: "pelajaran",
   tema: "navy",
   musik: { bpm: 104, akor: [[57, [57, 60, 64]], [53, [53, 57, 60]], [48, [48, 52, 55]], [55, [55, 59, 62]]], kick: true, hat: true },
   petunjukIsi: `{"pertanyaan":"...","pilihan":["...","...","..."],"jawaban":0,"penjelasan":"..."}  // pilihan 3-4 butir pendek; jawaban = nomor pilihan benar mulai dari 0; penjelasan 1-2 kalimat`,
@@ -24,8 +25,8 @@ export default {
     const daftar = c.pilihan.map((p, i) => `${HURUF[i]}, ${p}`).join(". ");
     return `Kuis kilat! ${c.pertanyaan} ${daftar}. Pikirkan dulu ya. ... Jawabannya adalah ${HURUF[c.jawaban]}, ${c.pilihan[c.jawaban]}. ${c.penjelasan}`;
   },
-  bangun(c) {
-    const th = THEMES[this.tema], n = c.pilihan.length;
+  bangun(c, opsi = {}) {
+    const th = THEMES[opsi.tema || this.tema], n = c.pilihan.length;
     const dur = 21;
     const oy0 = 600, oh = n === 4 ? 92 : 104, gp = 18;
     const sfx = efek([0.7, "whoosh", { gain: 0.3 }]);

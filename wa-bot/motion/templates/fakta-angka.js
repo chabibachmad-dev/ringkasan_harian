@@ -5,11 +5,14 @@ import { S, L, N, hasil } from "./util.js";
 export default {
   id: "fakta-angka",
   nama: "Fakta Angka",
-  hari: 3,
+  hari: 1,
+  jalur: "fakta",
   tema: "forest",
   musik: { bpm: 100, akor: [[50, [50, 53, 57]], [58, [58, 62, 65]], [53, [53, 57, 60]], [57, [57, 61, 64]]], kick: true, hat: false },
   petunjukIsi: `{"judul":"...","angka":0,"desimal":0,"satuan":"...","keterangan":"...","fakta":["...","..."]}  // angka = bilangan (tanpa titik ribuan); satuan pendek (misal "km", "tahun"); keterangan 1 kalimat; fakta 0-3 butir pendek`,
   contoh: { judul: "Seberapa tinggi Gunung Everest?", angka: 8849, desimal: 0, satuan: "meter di atas laut", keterangan: "Puncak tertinggi di dunia, ada di perbatasan Nepal dan Tiongkok.", fakta: ["Tingginya hampir 9 kilometer.", "Pesawat penumpang terbang sekitar 10 km.", "Pendaki butuh sekitar 2 bulan menuju puncak."] },
+
+  angkaKunci(c) { return [String(c.angka)]; },
 
   rapikan(raw) {
     const gal = [];
@@ -21,8 +24,8 @@ export default {
   narasi(c) {
     return `Tahukah kamu? ${c.judul} Jawabannya ${fmtAngka(c.angka, c.desimal)} ${c.satuan}. ${c.keterangan} ${c.fakta.join(" ")}`;
   },
-  bangun(c) {
-    const th = THEMES[this.tema], adaFakta = c.fakta.length > 0;
+  bangun(c, opsi = {}) {
+    const th = THEMES[opsi.tema || this.tema], adaFakta = c.fakta.length > 0;
     const tF = 11.0, dur = adaFakta ? tF + 1.2 + c.fakta.length * 2.0 + 3.6 : 16;
     const sfx = efek([0.6, "whoosh", { gain: 0.3 }]);
     for (let k = 0; k < 20; k++) sfx.push({ t: 1.3 + k * 0.21, k: "tick", f: 700 + k * 35, gain: 0.35 });

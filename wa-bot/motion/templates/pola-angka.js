@@ -5,7 +5,8 @@ import { S, L, hasil } from "./util.js";
 export default {
   id: "pola-angka",
   nama: "Pola Angka",
-  hari: 0,
+  hari: null,
+  jalur: "pelajaran",
   tema: "dusk",
   musik: { bpm: 100, akor: [[50, [50, 54, 57]], [47, [47, 50, 54]], [55, [55, 59, 62]], [52, [52, 56, 59]]], kick: false, hat: true },
   petunjukIsi: `{"judul":"...","deret":["2","5","8","11"],"aturan":"+3","berikutnya":"14","penjelasan":"..."}  // deret 4-6 bilangan; aturan pendek (misal "+3", "×2"); berikutnya = bilangan setelah deret; penjelasan 1-2 kalimat`,
@@ -17,8 +18,8 @@ export default {
     return hasil(isi, gal);
   },
   narasi(c) { return `${c.judul} Perhatikan deret ini. ${c.deret.join(", ")}, lalu angka berapa? ... Aturannya ${c.aturan.replace("+", "tambah ").replace("−", "kurang ").replace("-", "kurang ").replace("×", "kali ")}. Jadi angka berikutnya adalah ${c.berikutnya}. ${c.penjelasan}`; },
-  bangun(c) {
-    const th = THEMES[this.tema], n = c.deret.length + 1;
+  bangun(c, opsi = {}) {
+    const th = THEMES[opsi.tema || this.tema], n = c.deret.length + 1;
     const t0 = 1.8, gp = 0.8, tTanya = t0 + n * gp - 0.2, tJawab = tTanya + 3.4, dur = tJawab + 1.6 + 5.8;
     const gap = 12, bw = (624 - (n - 1) * gap) / n, bh = Math.min(120, bw * 1.25), by = 560;
     const sfx = efek([0.6, "whoosh", { gain: 0.3 }]);

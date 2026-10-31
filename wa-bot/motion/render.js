@@ -25,14 +25,15 @@ export function rencanaWaktu({ durTemplat, durNarasi = 0, withHook = true, withO
 /**
  * Render satu video.
  * @param {object} o  templatId, isi (sudah lolos rapikan), keluar (.mp4), narasi (berkas audio, opsional),
- *                    hook (teks pancingan), teaser (teks "Besok: ..."), kanal, skala (1 = 720x1280, 1.5 = 1080x1920), fps
+ *                    hook (teks pancingan), teaser (teks pada penutup), teaserLabel (judul kecil penutup, default "BESOK"),
+ *                    tema (nama tema warna; default tema templat, lihat temaMinggu()), kanal, skala (1 = 720x1280, 1.5 = 1080x1920), fps
  */
 export async function renderVideo(o) {
-  const tpl = ambilTemplat(o.templatId), th = THEMES[tpl.tema];
+  const tpl = ambilTemplat(o.templatId), th = THEMES[o.tema || tpl.tema];
   const { skala = 1.5, fps = 30, ffmpeg = "ffmpeg", ffprobe = "ffprobe" } = o;
   const canvasLib = await import("@napi-rs/canvas");
   await siapkanFont(canvasLib);
-  const spec = tpl.bangun(o.isi || {});
+  const spec = tpl.bangun(o.isi || {}, { tema: o.tema });
   const durNarasi = o.narasi ? durasiBerkas(o.narasi, ffprobe) : 0;
   const hookTeks = o.hook || null;
   const rw = rencanaWaktu({ durTemplat: spec.durasi, durNarasi, withHook: !!hookTeks, withOutro: o.outro !== false });
@@ -74,7 +75,7 @@ export async function renderVideo(o) {
       else if (T < tTpl1) {
         spec.gambar(g, (T - tTpl0) / k);
         const f = T - tTpl0; if (hook && f < 0.15) { g.fillStyle = `rgba(11,22,38,${0.6 * (1 - f / 0.15)})`; g.fillRect(0, 0, W, H); }
-      } else gambarOutro(g, T - tTpl1, { teaser: o.teaser, kanal: o.kanal }, th);
+      } else gambarOutro(g, T - tTpl1, { teaser: o.teaser, kanal: o.kanal, label: o.teaserLabel }, th);
       const buf = cv.data();
       if (!ff.stdin.write(buf)) await once(ff.stdin, "drain");
       if (o.onProgress && i % 30 === 0) o.onProgress(i / nFrame);

@@ -38,9 +38,9 @@ export function efekHook(teks) {
 }
 
 /** Penutup: teaser esok hari + ajakan ikuti. t = 0..DUR_OUTRO. */
-export function gambarOutro(g, t, { teaser, kanal }, th) {
+export function gambarOutro(g, t, { teaser, kanal, label }, th) {
   latar(g, t, th);
-  pil(g, t, teaser ? "BESOK" : "SAMPAI JUMPA", W / 2, 430, 0.1, th, { warna: th.a2 });
+  pil(g, t, teaser ? (label || "BESOK") : "SAMPAI JUMPA", W / 2, 430, 0.1, th, { warna: th.a2 });
   if (teaser) {
     const m = muatkan(g, teaser, 600, 900, 70, 4, 40), lh = Math.round(m.size * 1.2);
     g.font = font(900, m.size); g.fillStyle = th.ink; g.textAlign = "center"; g.textBaseline = "alphabetic";

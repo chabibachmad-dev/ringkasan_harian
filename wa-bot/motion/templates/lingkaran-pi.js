@@ -6,6 +6,7 @@ export default {
   id: "lingkaran-pi",
   nama: "Lingkaran dan π (contoh khusus)",
   hari: null,
+  jalur: "khusus",
   tema: "navy",
   musik: { bpm: 96, akor: [[57, [57, 60, 64]], [53, [53, 57, 60]], [48, [48, 52, 55]], [55, [55, 59, 62]]], kick: true, hat: true },
   petunjukIsi: `{}  // tidak ada isian`,
