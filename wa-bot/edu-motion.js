@@ -48,7 +48,7 @@ const dariHari = (iso) => new Date(`${iso}T12:00:00`);
  *  llm     : async (prompt) => string          speaker : { speakWav(text,{voice,style}) -> {wav} }
  *  sendText: async (text, {markup}) -> jumlah penerima (markup = baris tombol Telegram)
  */
-export function createMotion({ config, tz = "Asia/Makassar", llm = null, speaker = null, sendText = async () => 0, now = () => Date.now(), log = console, lib: libOverride = {} } = {}) {
+export function createMotion({ config, tz = "Asia/Makassar", llm = null, antrean = null, speaker = null, sendText = async () => 0, now = () => Date.now(), log = console, lib: libOverride = {} } = {}) {
   const lib = { ...LIB_BAWAAN, ...libOverride };
   const muat = () => lib.muatState(config.temaFile);
   const simpan = (st) => lib.simpanState(config.temaFile, st);
@@ -86,7 +86,9 @@ export function createMotion({ config, tz = "Asia/Makassar", llm = null, speaker
     if (!suara?.wav) throw new Error("Suara narasi kosong.");
     const berkasSuara = path.join(tmpDir, "narasi.wav");
     fs.writeFileSync(berkasSuara, suara.wav);
-    const v = await lib.renderVideo({ templatId: tpl.id, isi, hook, teaser: lib.teaserBesok(st, tanggal), narasi: berkasSuara, keluar: file, skala: config.skala, kanal: config.channelName });
+    // render berat: bergiliran dengan permintaan video dari WhatsApp (antrean yang sama)
+    const render = () => lib.renderVideo({ templatId: tpl.id, isi, hook, teaser: lib.teaserBesok(st, tanggal), narasi: berkasSuara, keluar: file, skala: config.skala, kanal: config.channelName });
+    const v = await (antrean ? antrean.jalankan(render) : render());
     const meta = lib.metaShorts({ templatId: tpl.id, isi, hook, topik, kanal: config.channelName, tanggal });
     return { topik, asal, dariBank, templatId: tpl.id, hook, dasar, narasi, isi, meta, detik: v.durasi, lebar: v.lebar, tinggi: v.tinggi };
   }

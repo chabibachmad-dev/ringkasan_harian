@@ -57,6 +57,7 @@ import pino from "pino";
 import qrcode from "qrcode-terminal";
 import * as cheerio from "cheerio";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createSimab, SIMAB_OLLAMA_SYSTEM } from "./simab.js";
@@ -66,6 +67,8 @@ import { audioOf, createWaTutor, readWaVoiceConfig } from "./wa-voice.js";
 import { createSpeaker, readTtsConfig } from "./voice-output.js";
 import { createEdu, createEduDefaults, readEduConfig } from "./edu-channel.js";
 import { createMotion, readMotionConfig } from "./edu-motion.js";
+import { buatAntrean, buatPembatas, konfigDariEnv as konfigVideoWa } from "./motion/perintah-wa.js";
+import { createWaVideo } from "./wa-video.js";
 import { createYoutube, readYoutubeConfig } from "./youtube.js";
 import { buildTutorSystemPrompt, buildTutorUserPrompt, parseTutorReply } from "./tutor.js";
 import { createAppAgentWorker } from "./app-agent.js";
@@ -3236,6 +3239,8 @@ async function handleGroupMessage(msg, sock) {
       }
     }
   }
+  // Permintaan video motion graphic ("/video ...", "buatkan video ..."): di grup cukup dengan /video, atau bila bot dipanggil.
+  if (!msg.key.fromMe && !fromBot && !photo && !docAttached && !groupAudio && !groupVideo && (await tanganiVideoWa(sock, msg, { teks: text, grup: groupJid, disebut: triggered }))) return;
   if (!triggered) {
     // Kalimat biasa yang tampak jelas seperti pengumuman jadwal ("besok rapat jam 9"): bot menawarkan mencatatnya (tanpa AI, tanpa menyimpan obrolan).
     if (!photo && !docAttached && !groupAudio && agenda.mightOffer(rawText)) offerAgendaFromChat(sock, msg, groupJid, rawText).catch((e) => console.error("📅 Tawaran jadwal gagal:", e instanceof Error ? e.message : String(e)));
@@ -4465,6 +4470,45 @@ async function handleWaVideoCommand(sock, jid, msg, text) {
   return true;
 }
 
+// ---- Permintaan video motion graphic lewat WhatsApp (motion/perintah-wa.js): satu pintu untuk nomor utama dan nomor kedua ----
+// Antrean render dan pembatas dipakai bersama oleh kedua akun (dan job Short terjadwal), supaya render tidak bertabrakan.
+const waVideoKonfig = konfigVideoWa(process.env);
+const waVideoAntrean = buatAntrean({ maksTunggu: waVideoKonfig.maksAntrean });
+const waVideoPembatas = buatPembatas({ selangMenit: waVideoKonfig.selangMenit, maksHarian: waVideoKonfig.maksHarian });
+const motionLlm = (prompt) => generateVideoScript({ system: "Kamu penulis konten edukasi berbahasa Indonesia yang ramah keluarga. Patuhi format keluaran yang diminta persis.", user: prompt });
+const waVideoDeps = {
+  llm: motionLlm,
+  cari: async (kueri) => (await webSearch.search(kueri, 6, { snippetChars: 700 })).map((r) => ({ judul: r.title || "", url: r.url || "", teks: r.snippet || "" })),
+  tts: async (teks) => {
+    if (!speaker.available()) return null;
+    const r = await speaker.speakWav(teks, {});
+    if (!r?.wav) return null;
+    const berkas = path.join(os.tmpdir(), `ayyubi-narasi-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.wav`);
+    fs.writeFileSync(berkas, r.wav);
+    return berkas;
+  }
+};
+const waVideo = createWaVideo({
+  konfig: waVideoKonfig,
+  antrean: waVideoAntrean,
+  pembatas: waVideoPembatas,
+  deps: waVideoDeps,
+  namaBot: () => (currentAccountId() === MAIN_ACCOUNT ? "Ayyubi" : wa2Config.botName || ""),
+  adalahPemilik: (msg, selfChat) => isOwnerSender(msg, selfChat),
+  bagianPengirim: senderUserParts,
+  grupBoleh: async (sock, grup) => {
+    const subject = await getGroupSubject(sock, grup);
+    return { boleh: isGroupAllowed(grup, subject, sock), subject };
+  },
+  kontakDilayani: async (msg) => AUTO_REPLY_ACTIVE && aiPauseRemainingMs(jidUserKeys(msg.key.remoteJid, msg.key.remoteJidAlt)) === 0 && (await isAutoReplyEnabledForContact(msg.key.remoteJid)),
+  balasGrup: replyGroupText,
+  catatKeluarGrup: async (grup, subject, sent, keterangan) => {
+    const { error } = await supabase.from("whatsapp_messages").insert({ wa_jid: grup, wa_name: subject || null, direction: "out", content: keterangan, status: "sent", wa_message_id: sent?.key?.id ?? null, ...acctFields(currentAccountId()) });
+    if (error) console.error("Gagal catat video grup:", error.message);
+  }
+});
+const tanganiVideoWa = (sock, msg, o) => waVideo.tangani(sock, msg, o);
+
 /** Pemilik meminta gambar di chat pribadi ("buatkan gambar ..." / "/gambar ..."). true = ditangani. */
 async function handleWaImageCommand(sock, jid, msg, text) {
   if (!imageGen.available()) return false;
@@ -4705,6 +4749,7 @@ async function handleIncoming(msg, sock) {
   if (isOwnerSender(msg, isSelfChat) && !isGroupJid(jid) && (await handleWaRouteCommand(sock, jid, text))) return;
   if (isOwnerSender(msg, isSelfChat) && !isGroupJid(jid) && (await handleWaNodinCommand(sock, jid, text))) return;
   if (isOwnerSender(msg, isSelfChat) && !isGroupJid(jid) && (await handleWaKasCommand(sock, jid, text))) return;
+  if (!isGroupJid(jid) && !viaVoice && (await tanganiVideoWa(sock, msg, { teks: text, isSelfChat }))) return;
   if (isOwnerSender(msg, isSelfChat) && !isGroupJid(jid) && (await handleWaVideoCommand(sock, jid, msg, text))) return;
   if (isOwnerSender(msg, isSelfChat) && !isGroupJid(jid) && (await handleWaImageCommand(sock, jid, msg, text))) return;
 
@@ -6330,8 +6375,9 @@ const eduSendText = (text, opts) => telegram.sendOwner(text, opts);
 const eduMotion = createMotion({
   config: { ...readMotionConfig(process.env), channelName: eduConfig.channelName, voice: eduConfig.voice, style: eduConfig.style },
   tz: eduConfig.timeZone,
-  llm: (prompt) => generateVideoScript({ system: "Kamu penulis konten edukasi anak SD berbahasa Indonesia. Patuhi format keluaran yang diminta persis.", user: prompt }),
+  llm: motionLlm,
   speaker,
+  antrean: waVideoAntrean,
   sendText: eduSendText
 });
 const edu = createEdu({
