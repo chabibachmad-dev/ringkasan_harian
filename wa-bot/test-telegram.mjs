@@ -831,5 +831,35 @@ for (const mode of ["ok", "gagal"]) {
   check(help.includes("/persona") && help.length <= 3500, "HELP memuat /persona dan tetap di bawah MAX_TEXT (3500)");
 }
 
+// ---- tema mingguan channel edukasi: tombol tema:*, /tema, dan balasan teks pemilik
+{
+  const f = fakeApi();
+  const log = [];
+  const edu = {
+    temaCallback: async (d) => { log.push(["cb", d]); return "tema oke"; },
+    temaPerintah: async (a) => { log.push(["cmd", a]); return a ? `perintah ${a}` : ""; },
+    temaTeks: async (t, o) => { log.push(["teks", t, o.replyText]); return { handled: /^ganti/.test(t) || /Usulan tema/.test(o.replyText) }; }
+  };
+  const tg = createTelegram({ config: cfg(), deps: { chat: async () => "jawaban ai", edu }, fetchImpl: f, log: quiet });
+  const cb = (data, from = 111) => ({ update_id: 9, callback_query: { id: "c", from: { id: from }, data, message: { message_id: 7, chat: { id: from, type: "private" } } } });
+  await tg.handleUpdate(cb("tema:setuju:2026-11-02"));
+  check(log.at(-1)?.[1] === "tema:setuju:2026-11-02" && f.texts(111).at(-1) === "tema oke", "tema: tombol diteruskan ke edu.temaCallback dan balasannya dikirim");
+  check(f.calls.some((c) => c.method === "editMessageReplyMarkup" && c.body.message_id === 7), "tema: tombol pada pesan usulan dihapus setelah ditekan");
+  const n = log.length;
+  await tg.handleUpdate(cb("tema:setuju:2026-11-02", 222));
+  check(log.length === n, "tema: tombol dari non-pemilik tidak diteruskan");
+  await tg.handleUpdate(msg(111, "/tema tambah Gunung; Laut"));
+  check(log.at(-1)[0] === "cmd" && log.at(-1)[1] === "tambah Gunung; Laut" && f.texts(111).at(-1) === "perintah tambah Gunung; Laut", "tema: /tema <arg> diteruskan");
+  const sebelum = f.texts(111).length;
+  await tg.handleUpdate(msg(111, "/tema"));
+  check(f.texts(111).length === sebelum, "tema: /tema yang dijawab sendiri oleh modul (hasil kosong) tidak mengirim pesan kosong");
+  await tg.handleUpdate(msg(111, "ganti 3: Mars"));
+  check(log.at(-1)[0] === "teks" && f.texts(111).at(-1) !== "jawaban ai", "tema: perintah 'ganti 3: Mars' dicegat, tidak sampai ke AI");
+  await tg.handleUpdate(msg(111, "ok mantap", { reply_to_message: { text: "🗓️ Usulan tema pekan 2–8 Nov 2026:" } }));
+  check(log.at(-1)[2].includes("Usulan tema") && f.texts(111).at(-1) !== "jawaban ai", "tema: balasan ke pesan usulan membawa teks pesan yang dibalas");
+  await tg.handleUpdate(msg(111, "halo apa kabar"));
+  check(f.texts(111).at(-1) === "jawaban ai", "tema: obrolan biasa tetap ke AI");
+}
+
 if (fails) { console.log(`\n${fails} GAGAL`); process.exit(1); }
 console.log("\nsemua ok");

@@ -65,6 +65,7 @@ import { createTranscriber, describeError, readSttConfig, voiceToCommand } from 
 import { audioOf, createWaTutor, readWaVoiceConfig } from "./wa-voice.js";
 import { createSpeaker, readTtsConfig } from "./voice-output.js";
 import { createEdu, createEduDefaults, readEduConfig } from "./edu-channel.js";
+import { createMotion, readMotionConfig } from "./edu-motion.js";
 import { createYoutube, readYoutubeConfig } from "./youtube.js";
 import { buildTutorSystemPrompt, buildTutorUserPrompt, parseTutorReply } from "./tutor.js";
 import { createAppAgentWorker } from "./app-agent.js";
@@ -6324,12 +6325,22 @@ async function handleWaDokumenCommand(sock, jid, text) {
 // Channel YouTube edukasi SD (edu-channel.js): video papan tulis dibuat otomatis, kamu setujui di Telegram, lalu diunggah terjadwal.
 const eduConfig = readEduConfig(process.env);
 const youtube = createYoutube({ config: readYoutubeConfig(process.env) });
+const eduSendText = (text, opts) => telegram.sendOwner(text, opts);
+// Short motion graphic (EDU_MODE=motion, bawaan); EDU_MODE=papan memakai video papan tulis lama saja. Lihat edu-motion.js dan motion/README.md.
+const eduMotion = createMotion({
+  config: { ...readMotionConfig(process.env), channelName: eduConfig.channelName, voice: eduConfig.voice, style: eduConfig.style },
+  tz: eduConfig.timeZone,
+  llm: (prompt) => generateVideoScript({ system: "Kamu penulis konten edukasi anak SD berbahasa Indonesia. Patuhi format keluaran yang diminta persis.", user: prompt }),
+  speaker,
+  sendText: eduSendText
+});
 const edu = createEdu({
   config: eduConfig,
   speaker,
   ...createEduDefaults({ config: eduConfig }),
   youtube,
-  sendText: (text, opts) => telegram.sendOwner(text, opts),
+  motion: eduMotion,
+  sendText: eduSendText,
   sendFile: (file, caption) => telegram.sendOwnerFiles([file], caption)
 });
 const telegram = createTelegram({

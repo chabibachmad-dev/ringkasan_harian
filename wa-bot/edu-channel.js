@@ -58,7 +58,8 @@ export function readEduConfig(env = process.env) {
     maxSec: Math.max(minSec + 10, num(env.EDU_MAX_SEC, 120, 30, 600)),
     keepDays: num(env.EDU_KEEP_DAYS, 14, 1, 365),
     maxAttempts: num(env.EDU_MAX_ATTEMPTS, 4, 1, 12), // percobaan membuat per hari bila gagal
-    dir: String(env.EDU_DIR || "edu-data").trim()
+    dir: String(env.EDU_DIR || "edu-data").trim(),
+    mode: String(env.EDU_MODE || "motion").trim().toLowerCase() === "papan" ? "papan" : "motion" // motion = Short motion graphic (motion/); papan = video papan tulis lama
   };
 }
 
@@ -73,7 +74,7 @@ export const localDay = (ms, tz) => {
   const p = zonedParts(ms, tz);
   return `${p.y}-${String(p.m).padStart(2, "0")}-${String(p.d).padStart(2, "0")}`;
 };
-const minutesOfDay = (ms, tz) => {
+export const minutesOfDay = (ms, tz) => {
   const p = zonedParts(ms, tz);
   return p.hh * 60 + p.mm;
 };
@@ -139,6 +140,7 @@ export function createEdu({
   sendText = async () => 0, // (text, { markup }) -> jumlah penerima
   sendFile = async () => 0, // (file {video|photo,data,name,...}, caption) -> jumlah penerima
   loadCards = () => [],
+  motion = null, // createMotion(...) dari edu-motion.js; null = selalu papan tulis
   now = () => Date.now(),
   log = console
 } = {}) {
@@ -289,6 +291,42 @@ export function createEdu({
     }
   }
 
+  const motionAktif = () => Boolean(motion) && config.mode === "motion";
+
+  /** Draf Short motion graphic. Melempar bila gagal (pemanggil jatuh ke papan tulis). */
+  async function produceMotion({ templatId = "", topik = "" } = {}) {
+    const s = load();
+    if (!speaker?.available?.()) throw Object.assign(new Error("Suara narasi belum aktif (butuh GEMINI_API_KEYS dan ffmpeg)."), { fatal: true });
+    const id = String(++s.seq);
+    const tmpDir = path.join(tmpRoot, id);
+    const file = path.join(videoDir, `edu-${id}.mp4`);
+    const tanggal = localDay(now(), tz);
+    try {
+      const bank = () => {
+        const pick = pickNext({ history: s.history, cards: loadCards(), grades: config.grades, mix: config.mix, seed: (now() % 1_000_000_000) + s.seq * 7919 + 1 });
+        return { topik: pick.plan.topic, key: pick.key, grade: pick.plan.grade };
+      };
+      const r = await motion.produce({ tanggal, file, tmpDir, bank, topik, templatId });
+      const size = fs.statSync(file).size;
+      if (size < 20_000) throw new Error("Hasil video terlalu kecil/rusak.");
+      if (r.dariBank) { s.history.push({ key: r.dariBank.key, grade: r.dariBank.grade, at: now(), id }); s.history = s.history.slice(-200); }
+      const item = {
+        id, status: "awaiting", source: "motion", mode: "motion", kind: "motion", grade: 0, topic: r.topik, title: r.meta.judul,
+        templatId: r.templatId, tags: r.meta.tag, description: r.meta.deskripsi, dasar: r.dasar, madeForKids: r.meta.madeForKids, aiDisclosure: r.meta.containsSyntheticMedia,
+        script: r.narasi, file, thumb: null, size, seconds: Math.round(r.detik), createdAt: now(), tries: 0, lebar: r.lebar, tinggi: r.tinggi
+      };
+      s.items.push(item);
+      save();
+      return item;
+    } catch (e) {
+      s.seq -= 1; // nomor tidak terpakai
+      save();
+      throw e;
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  }
+
   // format tombol Telegram milik telegram.send: baris-baris tombol (bukan {inline_keyboard})
 const kb = (id) => [[{ text: "✅ Setujui & jadwalkan", callback_data: `ed:ok:${id}` }], [{ text: "🔁 Buat ulang", callback_data: `ed:again:${id}` }, { text: "🗑️ Buang", callback_data: `ed:no:${id}` }]];
 
@@ -296,14 +334,15 @@ const kb = (id) => [[{ text: "✅ Setujui & jadwalkan", callback_data: `ed:ok:${
     const s = load();
     const slot = nextPublishAt({ now: now(), publishTime: config.publishTime, tz, taken: scheduledTimes(item.id) });
     const answers = [item.answer, ...(item.practiceAnswers || [])].filter(Boolean);
-    const cap = `🎓 Draf video #${item.id} · Kelas ${item.grade} SD · ${fmtDur(item.seconds)}\n*${item.title}*`;
+    const cap = item.mode === "motion" ? `🎬 Draf Short #${item.id} · ${fmtDur(item.seconds)}\n*${item.title}*` : `🎓 Draf video #${item.id} · Kelas ${item.grade} SD · ${fmtDur(item.seconds)}\n*${item.title}*`;
     let delivered = 0;
     if (item.size <= 48 * 1024 * 1024) {
-      delivered = await sendFile({ video: true, data: fs.readFileSync(item.file), name: `edu-${item.id}.mp4`, mime: "video/mp4", width: 1280, height: 720 }, cap);
+      delivered = await sendFile({ video: true, data: fs.readFileSync(item.file), name: `edu-${item.id}.mp4`, mime: "video/mp4", width: item.lebar || 1280, height: item.tinggi || 720 }, cap);
     }
     const txt = [
       item.size > 48 * 1024 * 1024 ? `${cap}\n(Berkas terlalu besar untuk Telegram.)` : null,
       `Periksa videonya dulu. Kalau disetujui, akan ditayangkan ${fmtWhen(slot, tz, config.tzLabel)}.`,
+      item.dasar ? `Dasar fakta: ${item.dasar}` : null,
       answers.length ? `🔑 Kunci jawaban (cek sendiri): ${answers.join(" | ")}` : null,
       `Naskah: /edu naskah ${item.id}`
     ].filter(Boolean).join("\n");
@@ -330,7 +369,18 @@ const kb = (id) => [[{ text: "✅ Setujui & jadwalkan", callback_data: `ed:ok:${
     producing = track(
       (async () => {
         try {
-          const item = await produceInner(opts);
+          let item;
+          const pakaiMotion = motionAktif() && (opts.motion || (!opts.kind && !opts.grade));
+          if (pakaiMotion) {
+            try {
+              item = await produceMotion(opts.motion || {});
+            } catch (e) {
+              const alasan = String(e?.message || e).slice(0, 250);
+              log.error?.(`🎓 [Edu] video motion gagal, pindah ke papan tulis: ${alasan}`);
+              await sendText(`⚠️ Video motion graphic gagal dibuat (${alasan}). Beralih ke video papan tulis.`).catch(() => {});
+              item = await produceInner({ ...opts, kind: null, grade: null });
+            }
+          } else item = await produceInner(opts);
           if (!manual) s.day.produced = true;
           save();
           const n = await deliver(item);
@@ -369,7 +419,8 @@ const kb = (id) => [[{ text: "✅ Setujui & jadwalkan", callback_data: `ed:ok:${
         item.publishAt = nextPublishAt({ now: now(), publishTime: config.publishTime, tz, taken: scheduledTimes(item.id) });
         save();
       }
-      const r = await youtube.upload({ file: item.file, title: item.title, description: item.description, tags: item.tags, publishAt: item.publishAt });
+      const extra = item.mode === "motion" ? { madeForKids: true, aiDisclosure: true } : {};
+      const r = await youtube.upload({ file: item.file, title: item.title, description: item.description, tags: item.tags, publishAt: item.publishAt, ...extra });
       item.ytId = r.id;
       item.ytUrl = r.url;
       item.studioUrl = r.studioUrl;
@@ -421,6 +472,7 @@ const kb = (id) => [[{ text: "✅ Setujui & jadwalkan", callback_data: `ed:ok:${
     item.tries = 0;
     item.retryAt = 0;
     save();
+    if (item.mode === "motion" && item.topic) motion?.catatTopik?.(item.topic)?.catch?.(() => {});
     if (!ytReady()) {
       return `👍 Video #${item.id} disetujui, tapi YouTube belum tersambung (${youtube?.status?.().broken || "isi YT_CLIENT_ID / YT_CLIENT_SECRET / YT_REFRESH_TOKEN di .env"}). Video disimpan; begitu YouTube siap akan diunggah otomatis, atau ketik /edu ulang ${item.id}.`;
     }
@@ -455,6 +507,10 @@ const kb = (id) => [[{ text: "✅ Setujui & jadwalkan", callback_data: `ed:ok:${
     if (item.status !== "awaiting") return `Video #${item.id} sudah berstatus "${item.status}".`;
     if (producing) return "Sedang ada video yang dibuat. Tunggu sebentar, lalu coba lagi.";
     discard(item, "dibuat ulang");
+    if (item.mode === "motion") {
+      startProduce({ source: "manual", motion: { templatId: item.templatId, topik: item.topic } });
+      return `🔁 Draf #${item.id} dibuang. Membuat pengganti (${item.topic}); kirim ulang dalam beberapa menit.`;
+    }
     startProduce({ source: "manual", kind: item.kind, grade: item.grade });
     return `🔁 Draf #${item.id} dibuang. Membuat pengganti (kelas ${item.grade}, ${item.kind === "math" ? "matematika" : "sains"}); kirim ulang dalam beberapa menit.`;
   }
@@ -473,6 +529,8 @@ const kb = (id) => [[{ text: "✅ Setujui & jadwalkan", callback_data: `ed:ok:${
       if (ytReady()) {
         for (const it of s.items) if (it.status === "approved" && (it.retryAt || 0) <= t && !jobs.size) startUpload(it);
       }
+
+      if (motionAktif()) await motion.tickTema();
 
       // buat video harian
       if (!s.paused && !producing && !s.day.produced && minutesOfDay(t, tz) >= hhmmToMin(config.renderTime) && s.day.attempts < config.maxAttempts) {
@@ -520,14 +578,14 @@ const kb = (id) => [[{ text: "✅ Setujui & jadwalkan", callback_data: `ed:ok:${
     const s = load();
     const n = (k) => s.items.filter((i) => i.status === k).length;
     const yt = !youtube?.available?.() ? "YouTube belum diatur" : youtube.status().broken ? "YouTube: izin ditolak" : "YouTube siap";
-    return `${s.paused ? "DIJEDA" : "aktif"} · buat ${config.renderTime}, tayang ${config.publishTime} ${config.tzLabel} · menunggu kamu: ${n("awaiting")} · terjadwal: ${n("scheduled")}${n("approved") ? ` · belum terunggah: ${n("approved")}` : ""}${n("failed") ? ` · gagal: ${n("failed")}` : ""} · ${yt}`;
+    return `${s.paused ? "DIJEDA" : "aktif"} · mode ${motionAktif() ? "motion" : "papan"} · buat ${config.renderTime}, tayang ${config.publishTime} ${config.tzLabel} · menunggu kamu: ${n("awaiting")} · terjadwal: ${n("scheduled")}${n("approved") ? ` · belum terunggah: ${n("approved")}` : ""}${n("failed") ? ` · gagal: ${n("failed")}` : ""} · ${yt}`;
   }
 
   function list() {
     const s = load();
     const act = s.items.filter((i) => ["awaiting", "approved", "uploading", "failed", "scheduled"].includes(i.status)).slice(-12);
     if (!act.length) return "Antrean kosong. Buat satu: /edu buat";
-    return act.map((i) => `#${i.id} · Kelas ${i.grade} · ${i.title.split(" | ")[0]} · ${STATUS_LABEL[i.status]}${i.publishAt && ["scheduled", "approved"].includes(i.status) ? ` (${fmtWhen(i.publishAt, tz, config.tzLabel)})` : ""}${i.error && ["failed", "approved"].includes(i.status) ? `\n   ⚠️ ${i.error.slice(0, 120)}` : ""}`).join("\n");
+    return act.map((i) => `#${i.id} · ${i.mode === "motion" ? "Short" : `Kelas ${i.grade}`} · ${i.title.split(" | ")[0]} · ${STATUS_LABEL[i.status]}${i.publishAt && ["scheduled", "approved"].includes(i.status) ? ` (${fmtWhen(i.publishAt, tz, config.tzLabel)})` : ""}${i.error && ["failed", "approved"].includes(i.status) ? `\n   ⚠️ ${i.error.slice(0, 120)}` : ""}`).join("\n");
   }
 
   const HELP = [
@@ -539,7 +597,8 @@ const kb = (id) => [[{ text: "✅ Setujui & jadwalkan", callback_data: `ed:ok:${
     "/edu naskah <no>  — naskah yang diucapkan",
     "/edu ulang <no>  — coba unggah lagi",
     "/edu youtube  — cek sambungan YouTube",
-    "/edu jeda  /edu lanjut  — hentikan / lanjutkan pembuatan harian"
+    "/edu jeda  /edu lanjut  — hentikan / lanjutkan pembuatan harian",
+    "/tema  — usulan tema mingguan (Short motion graphic); /tema tambah topik; topik lain"
   ].join("\n");
 
   async function handle(arg = "") {
@@ -595,7 +654,12 @@ const kb = (id) => [[{ text: "✅ Setujui & jadwalkan", callback_data: `ed:ok:${
     return HELP;
   }
 
-  return { config, check, handle, decide, describe, idle, startProduce, load, nextSlot: () => nextPublishAt({ now: now(), publishTime: config.publishTime, tz, taken: scheduledTimes() }), enabled: () => config.enabled };
+  const temaTersedia = () => motionAktif() && config.enabled;
+  const temaCallback = async (data) => (temaTersedia() ? motion.callback(data) : "Fitur tema mingguan hanya aktif pada EDU_MODE=motion.");
+  const temaPerintah = async (arg) => (temaTersedia() ? motion.perintah(arg) : "Fitur tema mingguan hanya aktif pada EDU_MODE=motion (dan EDU_ENABLED=true).");
+  const temaTeks = async (text, o) => (temaTersedia() ? motion.teks(text, o) : { handled: false });
+
+  return { config, check, handle, decide, temaCallback, temaPerintah, temaTeks, describe, idle, startProduce, load, nextSlot: () => nextPublishAt({ now: now(), publishTime: config.publishTime, tz, taken: scheduledTimes() }), enabled: () => config.enabled };
 }
 
 /** Rakitan bawaan untuk index.js: perakit, sampul, dan pemuat kartu sains dari berkas. */

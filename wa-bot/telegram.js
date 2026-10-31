@@ -879,6 +879,18 @@ Suara khusus satu grup: /suara grup wanita <nama grup> • /suara grup (daftar) 
       if (out) await send(chatId, out).catch(() => {});
       return;
     }
+    if (data.startsWith("tema:") && deps.edu?.temaCallback) {
+      // tombol usulan tema mingguan (edu-motion.js): tema:setuju|ulang|revisi:<minggu>
+      await clearKeyboard(chatId, cb.message.message_id);
+      let out;
+      try {
+        out = await deps.edu.temaCallback(data);
+      } catch (e) {
+        out = `⚠️ ${String(e?.message || e).slice(0, 300)}`;
+      }
+      if (out) await send(chatId, out).catch(() => {});
+      return;
+    }
     if (data.startsWith("ed:") && deps.edu) {
       // tombol draf video edukasi (edu-channel.js): ed:ok:<id> setujui / ed:again:<id> buat ulang / ed:no:<id> buang
       await clearKeyboard(chatId, cb.message.message_id);
@@ -1059,7 +1071,7 @@ Suara khusus satu grup: /suara grup wanita <nama grup> • /suara grup (daftar) 
   }
 
   /** Satu pesan dari pemilik -> balasan. Dipisah dari polling supaya mudah dites. */
-  async function handleOwnerText(chatId, rawText, { viaVoice = false, messageId = null } = {}) {
+  async function handleOwnerText(chatId, rawText, { viaVoice = false, messageId = null, replyText = "" } = {}) {
     const text = String(rawText ?? "").trim();
     if (!text) return;
     const key = `tg:${chatId}`;
@@ -1212,6 +1224,17 @@ Suara khusus satu grup: /suara grup wanita <nama grup> • /suara grup (daftar) 
       } catch (e) {
         return void (await reply(`⚠️ Channel edukasi: ${String(e?.message || e).slice(0, 300)}`));
       }
+    }
+
+    if (name === "tema") {
+      if (!deps.edu?.temaPerintah) return void (await reply("Channel edukasi belum terpasang di bot ini."));
+      try {
+        const out = await withTyping(chatId, () => deps.edu.temaPerintah(arg));
+        if (out) await reply(out);
+      } catch (e) {
+        await reply(`⚠️ Tema mingguan: ${String(e?.message || e).slice(0, 300)}`);
+      }
+      return;
     }
 
     if (name === "pasar" || name === "emas" || name === "ihsg") {
@@ -1380,6 +1403,15 @@ Suara khusus satu grup: /suara grup wanita <nama grup> • /suara grup (daftar) 
     // latihan Speaking sedang berjalan: pesan biasa = ucapan untuk tutor
     if (tutorActive(chatId)) return handleTutorTurn(chatId, text);
 
+    // balasan untuk usulan tema mingguan (membalas pesan usulan, setelah tombol Revisi, atau perintah ganti/tukar/hapus/tema:)
+    if (deps.edu?.temaTeks) {
+      try {
+        if ((await deps.edu.temaTeks(text, { replyText })).handled) return;
+      } catch (e) {
+        return void (await reply(`⚠️ Tema mingguan: ${String(e?.message || e).slice(0, 300)}`));
+      }
+    }
+
     // obrolan biasa dengan AI
     pushHistory(chatId, "user", text);
     try {
@@ -1463,7 +1495,7 @@ Suara khusus satu grup: /suara grup wanita <nama grup> • /suara grup (daftar) 
       await send(chatId, "Bot membaca pesan teks dan pesan suara (tahan tombol mikrofon).").catch(() => {});
       return;
     }
-    await handleOwnerText(chatId, m.text, { messageId: m.message_id });
+    await handleOwnerText(chatId, m.text, { messageId: m.message_id, replyText: m.reply_to_message?.text || "" });
   }
 
   async function loadOffset() {
@@ -1477,7 +1509,7 @@ Suara khusus satu grup: /suara grup wanita <nama grup> • /suara grup (daftar) 
   }
 
   const HANDLER_DEADLINE_MS = 10 * 60_000;
-  const FAST_COMMANDS = new Set(["dokumen", "dok", "doc", "arsip", "status", "id", "help", "start", "ingat", "catatan", "lupa", "memori", "note", "penyedia", "provider", "skill", "skil", "lokal", "tanya", "pasar", "emas", "ihsg", "ingatkan", "remind", "pengingat", "reminder", "cadangan", "backup", "kesehatan", "sehat", "health", "urutan", "route", "rute", "nodin", "notadinas", "kas", "laporankas", "voice", "wa2", "nomor2", "grup", "group", "gambar", "image", "img", "video", "vidio", "vid", "metaai", "env", "stopmotion", "stop_motion", "edit", "ubah", "musik", "music", "edu", "channel", "yt"]);
+  const FAST_COMMANDS = new Set(["dokumen", "dok", "doc", "arsip", "status", "id", "help", "start", "ingat", "catatan", "lupa", "memori", "note", "penyedia", "provider", "skill", "skil", "lokal", "tanya", "pasar", "emas", "ihsg", "ingatkan", "remind", "pengingat", "reminder", "cadangan", "backup", "kesehatan", "sehat", "health", "urutan", "route", "rute", "nodin", "notadinas", "kas", "laporankas", "voice", "wa2", "nomor2", "grup", "group", "gambar", "image", "img", "video", "vidio", "vid", "metaai", "env", "stopmotion", "stop_motion", "edit", "ubah", "musik", "music", "edu", "channel", "yt", "tema"]);
   function isFastUpdate(u) {
     const m = u?.message;
     if (!m) return false;
@@ -1598,6 +1630,7 @@ Suara khusus satu grup: /suara grup wanita <nama grup> • /suara grup (daftar) 
           { command: "ingatkan", description: "Pengingat pribadi: /ingatkan besok 09:00 kirim SPJ; /pengingat" },
           { command: "ibadah", description: "Pengingat ibadah: juz harian, hadits, ayat (/ibadah mulai juz 2)" },
           { command: "edu", description: "Channel YouTube edukasi: draf video, setujui, jadwal tayang" },
+          { command: "tema", description: "Tema Short edukasi mingguan: lihat usulan, tambah topik" },
           { command: "kesehatan", description: "Periksa kesehatan bot: Ollama, disk, memori, WhatsApp, cadangan" },
           { command: "voice", description: "Balasan grup WhatsApp: suara (on) atau teks (off)" },
           { command: "grup", description: "Grup WhatsApp yang dijawab bot: lihat, tambah, hapus" },
