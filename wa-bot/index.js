@@ -113,6 +113,7 @@ import { VIDEO_QA_SYSTEM, buildVideoQuestion, checkVideoLimits, prepareVideoPart
 import { BOS_FALLBACK, createTanyaBosGate, neutralizeOwnerMarks, ownerGroupConfig, ownerGroupNote, plainSenderName, resolveTanyaBos, tanyaBosNote } from "./owner-group.js";
 import { createJina } from "./jina.js";
 import { createSbm, loadSbmData } from "./sbm.js";
+import { createSbmKmk296 } from "./sbm-kmk296.js";
 import { createHybridSearch, createEmbedWorker, parseJinaCommand, handleJinaCommand, describeJinaForStatus } from "./jina-rag.js";
 import { createKbIngestWorker, readKbConfig } from "./kb-ingest.js";
 import { createKbRetrievalWorker } from "./kb-retrieval.js";
@@ -780,6 +781,32 @@ const sbmCalc = (() => {
     return null;
   }
 })();
+// Pencarian angka SBM KMK 296/2026 (sbm-kmk296.js): BUKAN kalkulator -- baris data resmi disisipkan ke konteks AI lewat jalur docChunks
+// ("DATA RESMI KMK 296/2026"), jawaban akhir tetap lewat docguard + reply-guard seperti konteks dokumen lain. Dimatikan dengan SBM_KMK296_ENABLED=false.
+const sbmKmk296 = (() => {
+  if ((process.env.SBM_KMK296_ENABLED || "true").toLowerCase() === "false") return null;
+  try {
+    const s = createSbmKmk296({ dir: process.env.SBM_KMK296_DIR || fileURLToPath(new URL("./data/kmk-296-2026/", import.meta.url)) });
+    console.log(`📒 SBM KMK 296/2026 aktif (${s.stats.rows} baris, ${s.stats.sections} bagian penjelasan).`);
+    return s;
+  } catch (e) {
+    console.warn("📒 SBM KMK 296/2026 tidak aktif:", e instanceof Error ? e.message : String(e));
+    return null;
+  }
+})();
+// Potongan "DATA RESMI KMK 296/2026" untuk pertanyaan biaya/ketentuan; [] bila bukan urusannya (atau grup memakai dokumen terkunci).
+function kmk296Chunks(text, pinnedTitles = null) {
+  if (!sbmKmk296 || pinnedTitles) return [];
+  try {
+    const r = sbmKmk296.contextFor(text);
+    if (r.chunks.length > 0) console.log(`📒 [KMK 296/2026] konteks ${r.kind} disisipkan (${r.chunks[0].text.split("\n").length} baris).`);
+    return r.chunks;
+  } catch (e) {
+    console.error("📒 KMK 296/2026 gagal (dilewati):", e instanceof Error ? e.message : String(e));
+    return [];
+  }
+}
+
 function sbmAnswer(key, text) {
   if (!sbmCalc) return null;
   try {
@@ -1194,7 +1221,8 @@ async function generateAutoReplyWithOllama(jid, { timeoutMs } = {}) {
   const docsAllowed = !pdfAsked && (lookupAllowed || (GROUP_DOCS_ALWAYS && searchQuestion.trim().split(/\s+/).length >= 3));
   const pinnedTitles = docTitlesFor(jid);
   const docChunks = docsAllowed ? await fetchRelevantKnowledgeChunks(searchQuestion, RAG_CONTEXT_BUDGET_CHARS, pinnedTitles, { includeLocal: DOC_LOCAL_WA_CONTACTS }) : [];
-  const topScore = docChunks[0]?.score ?? 0;
+  const topScore = docChunks[0]?.score ?? 0; // skor dokumen asli (skala berbeda dari BM25 KMK 296)
+  if (!pdfAsked) docChunks.unshift(...kmk296Chunks(searchQuestion, pinnedTitles));
   { const st = waAccountContext.getStore(); if (st) st.serious = pdfAsked || docChunks.length > 0 || NEEDS_ACCURATE_FIGURES_RE.test(searchQuestion) || isGraveTopic(searchQuestion); }
   const webResults = !lookupAllowed || pinnedTitles || topScore >= RAG_STRONG_MATCH_SCORE ? [] : await webSearch.search(searchQuestion, WEB_SEARCH_MAX_RESULTS, { snippetChars: 220 });
 
@@ -1906,6 +1934,7 @@ async function generateAutoReplyWithGemini(jid) {
     const titles = docChunks.map((c) => `"${c.title}"(skor ${c.score.toFixed(1)})`).join(", ") || "-";
     console.log(`📚 [Dokumen] ${docChunks.length} potongan dipakai: ${titles}`);
   }
+  if (!pdfAsked) docChunks = [...kmk296Chunks(webQueryRaw, pinnedTitles), ...docChunks];
   // Jalur: obrolan biasa = "santai" (cepat dulu), pertanyaan angka/aturan/dokumen/internet = "akurat" (Gemini dulu). Lihat ai-route.js & /urutan.
   const lastIncoming = stripGroupMeta(jid, contents.filter((c) => c.role === "user").at(-1)?.parts?.[0]?.text ?? "");
   const route = classifyRoute({ text: lastIncoming, pinnedDocs: Boolean(pinnedTitles), docChunks: docChunks.length, webQuery, accurateRe: NEEDS_ACCURATE_FIGURES_RE });
@@ -5106,6 +5135,7 @@ async function generateTelegramReply(history) {
     } catch (err) {
       console.error("✈️ [Telegram] gagal cari di Dokumen Pengetahuan, lanjut tanpa:", err instanceof Error ? err.message : String(err));
     }
+    docChunks = [...kmk296Chunks(query), ...docChunks];
   }
   const data = await geminiGenerateWithRotation(TELEGRAM_SYSTEM_PROMPT, contents, { webQuery: query, docChunks });
   const raw = extractGeminiText(data).trim();
