@@ -206,6 +206,8 @@ check(T.senenBerikut(new Date(2026, 10, 2)) === "2026-11-09", "Senin -> Senin pe
   const r0 = rencanaWaktu({ durTemplat: 20, durNarasi: 0 }); check(r0.k === 1 && r0.total > 20, "rencana waktu: tanpa narasi tidak diregangkan");
   const r1 = rencanaWaktu({ durTemplat: 16, durNarasi: 30, withHook: true }); check(r1.k > 1.5 && r1.total >= 30, "rencana waktu: narasi panjang meregangkan templat");
   const r2 = rencanaWaktu({ durTemplat: 10, durNarasi: 90 }); check(r2.k <= 2.2, "rencana waktu: regangan dibatasi");
+  const r4 = rencanaWaktu({ durTemplat: 16, durNarasi: 60 }); check(r4.k === 2.2 && r4.tahan > 0 && r4.total >= 60 + 0.3 + 1.0 + r4.outro - 1e-9, "rencana waktu: narasi lebih panjang dari regangan maksimal -> bingkai ditahan, suara tidak terpotong");
+  check(rencanaWaktu({ durTemplat: 16, durNarasi: 30 }).tahan === 0 && rencanaWaktu({ durTemplat: 16 }).tahan === 0, "rencana waktu: tanpa kelebihan narasi tidak ada penahanan");
   const r3 = rencanaWaktu({ durTemplat: 20, durNarasi: 5 }); check(r3.k === 1, "rencana waktu: narasi pendek tidak memendekkan templat");
 }
 

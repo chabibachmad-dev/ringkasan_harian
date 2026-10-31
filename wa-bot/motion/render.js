@@ -18,8 +18,10 @@ export function durasiBerkas(berkas, ffprobe = "ffprobe") {
 /** Hitung rencana waktu: faktor regang k membuat templat cukup panjang untuk narasi. */
 export function rencanaWaktu({ durTemplat, durNarasi = 0, withHook = true, withOutro = true }) {
   const h = withHook ? DUR_HOOK : 0, o = withOutro ? DUR_OUTRO : 0;
-  const k = durNarasi > 0 ? Math.max(1, (durNarasi + 0.3 + 1.0 - h) / durTemplat) : 1;
-  return { k: Math.min(k, 2.2), hook: h, outro: o, total: h + durTemplat * Math.min(k, 2.2) + o };
+  const k = Math.min(durNarasi > 0 ? Math.max(1, (durNarasi + 0.3 + 1.0 - h) / durTemplat) : 1, 2.2);
+  // Narasi yang lebih panjang dari regangan maksimal: bingkai terakhir templat ditahan sampai narasi selesai (jangan memotong suara).
+  const tahan = durNarasi > 0 ? Math.max(0, durNarasi + 0.3 + 1.0 - (h + durTemplat * k)) : 0;
+  return { k, tahan, hook: h, outro: o, total: h + durTemplat * k + tahan + o };
 }
 
 /**
@@ -37,13 +39,13 @@ export async function renderVideo(o) {
   const durNarasi = o.narasi ? durasiBerkas(o.narasi, ffprobe) : 0;
   const hookTeks = o.hook || null;
   const rw = rencanaWaktu({ durTemplat: spec.durasi, durNarasi, withHook: !!hookTeks, withOutro: o.outro !== false });
-  const { k, hook, outro, total } = rw;
+  const { k, tahan, hook, outro, total } = rw;
 
   // audio
   const efekAll = [];
   if (hookTeks) efekAll.push(...efekHook(hookTeks));
   for (const e of spec.efek || []) efekAll.push({ ...e, t: hook + e.t * k });
-  if (outro) efekAll.push(...efekOutro().map((e) => ({ ...e, t: hook + spec.durasi * k + e.t })));
+  if (outro) efekAll.push(...efekOutro().map((e) => ({ ...e, t: hook + spec.durasi * k + tahan + e.t })));
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "motion-"));
   const wav = path.join(tmp, "musik.wav");
   tulisWav(wav, sintesisAudio({ durasi: total, musik: tpl.musik, efek: efekAll }));
@@ -66,14 +68,14 @@ export async function renderVideo(o) {
   ff.stdin.on("error", () => {});
 
   const cv = canvasLib.createCanvas(pw, ph), g = cv.getContext("2d");
-  const nFrame = Math.round(total * fps), tTpl0 = hook, tTpl1 = hook + spec.durasi * k;
+  const nFrame = Math.round(total * fps), tTpl0 = hook, tTpl1 = hook + spec.durasi * k + tahan;
   try {
     for (let i = 0; i < nFrame; i++) {
       const T = i / fps;
       g.setTransform(skala, 0, 0, skala, 0, 0); g.globalAlpha = 1; g.textAlign = "left"; g.textBaseline = "alphabetic";
       if (hook && T < tTpl0) gambarHook(g, T, hookTeks, th);
       else if (T < tTpl1) {
-        spec.gambar(g, (T - tTpl0) / k);
+        spec.gambar(g, Math.min((T - tTpl0) / k, spec.durasi));
         const f = T - tTpl0; if (hook && f < 0.15) { g.fillStyle = `rgba(11,22,38,${0.6 * (1 - f / 0.15)})`; g.fillRect(0, 0, W, H); }
       } else gambarOutro(g, T - tTpl1, { teaser: o.teaser, kanal: o.kanal, label: o.teaserLabel }, th);
       const buf = cv.data();
