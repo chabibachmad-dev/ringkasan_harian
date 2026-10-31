@@ -8,6 +8,9 @@ import { createEdu, readEduConfig } from "./edu-channel.js";
 import { createMotion, readMotionConfig } from "./edu-motion.js";
 import { silentWav, wavSeconds, beatSeconds } from "./edu-board.js";
 import { muatState, simpanState, senenBerikut } from "./motion/tema-mingguan.js";
+import { templatUntuk } from "./motion/templates/index.js";
+
+const TPL_RABU = templatUntuk("2026-10-28").id; // rotasi templat bisa berubah antarversi modul; tes mengikuti modul
 
 let fails = 0;
 const check = (c, m) => { if (!c) { fails++; console.log("FAIL:", m); } else console.log("ok:", m); };
@@ -204,15 +207,15 @@ const buttons = (m) => m.markup?.flat().map((b) => b.callback_data) || [];
   const { clock, sent, rec, edu, yt, temaFile } = s;
   // tema disetujui untuk Rabu 28 Okt
   simpanState(temaFile, { usulan: { minggu: "2026-10-26", status: "disetujui", hari: [
-    { tanggal: "2026-10-28", hari: 3, nama: "Rabu", templat: "fakta-angka", templatNama: "Fakta Angka", topik: "Tinggi Everest", sumber: "ai" },
+    { tanggal: "2026-10-28", hari: 3, nama: "Rabu", templat: TPL_RABU, templatNama: "Templat Rabu", topik: "Tinggi Everest", sumber: "ai" },
     { tanggal: "2026-10-29", hari: 4, nama: "Kamis", templat: "perbandingan-bar", templatNama: "Perbandingan", topik: "Kecepatan kendaraan", sumber: "ai" }] }, temaOwner: [], riwayat: [] });
   await edu.check(); await edu.idle();
   const it = edu.load().items[0];
   check(it && it.mode === "motion" && it.status === "awaiting" && it.topic === "Tinggi Everest", "03:00: draf motion dibuat dari tema disetujui hari ini");
   const a = rec.buatIsi[0], r = rec.render[0];
-  check(a.templatId === "fakta-angka" && a.topik === "Tinggi Everest" && typeof a.llm === "function", "buatIsi: templat Rabu + topik tema + llm");
+  check(a.templatId === TPL_RABU && a.topik === "Tinggi Everest" && typeof a.llm === "function", "buatIsi: templat Rabu + topik tema + llm");
   check(rec.tts[0] === "Narasi tentang Tinggi Everest.", "TTS memakai narasi dari buatIsi");
-  check(r.templatId === "fakta-angka" && r.hook === "Siap menebak?" && r.teaser === "Kecepatan kendaraan" && r.skala === 1.5 && /\.wav$/.test(r.narasi) && r.keluar.endsWith("edu-1.mp4"), "renderVideo: hook, teaser besok, skala 1,5, narasi, berkas keluar");
+  check(r.templatId === TPL_RABU && r.hook === "Siap menebak?" && r.teaser === "Kecepatan kendaraan" && r.skala === 1.5 && /\.wav$/.test(r.narasi) && r.keluar.endsWith("edu-1.mp4"), "renderVideo: hook, teaser besok, skala 1,5, narasi, berkas keluar");
   check(sent.files.length === 1 && sent.files[0].file.width === 1080 && sent.files[0].file.height === 1920 && /Draf Short #1/.test(sent.files[0].caption), "video 1080x1920 dikirim untuk persetujuan");
   const m = sent.text.at(-1);
   check(/Dasar fakta: Tabel perkalian/.test(m.text) && buttons(m).join() === "ed:ok:1,ed:again:1,ed:no:1", "baris 'Dasar fakta' + tombol setuju/ulang/buang yang sudah ada");
@@ -232,7 +235,7 @@ const buttons = (m) => m.markup?.flat().map((b) => b.callback_data) || [];
   simpanState(a.temaFile, { usulan: { minggu: "2026-10-26", status: "diusulkan", hari: [{ tanggal: "2026-10-28", hari: 3, templat: "fakta-angka", topik: "Belum disetujui", sumber: "ai" }] }, temaOwner: [], riwayat: [] });
   await a.edu.check(); await a.edu.idle();
   const it = a.edu.load().items[0];
-  check(it.mode === "motion" && it.topic !== "Belum disetujui" && it.topic.length > 2 && a.rec.buatIsi[0].templatId === "fakta-angka", "tema belum disetujui: topik dari bank edu, templat tetap menurut hari");
+  check(it.mode === "motion" && it.topic !== "Belum disetujui" && it.topic.length > 2 && a.rec.buatIsi[0].templatId === TPL_RABU, "tema belum disetujui: topik dari bank edu, templat tetap menurut hari");
   check(a.edu.load().history.length === 1, "topik bank tercatat di riwayat bank agar tidak berulang");
 
   const b = setup();
