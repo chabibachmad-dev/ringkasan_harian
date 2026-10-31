@@ -208,6 +208,11 @@ check(T.senenBerikut(new Date(2026, 10, 2)) === "2026-11-09", "Senin -> Senin pe
   const r2 = rencanaWaktu({ durTemplat: 10, durNarasi: 90 }); check(r2.k <= 2.2, "rencana waktu: regangan dibatasi");
   const r4 = rencanaWaktu({ durTemplat: 16, durNarasi: 60 }); check(r4.k === 2.2 && r4.tahan > 0 && r4.total >= 60 + 0.3 + 1.0 + r4.outro - 1e-9, "rencana waktu: narasi lebih panjang dari regangan maksimal -> bingkai ditahan, suara tidak terpotong");
   check(rencanaWaktu({ durTemplat: 16, durNarasi: 30 }).tahan === 0 && rencanaWaktu({ durTemplat: 16 }).tahan === 0, "rencana waktu: tanpa kelebihan narasi tidak ada penahanan");
+  const t1 = rencanaWaktu({ durTemplat: 20, durNarasi: 12, target: 30 }); check(Math.abs(t1.total - 30) < 0.01 && t1.laju === 1 && t1.tercapai, "durasi target: lebih panjang dari bawaan -> total tepat target");
+  const t2 = rencanaWaktu({ durTemplat: 20, durNarasi: 25, target: 45 }); check(Math.abs(t2.total - 45) < 0.01 && t2.k <= 2.2 + 1e-9 && t2.tahan >= 0, "durasi target: 45 detik tercapai (regang + tahan)");
+  const t3 = rencanaWaktu({ durTemplat: 20, durNarasi: 25, target: 20 }); check(t3.laju > 1 && t3.laju <= 1.25 + 1e-9 && t3.total >= 25 / t3.laju + 0.3 + 1.0, "durasi target: narasi dipercepat (maks 1,25x) dan tidak terpotong");
+  const t4 = rencanaWaktu({ durTemplat: 20, durNarasi: 50, target: 15 }); check(t4.tercapai === false && t4.total > 15 && t4.total >= 50 / 1.25, "durasi target mustahil: tidak memotong suara, ditandai tidak tercapai");
+  check(rencanaWaktu({ durTemplat: 20, durNarasi: 12 }).total === rencanaWaktu({ durTemplat: 20, durNarasi: 12, target: 0 }).total, "tanpa target perilaku lama tidak berubah");
   const r3 = rencanaWaktu({ durTemplat: 20, durNarasi: 5 }); check(r3.k === 1, "rencana waktu: narasi pendek tidak memendekkan templat");
 }
 
@@ -262,6 +267,9 @@ else {
   check(p && p.templatId === "mitos-fakta" && p.topik === "makan wortel bikin mata tajam", "wa: jenis mitos + penutup 'ya' dibuang");
   p = k("@628123456789 buatin video motion graphic proses terjadinya hujan tanpa suara hd");
   check(p && p.templatId === "proses-tahapan" && p.topik === "terjadinya hujan" && p.suara === false && p.hd === true, "wa: mention dibuang, tanpa suara, hd");
+  p = k("/video fakta gunung Everest 30 detik"); check(p && p.durasi === 30 && p.topik === "fakta gunung Everest", "wa: '30 detik' dibaca sebagai durasi dan dibuang dari topik");
+  p = k("buatkan video tentang siklus air selama 1 menit hd"); check(p && p.durasi === 60 && p.hd && p.topik === "siklus air", "wa: '1 menit' = 60 detik, bersama hd");
+  check(k("/video kuis: perkalian 7 dan 8").durasi === 0, "wa: tanpa durasi -> 0 (bawaan)");
   p = k("Ayyubi, buatkan video kuis: perkalian 7 dan 8", { namaBot: "Ayyubi" });
   check(p && p.templatId === "kuis-kilat" && p.topik === "perkalian 7 dan 8", "wa: nama bot di depan dibuang");
   p = k("buat video fakta unik kucing");

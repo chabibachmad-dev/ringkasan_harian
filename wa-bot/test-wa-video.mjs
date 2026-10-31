@@ -20,7 +20,7 @@ const PEMILIK = "628111";
 function setup(env = {}, over = {}) {
   const sent = [];
   const sock = { sendMessage: async (jid, content, opts) => { sent.push({ jid, content, quoted: opts?.quoted }); return { key: { id: `k${sent.length}` } }; } };
-  const rec = { balasGrup: [], catat: [], cari: 0, llm: 0 };
+  const rec = { balasGrup: [], catat: [], cari: 0, llm: 0, render: [] };
   const wv = createWaVideo({
     konfig: konfigDariEnv(env), antrean: buatAntrean({ maksTunggu: 3 }), pembatas: buatPembatas({ selangMenit: 0, maksHarian: 3 }),
     deps: { llm: async () => { rec.llm++; return JSON.stringify(baik); }, cari: async () => { rec.cari++; return [ev, ev2]; }, tts: null },
@@ -31,7 +31,7 @@ function setup(env = {}, over = {}) {
     kontakDilayani: async () => over.dilayani !== false,
     balasGrup: async (s, grup, msg, subject, t) => { rec.balasGrup.push(t); },
     catatKeluarGrup: async (grup, subject, sentMsg, ket) => { rec.catat.push({ grup, ket }); },
-    renderFn: async (a) => { fs.writeFileSync(a.keluar, "mp4"); return { berkas: a.keluar, durasi: 22 }; },
+    renderFn: async (a) => { rec.render.push(a); fs.writeFileSync(a.keluar, "mp4"); return { berkas: a.keluar, durasi: over.durasiAkhir || 22, tercapai: over.tercapai }; },
     folder: tmp, log: quiet
   });
   const pesan = (remoteJid, participant) => ({ key: { remoteJid, participant, id: "m1" } });
@@ -52,6 +52,20 @@ const teks = (sent) => sent.filter((x) => x.content.text).map((x) => x.content.t
   const n = sent.length;
   check((await wv.tangani(sock, m, { teks: "halo, apa kabar?" })) === false && sent.length === n, "pemilik: obrolan biasa -> false, tidak ada pesan");
   check((await wv.tangani(sock, m, { teks: "/video bantuan" })) === true && /video/i.test(teks(sent).at(-1)), "pemilik: /video bantuan -> teks bantuan");
+}
+
+// ---- durasi target
+{
+  const a = setup();
+  await a.wv.tangani(a.sock, a.pesan(`${PEMILIK}@s.whatsapp.net`), { teks: "/video fakta Gunung Everest 30 detik" });
+  check(a.rec.render.at(-1)?.durasiTarget === 30 && videos(a.sent).length === 1, "durasi: '30 detik' diteruskan ke render sebagai durasiTarget");
+  await a.wv.tangani(a.sock, a.pesan(`${PEMILIK}@s.whatsapp.net`), { teks: "/video fakta Gunung Everest" });
+  check(a.rec.render.at(-1)?.durasiTarget === undefined, "durasi: tanpa permintaan, tidak ada target");
+  await a.wv.tangani(a.sock, a.pesan(`${PEMILIK}@s.whatsapp.net`), { teks: "/video fakta Gunung Everest 5 menit" });
+  check(/disesuaikan ke 45 detik/.test(videos(a.sent).at(-1).content.caption), "durasi di luar rentang: pemohon diberi tahu disesuaikan ke 45 detik");
+  const b = setup({}, { tercapai: false, durasiAkhir: 24 });
+  await b.wv.tangani(b.sock, b.pesan(`${PEMILIK}@s.whatsapp.net`), { teks: "/video fakta Gunung Everest 15 detik" });
+  check(/tidak bisa dicapai persis/.test(videos(b.sent).at(-1).content.caption), "durasi mustahil: keterangan jujur soal durasi akhir");
 }
 
 // ---- nomor lain ditolak / diizinkan
