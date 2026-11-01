@@ -45,7 +45,7 @@ function setup(over = {}) {
   const cfgMotion = { ...readMotionConfig(over.motionEnv || {}), temaFile, channelName: "Belajar Bareng", voice: undefined, style: "ramah" };
   const motion = createMotion({
     config: cfgMotion, tz: TZ, llm, speaker, now: () => clock.t, log: quiet,
-    sendText: async (text, o) => { sent.text.push({ text, markup: o?.markup }); return 1; },
+    sendText: async (text, o) => { if (o?.kecuali !== "telegram" && (!o?.hanya || o.hanya === "telegram")) sent.text.push({ text, markup: o?.markup }); if (o?.kecuali !== "wa" && (!o?.hanya || o.hanya === "wa")) (sent.wa ||= []).push(text); return 1; },
     lib: {
       buatIsi: async (a) => { rec.buatIsi.push(a); if (rec.failIsi) throw new Error("isi gagal"); return { isi: ISI, hook: "Siap menebak?", dasar: "Tabel perkalian", narasi: `Narasi tentang ${a.topik}.`, percobaan: 1 }; },
       renderVideo: async (a) => { rec.render.push(a); if (rec.failRender) throw new Error("render gagal"); fs.writeFileSync(a.keluar, Buffer.alloc(40_000, 1)); return { berkas: a.keluar, durasi: 24, templat: a.templatId, lebar: 1080, tinggi: 1920 }; }
@@ -67,7 +67,7 @@ function setup(over = {}) {
   const edu = createEdu({
     config, speaker, renderer, youtube: yt, motion: over.noMotion ? null : motion,
     thumbnail: async ({ outFile }) => { fs.writeFileSync(outFile, Buffer.alloc(2000, 2)); return outFile; },
-    sendText: async (text, o) => { sent.text.push({ text, markup: o?.markup }); return 1; },
+    sendText: async (text, o) => { if (o?.kecuali !== "telegram" && (!o?.hanya || o.hanya === "telegram")) sent.text.push({ text, markup: o?.markup }); if (o?.kecuali !== "wa" && (!o?.hanya || o.hanya === "wa")) (sent.wa ||= []).push(text); return 1; },
     sendFile: async (file, caption) => { sent.files.push({ file, caption }); return 1; },
     loadCards: () => JSON.parse(fs.readFileSync(new URL("./data/edu-sains.json", import.meta.url), "utf8")),
     now: () => clock.t, log: quiet
@@ -266,9 +266,8 @@ const buttons = (m) => m.markup?.flat().map((b) => b.callback_data) || [];
   await a.edu.check(); await a.edu.idle();
   check(a.rec.buatIsi.length === 0 && a.edu.load().items[0].kind !== "motion", "EDU_MODE=papan: pipeline lama saja");
   a.clock.t = wita("2026-10-31", "08:00"); await a.edu.check();
-  check(!fs.existsSync(a.temaFile), "EDU_MODE=papan: jadwal tema tidak berjalan");
-  check(/hanya aktif pada EDU_MODE=motion/.test(await a.edu.temaPerintah("")), "/tema menjelaskan bila mode papan");
-  check((await a.edu.temaTeks("ganti 1: x")).handled === false, "mode papan: teks tidak dicegat");
+  check(fs.existsSync(a.temaFile), "EDU_MODE=papan: agenda mingguan tetap berjalan (dipakai Short harian)");
+  check(/Belum ada usulan|Usulan tema/.test(await a.edu.temaPerintah("")) || a.sent.text.some((t) => /Usulan tema pekan/.test(t.text)), "/tema tetap bisa dipakai pada mode papan");
 
   const b = setup({ noMotion: true });
   await b.edu.check(); await b.edu.idle();

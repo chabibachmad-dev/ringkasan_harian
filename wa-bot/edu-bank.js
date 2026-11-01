@@ -706,8 +706,40 @@ export function buildSainsPlan(card) {
  *  - generator/kartu yang sama tidak diulang dalam `cooldown` video terakhir;
  *  - kelas diputar agar semua kelas 1-6 kebagian.
  */
-export function pickNext({ history = [], cards = [], grades = [1, 2, 3, 4, 5, 6], mix = { math: 2, sains: 1 }, seed = Date.now(), kind = null, grade = null, cooldown = 6 } = {}) {
+// ---- pemetaan topik bebas (agenda mingguan) ke materi bank terdekat
+const STOP = new Set(["dan", "atau", "yang", "dengan", "untuk", "pada", "dari", "dalam", "sebagai", "cara", "soal", "tentang", "the", "ke", "di", "itu", "ini"]);
+const kata = (t) => String(t || "").toLowerCase().normalize("NFKD").replace(/[^a-z0-9 ]+/g, " ").split(/\s+/).filter((w) => w.length > 2 && !STOP.has(w));
+const akar = (w) => w.replace(/^(me|pem|pen|ber|per|ke)/, "").replace(/(an|kan|i)$/, "");
+/**
+ * Materi bank yang paling dekat dengan topik bebas. Skor = jumlah kata (berakar sama) yang beririsan dengan nama topik/judul materi.
+ * @returns {{kunci:string, topik:string, skor:number}|null}  null bila irisannya kurang dari ~60% kata topik
+ */
+export function petakanTopik(topik, { cards = [] } = {}) {
+  const q = kata(topik).map(akar).filter((w) => w.length > 2);
+  if (!q.length) return null;
+  const cand = [];
+  for (const name of Object.keys(GENERATORS)) { const x = GENERATORS[name](makeRng(1)); cand.push({ kunci: `math:${name}`, topik: x.topic, teks: `${x.topic} ${x.title}` }); }
+  for (const c of cards) cand.push({ kunci: `sains:${c.id}`, topik: c.topic, teks: `${c.topic} ${c.title || ""}` });
+  let best = null;
+  for (const c of cand) {
+    const w = new Set(kata(c.teks).map(akar));
+    const skor = q.filter((x) => w.has(x) || [...w].some((y) => y.length > 3 && x.length > 3 && (y.startsWith(x) || x.startsWith(y)))).length;
+    if (skor > (best?.skor || 0)) best = { kunci: c.kunci, topik: c.topik, skor };
+  }
+  return best && best.skor >= Math.max(1, Math.ceil(q.length * 0.6)) ? best : null; // irisan kecil = bukan materi yang diminta
+}
+
+export function pickNext({ history = [], cards = [], grades = [1, 2, 3, 4, 5, 6], mix = { math: 2, sains: 1 }, seed = Date.now(), kind = null, grade = null, cooldown = 6, kunci = null } = {}) {
   const r = makeRng(seed);
+  if (kunci) {
+    const [jenis, id] = String(kunci).split(":");
+    if (jenis === "math" && GENERATORS[id]) {
+      const g = (grade && GENERATOR_GRADES[id].includes(grade) && grade) || GENERATOR_GRADES[id].find((x) => grades.includes(x)) || GENERATOR_GRADES[id][0];
+      return { kind: "math", key: `math:${id}`, grade: g, plan: buildMathPlan({ gen: id, grade: g, seed: Math.floor(r.next() * 1e9) + 1, practice: 1 }) };
+    }
+    const c = jenis === "sains" ? cards.find((x) => x.id === id) : null;
+    if (c) return { kind: "sains", key: `sains:${c.id}`, grade: Array.isArray(c.grade) ? c.grade[0] : c.grade, plan: buildSainsPlan(c) };
+  }
   const cyc = [];
   for (const [k, n] of Object.entries(mix)) for (let i = 0; i < n; i++) cyc.push(k);
   const want = kind || cyc[history.length % Math.max(1, cyc.length)] || "math";

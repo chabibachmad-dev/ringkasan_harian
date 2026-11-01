@@ -63,6 +63,11 @@ export function createMotion({ config, tz = "Asia/Makassar", llm = null, antrean
   };
 
   const kirimUsulan = (u, awalan = "") => sendText(`${awalan}${lib.formatUsulan(u)}`, { markup: baris(u.minggu) });
+  /** Jawaban langsung hanya ke kanal asal (kanal lain dikabari terpisah oleh kabari). */
+  const balas = (kanal, pesan) => sendText(pesan, { hanya: kanal });
+  const NAMA_KANAL = { telegram: "Telegram", wa: "WhatsApp" };
+  /** Kabari kanal lain (bukan `kanal` asal) bahwa pemilik sudah memutuskan lewat `kanal`. */
+  const kabari = (kanal, pesan) => (kanal ? sendText(`ℹ️ (lewat ${NAMA_KANAL[kanal] || kanal}) ${pesan}`, { kecuali: kanal }).catch(() => 0) : Promise.resolve(0));
 
   // ------------------------------------------------------------ pembuatan video
   /**
@@ -91,6 +96,12 @@ export function createMotion({ config, tz = "Asia/Makassar", llm = null, antrean
     const v = await (antrean ? antrean.jalankan(render) : render());
     const meta = lib.metaShorts({ templatId: tpl.id, isi, hook, topik, kanal: config.channelName, tanggal });
     return { topik, asal, dariBank, templatId: tpl.id, hook, dasar, narasi, isi, meta, detik: v.durasi, lebar: v.lebar, tinggi: v.tinggi };
+  }
+
+  /** Topik video pelajaran untuk tanggal itu, hanya bila agenda sudah disetujui. "" bila tak ada. */
+  function pelajaranHariIni(tanggal) {
+    const t = lib.temaUntuk(muat(), tanggal);
+    return t.status === "disetujui" ? String(t.pelajaran?.topik || "") : "";
   }
 
   /** Dipanggil saat video disetujui: topik masuk riwayat supaya tidak diusulkan lagi. */
@@ -141,14 +152,22 @@ export function createMotion({ config, tz = "Asia/Makassar", llm = null, antrean
   const tickTema = () => serial(tickInner).catch((e) => { log.error?.(`🗓️ [Tema] jadwal gagal: ${e?.message || e}`); });
 
   // ------------------------------------------------------------ tombol, balasan, perintah
-  async function terapkanPerintah(st, perintah) {
+  async function terapkanPerintah(st, perintah, kanal = "") {
+    const u0 = st.usulan;
+    // keputusan pertama yang masuk yang berlaku: setelah disetujui (dari kanal mana pun), setuju/ulang berikutnya ditolak
+    if (u0?.status === "disetujui" && (perintah.aksi === "setuju" || perintah.aksi === "ulang")) {
+      const lewat = u0.disetujuiLewat ? ` lewat ${NAMA_KANAL[u0.disetujuiLewat] || u0.disetujuiLewat}` : "";
+      return { state: st, pesan: `Usulan ini sudah disetujui${lewat}.`, berubah: false, ditolak: true };
+    }
     const r = await lib.terapkan({ state: st, perintah, llm, sekarang: new Date(now()) });
+    if (perintah.aksi === "setuju" && r.state.usulan) r.state.usulan.disetujuiLewat = kanal || "telegram";
     if (r.berubah || perintah.aksi === "setuju") simpan(r.state);
+    if ((r.berubah || perintah.aksi === "setuju") && kanal && perintah.aksi !== "tema") await kabari(kanal, r.pesan);
     return r;
   }
 
   /** callback_data "tema:setuju|ulang|revisi:<minggu>" (tanpa awalan "tema:" atau dengan). Mengembalikan teks balasan atau "". */
-  function callback(data) {
+  function callback(data, { kanal = "telegram" } = {}) {
     return serial(async () => {
       const m = /^(?:tema:)?(setuju|ulang|revisi):(\S+)$/.exec(String(data || "").trim());
       if (!m) return "Tombol tema tidak dikenal.";
@@ -165,11 +184,11 @@ export function createMotion({ config, tz = "Asia/Makassar", llm = null, antrean
         return "Silakan balas dengan perubahan, misalnya: ganti 3: planet Mars, tukar 2 5, hapus 4, atau tulis bebas.";
       }
       if (aksi === "setuju") {
-        if (u.status === "disetujui") return "Usulan ini sudah disetujui.";
-        return (await terapkanPerintah(st, { aksi: "setuju" })).pesan;
+        return (await terapkanPerintah(st, { aksi: "setuju" }, kanal)).pesan;
       }
-      const r = await terapkanPerintah(st, { aksi: "ulang" });
-      await sendText(r.pesan);
+      const r = await terapkanPerintah(st, { aksi: "ulang" }, kanal);
+      if (r.ditolak) return r.pesan;
+      await balas(kanal, r.pesan);
       await kirimUsulan(r.state.usulan);
       return "";
     });
@@ -179,26 +198,29 @@ export function createMotion({ config, tz = "Asia/Makassar", llm = null, antrean
    * Teks bebas dari pemilik. Ditangani bila membalas pesan usulan, setelah menekan "Revisi", atau berupa perintah tegas
    * (ganti/tukar/hapus/tema:). Pesan biasa seperti "ok" tidak dicegat. Mengembalikan { handled }.
    */
-  function teks(text, { replyText = "" } = {}) {
+  function teks(text, { replyText = "", kanal = "telegram" } = {}) {
     return serial(async () => {
       const st = muat();
       const p = lib.parsePerintah(text);
       const membalas = /Usulan tema pekan/.test(String(replyText || "").slice(0, 300));
       const siaga = st.menunggu && st.menunggu.sampai > now();
-      const tegas = ["ganti", "tukar", "hapus"].includes(p.aksi) ? Boolean(st.usulan) : ["tema", "daftarTema"].includes(p.aksi);
+      let tegas = ["ganti", "gantiPelajaran", "tukar", "hapus"].includes(p.aksi) ? Boolean(st.usulan) : ["tema", "daftarTema"].includes(p.aksi);
+      // WhatsApp tidak punya tombol: "setuju"/"ulang" yang jelas dianggap jawaban selama usulan masih menunggu
+      if (kanal === "wa" && st.usulan?.status === "diusulkan" && /^(setuju|acc|usul(kan)? ulang|ulang)\s*$/i.test(String(text).trim())) tegas = true;
+      // sudah diputuskan lewat kanal lain beberapa jam lalu: jawab "sudah disetujui", jangan diam
+      if (kanal === "wa" && st.usulan?.status === "disetujui" && Date.parse(st.usulan.disetujui || 0) > now() - 12 * 3600_000 && /^(setuju|usul(kan)? ulang)\s*$/i.test(String(text).trim())) tegas = true;
       if (!(membalas || siaga || tegas)) return { handled: false };
       if (!st.usulan && !["tema", "daftarTema"].includes(p.aksi)) return { handled: false };
-      if (p.aksi === "setuju" && st.usulan?.status === "disetujui") { await sendText("Usulan ini sudah disetujui."); return { handled: true }; }
-      const r = await terapkanPerintah(st, p);
+      const r = await terapkanPerintah(st, p, kanal);
       if (siaga && (r.berubah || p.aksi !== "bebas")) { const s2 = muat(); s2.menunggu = null; simpan(s2); }
-      await sendText(r.pesan);
-      if ((r.berubah || p.aksi === "ulang") && r.state.usulan) await kirimUsulan(r.state.usulan);
+      await balas(kanal, r.pesan);
+      if (!r.ditolak && p.aksi !== "setuju" && (r.berubah || p.aksi === "ulang") && r.state.usulan) await kirimUsulan(r.state.usulan);
       return { handled: true };
     });
   }
 
   /** /tema | /tema tambah a; b | /tema setuju|ulang | /tema usul | /tema <perintah apa pun dari parsePerintah> */
-  function perintah(arg = "") {
+  function perintah(arg = "", { kanal = "telegram" } = {}) {
     return serial(async () => {
       const a = String(arg || "").trim();
       const st = muat();
@@ -211,7 +233,7 @@ export function createMotion({ config, tz = "Asia/Makassar", llm = null, antrean
       if ((m = a.match(/^tambah\s+([\s\S]+)$/i))) {
         const daftar = m[1].split(/[;\n]+/).map((x) => x.trim()).filter(Boolean);
         if (!daftar.length) return "Tulis topiknya: /tema tambah topik; topik lain";
-        return (await terapkanPerintah(st, { aksi: "tema", daftar })).pesan;
+        return (await terapkanPerintah(st, { aksi: "tema", daftar }, kanal)).pesan;
       }
       if (/^usul(kan)?$/i.test(a)) {
         const senen = lib.senenBerikut(dariHari(localDay(now(), tz)));
@@ -223,12 +245,12 @@ export function createMotion({ config, tz = "Asia/Makassar", llm = null, antrean
         return "";
       }
       const p = lib.parsePerintah(a);
-      const r = await terapkanPerintah(st, p);
-      await sendText(r.pesan);
-      if ((r.berubah || p.aksi === "ulang") && r.state.usulan) await kirimUsulan(r.state.usulan);
+      const r = await terapkanPerintah(st, p, kanal);
+      await balas(kanal, r.pesan);
+      if (!r.ditolak && (r.berubah || p.aksi === "ulang") && r.state.usulan) await kirimUsulan(r.state.usulan);
       return "";
     });
   }
 
-  return { config, produce, catatTopik, tickTema, callback, teks, perintah, state: muat };
+  return { config, produce, catatTopik, pelajaranHariIni, tickTema, callback, teks, perintah, state: muat };
 }

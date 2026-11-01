@@ -12,7 +12,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
-import { pickNext, buildMathPlan } from "./edu-bank.js";
+import { pickNext, buildMathPlan, petakanTopik } from "./edu-bank.js";
 import { flattenPlan, wavSeconds, beatSeconds, createBoardRenderer, renderThumbnail, chapterText } from "./edu-board.js";
 
 const flag = (v, d) => {
@@ -46,6 +46,7 @@ export function readEduConfig(env = process.env) {
     channelName: String(env.EDU_CHANNEL_NAME || "Belajar Bareng").trim().slice(0, 40),
     renderTime: hhmm(env.EDU_RENDER_TIME, "02:00"), // kapan video baru dibuat tiap hari (jam lokal)
     publishTime: hhmm(env.EDU_PUBLISH_TIME, "16:00"), // jam tayang di YouTube (jam lokal), satu video per hari
+    shortsPublishTime: hhmm(env.SHORTS_TAYANG, "18:00"), // jam tayang Short harian (satu Short per hari, terpisah dari video pelajaran)
     timeZone: String(env.WA_TIMEZONE || "Asia/Makassar").trim(),
     tzLabel: String(env.WA_TIMEZONE_LABEL || "WITA").trim(),
     maxPending: num(env.EDU_MAX_PENDING, 3, 1, 10), // berhenti membuat bila segini draf belum kamu putuskan
@@ -256,7 +257,15 @@ export function createEdu({
     const s = load();
     if (!speaker?.available?.()) throw Object.assign(new Error("Suara narasi belum aktif (butuh GEMINI_API_KEYS dan ffmpeg)."), { fatal: true });
     if (!renderer) throw Object.assign(new Error("Perakit video belum tersedia."), { fatal: true });
-    const pick = pickNext({ history: s.history, cards: loadCards(), grades: config.grades, mix: config.mix, seed: (now() % 1_000_000_000) + s.seq * 7919 + 1, kind, grade });
+    // topik pelajaran dari agenda mingguan (bila sudah disetujui): dipetakan ke materi bank terdekat; tak ada yang cocok -> rotasi biasa
+    let pemetaan = null, kunci = null;
+    const agenda = !kind && !grade && source === "otomatis" ? motion?.pelajaranHariIni?.(localDay(now(), tz)) : "";
+    if (agenda) {
+      const m = petakanTopik(agenda, { cards: loadCards() });
+      if (m && !s.history.slice(-3).some((h) => h.key === m.kunci)) { kunci = m.kunci; pemetaan = { diminta: agenda, dipakai: m.topik }; }
+      else pemetaan = { diminta: agenda, dipakai: m ? `${m.topik} (baru dipakai, diganti rotasi biasa)` : "" };
+    }
+    const pick = pickNext({ history: s.history, cards: loadCards(), grades: config.grades, mix: config.mix, seed: (now() % 1_000_000_000) + s.seq * 7919 + 1, kind, grade, kunci });
     let plan = pick.plan;
     if (plan.kind === "math" && config.practice !== 1) plan = buildMathPlan({ gen: plan.gen, grade: plan.grade, seed: plan.seed, practice: config.practice });
     const fitted = await fit(plan);
@@ -279,7 +288,7 @@ export function createEdu({
         tags: p.tags, answer: p.answer, practiceAnswers: p.practiceAnswers,
         description: buildDescription(p, { chapters: chapterText(r.timeline), channelName: config.channelName }),
         script: scriptText(p), file, thumb, size, seconds: Math.round(r.seconds), createdAt: now(),
-        tries: 0
+        tries: 0, pemetaan
       };
       s.items.push(item);
       s.history.push({ key: pick.key, grade: p.grade, at: now(), id });
@@ -327,12 +336,40 @@ export function createEdu({
     }
   }
 
+  let shortsHook = null; // { ulang(item) } dipasang oleh shorts-harian.js
+  const pasangShorts = (h) => { shortsHook = h; };
+  /** Link video pelajaran (16:9) yang tayang/terjadwal pada tanggal itu, bila sudah terunggah. */
+  function linkPelajaran(tanggal) {
+    const it = load().items.filter((i) => !isShort(i) && i.mode !== "motion" && i.ytUrl && i.publishAt && localDay(i.publishAt, tz) === tanggal).pop();
+    return it?.ytUrl || "";
+  }
+  /** Daftarkan Short harian yang sudah dirender sebagai draf (persetujuan & unggah memakai alur yang sama dengan video lain). */
+  async function ajukanShort({ file, topik, judul, deskripsi, tag, dasar, sumber = [], templatId, naskah = "", detik = 0, lebar, tinggi, tanggal = "" }) {
+    const s = load();
+    const size = fs.statSync(file).size;
+    if (size < 20_000) throw new Error("Hasil video terlalu kecil/rusak.");
+    const id = String(++s.seq);
+    const tujuan = path.join(videoDir, `edu-${id}.mp4`);
+    ensure();
+    fs.copyFileSync(file, tujuan);
+    const item = {
+      id, status: "awaiting", source: "short-harian", mode: "motion", kind: "short", grade: 0, topic: topik, title: judul, templatId, tags: tag,
+      description: deskripsi, dasar, sumber, madeForKids: true, aiDisclosure: true, script: naskah, file: tujuan, thumb: null, size,
+      seconds: Math.round(detik), createdAt: now(), tries: 0, lebar, tinggi, tanggal
+    };
+    s.items.push(item);
+    save();
+    await deliver(item);
+    return item;
+  }
+  const shortMenunggu = () => load().items.filter((i) => isShort(i) && i.status === "awaiting").length;
+
   // format tombol Telegram milik telegram.send: baris-baris tombol (bukan {inline_keyboard})
 const kb = (id) => [[{ text: "✅ Setujui & jadwalkan", callback_data: `ed:ok:${id}` }], [{ text: "🔁 Buat ulang", callback_data: `ed:again:${id}` }, { text: "🗑️ Buang", callback_data: `ed:no:${id}` }]];
 
   async function deliver(item) {
     const s = load();
-    const slot = nextPublishAt({ now: now(), publishTime: config.publishTime, tz, taken: scheduledTimes(item.id) });
+    const slot = slotFor(item);
     const answers = [item.answer, ...(item.practiceAnswers || [])].filter(Boolean);
     const cap = item.mode === "motion" ? `🎬 Draf Short #${item.id} · ${fmtDur(item.seconds)}\n*${item.title}*` : `🎓 Draf video #${item.id} · Kelas ${item.grade} SD · ${fmtDur(item.seconds)}\n*${item.title}*`;
     let delivered = 0;
@@ -341,8 +378,10 @@ const kb = (id) => [[{ text: "✅ Setujui & jadwalkan", callback_data: `ed:ok:${
     }
     const txt = [
       item.size > 48 * 1024 * 1024 ? `${cap}\n(Berkas terlalu besar untuk Telegram.)` : null,
+      isShort(item) && item.sumber?.length ? `Sumber:\n${item.sumber.map((x) => `- ${x.judul ? x.judul + " " : ""}${x.url}`).join("\n")}` : null,
       `Periksa videonya dulu. Kalau disetujui, akan ditayangkan ${fmtWhen(slot, tz, config.tzLabel)}.`,
       item.dasar ? `Dasar fakta: ${item.dasar}` : null,
+      item.pemetaan ? (item.pemetaan.dipakai && item.pemetaan.dipakai.indexOf("diganti") < 0 ? `📅 Agenda: "${item.pemetaan.diminta}" → materi terdekat di bank: ${item.pemetaan.dipakai}.` : `📅 Agenda: "${item.pemetaan.diminta}" belum ada di bank materi${item.pemetaan.dipakai ? ` (${item.pemetaan.dipakai})` : ""}; video ini memakai rotasi biasa.`) : null,
       answers.length ? `🔑 Kunci jawaban (cek sendiri): ${answers.join(" | ")}` : null,
       `Naskah: /edu naskah ${item.id}`
     ].filter(Boolean).join("\n");
@@ -353,8 +392,14 @@ const kb = (id) => [[{ text: "✅ Setujui & jadwalkan", callback_data: `ed:ok:${
     return n;
   }
 
-  function scheduledTimes(exceptId = null) {
-    return load().items.filter((i) => ["scheduled", "uploading"].includes(i.status) || (i.status === "approved" && i.publishAt)).filter((i) => String(i.id) !== String(exceptId)).map((i) => i.publishAt).filter(Boolean);
+  const isShort = (i) => i.kind === "short";
+  /** Jam tayang terdekat yang kosong. Short dan video pelajaran punya jam tayang & hari terpakai masing-masing. */
+  function slotFor(item) {
+    const short = isShort(item);
+    return nextPublishAt({ now: now(), publishTime: short ? config.shortsPublishTime : config.publishTime, tz, taken: scheduledTimes(item.id, short) });
+  }
+  function scheduledTimes(exceptId = null, short = false) {
+    return load().items.filter((i) => isShort(i) === short).filter((i) => ["scheduled", "uploading"].includes(i.status) || (i.status === "approved" && i.publishAt)).filter((i) => String(i.id) !== String(exceptId)).map((i) => i.publishAt).filter(Boolean);
   }
 
   /** Buat draf (otomatis/manual). Tidak melempar; mengabari pemilik bila gagal. */
@@ -416,7 +461,7 @@ const kb = (id) => [[{ text: "✅ Setujui & jadwalkan", callback_data: `ed:ok:${
     save();
     try {
       if (!(item.publishAt && item.publishAt >= now() + 20 * 60_000)) {
-        item.publishAt = nextPublishAt({ now: now(), publishTime: config.publishTime, tz, taken: scheduledTimes(item.id) });
+        item.publishAt = slotFor(item);
         save();
       }
       const extra = item.mode === "motion" ? { madeForKids: true, aiDisclosure: true } : {};
@@ -428,6 +473,7 @@ const kb = (id) => [[{ text: "✅ Setujui & jadwalkan", callback_data: `ed:ok:${
       item.status = "scheduled";
       item.uploadedAt = now();
       save();
+      if (isShort(item) && item.topic) motion?.catatTopik?.(item.topic)?.catch?.(() => {}); // riwayat dicatat setelah benar-benar terunggah
       let thumbNote = "";
       if (item.thumb && fs.existsSync(item.thumb)) {
         const t = await youtube.setThumbnail(r.id, item.thumb);
@@ -468,11 +514,11 @@ const kb = (id) => [[{ text: "✅ Setujui & jadwalkan", callback_data: `ed:ok:${
     if (item.status !== "awaiting") return `Video #${item.id} sudah berstatus "${item.status}".`;
     item.status = "approved";
     item.approvedAt = now();
-    item.publishAt = nextPublishAt({ now: now(), publishTime: config.publishTime, tz, taken: scheduledTimes(item.id) });
+    item.publishAt = slotFor(item);
     item.tries = 0;
     item.retryAt = 0;
     save();
-    if (item.mode === "motion" && item.topic) motion?.catatTopik?.(item.topic)?.catch?.(() => {});
+    if (item.mode === "motion" && !isShort(item) && item.topic) motion?.catatTopik?.(item.topic)?.catch?.(() => {});
     if (!ytReady()) {
       return `👍 Video #${item.id} disetujui, tapi YouTube belum tersambung (${youtube?.status?.().broken || "isi YT_CLIENT_ID / YT_CLIENT_SECRET / YT_REFRESH_TOKEN di .env"}). Video disimpan; begitu YouTube siap akan diunggah otomatis, atau ketik /edu ulang ${item.id}.`;
     }
@@ -505,6 +551,12 @@ const kb = (id) => [[{ text: "✅ Setujui & jadwalkan", callback_data: `ed:ok:${
     }
     // again
     if (item.status !== "awaiting") return `Video #${item.id} sudah berstatus "${item.status}".`;
+    if (isShort(item)) {
+      if (!shortsHook?.ulang) return "Pembuat Short belum terpasang.";
+      discard(item, "dibuat ulang");
+      shortsHook.ulang(item);
+      return `🔁 Short #${item.id} dibuang. Membuat pengganti (${item.topic}); kirim ulang dalam beberapa menit.`;
+    }
     if (producing) return "Sedang ada video yang dibuat. Tunggu sebentar, lalu coba lagi.";
     discard(item, "dibuat ulang");
     if (item.mode === "motion") {
@@ -530,11 +582,11 @@ const kb = (id) => [[{ text: "✅ Setujui & jadwalkan", callback_data: `ed:ok:${
         for (const it of s.items) if (it.status === "approved" && (it.retryAt || 0) <= t && !jobs.size) startUpload(it);
       }
 
-      if (motionAktif()) await motion.tickTema();
+      if (temaTersedia()) await motion.tickTema();
 
       // buat video harian
       if (!s.paused && !producing && !s.day.produced && minutesOfDay(t, tz) >= hhmmToMin(config.renderTime) && s.day.attempts < config.maxAttempts) {
-        const awaiting = s.items.filter((i) => i.status === "awaiting").length;
+        const awaiting = s.items.filter((i) => i.status === "awaiting" && !isShort(i)).length;
         const gap = s.day.lastErrorQuota ? 90 * 60_000 : 20 * 60_000;
         if (awaiting < config.maxPending && t - (s.day.lastAttemptAt || 0) >= gap) startProduce({ source: "otomatis" });
       }
@@ -654,12 +706,13 @@ const kb = (id) => [[{ text: "✅ Setujui & jadwalkan", callback_data: `ed:ok:${
     return HELP;
   }
 
-  const temaTersedia = () => motionAktif() && config.enabled;
-  const temaCallback = async (data) => (temaTersedia() ? motion.callback(data) : "Fitur tema mingguan hanya aktif pada EDU_MODE=motion.");
-  const temaPerintah = async (arg) => (temaTersedia() ? motion.perintah(arg) : "Fitur tema mingguan hanya aktif pada EDU_MODE=motion (dan EDU_ENABLED=true).");
+  // agenda mingguan berjalan walau video pelajaran memakai papan tulis (Short harian memakainya, lihat shorts-harian.js)
+  const temaTersedia = () => Boolean(motion) && config.enabled;
+  const temaCallback = async (data, o) => (temaTersedia() ? motion.callback(data, o) : "Fitur tema mingguan tidak aktif (butuh modul motion dan EDU_ENABLED=true).");
+  const temaPerintah = async (arg, o) => (temaTersedia() ? motion.perintah(arg, o) : "Fitur tema mingguan tidak aktif (butuh modul motion dan EDU_ENABLED=true).");
   const temaTeks = async (text, o) => (temaTersedia() ? motion.teks(text, o) : { handled: false });
 
-  return { config, check, handle, decide, temaCallback, temaPerintah, temaTeks, describe, idle, startProduce, load, nextSlot: () => nextPublishAt({ now: now(), publishTime: config.publishTime, tz, taken: scheduledTimes() }), enabled: () => config.enabled };
+  return { config, check, handle, decide, ajukanShort, pasangShorts, linkPelajaran, shortMenunggu, temaCallback, temaPerintah, temaTeks, describe, idle, startProduce, load, nextSlot: () => nextPublishAt({ now: now(), publishTime: config.publishTime, tz, taken: scheduledTimes() }), enabled: () => config.enabled };
 }
 
 /** Rakitan bawaan untuk index.js: perakit, sampul, dan pemuat kartu sains dari berkas. */
