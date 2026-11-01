@@ -1,0 +1,84 @@
+{
+  "usulan": {
+    "minggu": "2026-11-02",
+    "status": "disetujui",
+    "dibuat": "2026-10-31T10:10:11.561Z",
+    "hari": [
+      {
+        "tanggal": "2026-11-02",
+        "hari": 1,
+        "nama": "Senin",
+        "templat": "kuis-kilat",
+        "templatNama": "Kuis Kilat",
+        "topik": "Berapa jumlah sisi segitiga?",
+        "sumber": "ai"
+      },
+      {
+        "tanggal": "2026-11-03",
+        "hari": 2,
+        "nama": "Selasa",
+        "templat": "hitung-langkah",
+        "templatNama": "Hitung Langkah demi Langkah",
+        "topik": "Cara menambah 23 dan 47",
+        "sumber": "ai"
+      },
+      {
+        "tanggal": "2026-11-04",
+        "hari": 3,
+        "nama": "Rabu",
+        "templat": "fakta-angka",
+        "templatNama": "Fakta Angka",
+        "topik": "Fakta menarik angka 7",
+        "sumber": "ai"
+      },
+      {
+        "tanggal": "2026-11-05",
+        "hari": 4,
+        "nama": "Kamis",
+        "templat": "perbandingan-bar",
+        "templatNama": "Perbandingan Batang",
+        "topik": "Bandingkan tinggi pohon kelapa",
+        "sumber": "ai"
+      },
+      {
+        "tanggal": "2026-11-06",
+        "hari": 5,
+        "nama": "Jumat",
+        "templat": "proses-tahapan",
+        "templatNama": "Proses Bertahap",
+        "topik": "Membuat origami burung",
+        "sumber": "ai"
+      },
+      {
+        "tanggal": "2026-11-07",
+        "hari": 6,
+        "nama": "Sabtu",
+        "templat": "mitos-fakta",
+        "templatNama": "Mitos atau Fakta",
+        "topik": "Mitos kucing punya 9 nyawa",
+        "sumber": "ai"
+      },
+      {
+        "tanggal": "2026-11-08",
+        "hari": 7,
+        "nama": "Minggu",
+        "templat": "pola-angka",
+        "templatNama": "Pola Angka",
+        "topik": "Deret angka 2,4,6,?",
+        "sumber": "ai"
+      }
+    ],
+    "disetujui": "2026-10-31T10:10:45.301Z",
+    "disetujuiOleh": "owner"
+  },
+  "temaOwner": [],
+  "riwayat": [
+    "Sifat Cahaya",
+    "Jarak, kecepatan, dan waktu",
+    "Kenapa langit berwarna biru"
+  ],
+  "penanda": {
+    "usul": "2026-11-02"
+  },
+  "menunggu": null
+}

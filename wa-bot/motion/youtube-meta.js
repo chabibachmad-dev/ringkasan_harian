@@ -2,9 +2,10 @@
 import { potong } from "./engine.js";
 
 export function judulDari(templatId, isi, hook) {
+  if (Array.isArray(isi?.bab)) return potong(isi.judul || hook || "Belajar Bareng", 88);
   const p = { "kuis-kilat": isi.pertanyaan, "hitung-langkah": isi.judul ? `${isi.judul}: ${isi.soal}` : isi.soal, "fakta-angka": isi.judul, "perbandingan-bar": isi.judul,
     "proses-tahapan": isi.judul, "mitos-fakta": isi.mitos ? `Mitos atau fakta? ${isi.mitos}` : "", "pola-angka": `${isi.judul} ${(isi.deret || []).join(", ")}, ...?`,
-    peringkat: isi.judul, "garis-waktu": isi.judul, "cerita-fakta": isi.judul }[templatId];
+    peringkat: isi.judul, "garis-waktu": isi.judul, "cerita-fakta": isi.judul }[String(templatId).replace(/-teks$/, "")];
   return potong(p || hook || "Belajar Bareng", 88);
 }
 export function metaShorts({ templatId, isi, hook, topik, kanal = "Belajar Bareng", tanggal = "", sumber = [], linkVideo = "" }) {

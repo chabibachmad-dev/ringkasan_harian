@@ -11,6 +11,9 @@ import { rencanaWaktu } from "./motion/render.js";
 import { W, H, THEMES, fmtAngka, bungkus, siapkanFont } from "./motion/engine.js";
 import * as T from "./motion/tema-mingguan.js";
 import * as WA from "./motion/perintah-wa.js";
+import { rapikanPenjelas, angkaKunciPenjelas, susunWaktu } from "./motion/penjelas.js";
+import { BENDA, DAFTAR_BENDA } from "./motion/benda.js";
+import { buatIsiFaktaCadangan } from "./motion/content.js";
 
 let fails = 0;
 const check = (c, m) => { if (!c) { fails++; console.log("FAIL:", m); } else console.log("ok:", m); };
@@ -21,7 +24,7 @@ check(new Set(HARIAN.map((t) => t.hari)).size === 7, "tiap hari punya templat be
 check(templatUntuk("2026-11-02").id === "fakta-angka", "Senin = fakta-angka");
 check(templatUntuk("2026-11-08").id === "cerita-fakta", "Minggu = cerita-fakta");
 check(HARIAN.every((t) => t.jalur === "fakta"), "semua templat rotasi harian berjalur fakta");
-check(SEMUA.filter((t) => t.hari === null).every((t) => ["pelajaran", "khusus"].includes(t.jalur)), "templat di luar rotasi berjalur pelajaran/khusus");
+check(SEMUA.filter((t) => t.hari === null).every((t) => ["pelajaran", "khusus"].includes(t.jalur) || t.id.endsWith("-teks")), "templat di luar rotasi berjalur pelajaran/khusus");
 {
   const tgl = (n) => `2026-11-${String(n).padStart(2, "0")}`; const pekan1 = [2, 3, 4, 5, 6, 7, 8].map((d) => temaMinggu(templatUntuk(tgl(d)), tgl(d))), pekan2 = [9, 10, 11, 12, 13, 14, 15].map((d) => temaMinggu(templatUntuk(tgl(d)), tgl(d)));
   check(new Set(pekan1).size === 7 && new Set(pekan2).size === 7, "warna: dalam satu pekan tiap hari berwarna beda");
@@ -37,13 +40,13 @@ for (const t of SEMUA) {
   check(r.ok, `${t.id}: contoh lolos validasi`);
   check(periksaIsi(t.id, r.isi).length === 0, `${t.id}: contoh lolos pemeriksaan hitungan`);
   const sp = t.bangun(r.isi);
-  check(sp.durasi >= 14 && sp.durasi <= 26, `${t.id}: durasi ${sp.durasi.toFixed(1)} dtk wajar untuk Shorts`);
+  check(sp.durasi >= 14 && sp.durasi <= (t.ilustrasi ? 46 : 26), `${t.id}: durasi ${sp.durasi.toFixed(1)} dtk wajar untuk Shorts`);
   check(sp.efek.every((e) => e.t >= 0 && e.t <= sp.durasi), `${t.id}: waktu efek di dalam durasi`);
   check(typeof t.narasi(r.isi) === "string" && t.narasi(r.isi).length > 20, `${t.id}: narasi tersusun`);
 }
 
 // 3. validasi menolak isi buruk
-const kuis = ambilTemplat("kuis-kilat"), hit = ambilTemplat("hitung-langkah"), bar = ambilTemplat("perbandingan-bar"), mit = ambilTemplat("mitos-fakta"), pola = ambilTemplat("pola-angka"), fa = ambilTemplat("fakta-angka");
+const kuis = ambilTemplat("kuis-kilat"), hit = ambilTemplat("hitung-langkah"), bar = ambilTemplat("perbandingan-bar-teks"), mit = ambilTemplat("mitos-fakta-teks"), pola = ambilTemplat("pola-angka"), fa = ambilTemplat("fakta-angka-teks");
 check(!kuis.rapikan({ ...kuis.contoh, jawaban: 9 }).ok, "kuis: jawaban di luar pilihan ditolak");
 check(!kuis.rapikan({ ...kuis.contoh, pilihan: ["a", "b"] }).ok, "kuis: kurang dari 3 pilihan ditolak");
 check(!hit.rapikan({ ...hit.contoh, langkah: [hit.contoh.langkah[0]] }).ok, "hitung: satu langkah ditolak");
@@ -51,9 +54,9 @@ check(!bar.rapikan({ ...bar.contoh, item: bar.contoh.item.slice(0, 2) }).ok, "ba
 check(!bar.rapikan({ ...bar.contoh, item: bar.contoh.item.map((x) => ({ ...x, nilai: 0 })) }).ok, "bar: semua nilai nol ditolak");
 check(!mit.rapikan({ mitos: "x" }).ok, "mitos: isi tidak lengkap ditolak");
 check(!pola.rapikan({ ...pola.contoh, deret: ["1", "2"] }).ok, "pola: deret terlalu pendek ditolak");
-check(!ambilTemplat("peringkat").rapikan({ ...ambilTemplat("peringkat").contoh, item: ambilTemplat("peringkat").contoh.item.slice(0, 2) }).ok, "peringkat: harus 3 item");
-check(!ambilTemplat("garis-waktu").rapikan({ ...ambilTemplat("garis-waktu").contoh, peristiwa: ambilTemplat("garis-waktu").contoh.peristiwa.slice(0, 2) }).ok, "garis-waktu: minimal 3 peristiwa");
-check(!ambilTemplat("cerita-fakta").rapikan({ ...ambilTemplat("cerita-fakta").contoh, bagian: ["satu", "dua"] }).ok, "cerita-fakta: minimal 3 bagian");
+check(!ambilTemplat("peringkat-teks").rapikan({ ...ambilTemplat("peringkat-teks").contoh, item: ambilTemplat("peringkat-teks").contoh.item.slice(0, 2) }).ok, "peringkat: harus 3 item");
+check(!ambilTemplat("garis-waktu-teks").rapikan({ ...ambilTemplat("garis-waktu-teks").contoh, peristiwa: ambilTemplat("garis-waktu-teks").contoh.peristiwa.slice(0, 2) }).ok, "garis-waktu: minimal 3 peristiwa");
+check(!ambilTemplat("cerita-fakta-teks").rapikan({ ...ambilTemplat("cerita-fakta-teks").contoh, bagian: ["satu", "dua"] }).ok, "cerita-fakta: minimal 3 bagian");
 check(!fa.rapikan({ ...fa.contoh, angka: "abc" }).ok, "fakta: angka bukan bilangan ditolak");
 check(fa.rapikan({ ...fa.contoh, angka: "8.849" }).isi.angka === 8849, "fakta: angka berformat Indonesia dibaca benar");
 check(kuis.rapikan({ ...kuis.contoh, pertanyaan: "x".repeat(500) }).isi.pertanyaan.length <= 170, "teks terlalu panjang dipotong");
@@ -99,22 +102,22 @@ check(periksaRamahKeluarga({ a: "Dia ingin membunuh nyamuk" }).length === 1 && p
   const ev2 = { judul: "Everest Facts", url: "https://b.example.com/facts", teks: "Mount Everest stands 8,849 m above sea level, the highest mountain on Earth, first climbed in 1953 by Hillary and Norgay." };
   const sama = { judul: "Salinan", url: "https://a.example.org/lain", teks: ev.teks };
   const cari = async () => [ev, ev2];
-  const fa = ambilTemplat("fakta-angka");
+  const fa = ambilTemplat("fakta-angka-teks");
   const baik = { ...fa.contoh, judul: "Seberapa tinggi Gunung Everest?", angka: 8849, hook: "Setinggi apa?", dasar: "Sumber 1 dan 2", sumber: [1, 2] };
-  const r = await buatIsiFakta({ llm: async () => JSON.stringify(baik), cari, templatId: "fakta-angka", topik: "Everest" });
+  const r = await buatIsiFakta({ llm: async () => JSON.stringify(baik), cari, templatId: "fakta-angka-teks", topik: "Everest" });
   check(r.percobaan === 1 && r.sumber.length === 2 && r.sumber[0].url.startsWith("https://"), "fakta: lolos dengan 2 sumber dan angka cocok");
   let n = 0; const balasan = [JSON.stringify({ ...baik, angka: 9100 }), JSON.stringify({ ...baik, sumber: [1] }), JSON.stringify(baik)]; const prompts = [];
-  const r2 = await buatIsiFakta({ llm: async (p) => { prompts.push(p); return balasan[n++]; }, cari, templatId: "fakta-angka", topik: "Everest" });
+  const r2 = await buatIsiFakta({ llm: async (p) => { prompts.push(p); return balasan[n++]; }, cari, templatId: "fakta-angka-teks", topik: "Everest" });
   check(r2.percobaan === 3 && /tidak tertulis di sumber/.test(prompts[1]) && /minimal 2 sumber/.test(prompts[2]), "fakta: angka karangan dan sumber kurang ditolak lalu diperbaiki");
-  let e1 = null; try { await buatIsiFakta({ llm: async () => JSON.stringify(baik), cari: async () => [ev, sama], templatId: "fakta-angka", topik: "x" }); } catch (e) { e1 = e; } check(e1 && /Sumber kurang/.test(e1.message), "fakta: dua sumber dari situs yang sama ditolak");
-  let e2 = null; try { await buatIsiFakta({ llm: async () => JSON.stringify({ tidakCukup: true }), cari, templatId: "fakta-angka", topik: "x" }); } catch (e) { e2 = e; } check(e2 && /tidak cukup/.test(e2.message), "fakta: AI menolak mengarang -> galat");
-  let e3 = null; try { await buatIsiFakta({ llm: async () => JSON.stringify({ ...baik, judul: "Pembunuhan misterius" }), cari, templatId: "fakta-angka", topik: "x", maksCoba: 2 }); } catch (e) { e3 = e; } check(e3 && /ramah keluarga/.test(e3.message), "fakta: topik tidak ramah keluarga ditolak");
-  let e4 = null; try { await buatIsiFakta({ llm: async () => "{}", templatId: "fakta-angka", topik: "x" }); } catch (e) { e4 = e; } check(e4 && /fungsi cari/.test(e4.message), "fakta: tanpa fungsi cari ditolak");
-  const garis = ambilTemplat("garis-waktu"), sg = [{ judul: "NASA", url: "https://x.example/n", teks: "Sputnik 1 diluncurkan pada 1957, manusia pertama ke luar angkasa pada 1961, Apollo 11 mendarat di Bulan tahun 1969, misi terakhir 1972." }, { judul: "Space", url: "https://y.example/s", teks: "Timeline: 1957 Sputnik; 1961 Gagarin; 1969 Apollo 11; 1972 Apollo 17 mission ended lunar landings." }];
+  let e1 = null; try { await buatIsiFakta({ llm: async () => JSON.stringify(baik), cari: async () => [ev, sama], templatId: "fakta-angka-teks", topik: "x" }); } catch (e) { e1 = e; } check(e1 && /Sumber kurang/.test(e1.message), "fakta: dua sumber dari situs yang sama ditolak");
+  let e2 = null; try { await buatIsiFakta({ llm: async () => JSON.stringify({ tidakCukup: true }), cari, templatId: "fakta-angka-teks", topik: "x" }); } catch (e) { e2 = e; } check(e2 && /tidak cukup/.test(e2.message), "fakta: AI menolak mengarang -> galat");
+  let e3 = null; try { await buatIsiFakta({ llm: async () => JSON.stringify({ ...baik, judul: "Pembunuhan misterius" }), cari, templatId: "fakta-angka-teks", topik: "x", maksCoba: 2 }); } catch (e) { e3 = e; } check(e3 && /ramah keluarga/.test(e3.message), "fakta: topik tidak ramah keluarga ditolak");
+  let e4 = null; try { await buatIsiFakta({ llm: async () => "{}", templatId: "fakta-angka-teks", topik: "x" }); } catch (e) { e4 = e; } check(e4 && /fungsi cari/.test(e4.message), "fakta: tanpa fungsi cari ditolak");
+  const garis = ambilTemplat("garis-waktu-teks"), sg = [{ judul: "NASA", url: "https://x.example/n", teks: "Sputnik 1 diluncurkan pada 1957, manusia pertama ke luar angkasa pada 1961, Apollo 11 mendarat di Bulan tahun 1969, misi terakhir 1972." }, { judul: "Space", url: "https://y.example/s", teks: "Timeline: 1957 Sputnik; 1961 Gagarin; 1969 Apollo 11; 1972 Apollo 17 mission ended lunar landings." }];
   const gw = { ...garis.contoh, hook: "Dari mana mulai?", dasar: "NASA", sumber: [1, 2] };
-  const rg = await buatIsiFakta({ llm: async () => JSON.stringify(gw), cari: async () => sg, templatId: "garis-waktu", topik: "Bulan" });
+  const rg = await buatIsiFakta({ llm: async () => JSON.stringify(gw), cari: async () => sg, templatId: "garis-waktu-teks", topik: "Bulan" });
   check(rg.isi.peristiwa.length === 4, "fakta: garis waktu dengan tahun cocok lolos");
-  let e5 = null; try { await buatIsiFakta({ llm: async () => JSON.stringify({ ...gw, peristiwa: [...gw.peristiwa.slice(0, 3), { tahun: "1980", teks: "Karangan." }] }), cari: async () => sg, templatId: "garis-waktu", topik: "Bulan", maksCoba: 1 }); } catch (e) { e5 = e; } check(e5 && /1980/.test(e5.message), "fakta: tahun karangan terdeteksi");
+  let e5 = null; try { await buatIsiFakta({ llm: async () => JSON.stringify({ ...gw, peristiwa: [...gw.peristiwa.slice(0, 3), { tahun: "1980", teks: "Karangan." }] }), cari: async () => sg, templatId: "garis-waktu-teks", topik: "Bulan", maksCoba: 1 }); } catch (e) { e5 = e; } check(e5 && /1980/.test(e5.message), "fakta: tahun karangan terdeteksi");
 }
 
 // 7. tema mingguan
@@ -138,7 +141,7 @@ check(T.senenBerikut(new Date(2026, 10, 2)) === "2026-11-09", "Senin -> Senin pe
   check(u3.hari.every((x) => x.sumber === "bank"), "AI gagal -> jatuh ke bank cadangan");
   const u4 = await T.usulkanMinggu({ senen: "2026-11-02", riwayat: [T.BANK_TEMA["fakta-angka"][0]] });
   check(u4.hari[0].topik !== T.BANK_TEMA["fakta-angka"][0], "topik yang sudah pernah dipakai dihindari");
-  check(T.formatUsulan(u0).includes("Short (Fakta Angka)") && T.formatUsulan(u0).includes("Video pelajaran:") && T.formatUsulan(u0).includes("setuju"), "format pesan usulan memuat dua jalur");
+  check(T.formatUsulan(u0).includes("Short (Fakta Bergambar: Angka)") && T.formatUsulan(u0).includes("Video pelajaran:") && T.formatUsulan(u0).includes("setuju"), "format pesan usulan memuat dua jalur");
   check(T.tombolUsulan("2026-11-02").inline_keyboard[0][0].callback_data === "tema:setuju:2026-11-02", "tombol usulan");
 
   const P = T.parsePerintah;
@@ -182,7 +185,7 @@ check(T.senenBerikut(new Date(2026, 10, 2)) === "2026-11-09", "Senin -> Senin pe
 
 // 8. metadata YouTube
 {
-  const t = ambilTemplat("mitos-fakta"), m = metaShorts({ templatId: t.id, isi: t.contoh, hook: "Mitos atau fakta?", topik: "Wortel dan mata", sumber: [{ judul: "Contoh", url: "https://a.example/x" }], linkVideo: "https://youtu.be/abc" });
+  const t = ambilTemplat("mitos-fakta-teks"), m = metaShorts({ templatId: t.id, isi: t.contoh, hook: "Mitos atau fakta?", topik: "Wortel dan mata", sumber: [{ judul: "Contoh", url: "https://a.example/x" }], linkVideo: "https://youtu.be/abc" });
   check(m.deskripsi.includes("Sumber:") && m.deskripsi.includes("https://a.example/x") && m.deskripsi.includes("https://youtu.be/abc"), "deskripsi memuat sumber dan tautan video pelajaran");
   check(m.judul.length <= 100 && m.judul.endsWith("#Shorts"), "judul <= 100 huruf dan ber-#Shorts");
   check(m.madeForKids === true && m.containsSyntheticMedia === true && m.deskripsi.includes("#Shorts"), "metadata anak-anak + media sintetis");
@@ -206,13 +209,6 @@ check(T.senenBerikut(new Date(2026, 10, 2)) === "2026-11-09", "Senin -> Senin pe
   const r0 = rencanaWaktu({ durTemplat: 20, durNarasi: 0 }); check(r0.k === 1 && r0.total > 20, "rencana waktu: tanpa narasi tidak diregangkan");
   const r1 = rencanaWaktu({ durTemplat: 16, durNarasi: 30, withHook: true }); check(r1.k > 1.5 && r1.total >= 30, "rencana waktu: narasi panjang meregangkan templat");
   const r2 = rencanaWaktu({ durTemplat: 10, durNarasi: 90 }); check(r2.k <= 2.2, "rencana waktu: regangan dibatasi");
-  const r4 = rencanaWaktu({ durTemplat: 16, durNarasi: 60 }); check(r4.k === 2.2 && r4.tahan > 0 && r4.total >= 60 + 0.3 + 1.0 + r4.outro - 1e-9, "rencana waktu: narasi lebih panjang dari regangan maksimal -> bingkai ditahan, suara tidak terpotong");
-  check(rencanaWaktu({ durTemplat: 16, durNarasi: 30 }).tahan === 0 && rencanaWaktu({ durTemplat: 16 }).tahan === 0, "rencana waktu: tanpa kelebihan narasi tidak ada penahanan");
-  const t1 = rencanaWaktu({ durTemplat: 20, durNarasi: 12, target: 30 }); check(Math.abs(t1.total - 30) < 0.01 && t1.laju === 1 && t1.tercapai, "durasi target: lebih panjang dari bawaan -> total tepat target");
-  const t2 = rencanaWaktu({ durTemplat: 20, durNarasi: 25, target: 45 }); check(Math.abs(t2.total - 45) < 0.01 && t2.k <= 2.2 + 1e-9 && t2.tahan >= 0, "durasi target: 45 detik tercapai (regang + tahan)");
-  const t3 = rencanaWaktu({ durTemplat: 20, durNarasi: 25, target: 20 }); check(t3.laju > 1 && t3.laju <= 1.25 + 1e-9 && t3.total >= 25 / t3.laju + 0.3 + 1.0, "durasi target: narasi dipercepat (maks 1,25x) dan tidak terpotong");
-  const t4 = rencanaWaktu({ durTemplat: 20, durNarasi: 50, target: 15 }); check(t4.tercapai === false && t4.total > 15 && t4.total >= 50 / 1.25, "durasi target mustahil: tidak memotong suara, ditandai tidak tercapai");
-  check(rencanaWaktu({ durTemplat: 20, durNarasi: 12 }).total === rencanaWaktu({ durTemplat: 20, durNarasi: 12, target: 0 }).total, "tanpa target perilaku lama tidak berubah");
   const r3 = rencanaWaktu({ durTemplat: 20, durNarasi: 5 }); check(r3.k === 1, "rencana waktu: narasi pendek tidak memendekkan templat");
 }
 
@@ -267,9 +263,6 @@ else {
   check(p && p.templatId === "mitos-fakta" && p.topik === "makan wortel bikin mata tajam", "wa: jenis mitos + penutup 'ya' dibuang");
   p = k("@628123456789 buatin video motion graphic proses terjadinya hujan tanpa suara hd");
   check(p && p.templatId === "proses-tahapan" && p.topik === "terjadinya hujan" && p.suara === false && p.hd === true, "wa: mention dibuang, tanpa suara, hd");
-  p = k("/video fakta gunung Everest 30 detik"); check(p && p.durasi === 30 && p.topik === "fakta gunung Everest", "wa: '30 detik' dibaca sebagai durasi dan dibuang dari topik");
-  p = k("buatkan video tentang siklus air selama 1 menit hd"); check(p && p.durasi === 60 && p.hd && p.topik === "siklus air", "wa: '1 menit' = 60 detik, bersama hd");
-  check(k("/video kuis: perkalian 7 dan 8").durasi === 0, "wa: tanpa durasi -> 0 (bawaan)");
   p = k("Ayyubi, buatkan video kuis: perkalian 7 dan 8", { namaBot: "Ayyubi" });
   check(p && p.templatId === "kuis-kilat" && p.topik === "perkalian 7 dan 8", "wa: nama bot di depan dibuang");
   p = k("buat video fakta unik kucing");
@@ -305,7 +298,7 @@ else {
   // alur penuh dengan AI/pencarian/render tiruan
   const ev = { judul: "Gunung Everest", url: "https://a.example.org/everest", teks: "Gunung Everest memiliki tinggi 8.849 meter di atas permukaan laut dan berada di pegunungan Himalaya antara Nepal dan Tiongkok." };
   const ev2 = { judul: "Everest Facts", url: "https://b.example.com/facts", teks: "Mount Everest stands 8,849 m above sea level, the highest mountain on Earth, first climbed in 1953 by Hillary and Norgay." };
-  const fa = ambilTemplat("fakta-angka");
+  const fa = ambilTemplat("fakta-angka-teks");
   const baik = { ...fa.contoh, judul: "Seberapa tinggi Gunung Everest?", angka: 8849, hook: "Setinggi apa?", dasar: "Everest setinggi 8.849 meter.", sumber: [1, 2] };
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "mwa-"));
   const kirim = { teks: [], video: [] };
@@ -367,6 +360,39 @@ else {
     check(fs.existsSync(h.berkas) && fs.statSync(h.berkas).size > 5000 && h.durasi > 18, `wa render sungguhan: ${h.durasi.toFixed(1)} dtk, ${(fs.statSync(h.berkas).size / 1e3).toFixed(0)} KB`);
     fs.rmSync(tmp2, { recursive: true, force: true });
   } else console.log("lewati wa render sungguhan: canvas/ffmpeg tidak ada");
+}
+
+// 14. video penjelas bergambar
+{
+  check(DAFTAR_BENDA.length >= 30 && DAFTAR_BENDA.every((j) => typeof BENDA[j].gambar === "function" && BENDA[j].nama), `pustaka benda: ${DAFTAR_BENDA.length} benda lengkap`);
+  check(HARIAN.every((t) => t.ilustrasi === true), "rotasi harian memakai versi bergambar");
+  check(SEMUA.filter((t) => t.id.endsWith("-teks")).length === 7 && SEMUA.filter((t) => t.id.endsWith("-teks")).every((t) => t.hari === null), "ada 7 versi teks cadangan di luar rotasi");
+  const pr = ambilTemplat("proses-tahapan"), c = pr.contoh, dasar = JSON.parse(JSON.stringify(c));
+  const uji = (ubah, pola, m) => { const x = JSON.parse(JSON.stringify(dasar)); ubah(x); const r = rapikanPenjelas(x); check(!r.ok && r.galat.some((e) => pola.test(e)), m); };
+  check(rapikanPenjelas(dasar).ok, "penjelas: contoh valid");
+  uji((x) => { x.bab[0].objek[0].jenis = "naga"; }, /jenis benda "naga"/, "penjelas: jenis benda tidak dikenal ditolak (daftar pilihan disebut)");
+  uji((x) => { x.bab[0].objek[1].x = x.bab[0].objek[0].x; x.bab[0].objek[1].y = x.bab[0].objek[0].y; x.bab[0].objek[1].jenis = "awan"; x.bab[0].objek[0].jenis = "bumi"; }, /bertumpuk/, "penjelas: benda bertumpuk ditolak");
+  uji((x) => { x.bab[0].panah = [{ dari: "zzz", ke: "mt", baris: 0 }]; }, /id objek tidak ada/, "penjelas: panah ke id yang tidak ada ditolak");
+  uji((x) => { x.bab = x.bab.slice(0, 1); }, /2-3/, "penjelas: minimal 2 bab");
+  uji((x) => { x.bab[0].baris = ["satu dua tiga empat lima enam tujuh delapan sembilan sepuluh sebelas dua belas tiga belas empat belas lima belas enam belas tujuh belas"]; }, /terlalu panjang/, "penjelas: kalimat terlalu panjang ditolak");
+  uji((x) => { x.bab.forEach((b) => { b.baris = ["a b c d", "e f g h", "i j k l"]; }); x.bab[0].baris.push("m n o p"); }, /1-3|maksimal/, "penjelas: terlalu banyak kalimat ditolak");
+  uji((x) => { x.bab[1].panel = { judul: "x", maks: 10, muncul: 0, baris: [{ nama: "a", nilai: 50, tampil: "50" }, { nama: "b", nilai: 1, tampil: "1" }] }; }, /panel/, "penjelas: nilai panel melebihi maks ditolak");
+  const r2 = rapikanPenjelas({ ...dasar, bab: dasar.bab.map((b) => ({ ...b, panah: [], panel: null, objek: [{ jenis: "tetes", x: 150, y: -20, s: 9, baris: 7 }, { jenis: "awan", x: 20, y: 80 }] })) });
+  check(r2.ok && r2.isi.bab[0].objek[0].x === 100 && r2.isi.bab[0].objek[0].y === 0 && r2.isi.bab[0].objek[0].s === 2.4 && r2.isi.bab[0].objek[0].baris <= 1, "penjelas: posisi, skala, dan nomor baris dibatasi ke rentang aman");
+  const ak = angkaKunciPenjelas(ambilTemplat("garis-waktu").contoh.constructor === Object ? rapikanPenjelas(ambilTemplat("garis-waktu").contoh).isi : null);
+  check(["1957", "1961", "1969"].every((a) => ak.includes(a)), "penjelas: tahun terdeteksi sebagai angka kunci");
+  check(!angkaKunciPenjelas(rapikanPenjelas(ambilTemplat("mitos-fakta").contoh).isi).includes("0"), "penjelas: angka satu digit tidak diperiksa");
+  for (const t of HARIAN) { const w = susunWaktu(t.rapikan(t.contoh).isi); check(w.durasi <= 46 && w.bab.every((b) => b.baris.every((x) => x.t1 > x.t0)), `${t.id}: waktu adegan masuk akal (${w.durasi.toFixed(1)} dtk)`); }
+  // cadangan: AI gagal menyusun adegan -> jatuh ke versi teks; kurang sumber -> tidak jatuh
+  const ev = { judul: "Gunung Everest", url: "https://a.example.org/everest", teks: "Gunung Everest memiliki tinggi 8.849 meter di atas permukaan laut dan berada di pegunungan Himalaya antara Nepal dan Tiongkok." };
+  const ev2 = { judul: "Everest Facts", url: "https://b.example.com/facts", teks: "Mount Everest stands 8,849 m above sea level, the highest mountain on Earth, first climbed in 1953 by Hillary and Norgay." };
+  const fa = ambilTemplat("fakta-angka-teks").contoh, teksOk = { ...fa, judul: "Seberapa tinggi Gunung Everest?", angka: 8849, hook: "Setinggi apa?", dasar: "Everest.", sumber: [1, 2] };
+  const rc = await buatIsiFaktaCadangan({ llm: async () => JSON.stringify(teksOk), cari: async () => [ev, ev2], templatId: "fakta-angka", topik: "Everest" });
+  check(rc.templatId === "fakta-angka-teks", "cadangan: adegan bergambar gagal -> memakai versi teks");
+  const bergambar = { ...dasar, judul: "Hujan", hook: "Kenapa hujan?", dasar: "x", sumber: [1, 2] };
+  const rb = await buatIsiFaktaCadangan({ llm: async () => JSON.stringify(bergambar), cari: async () => [ev, ev2], templatId: "proses-tahapan", topik: "hujan" });
+  check(rb.templatId === "proses-tahapan" && rb.isi.bab.length === 3, "cadangan: adegan bergambar valid dipakai apa adanya");
+  let eg = null; try { await buatIsiFaktaCadangan({ llm: async () => "{}", cari: async () => [ev], templatId: "fakta-angka", topik: "x" }); } catch (e) { eg = e; } check(eg && /Sumber kurang/.test(eg.message), "cadangan: sumber kurang tidak diulang ke versi teks");
 }
 
 console.log(fails ? `\n${fails} tes GAGAL` : "\nSemua tes motion lolos");

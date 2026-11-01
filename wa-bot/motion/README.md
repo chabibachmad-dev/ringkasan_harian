@@ -12,30 +12,34 @@ Video vertikal 9:16 dibuat sepenuhnya dari kode: gambar dengan kanvas Node (`@na
 - Penutup: ajakan menonton pelajaran hari ini + ikuti kanal.
 - Volume dinormalkan ke sekitar -14 LUFS; musik otomatis mengecil saat narator bicara (sidechain).
 
-## Tujuh templat fakta (rotasi harian)
-| Hari | Templat | Isi |
-|---|---|---|
-| Senin | fakta-angka | satu angka menghitung naik dalam cincin + 0–3 fakta |
-| Selasa | peringkat | 3 hal teratas, dari nomor 3 ke nomor 1 |
-| Rabu | mitos-fakta | klaim distempel MITOS, kartu berbalik jadi FAKTA |
-| Kamis | perbandingan-bar | 3–5 batang tumbuh berurutan + kesimpulan |
-| Jumat | proses-tahapan | 3–5 tahap bergaris alir (bisa siklus) |
-| Sabtu | garis-waktu | 3–5 peristiwa berurutan dengan tahun |
-| Minggu | cerita-fakta | judul + 3–4 bagian + kartu "INTINYA" |
+## Tujuh gaya Short bergambar (rotasi harian)
+Tiap Short berupa adegan ilustrasi (benda vektor yang digambar dari kode), bukan hanya teks: kamera bergeser dan zoom antar-bab, benda masuk saat kalimatnya dibacakan, ada label, panah penghubung, panel batang angka, takarir kata demi kata, kartu "Intinya". Pustaka 33 benda (`benda.js`): matahari, bulan, bumi, planet, awan, awan hujan, gunung, gunung berapi, pohon, daun, bunga, tetes air, laut, kapal, balok besi, roda gigi, lampu, baterai, magnet, termometer, jam, buku, rumah, roket, gelas ukur, lingkaran pecahan, ikan, orang, petir, kompas, pelangi, panah besar, dll.
 
-Templat tambahan di luar rotasi (jalur `pelajaran`, `khusus`): `kuis-kilat`, `hitung-langkah`, `pola-angka`, `lingkaran-pi`.
+| Hari | Id | Gaya | Contoh |
+|---|---|---|---|
+| Senin | fakta-angka | satu angka mengejutkan + panel pembanding | Tinggi Gunung Everest |
+| Selasa | peringkat | nomor 3, 2, lalu 1 | 3 benda terbesar di tata surya |
+| Rabu | mitos-fakta | mitos, fakta, sebab | Petir tidak menyambar dua kali? |
+| Kamis | perbandingan-bar | dua sisi + panel batang | Air beku dan mendidih |
+| Jumat | proses-tahapan | tahap berurutan + panah | Bagaimana hujan terbentuk |
+| Sabtu | garis-waktu | peristiwa berurutan dengan tahun | Perjalanan manusia ke Bulan |
+| Minggu | cerita-fakta | sebab-akibat | Kenapa langit biru |
 
-Warna berganti tiap pekan (`temaMinggu(templat, tanggal)`): dalam satu pekan semua hari berbeda warna, pekan berikutnya semuanya bergeser, jadi templat yang sama tidak tampil identik dua pekan berturut-turut.
+Struktur isi (JSON, divalidasi `rapikanPenjelas`): 2-3 bab; tiap bab 1-3 kalimat narasi, 2-6 benda (jenis, posisi x/y 0-100, skala, nomor kalimat saat muncul, gaya masuk, label), 0-3 panah, panel opsional, lalu kalimat "inti". Aturan otomatis: jenis benda harus ada di pustaka, benda tidak boleh bertumpuk, id panah harus ada, total maksimal 8 kalimat dan 46 detik. Semua angka 2 digit ke atas (tahun, ribuan, desimal) harus tertulis di sumber (`angkaKunciPenjelas`).
+
+Cadangan: versi teks lama tetap ada dengan akhiran `-teks` (mis. `fakta-angka-teks`, di luar rotasi). `buatIsiFaktaCadangan` mencoba adegan bergambar dulu; bila AI gagal menyusunnya (bukan karena sumber kurang) otomatis jatuh ke versi teks, jadi video harian tetap jadi.
+
+Menambah benda: tambah satu entri di `benda.js` (gambar(g,t,o) berpusat di 0,0, lebar sekitar 100-160), langsung tersedia untuk AI lewat daftar di prompt. Lihat `penjelas/` untuk contoh adegan buatan tangan sepenuhnya (kapal mengapung) dan `ilustrasi.js` untuk kamera, label, takarir, panel.
 
 ## Isi fakta berbasis sumber (`content.js` → `buatIsiFakta`)
 ```js
 import { templatUntuk, temaMinggu } from "./motion/templates/index.js";
-import { buatIsiFakta } from "./motion/content.js";
+import { buatIsiFaktaCadangan } from "./motion/content.js";
 import { renderVideo } from "./motion/render.js";
-const t = templatUntuk("2026-11-02");   // Senin -> fakta-angka
-const r = await buatIsiFakta({ llm, cari, templatId: t.id, topik: "Tinggi Gunung Everest" });
-// r = { isi, hook, dasar, narasi, sumber:[{judul,url}], percobaan }
-await renderVideo({ templatId: t.id, isi: r.isi, hook: r.hook, narasi: "narasi.wav",
+const t = templatUntuk("2026-11-02");   // Senin -> fakta-angka (bergambar)
+const r = await buatIsiFaktaCadangan({ llm, cari, templatId: t.id, topik: "Tinggi Gunung Everest" });
+// r = { isi, hook, dasar, narasi, sumber:[{judul,url}], percobaan, templatId }  (templatId bisa "-teks" bila cadangan terpakai)
+await renderVideo({ templatId: r.templatId, isi: r.isi, hook: r.hook, narasi: "narasi.wav",
   teaser: "Pelajaran: Siklus air", teaserLabel: "TONTON JUGA",
   tema: temaMinggu(t, "2026-11-02"), keluar: "short.mp4" });
 ```
@@ -69,3 +73,7 @@ Salin satu berkas di `templates/`, ubah `id`, `tema`, `rapikan` (validasi isi), 
 - `node test-motion.mjs` (tes lengkap; render uji dilewati bila `@napi-rs/canvas`/ffmpeg tidak ada).
 - `node motion/render-contoh.mjs folder 1.5` merender 7 contoh Short (1080×1920).
 - Font Inter (lisensi SIL OFL 1.1) disertakan dalam `fonts/` (subset Latin).
+
+## Foto stok (Shutterstock) - `../media/gambar-stok.js`
+Bukan bagian motion, tetapi dikirim dalam paket yang sama. Perintah WA (pemilik; kirim fotonya sebagai DOKUMEN supaya tidak dikecilkan WhatsApp): keterangan `upscale` (perbesar bila di bawah 4 MP, target 5 MP, hasil JPEG kualitas tertinggi, dikirim balik sebagai dokumen), `cek shutterstock` (hanya laporan syarat), `/stok bantuan`.
+Batas: pembesaran maksimal 2,5 kali (di atasnya ditolak, pasti buram); di atas 1,6 kali diberi peringatan. Pembesaran tidak menambah detail asli. `node test-gambar-stok.mjs` untuk tes.

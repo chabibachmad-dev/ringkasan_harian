@@ -1,0 +1,22 @@
+PATCH: Motion graphic Shorts fakta (7 templat harian + tema mingguan dua jalur)
+Berkas baru saja (aman diterapkan lewat zip Telegram):
+  wa-bot/motion/**            (mesin, 7 gaya Short bergambar + 7 cadangan teks + 4 tambahan, pustaka 33 benda ilustrasi, audio, render, isi AI berbasis sumber, tema mingguan, metadata YouTube, font)
+  wa-bot/media/gambar-stok.js (baru: siapkan foto untuk Shutterstock, cek syarat + perbesar ke >= 4 MP)
+  wa-bot/test-motion.mjs      (tes)
+  wa-bot/test-gambar-stok.mjs (tes gambar stok)
+
+PENTING
+- Zip ini belum mengubah perilaku bot. Pemasangan ke jadwal harian dan Telegram dikerjakan lewat prompt Claude Code.
+- Butuh pustaka baru:  npm i @napi-rs/canvas   (package.json berubah, jadi dikerjakan Claude Code/di laptop Linux)
+- Tes baru belum masuk skrip "npm test" (daftar node test-*.mjs di package.json); tambahkan  && node test-motion.mjs && node test-gambar-stok.mjs
+- Tanpa @napi-rs/canvas, test-motion.mjs tetap lolos (bagian gambar/render dilewati), jadi aman bila zip diterapkan dulu.
+- Rancangan: sehari 2 posting di satu kanal YouTube: 1 Short fakta (9:16, modul ini) + 1 video pelajaran 16:9 (edu-board lama).
+  Instagram/medsos lain ditunda.
+- Baru: motion/perintah-wa.js = permintaan video lewat WhatsApp (chat pribadi/grup). Modul ini belum tersambung ke penangan pesan bot;
+  penyambungannya (satu panggilan tanganiPesanWa di awal penangan pesan) dikerjakan lewat prompt Claude Code.
+- Baru: Short harian kini BERGAMBAR (motion/penjelas*.js, benda.js, ilustrasi.js): adegan ilustrasi dengan kamera, label, panah, panel angka, takarir.
+  Id templat harian tetap sama (fakta-angka dst.); versi teks lama menjadi "<id>-teks" sebagai cadangan otomatis (buatIsiFaktaCadangan).
+  Pemanggil di bot sebaiknya memakai buatIsiFaktaCadangan dan merender dengan templatId yang dikembalikan.
+- Baru: media/gambar-stok.js = persiapan foto untuk Shutterstock lewat WhatsApp (tanganiGambarWa). Syaratnya 4 MEGAPIKSEL (bukan 4 MB); JPEG maks 50 MB.
+  Memakai ffmpeg/ffprobe saja (tanpa pustaka baru). Belum tersambung ke penangan pesan; penyambungan (unduh gambar/dokumen, kirim dokumen) lewat prompt Claude Code.
+  Shutterstock TIDAK menerima konten buatan AI dari kontributor; modul ini hanya untuk foto karya sendiri.

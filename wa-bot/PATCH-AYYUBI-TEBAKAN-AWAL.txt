@@ -1,0 +1,6 @@
+PATCH AYYUBI -- DATA AWAL TEBAK-TEBAKAN
+========================================
+Berkas BARU saja (tidak menimpa apa pun):
+  wa-bot/data/tebakan-awal.txt   ~115 tebakan & pengetahuan umum (hewan, logika, hitungan, umum, keuangan negara, canda)
+Format: kategori | pertanyaan | jawaban | petunjuk. Jawaban alternatif dipisah "/".
+Belum dipakai sampai fitur "gudang pengetahuan" dipasang (lewat Claude Code). Berkas ini yang akan diimpor.

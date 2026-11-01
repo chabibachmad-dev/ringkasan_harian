@@ -5,8 +5,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { ambilTemplat, templatUntuk, temaMinggu } from "./templates/index.js";
-import { buatIsi, buatIsiFakta, periksaRamahKeluarga, KATA_TIDAK_RAMAH } from "./content.js";
-import { renderVideo, DURASI_MIN, DURASI_MAKS } from "./render.js";
+import { buatIsi, buatIsiFaktaCadangan, periksaRamahKeluarga, KATA_TIDAK_RAMAH } from "./content.js";
+import { renderVideo } from "./render.js";
 import { metaShorts } from "./youtube-meta.js";
 
 // ---------- pengenalan perintah ----------
@@ -46,9 +46,7 @@ export function kenaliPerintah(teksMentah, { namaBot = "" } = {}) {
   sisa = sisa.trim();
   if (/^(bantuan|help|\?|menu|contoh)$/i.test(sisa)) return { bantuan: true, slash, topik: "", templatId: null, suara: true, hd: false };
 
-  let suara = true, hd = false, durasi = 0;
-  // "30 detik", "durasi 40 detik", "sekitar 1 menit": durasi target; dibulatkan ke rentang yang dilayani render
-  sisa = sisa.replace(/\b(?:durasi(?:nya)?|selama|sekitar|kira-?kira)?\s*(\d{1,3})\s*(detik|dtk|menit)\b/i, (_, n, satuan) => { durasi = Number(n) * (/^menit/i.test(satuan) ? 60 : 1); return " "; });
+  let suara = true, hd = false;
   sisa = sisa.replace(/\btanpa\s+(?:suara|narasi|narator|musik)\b/gi, () => { suara = false; return " "; })
     .replace(/\b(?:hd|full\s*hd|resolusi\s*tinggi)\b/gi, () => { hd = true; return " "; });
   sisa = sisa.replace(/^\s*(?:motion\s*graphics?|video|shorts?|pendek|singkat)\b/gi, " ").replace(/^\s*(?:motion\s*graphics?|video)\b/gi, " ").trim();
@@ -63,7 +61,7 @@ export function kenaliPerintah(teksMentah, { namaBot = "" } = {}) {
     if (mm) { templatId = id; if (!sep && id !== "fakta-angka") topik = sisa.replace(mm[0], " "); break; }
   }
   topik = topik.replace(/\b(?:ya|dong|deh|donk|please|tolong|nih)\b\s*[.!?]*\s*$/gi, "").replace(/^[\s:,.\-–]+|[\s:,.\-–]+$/g, "").replace(/\s+/g, " ").trim();
-  return { templatId, topik, suara, hd, durasi, slash, bantuan: false, kepanjangan: topik.length > MAKS_TOPIK };
+  return { templatId, topik, suara, hd, slash, bantuan: false, kepanjangan: topik.length > MAKS_TOPIK };
 }
 
 export function teksBantuan() {
@@ -75,7 +73,7 @@ export function teksBantuan() {
     "• /video proses: terjadinya hujan",
     "• /video kuis: perkalian 7 dan 8",
     "Jenis yang dikenal: fakta, peringkat, mitos, bandingkan, proses, sejarah (garis waktu), cerita, kuis, hitung, pola.",
-    "Tambahan: \"tanpa suara\" untuk video tanpa narasi, \"hd\" untuk resolusi 1080x1920 (lebih lama dibuat), \"30 detik\" untuk durasi (15-45 detik; bawaan sekitar 20-25 detik).",
+    "Tambahan: \"tanpa suara\" untuk video tanpa narasi, \"hd\" untuk resolusi 1080x1920 (lebih lama dibuat).",
     "Untuk fakta, saya mencari sumber di web dulu; bila sumber kurang, video tidak dibuat supaya tidak mengarang."
   ].join("\n");
 }
@@ -156,7 +154,7 @@ export async function buatVideoWa({ perintah, llm, cari, tts, folder = path.join
     if (typeof cari !== "function") throw Object.assign(new Error("pencarian web belum tersambung"), { ramah: "Pencarian web belum tersambung, jadi video fakta belum bisa dibuat. Coba jenis kuis/hitung/pola dulu." });
     let galat;
     for (const id of kandidat) {
-      try { hasil = await buatIsiFakta({ llm, cari, templatId: id, topik }); templatId = id; t = ambilTemplat(id); break; }
+      try { hasil = await buatIsiFaktaCadangan({ llm, cari, templatId: id, topik }); templatId = hasil.templatId; t = ambilTemplat(templatId); break; }
       catch (e) { galat = e; if (/Sumber (kurang|tidak cukup)/i.test(e.message)) break; }
     }
     if (!hasil) throw galat;
@@ -171,16 +169,15 @@ export async function buatVideoWa({ perintah, llm, cari, tts, folder = path.join
   if (perintah.suara !== false && typeof tts === "function") {
     try { narasi = await tts(hasil.narasi); } catch (e) { catatan.push("Suara narasi gagal dibuat, video dikirim dengan musik saja."); }
   }
+  if (hasil.sumber?.length && hasil.isi && typeof hasil.isi === "object" && !Array.isArray(hasil.isi)) {
+    const dom = [...new Set(hasil.sumber.map((x) => { try { return new URL(x.url).hostname.replace(/^www\./, ""); } catch { return ""; } }).filter(Boolean))].slice(0, 3);
+    if (dom.length && "sumberTeks" in hasil.isi) hasil.isi.sumberTeks = `Sumber: ${dom.join(", ")}`;
+  }
   fs.mkdirSync(folder, { recursive: true });
   const keluar = path.join(folder, `wa-${Date.now()}-${templatId}.mp4`);
   try {
-    const r = await renderFn({ templatId, isi: hasil.isi, hook: hasil.hook, narasi: narasi || undefined, durasiTarget: perintah.durasi || undefined, tema: t.hari !== null ? temaMinggu(t, tanggal) : t.tema, keluar, skala: skala ?? (perintah.hd ? 1.5 : 1) });
+    const r = await renderFn({ templatId, isi: hasil.isi, hook: hasil.hook, narasi: narasi || undefined, tema: t.hari !== null ? temaMinggu(t, tanggal) : t.tema, keluar, skala: skala ?? (perintah.hd ? 1.5 : 1) });
     const meta = metaShorts({ templatId, isi: hasil.isi, hook: hasil.hook, topik, sumber: hasil.sumber });
-    if (perintah.durasi) {
-      const dipakai = Math.min(DURASI_MAKS, Math.max(DURASI_MIN, perintah.durasi));
-      if (dipakai !== perintah.durasi) catatan.push(`Durasi disesuaikan ke ${dipakai} detik (rentang yang didukung ${DURASI_MIN}-${DURASI_MAKS} detik)`);
-      else if (r.tercapai === false) catatan.push(`Durasi akhir ${Math.round(r.durasi)} detik; target ${perintah.durasi} detik tidak bisa dicapai persis untuk isi ini`);
-    }
     return { berkas: r.berkas || keluar, durasi: r.durasi, judul: meta.judul.replace(/\s*#Shorts$/i, ""), dasar: hasil.dasar || "", sumber: hasil.sumber, templatId, catatan };
   } finally {
     if (narasi && fs.existsSync(narasi)) { try { fs.unlinkSync(narasi); } catch {} }

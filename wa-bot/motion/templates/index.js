@@ -12,8 +12,14 @@ import hitung from "./hitung-langkah.js";
 import pola from "./pola-angka.js";
 import pi from "./lingkaran-pi.js";
 import { THEMES } from "../engine.js";
+import { GAYA } from "../penjelas-gaya.js";
 
-export const SEMUA = [fakta, peringkat, mitos, bar, proses, waktu, cerita, kuis, hitung, pola, pi];
+// Rotasi harian memakai versi BERGAMBAR (penjelas-gaya.js, id sama). Versi teks lama tetap ada dengan akhiran "-teks" sebagai cadangan
+// (dipakai bila AI gagal menyusun adegan bergambar) dan berada di luar rotasi (hari = null).
+const LAMA = [fakta, peringkat, mitos, bar, proses, waktu, cerita];
+const BERGAMBAR = GAYA.map((g) => ({ ...g, musik: LAMA.find((l) => l.id === g.id).musik }));
+const TEKS = LAMA.map((t) => ({ ...t, id: `${t.id}-teks`, nama: `${t.nama} (teks)`, hari: null }));
+export const SEMUA = [...BERGAMBAR, ...TEKS, kuis, hitung, pola, pi];
 export const HARIAN = SEMUA.filter((t) => t.hari !== null);
 export const NAMA_HARI = ["Minggu", "Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu"];
 

@@ -85,6 +85,7 @@ export async function buatIsi({ llm, templatId, topik, kelas, maksCoba = 3 }) {
   throw new Error(`Gagal membuat isi (${templatId}): ${galTerakhir.join("; ")}`);
 }
 export { HOOK_DEFAULT };
+export const hookDefault = (id) => HOOK_DEFAULT[id] || HOOK_DEFAULT[String(id).replace(/-teks$/, "")] || "Tahukah kamu?";
 
 // =====================================================================================
 // FAKTA DUNIA (Shorts): dibuat dari sumber hasil pencarian web, bukan dari ingatan AI.
@@ -162,10 +163,24 @@ export async function buatIsiFakta({ llm, cari, templatId, topik, kelas, maksCob
       for (const a of t.angkaKunci ? t.angkaKunci(r.isi) : []) if (!angkaAdaDiSumber(a, teksDipakai)) gal.push(`angka/tahun "${a}" tidak tertulis di sumber yang dikutip`);
     }
     if (gal.length === 0) {
-      const hook = potong(mentah.hook || HOOK_DEFAULT[templatId] || "Tahukah kamu?", 38);
+      const hook = potong(mentah.hook || hookDefault(templatId), 38);
       return { isi: r.isi, hook, dasar: potong(mentah.dasar || "", 200), narasi: t.narasi(r.isi), sumber: dipakai.map((s) => ({ judul: s.judul, url: s.url })), percobaan: n };
     }
     galTerakhir = gal; prompt += `\n\nPERBAIKI, jawaban sebelumnya bermasalah: ${gal.join("; ")}. Balas hanya JSON yang sudah benar, atau {"tidakCukup":true} bila SUMBER memang tidak cukup.`;
   }
   throw new Error(`Gagal membuat fakta (${templatId}): ${galTerakhir.join("; ")}`);
+}
+
+/**
+ * Seperti buatIsiFakta, tetapi bila adegan bergambar gagal disusun (bukan karena sumber kurang), jatuh ke versi teks ("<id>-teks").
+ * Mengembalikan hasil buatIsiFakta + templatId yang akhirnya dipakai.
+ */
+export async function buatIsiFaktaCadangan(o) {
+  const ids = [o.templatId]; try { ambilTemplat(`${o.templatId}-teks`); ids.push(`${o.templatId}-teks`); } catch {}
+  let galat;
+  for (const id of ids) {
+    try { return { ...(await buatIsiFakta({ ...o, templatId: id })), templatId: id }; }
+    catch (e) { galat = e; if (/Sumber (kurang|tidak cukup)|fungsi cari/i.test(e.message)) break; }
+  }
+  throw galat;
 }
