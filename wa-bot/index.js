@@ -70,6 +70,7 @@ import { createShortsHarian, readShortsConfig } from "./shorts-harian.js";
 import { createMotion, readMotionConfig } from "./edu-motion.js";
 import { buatAntrean, buatPembatas, konfigDariEnv as konfigVideoWa } from "./motion/perintah-wa.js";
 import { createWaVideo } from "./wa-video.js";
+import { createWaGambar } from "./wa-gambar.js";
 import { createYoutube, readYoutubeConfig } from "./youtube.js";
 import { buildTutorSystemPrompt, buildTutorUserPrompt, parseTutorReply } from "./tutor.js";
 import { createAppAgentWorker } from "./app-agent.js";
@@ -3241,6 +3242,7 @@ async function handleGroupMessage(msg, sock) {
     }
   }
   // Permintaan video motion graphic ("/video ...", "buatkan video ..."): di grup cukup dengan /video, atau bila bot dipanggil.
+  if (!msg.key.fromMe && !fromBot && !groupAudio && !groupVideo && (await tanganiGambarStok(sock, msg, { teks: text, grup: groupJid, disebut: triggered }))) return;
   if (!msg.key.fromMe && !fromBot && !photo && !docAttached && !groupAudio && !groupVideo && (await tanganiVideoWa(sock, msg, { teks: text, grup: groupJid, disebut: triggered }))) return;
   if (!triggered) {
     // Kalimat biasa yang tampak jelas seperti pengumuman jadwal ("besok rapat jam 9"): bot menawarkan mencatatnya (tanpa AI, tanpa menyimpan obrolan).
@@ -4510,6 +4512,17 @@ const waVideo = createWaVideo({
 });
 const tanganiVideoWa = (sock, msg, o) => waVideo.tangani(sock, msg, o);
 
+// Persiapan foto untuk Shutterstock (media/gambar-stok.js, penyambung: wa-gambar.js). Antrean berat dipakai bersama render video;
+// berlaku untuk nomor utama dan nomor kedua karena penangan pesan dipakai bersama. WA_GAMBAR_SEMUA=1 mengizinkan non-pemilik.
+const tanganiGambarStok = createWaGambar({
+  unwrap: unwrapMessageContent,
+  unduh: (sumber, sock) => downloadMediaMessage(sumber, "buffer", {}, { logger: pino({ level: "silent" }), reuploadRequest: sock.updateMediaMessage }),
+  adalahPemilik: (msg, selfChat) => isOwnerSender(msg, selfChat),
+  grupBoleh: async (sock, grup) => { const subject = await getGroupSubject(sock, grup); return { boleh: isGroupAllowed(grup, subject, sock), subject }; },
+  balasGrup: (sock, grup, msg, subject, t) => replyGroupText(sock, grup, msg, subject, t),
+  antrean: waVideoAntrean
+});
+
 /** Pemilik meminta gambar di chat pribadi ("buatkan gambar ..." / "/gambar ..."). true = ditangani. */
 async function handleWaImageCommand(sock, jid, msg, text) {
   if (!imageGen.available()) return false;
@@ -4707,6 +4720,7 @@ async function handleIncoming(msg, sock) {
     }
   }
   // PDF di chat pribadi: dilampirkan (juga yang bersama keterangan), atau dibalas dengan pertanyaan -> dibaca semua halamannya lalu dijawab dengan kutipan halaman.
+  if (!viaVoice && (await tanganiGambarStok(sock, msg, { teks: text || "", isSelfChat }))) return;
   const dmPdf = !isSelfChat ? dmPdfCandidate(msg, text || "") : null;
   if (dmPdf) text = dmPdf.text;
   if (!text) return;
