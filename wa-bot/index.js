@@ -66,6 +66,7 @@ import { createTranscriber, describeError, readSttConfig, voiceToCommand } from 
 import { audioOf, createWaTutor, readWaVoiceConfig } from "./wa-voice.js";
 import { createSpeaker, readTtsConfig } from "./voice-output.js";
 import { createEdu, createEduDefaults, readEduConfig } from "./edu-channel.js";
+import { createShortsHarian, readShortsConfig } from "./shorts-harian.js";
 import { createMotion, readMotionConfig } from "./edu-motion.js";
 import { buatAntrean, buatPembatas, konfigDariEnv as konfigVideoWa } from "./motion/perintah-wa.js";
 import { createWaVideo } from "./wa-video.js";
@@ -4749,6 +4750,7 @@ async function handleIncoming(msg, sock) {
   if (isOwnerSender(msg, isSelfChat) && !isGroupJid(jid) && (await handleWaRouteCommand(sock, jid, text))) return;
   if (isOwnerSender(msg, isSelfChat) && !isGroupJid(jid) && (await handleWaNodinCommand(sock, jid, text))) return;
   if (isOwnerSender(msg, isSelfChat) && !isGroupJid(jid) && (await handleWaKasCommand(sock, jid, text))) return;
+  if (isOwnerSender(msg, isSelfChat) && !isGroupJid(jid) && !viaVoice && currentAccountId() === MAIN_ACCOUNT && (await edu.temaTeks(text, { kanal: "wa" })).handled) return;
   if (!isGroupJid(jid) && !viaVoice && (await tanganiVideoWa(sock, msg, { teks: text, isSelfChat }))) return;
   if (isOwnerSender(msg, isSelfChat) && !isGroupJid(jid) && (await handleWaVideoCommand(sock, jid, msg, text))) return;
   if (isOwnerSender(msg, isSelfChat) && !isGroupJid(jid) && (await handleWaImageCommand(sock, jid, msg, text))) return;
@@ -6369,8 +6371,21 @@ async function handleWaDokumenCommand(sock, jid, text) {
 
 // Channel YouTube edukasi SD (edu-channel.js): video papan tulis dibuat otomatis, kamu setujui di Telegram, lalu diunggah terjadwal.
 const eduConfig = readEduConfig(process.env);
+const shortsConfig = readShortsConfig(process.env);
+// Short harian (shorts-harian.js) sudah mengisi jalur Short; slot video harian tetap video pelajaran 16:9 (papan tulis).
+if (shortsConfig.aktif) eduConfig.mode = "papan";
 const youtube = createYoutube({ config: readYoutubeConfig(process.env) });
-const eduSendText = (text, opts) => telegram.sendOwner(text, opts);
+/** Kirim ke pemilik di Telegram (dengan tombol) dan WhatsApp (teks). opts.hanya / opts.kecuali = "telegram" | "wa". Mengembalikan jumlah penerima Telegram. */
+async function kirimPemilikEdu(text, opts = {}) {
+  const { hanya = "", kecuali = "" } = opts;
+  let n = 0;
+  if (kecuali !== "telegram" && (!hanya || hanya === "telegram")) n = await telegram.sendOwner(text, { markup: opts.markup || null }).catch(() => 0);
+  if (kecuali !== "wa" && (!hanya || hanya === "wa") && OWNER_JID && currentSock) {
+    try { await currentSock.sendMessage(OWNER_JID, { text }); n += hanya === "wa" ? 1 : 0; } catch (e) { console.error("🗓️ Gagal kirim ke WhatsApp pemilik:", e instanceof Error ? e.message : String(e)); }
+  }
+  return n;
+}
+const eduSendText = kirimPemilikEdu;
 // Short motion graphic (EDU_MODE=motion, bawaan); EDU_MODE=papan memakai video papan tulis lama saja. Lihat edu-motion.js dan motion/README.md.
 const eduMotion = createMotion({
   config: { ...readMotionConfig(process.env), channelName: eduConfig.channelName, voice: eduConfig.voice, style: eduConfig.style },
@@ -6573,10 +6588,17 @@ async function mirrorToTelegram(text) {
     return false;
   }
 }
+const shortsHarian = createShortsHarian({
+  config: { ...shortsConfig, channelName: eduConfig.channelName, skala: readMotionConfig(process.env).skala },
+  edu, motion: eduMotion, llm: motionLlm, cari: waVideoDeps.cari, tts: waVideoDeps.tts, antrean: waVideoAntrean,
+  sendText: kirimPemilikEdu, dir: eduConfig.dir, tz: eduConfig.timeZone
+});
 setInterval(() => {
   edu.check().catch(() => {});
+  shortsHarian.check().catch(() => {});
 }, 60_000);
 console.log(`🎓 Channel edukasi: ${edu.describe()}`);
+console.log(`🎬 Short harian: ${shortsConfig.aktif && eduConfig.enabled ? `aktif, mulai ${shortsConfig.jam} ${eduConfig.tzLabel}, tayang ${eduConfig.shortsPublishTime}` : "mati"}`);
 telegram
   .start()
   .then((connected) => (connected ? ops.announceStartup((chatId, text) => telegram.send(chatId, text)) : false))
