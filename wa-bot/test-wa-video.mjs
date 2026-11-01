@@ -11,7 +11,7 @@ let fails = 0;
 const check = (c, m) => { if (!c) { fails++; console.log("FAIL:", m); } else console.log("ok:", m); };
 const quiet = { log() {}, warn() {}, error() {} };
 
-const ev = { judul: "Gunung Everest", url: "https://a.example.org/everest", teks: "Gunung Everest memiliki tinggi 8.849 meter di atas permukaan laut dan berada di pegunungan Himalaya antara Nepal dan Tiongkok." };
+const ev = { judul: "Gunung Everest", url: "https://a.example.org/everest", teks: "Gunung Everest memiliki tinggi 8.849 meter di atas permukaan laut dan berada di pegunungan Himalaya antara Nepal dan Tiongkok. Gedung tertinggi di dunia, Burj Khalifa, setinggi 828 meter." };
 const ev2 = { judul: "Everest Facts", url: "https://b.example.com/facts", teks: "Mount Everest stands 8,849 m above sea level, the highest mountain on Earth, first climbed in 1953 by Hillary and Norgay." };
 const baik = { ...ambilTemplat("fakta-angka").contoh, judul: "Seberapa tinggi Gunung Everest?", angka: 8849, hook: "Setinggi apa?", dasar: "Everest setinggi 8.849 meter.", sumber: [1, 2] };
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "wav-"));
