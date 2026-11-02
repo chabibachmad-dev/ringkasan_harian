@@ -159,6 +159,7 @@ const HELP = [
   "/persona  — gaya bot WA: lihat, <bot> <teks>, grup santai|resmi <nama>, reset",
   "/tebak  — gudang tebak-tebakan (tambah, impor, daftar, menunggu)",
   "/wa2  — nomor WhatsApp kedua (status, kode, qr)",
+  "/resetpin <nama orang tua>  — kode reset PIN orang tua Study (untuk yang tidak punya nomor WA terdaftar)",
   "/grup  — grup WA yang dijawab bot: lihat, semua, tambah, hapus",
   "/humor  — humor per grup WA: pantun harian, roasting ringan, balas chat acak, chat otomatis, mode latihan",
   "/gambar <deskripsi>  — buat gambar; /gambar grup on|off = izinkan di grup WA\n/video <deskripsi>  — video bernarasi; kirim FOTO + keterangan \"jadikan video salju\" = foto hidup\n/env  — ubah kunci gambar (token Cloudflare, jatah) dari sini",
@@ -1171,6 +1172,10 @@ Suara khusus satu grup: /suara grup wanita <nama grup> • /suara grup (daftar) 
     if (name === "grup" || name === "group") {
       if (!deps.groups) return void (await reply("Pengaturan grup tidak tersedia di versi bot ini."));
       return void (await reply(await withAction(chatId, "typing", () => deps.groups.handle(arg))));
+    }
+    if (name === "resetpin") {
+      if (!deps.resetPin) return void (await reply("Reset PIN orang tua tidak tersedia di versi bot ini."));
+      return void (await reply(await withAction(chatId, "typing", () => deps.resetPin.handle(arg))));
     }
     if (name === "wa2" || name === "nomor2") {
       const w = deps.wa2;

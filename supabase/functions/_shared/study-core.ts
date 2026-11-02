@@ -892,3 +892,44 @@ export function cleanChatReply(text: string): string {
   }
   return t;
 }
+
+// ---------------------------------------------------------------- PIN orang tua: kode pendaftaran WA & kode reset
+// (diduplikasi di wa-bot/wa-pin-ortu.js untuk sisi bot; test-wa-pin-ortu.mjs memastikan keduanya sama)
+export const PARENT_WA_CODE_TTL_MS = 30 * 60 * 1000;
+export const PARENT_RESET_TTL_MS = 15 * 60 * 1000;
+export const PARENT_RESET_MAX_ATTEMPTS = 5;
+export const PARENT_RESET_MAX_PER_HOUR = 3;
+
+/** Angka acak aman secara kriptografis (tanpa bias modulo). */
+export function randomDigits(n: number): string {
+  let out = "";
+  const buf = new Uint32Array(1);
+  while (out.length < n) {
+    crypto.getRandomValues(buf);
+    if (buf[0] >= 4_294_967_290) continue; // buang ujung supaya merata terhadap 10
+    out += String(buf[0] % 10);
+  }
+  return out;
+}
+export const makeWaCode = (): string => `PIN-${randomDigits(6)}`;
+/** Ambil kode pendaftaran dari teks pesan WA ("PIN-482731", boleh huruf kecil/spasi di sekitarnya); null bila tidak ada. */
+export function findWaCode(text: unknown): string | null {
+  const m = /(?:^|[^A-Za-z0-9])PIN[-\s]?(\d{6})(?![0-9])/i.exec(String(text ?? ""));
+  return m ? `PIN-${m[1]}` : null;
+}
+export async function sha256Hex(text: string): Promise<string> {
+  return toHex(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text)));
+}
+export const hashWaCode = (code: string): Promise<string> => sha256Hex(`wa:${code.toUpperCase()}`);
+export const hashResetCode = (code: string, salt: string): Promise<string> => sha256Hex(`reset:${salt}:${code}`);
+export const resetMessage = (code: string): string => `Kode reset PIN orang tua Study: ${code}. Berlaku 15 menit. Abaikan bila bukan kamu.`;
+export const RESET_DONE_MESSAGE = "PIN orang tua Study berhasil diubah.";
+
+export type ResetRow = { attempts: number; expires_at: string; used_at: string | null };
+/** Keadaan kode reset: ok | used | expired | burned (terlalu banyak percobaan salah). */
+export function resetCodeState(row: ResetRow, now: number): "ok" | "used" | "expired" | "burned" {
+  if (row.used_at) return "used";
+  if (Date.parse(row.expires_at) <= now) return "expired";
+  if (row.attempts >= PARENT_RESET_MAX_ATTEMPTS) return "burned";
+  return "ok";
+}

@@ -1257,13 +1257,79 @@ async function promptParentIfNeeded(force = false) {
         if (!validPinFormat(x.pin)) return { ok: false, error: L("study_pin_invalid") };
         if (x.pin !== x.pin2) return { ok: false, error: L("study_np_mismatch") };
         const r = await studyCall("parent_create", { playerId: v.id, pin: v.pin, name: String(x.name).trim(), newPin: x.pin });
-        return r.ok ? { ok: true, value: r.parent } : { ok: false, error: errText(r) };
+        return r.ok ? { ok: true, value: { ...r.parent, newPin: x.pin } } : { ok: false, error: errText(r) };
       }
     });
-    if (done) window.alert(L("study_parent_done", { name: done.name }));
+    if (done) {
+      window.alert(L("study_parent_done", { name: done.name }));
+      if (done.newPin) await registerWa(done.id, done.newPin); // pendaftaran nomor WA (boleh dilewati)
+    }
   } finally {
     parentPromptBusy = false;
   }
+}
+
+// ---- Nomor WhatsApp orang tua (untuk lupa PIN): kirim kode sekali pakai ke bot; bot mencatat nomor pengirim. Boleh dilewati.
+async function registerWa(parentId, parentPin) {
+  const r = await studyCall("parent_wa_code", { parentId, parentPin });
+  if (!r.ok) {
+    window.alert(errText(r));
+    return false;
+  }
+  return openFormDialog({
+    title: L("study_wa_title"),
+    intro: L("study_wa_intro"),
+    okLabel: L("study_wa_done"),
+    cancelLabel: L("study_wa_skip"),
+    busyLabel: L("study_loading"),
+    fields: [{ key: "note", type: "note", label: L("study_wa_code_line", { code: r.code, minutes: r.minutes }) }],
+    extra: [
+      {
+        label: L("study_wa_check"),
+        onClick: async () => {
+          const l = await studyCall("parent_list", {});
+          const me = (l.parents || []).find((x) => x.id === parentId);
+          window.alert(L(me?.hasWa ? "study_wa_ok" : "study_wa_not_yet"));
+        }
+      }
+    ],
+    onSubmit: async () => ({ ok: true })
+  });
+}
+
+// ---- Lupa PIN: kode 6 digit dikirim ke nomor WhatsApp terdaftar (tidak pernah ditampilkan di layar), lalu wajib membuat PIN baru.
+async function openForgotPin(parentId, playerId) {
+  if (!playerId) return window.alert(L("study_forgot_need_child"));
+  if (!parentId || !window.confirm(L("study_forgot_confirm"))) return false;
+  const r = await studyCall("parent_reset_request", { parentId, playerId }, { timeoutMs: 40000 });
+  if (!r.ok) {
+    // tanpa nomor WA terdaftar: kode bisa datang dari pemilik aplikasi (Telegram); lanjut bila orang tua sudah memegang kodenya
+    if (!(r.noWa && window.confirm(L("study_forgot_owner_code")))) {
+      window.alert(errText(r));
+      return false;
+    }
+  }
+  const ok = await openFormDialog({
+    title: L("study_forgot_title"),
+    intro: L("study_forgot_intro"),
+    okLabel: L("study_set_save"),
+    cancelLabel: L("study_cancel"),
+    busyLabel: L("study_busy_saving"),
+    fields: [
+      { key: "code", label: L("study_forgot_code"), type: "pin" },
+      { key: "newPin", label: L("study_new_pin"), type: "pin" },
+      { key: "newPin2", label: L("study_new_pin2"), type: "pin" }
+    ],
+    onSubmit: async (v) => {
+      if (!/^\d{6}$/.test(String(v.code || "").trim())) return { ok: false, error: L("study_forgot_code_invalid") };
+      if (!validPinFormat(v.newPin)) return { ok: false, error: L("study_pin_invalid") };
+      if (v.newPin !== v.newPin2) return { ok: false, error: L("study_np_mismatch") };
+      const c = await studyCall("parent_reset_confirm", { parentId, code: String(v.code).trim(), newPin: v.newPin });
+      return c.ok ? { ok: true } : { ok: false, error: errText(c) };
+    }
+  });
+  if (ok) window.alert(L("study_forgot_done"));
+  return !!ok;
 }
 
 // ---- PIN orang tua per orang tua: pilih orang tua (yang tertaut ke anak) + PIN. Verifikasi sebenarnya di server (parentId + parentPin).
@@ -1286,7 +1352,8 @@ async function parentGate(playerId) {
       { key: "parentId", label: L("study_parent_who"), type: "select", value: parents[0].id, options: parents.map((x) => ({ value: x.id, label: x.name })) },
       { key: "parentPin", label: L("study_parent_pin"), type: "pin" }
     ],
-    auth: (v) => ({ parentId: v.parentId, parentPin: v.parentPin })
+    auth: (v) => ({ parentId: v.parentId, parentPin: v.parentPin }),
+    extra: [{ label: L("study_forgot_btn"), onClick: (v) => openForgotPin(v.parentId, playerId || S.viewer?.id || null) }]
   };
 }
 
@@ -1306,6 +1373,7 @@ async function openEditLevel() {
       classField((v) => v.grade, (v) => classesOf(v.grade), (v) => (v.grade === me.grade && me.classLevel ? String(me.classLevel) : undefined), me.classLevel),
       ...gate.fields
     ],
+    extra: gate.extra,
     onSubmit: async (v) => {
       if (!validPinFormat(v.parentPin)) return { ok: false, error: L("study_pin_invalid") };
       const res = await studyCall("player_update_level", {
@@ -1342,6 +1410,7 @@ async function openResetPin(player) {
       { key: "newPin", label: L("study_new_pin"), type: "pin" },
       { key: "newPin2", label: L("study_new_pin2"), type: "pin" }
     ],
+    extra: gate.extra,
     onSubmit: async (v) => {
       if (!validPinFormat(v.newPin)) return { ok: false, error: L("study_pin_invalid") };
       if (v.newPin !== v.newPin2) return { ok: false, error: L("study_np_mismatch") };
@@ -2447,6 +2516,7 @@ async function deleteComment(commentId, key, byParent) {
       cancelLabel: L("study_cancel"),
       busyLabel: L("study_loading"),
       fields: gate.fields,
+      extra: gate.extra,
       onSubmit: async (v) => {
         if (!validPinFormat(v.parentPin)) return { ok: false, error: L("study_pin_invalid") };
         const r = await studyCall("comment_delete", { commentId, ...gate.auth(v) });
@@ -3799,6 +3869,7 @@ async function openSettings() {
     cancelLabel: L("study_cancel"),
     busyLabel: L("study_loading"),
     fields: gate.fields,
+    extra: gate.extra,
     onSubmit: async (v) => {
       if (!validPinFormat(v.parentPin)) return { ok: false, error: L("study_pin_invalid") };
       const res = await studyCall("settings_open", gate.auth(v));
@@ -3915,7 +3986,7 @@ function renderSettings(data) {
     }
 
     <h3 class="sys-subtitle">${esc(L("study_parent_pin"))}</h3>
-    <div class="study-actions"><button type="button" class="secondary-btn" data-sact="parent-pin">${esc(L("study_set_change_pin"))}</button><button type="button" class="secondary-btn" data-sact="parent-link">${esc(L("study_set_link_child"))}</button></div>
+    <div class="study-actions"><button type="button" class="secondary-btn" data-sact="parent-pin">${esc(L("study_set_change_pin"))}</button><button type="button" class="secondary-btn" data-sact="parent-link">${esc(L("study_set_link_child"))}</button><button type="button" class="secondary-btn" data-sact="parent-wa">${esc(L(data.parent?.hasWa ? "study_wa_change" : "study_wa_register"))}</button>${data.parent?.hasWa ? `<button type="button" class="study-link-btn" data-sact="parent-wa-clear">${esc(L("study_wa_clear"))}</button>` : ""}</div>
 
     <div class="chat-code-dialog-actions">
       <button type="button" class="primary-btn" data-sact="close">${esc(L("study_close"))}</button>
@@ -4096,6 +4167,21 @@ async function onSettingsClick(e) {
     });
     if (ok) window.alert(L("study_parent_pin_changed"));
     return;
+  }
+
+  if (act === "parent-wa") {
+    const done = await registerWa(parentId, parentPin);
+    if (done === false || done === null) {
+      /* dilewati */
+    }
+    return reloadSettings();
+  }
+
+  if (act === "parent-wa-clear") {
+    if (!window.confirm(L("study_wa_clear_confirm"))) return;
+    const r = await studyCall("parent_wa_clear", { parentId, parentPin });
+    if (!r.ok) window.alert(errText(r));
+    return reloadSettings();
   }
 
   if (act === "parent-link") {

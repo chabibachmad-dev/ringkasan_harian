@@ -9,7 +9,8 @@
 --
 -- Tidak ada data pemain yang dihapus. Setelah migrasi ini semua anak (grade selain 'Umum') belum punya tautan, sehingga
 -- mendapat popup "Buat PIN orang tua" di login berikutnya; sampai ada PIN, semua aksi orang tua terkunci.
--- Lupa PIN: jalankan supabase/ops/reset-pin-ortu.sql (tidak ada PIN master).
+-- Lupa PIN: reset lewat WhatsApp (nomor terdaftar), atau perintah /resetpin di Telegram pemilik; cadangan terakhir
+-- supabase/ops/reset-pin-ortu.sql. Tidak ada PIN master.
 -- RLS aktif tanpa policy (terkunci dari anon key); semua lewat Edge Function `study`. Aman dijalankan ulang. Butuh migrasi 0023.
 -- ================================================================
 
@@ -20,6 +21,7 @@ create table if not exists public.study_parents (
   pin_hash text not null,
   pin_failures integer not null default 0,
   pin_locked_until timestamptz,
+  wa_jid text, -- nomor WA orang tua (jid Baileys), terdaftar lewat kode yang dikirim ke bot; boleh kosong; boleh dipakai beberapa orang tua
   created_at timestamptz not null default now()
 );
 create unique index if not exists study_parents_name_ci on public.study_parents (lower(btrim(name)));
@@ -43,11 +45,39 @@ create table if not exists public.study_parent_actions (
 );
 create index if not exists study_parent_actions_created_idx on public.study_parent_actions (created_at desc);
 
+-- Kode pendaftaran nomor WA (PIN-123456): sekali pakai, 30 menit, terikat ke satu orang tua; disimpan sebagai hash SHA-256.
+create table if not exists public.study_parent_wa_codes (
+  id uuid primary key default gen_random_uuid(),
+  parent_id uuid not null references public.study_parents (id) on delete cascade,
+  code_hash text not null,
+  expires_at timestamptz not null,
+  used_at timestamptz,
+  created_at timestamptz not null default now()
+);
+create index if not exists study_parent_wa_codes_hash_idx on public.study_parent_wa_codes (code_hash) where used_at is null;
+
+-- Kode reset PIN (6 digit): sekali pakai, 15 menit, maks 5 percobaan salah lalu hangus; hash SHA-256 + salt per kode.
+-- via: 'wa' (dikirim ke nomor terdaftar) atau 'owner' (dibuat pemilik lewat Telegram).
+create table if not exists public.study_parent_reset_codes (
+  id uuid primary key default gen_random_uuid(),
+  parent_id uuid not null references public.study_parents (id) on delete cascade,
+  code_salt text not null,
+  code_hash text not null,
+  via text not null default 'wa' check (via in ('wa', 'owner')),
+  attempts integer not null default 0,
+  expires_at timestamptz not null,
+  used_at timestamptz,
+  created_at timestamptz not null default now()
+);
+create index if not exists study_parent_reset_codes_parent_idx on public.study_parent_reset_codes (parent_id, created_at desc);
+
 alter table public.study_redemptions add column if not exists given_by_parent_id uuid references public.study_parents (id) on delete set null;
 
 alter table public.study_parents enable row level security;
 alter table public.study_parent_children enable row level security;
 alter table public.study_parent_actions enable row level security;
+alter table public.study_parent_wa_codes enable row level security;
+alter table public.study_parent_reset_codes enable row level security;
 
 -- PIN orang tua bersama lama tidak berlaku lagi.
 update public.study_settings

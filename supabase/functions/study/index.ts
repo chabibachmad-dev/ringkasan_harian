@@ -111,6 +111,17 @@ import {
   MAX_QUESTIONS,
   PIN_LOCK_MS,
   PIN_MAX_FAILURES,
+  PARENT_WA_CODE_TTL_MS,
+  PARENT_RESET_TTL_MS,
+  PARENT_RESET_MAX_ATTEMPTS,
+  PARENT_RESET_MAX_PER_HOUR,
+  RESET_DONE_MESSAGE,
+  makeWaCode,
+  randomDigits,
+  hashWaCode,
+  hashResetCode,
+  resetCodeState,
+  resetMessage,
   QUESTION_BATCH,
   allowedMaterialGrades,
   classesOf,
@@ -1302,7 +1313,7 @@ Deno.serve(async (req) => {
       }
       return json({
         ok: true,
-        parent: { id: par.parent.id, name: par.parent.name },
+        parent: { id: par.parent.id, name: par.parent.name, hasWa: !!par.parent.wa_jid },
         recentBonuses: [...batches.values()].slice(0, 10),
         settings: publicSettings(await loadSettings(admin) as Row, items),
         pendingRedemptions: (pending.data ?? []).map((r: Row) => ({ id: r.id, playerName: names.get(r.player_id) ?? "?", itemName: r.item_name, cost: r.cost, createdAt: r.created_at })),
@@ -1419,7 +1430,7 @@ Deno.serve(async (req) => {
     // parent_link_child { parentId, parentPin, playerId, playerPin } -> { ok }   (dari Setting: tautkan anak lain; butuh PIN anak itu)
     // parent_pin_change { parentId, parentPin, newPin }              -> { ok }
     if (action === "parent_list") {
-      let q = admin.from("study_parents").select("id,name").order("name", { ascending: true });
+      let q = admin.from("study_parents").select("id,name,wa_jid").order("name", { ascending: true });
       if (body.playerId !== undefined && body.playerId !== null) {
         if (!isUuid(body.playerId)) return fail("Pemain tidak valid.");
         const { data: links, error: e1 } = await admin.from("study_parent_children").select("parent_id").eq("player_id", body.playerId);
@@ -1430,7 +1441,7 @@ Deno.serve(async (req) => {
       }
       const { data, error } = await q;
       if (error) return fail(PARENT_NO_TABLE.test(error.message) ? "PIN orang tua belum aktif di server (migrasi 0044 belum dijalankan)." : error.message, 500);
-      return json({ ok: true, parents: (data ?? []).map((r: Row) => ({ id: r.id, name: r.name })) });
+      return json({ ok: true, parents: (data ?? []).map((r: Row) => ({ id: r.id, name: r.name, hasWa: !!r.wa_jid })) });
     }
 
     if (action === "parent_status") {
@@ -1460,7 +1471,7 @@ Deno.serve(async (req) => {
       const { error: e2 } = await admin.from("study_parent_children").insert({ parent_id: par.id, player_id: auth.player.id });
       if (e2) return fail(e2.message, 500);
       await logParent(admin, par, "parent_create", auth.player.id, "buat PIN orang tua");
-      return json({ ok: true, parent: { id: par.id, name: par.name } });
+      return json({ ok: true, parent: { id: par.id, name: par.name, hasWa: false } });
     }
 
     if (action === "parent_link") {
@@ -1495,6 +1506,112 @@ Deno.serve(async (req) => {
       const { error } = await admin.from("study_parents").update({ pin_salt: salt, pin_hash: hash, pin_failures: 0, pin_locked_until: null }).eq("id", par.parent.id);
       if (error) return fail(error.message, 500);
       await logParent(admin, par.parent, "parent_pin_change", null, "ganti PIN");
+      return json({ ok: true });
+    }
+
+    // ------------------------------------------------------------ nomor WA orang tua + reset PIN lewat WhatsApp
+    // parent_wa_code      { parentId, parentPin }            -> { code:"PIN-123456", minutes }   (kirim kode itu ke WhatsApp bot Ayyubi; bot mencatat nomornya)
+    // parent_wa_clear     { parentId, parentPin }            -> { ok }
+    // parent_reset_request{ parentId, playerId }             -> { ok, sent:true }   (kode 6 digit dikirim ke nomor terdaftar; TIDAK pernah ditampilkan)
+    // parent_reset_confirm{ parentId, code, newPin }         -> { ok }   (kode benar + PIN baru; PIN lama berlaku sampai ini berhasil)
+    if (action === "parent_wa_code") {
+      const par = await checkParent(admin, body);
+      if (par instanceof Response) return par;
+      const code = makeWaCode();
+      await admin.from("study_parent_wa_codes").delete().eq("parent_id", par.parent.id).is("used_at", null);
+      const { error } = await admin.from("study_parent_wa_codes").insert({ parent_id: par.parent.id, code_hash: await hashWaCode(code), expires_at: new Date(Date.now() + PARENT_WA_CODE_TTL_MS).toISOString() });
+      if (error) return fail(PARENT_NO_TABLE.test(error.message) ? "Pendaftaran nomor WA belum aktif di server (migrasi 0044 belum dijalankan)." : error.message, 500);
+      await logParent(admin, par.parent, "wa_code", null, "kode pendaftaran nomor WA");
+      return json({ ok: true, code, minutes: PARENT_WA_CODE_TTL_MS / 60000 });
+    }
+
+    if (action === "parent_wa_clear") {
+      const par = await checkParent(admin, body);
+      if (par instanceof Response) return par;
+      const { error } = await admin.from("study_parents").update({ wa_jid: null }).eq("id", par.parent.id);
+      if (error) return fail(error.message, 500);
+      await logParent(admin, par.parent, "wa_clear", null, "hapus nomor WA");
+      return json({ ok: true });
+    }
+
+    if (action === "parent_reset_request") {
+      if (!isUuid(body.parentId) || !isUuid(body.playerId)) return fail("Pilih orang tua dan anaknya.");
+      const { data: parent, error: pe } = await admin.from("study_parents").select("id,name,wa_jid").eq("id", body.parentId).maybeSingle();
+      if (pe) return fail(PARENT_NO_TABLE.test(pe.message) ? "PIN orang tua belum aktif di server (migrasi 0044 belum dijalankan)." : pe.message, 500);
+      if (!parent) return fail("Orang tua tidak ditemukan.", 404);
+      // hanya orang tua yang tertaut ke anak itu yang boleh dipicu dari anak tersebut
+      const { data: link } = await admin.from("study_parent_children").select("player_id").eq("parent_id", parent.id).eq("player_id", body.playerId).maybeSingle();
+      if (!link) return fail("Orang tua ini bukan tautan anak tersebut.", 403, { notLinked: true });
+      const since = new Date(Date.now() - 3600_000).toISOString();
+      const { count } = await admin.from("study_parent_reset_codes").select("id", { count: "exact", head: true }).eq("parent_id", parent.id).gte("created_at", since);
+      if ((count ?? 0) >= PARENT_RESET_MAX_PER_HOUR) return fail("Terlalu sering meminta kode reset (maksimal 3 per jam). Coba lagi nanti.", 429, { rateLimited: true });
+      if (!parent.wa_jid) return fail("Nomor WhatsApp orang tua ini belum didaftarkan, jadi kode tidak bisa dikirim. Hubungi pemilik aplikasi untuk reset lewat Telegram.", 409, { noWa: true });
+      const code = randomDigits(6);
+      const salt = randomDigits(16);
+      const { data: row, error: ce } = await admin
+        .from("study_parent_reset_codes")
+        .insert({ parent_id: parent.id, code_salt: salt, code_hash: await hashResetCode(code, salt), via: "wa", expires_at: new Date(Date.now() + PARENT_RESET_TTL_MS).toISOString() })
+        .select("id")
+        .single();
+      if (ce || !row) return fail(ce?.message || "Gagal membuat kode.", 500);
+      // kirim lewat kotak keluar WhatsApp yang sudah ada (bot memeriksanya tiap beberapa detik)
+      const { data: msg, error: me } = await admin.from("whatsapp_messages").insert({ wa_jid: parent.wa_jid, direction: "out", content: resetMessage(code), status: "pending" }).select("id").single();
+      const undo = async (why: string) => {
+        await admin.from("study_parent_reset_codes").update({ used_at: new Date().toISOString() }).eq("id", row.id);
+        if (msg?.id) await admin.from("whatsapp_messages").update({ status: "failed", content: "[kode reset dibatalkan]", error: why.slice(0, 200) }).eq("id", msg.id).eq("status", "pending");
+      };
+      if (me || !msg) {
+        await undo(me?.message || "gagal antre");
+        return fail("Pesan WhatsApp tidak bisa diantrekan. Coba lagi nanti.", 502, { sendFailed: true });
+      }
+      let state = "pending";
+      for (let i = 0; i < 8 && state === "pending"; i++) {
+        await new Promise((r) => setTimeout(r, 2000));
+        const { data: cur } = await admin.from("whatsapp_messages").select("status").eq("id", msg.id).maybeSingle();
+        state = cur?.status ?? "pending";
+      }
+      if (state === "sent") {
+        await admin.from("whatsapp_messages").update({ content: "[kode reset dikirim]" }).eq("id", msg.id); // jangan tinggalkan kode di riwayat chat
+        await logParent(admin, parent, "reset_request", body.playerId, "kode reset dikirim ke WA");
+        return json({ ok: true, sent: true });
+      }
+      await undo(state === "failed" ? "gagal kirim" : "bot belum mengirim");
+      return fail(
+        state === "failed" ? "Pesan WhatsApp gagal terkirim. Pastikan nomor itu benar, lalu coba lagi." : "Bot WhatsApp belum terhubung atau belum mengirim pesan. Coba lagi nanti, atau hubungi pemilik aplikasi.",
+        502,
+        { sendFailed: true }
+      );
+    }
+
+    if (action === "parent_reset_confirm") {
+      if (!isUuid(body.parentId)) return fail("Pilih orang tua.");
+      if (typeof body.code !== "string" || !/^\d{6}$/.test(body.code.trim())) return fail("Kode reset terdiri dari 6 angka.");
+      if (!validPin(body.newPin)) return fail("PIN baru harus 4-6 angka."); // diperiksa dulu: kode tidak terpakai oleh PIN yang salah format
+      const { data: parent } = await admin.from("study_parents").select("id,name,wa_jid").eq("id", body.parentId).maybeSingle();
+      if (!parent) return fail("Kode salah atau sudah tidak berlaku.", 403, { resetWrong: true });
+      const { data: rows } = await admin.from("study_parent_reset_codes").select("*").eq("parent_id", parent.id).is("used_at", null).order("created_at", { ascending: false }).limit(5);
+      const live = ((rows ?? []) as Row[]).filter((r) => resetCodeState(r as never, Date.now()) === "ok");
+      if (live.length === 0) return fail("Kode salah atau sudah tidak berlaku. Minta kode baru.", 403, { resetWrong: true, expired: true });
+      const code = body.code.trim();
+      let hit: Row | null = null;
+      for (const r of live) if ((await hashResetCode(code, r.code_salt)) === r.code_hash) hit = r;
+      if (!hit) {
+        for (const r of live) await admin.from("study_parent_reset_codes").update({ attempts: (r.attempts ?? 0) + 1 }).eq("id", r.id);
+        const left = PARENT_RESET_MAX_ATTEMPTS - Math.max(...live.map((r) => (r.attempts ?? 0) + 1));
+        return fail(left > 0 ? `Kode salah. Sisa percobaan: ${left}.` : "Kode salah terlalu sering dan kini hangus. Minta kode baru.", 403, { resetWrong: true, attemptsLeft: Math.max(left, 0) });
+      }
+      // tandai terpakai lebih dulu (kondisional) supaya kode yang sama tidak bisa dipakai dua kali
+      const { data: used } = await admin.from("study_parent_reset_codes").update({ used_at: new Date().toISOString() }).eq("id", hit.id).is("used_at", null).select("id").maybeSingle();
+      if (!used) return fail("Kode sudah dipakai.", 403, { resetWrong: true });
+      const { salt, hash } = await hashPin(body.newPin as string);
+      const { error } = await admin.from("study_parents").update({ pin_salt: salt, pin_hash: hash, pin_failures: 0, pin_locked_until: null }).eq("id", parent.id);
+      if (error) {
+        await admin.from("study_parent_reset_codes").update({ used_at: null }).eq("id", hit.id); // PIN gagal tersimpan: kode boleh dicoba lagi
+        return fail(error.message, 500);
+      }
+      await admin.from("study_parent_reset_codes").update({ used_at: new Date().toISOString() }).eq("parent_id", parent.id).is("used_at", null);
+      await logParent(admin, parent, "parent_pin_reset", null, `reset PIN (${hit.via})`);
+      if (parent.wa_jid) await admin.from("whatsapp_messages").insert({ wa_jid: parent.wa_jid, direction: "out", content: RESET_DONE_MESSAGE, status: "pending" });
       return json({ ok: true });
     }
 

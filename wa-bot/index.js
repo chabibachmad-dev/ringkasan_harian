@@ -72,6 +72,7 @@ import { buatAntrean, buatPembatas, konfigDariEnv as konfigVideoWa } from "./mot
 import { createWaVideo } from "./wa-video.js";
 import { createWaGambar } from "./wa-gambar.js";
 import { createWaStokAdobe } from "./wa-stok-adobe.js";
+import { STUDY_PIN_MSG_RE, createWaPinOrtu, resetPinPemilik } from "./wa-pin-ortu.js";
 import { createYoutube, readYoutubeConfig } from "./youtube.js";
 import { buildTutorSystemPrompt, buildTutorUserPrompt, parseTutorReply } from "./tutor.js";
 import { createAppAgentWorker } from "./app-agent.js";
@@ -4537,6 +4538,9 @@ const tanganiStokAdobe = createWaStokAdobe({
   folder: process.env.STOK_ADOBE_DIR?.trim() || fileURLToPath(new URL("./data/stok-adobe", import.meta.url))
 });
 
+// PIN orang tua Study (migrasi 0044): pesan pribadi berisi kode "PIN-123456" mendaftarkan nomor WA orang tua. Hanya nomor utama.
+const tanganiPinOrtu = createWaPinOrtu({ supabase, mainAccount: MAIN_ACCOUNT, log: console });
+
 /** Pemilik meminta gambar di chat pribadi ("buatkan gambar ..." / "/gambar ..."). true = ditangani. */
 async function handleWaImageCommand(sock, jid, msg, text) {
   if (!imageGen.available()) return false;
@@ -4734,6 +4738,7 @@ async function handleIncoming(msg, sock) {
     }
   }
   // PDF di chat pribadi: dilampirkan (juga yang bersama keterangan), atau dibalas dengan pertanyaan -> dibaca semua halamannya lalu dijawab dengan kutipan halaman.
+  if (!viaVoice && !isSelfChat && (await tanganiPinOrtu(sock, msg, { teks: text || "", account: currentAccountId() }))) return;
   if (!viaVoice && (await tanganiStokAdobe(sock, msg, { teks: text || "", isSelfChat }))) return;
   if (!viaVoice && (await tanganiGambarStok(sock, msg, { teks: text || "", isSelfChat }))) return;
   const dmPdf = !isSelfChat ? dmPdfCandidate(msg, text || "") : null;
@@ -4898,8 +4903,9 @@ async function processPendingOutgoing(sock) {
         .from("whatsapp_messages")
         .update({ status: "sent", wa_message_id: sent?.key?.id ?? null, error: null })
         .eq("id", row.id);
-      console.log(`📤 Terkirim ke ${row.wa_jid}: ${row.content.slice(0, 60)}`);
-      markManualFromApp(row.wa_jid);
+      const studyPin = STUDY_PIN_MSG_RE.test(row.content); // kode reset / pemberitahuan PIN: jangan dicatat isinya, jangan jeda AI
+      console.log(`📤 Terkirim ke ${row.wa_jid}: ${studyPin ? "[pesan PIN orang tua Study]" : row.content.slice(0, 60)}`);
+      if (!studyPin) markManualFromApp(row.wa_jid);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error(`Gagal kirim ke ${row.wa_jid}:`, msg);
@@ -6580,6 +6586,7 @@ const telegram = createTelegram({
     groups: { handle: (arg) => groupList.handle(arg, { secondAliases: [String(wa2Config.botName || "").trim().split(/\s+/)[0]] }) },
     humorReview: { decide: (arg) => humor.decide(arg) },
     humor: { handle: (arg) => humor.handle(arg, { secondAliases: [String(wa2Config.botName || "").trim().split(/\s+/)[0]] }) },
+    resetPin: { handle: (arg) => resetPinPemilik({ supabase, nama: arg }) },
     wa2: {
       describe: () => describeWa2(),
       qr: async () => ({ data: await wa2QrImage(), name: "qr-nomor-2.png", mime: "image/png", photo: true }),
