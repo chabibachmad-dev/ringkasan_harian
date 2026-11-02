@@ -47,7 +47,13 @@ const noHard = (s) => !/(?:fill|stroke)="#|(?:fill|stroke)="(?:black|white)"/.te
 check([ICON_MOON, ICON_SUN, ICON_SETTINGS, MENU_SVG, BELL_SVG].every(noHard), "ikon tanpa warna tetap");
 check(/\.study-menu-icon \{[^}]*stroke: currentColor/.test(css) && /\.study-bell \{[^}]*stroke: currentColor/.test(css), "ikon hamburger & lonceng pakai stroke: currentColor");
 check(/\.detail-topbar-row \.study-menu-btn[\s\S]{0,200}flex: none/.test(css) && /#screen-study \.detail-title \{[^}]*min-width: 0[^}]*text-overflow: ellipsis/.test(css), "tombol flex:none, judul min-width:0 + ellipsis");
-check(/@media \(max-width: 640px\)[\s\S]{0,600}\.study-menu \{[\s\S]{0,200}position: fixed/.test(css), "di HP menu jadi panel dari kanan");
+const menuCss = css.match(/\.study-menu \{[^}]*\}/)[0];
+check(/position: absolute/.test(menuCss) && /top: calc\(100% \+ 4px\)/.test(menuCss) && /border-radius: 14px/.test(menuCss) && /border: 1\.5px/.test(menuCss), "menu = popup kecil menempel di bawah header, sudut 14px, garis 1.5px");
+check(/right: max\(12px, env\(safe-area-inset-right/.test(menuCss) && /max-width: min\(280px, calc\(100vw - 24px\)\)/.test(menuCss) && /max-height: calc\(100dvh/.test(menuCss) && /overflow-y: auto/.test(menuCss), "popup rata kanan, lebar maks min(280px,100vw-24px), max-height + scroll, area aman");
+check(!/position: fixed/.test(menuCss) && !/@media \(max-width: 640px\)[^@]{0,300}\.study-menu(?:-scrim)?[ :{]/.test(css), "tidak ada lagi panel penuh dari kanan di layar sempit");
+const scrimCss = css.match(/\.study-menu-scrim:not\(\[hidden\]\) \{[^}]*\}/)[0];
+check(/background: transparent/.test(scrimCss) && !/rgba\(0, 0, 0, 0\.45\)/.test(css) && /position: fixed/.test(scrimCss), "lapisan penangkap ketukan transparan (tanpa latar gelap)");
+check(/\.study-menu-item \{[^}]*min-height: 44px/.test(css), "tinggi baris menu minimal 44px");
 // setiap item menu punya ikon, dan ikonnya terpasang di menuIcon()
 const allRows = headerMenuRows({ theme: "light", unread: 1, hasNotif: true, hasSettings: true, pageItems: [["new-player", "a"], ["new-lesson", "b"], ["rooms", "c"], ["speak", "d"]], labels: L });
 check(allRows.every((r) => r.icon), `setiap item menu punya ikon (${allRows.map((r) => r.icon).join(",")})`);
