@@ -4,6 +4,7 @@ Bot **menyiapkan** paket (ikon SVG + latar/pola JPEG + CSV metadata + lembar pra
 
 ## Perintah (hanya pemilik)
 - `/adobe ikon dan latar ramadan 12 ikon 3 latar` -> bot menyusun rencana
+- `/adobe video ramadan 3` -> latar gerak loop (MP4 1920x1080, 30 fps, 10 dtk, tanpa suara); tambah kata `vertikal` untuk 1080x1920
 - `/adobe ikon 3d ramadan 6` -> ikon 3D (JPEG ilustrasi 2400x2400, 5,8 MP)
 - `/adobe ikon idul adha 8` -> tema baru: ikon disusun AI (eksperimental), WAJIB dicek lewat pratinjau
 - `/adobe setuju` | `/adobe batal` | `/adobe riwayat` | `/adobe bantuan`
@@ -55,3 +56,14 @@ Yang perlu diketahui:
 - Beberapa lubang sempit (jendela menara masjid) tampak gelap karena tidak terkena cahaya; ini normal untuk rendering fisik, tetapi periksa pratinjau.
 - Hasil tetap JPEG ilustrasi (bukan vektor): tipe Illustration, jangan centang "This is an icon", dan beri label AI.
 - Blender gagal atau melebihi batas waktu: bot memakai render JS dan menulis "Info 3D" pada ringkasan paket.
+
+## Video latar gerak (Adobe Stock)
+Perintah: `/adobe video ramadan 3`, `/adobe video batik 2 vertikal`, `/adobe latar gerak 2`, `/adobe ikon ramadan 4 dan 2 video`. Maks 4 klip per paket. Lalu `/adobe setuju`.
+
+- **Desain** (`video-mesin.mjs`): bintang-islami-emas, kawung-bergulir (batik), lentera-melayang, bulan-bintang-malam, gradien-cair, bokeh-emas. Digambar dari kode (@napi-rs/canvas) dan di-encode ffmpeg (H.264, yuv420p, bt709, tanpa audio). Semua loop mulus (frekuensi bilangan bulat per putaran atau bergeser tepat satu ubin; diuji: frame awal = frame akhir).
+- **Pemeriksa spesifikasi** (`periksaVideo`, memakai ffprobe) mengikuti halaman bantuan Adobe: MP4/MOV, H.264, 5-60 dtk, frame rate 23,98/24/25/29,97/30/50/59,94/60, resolusi horizontal 1920x1080 dan seterusnya atau vertikal 1080x1920 dan seterusnya, maks 3,9 GB. Klip yang tidak lolos dibuang dari paket dan dilaporkan sebagai "Gagal".
+- **Isi zip**: `video/*.mp4`, `metadata-video.csv`, `metadata-video.txt` (judul, kata kunci, kategori, label AI, spesifikasi), `PETUNJUK.txt`. Klip vertikal berakhiran `-v.mp4`, judul berawalan "Vertical", kata kunci memuat "vertical video" (saran Adobe). Apakah portal menyediakan Upload CSV untuk video belum diverifikasi; bila tidak ada, salin dari metadata-video.txt.
+- **Waktu render**: sekitar 1 menit per klip (2 inti). ffmpeg memakai `STOK_FFMPEG_THREADS` (bawaan 2) supaya bot tidak kehabisan CPU. Render berjalan asinkron.
+- **Ukuran zip**: beberapa MB sampai puluhan MB (desain bergaris halus lebih besar), aman untuk dokumen WA.
+- Desain `bintang-islami-emas` sudah diunggah pemilik (tercatat di `SUDAH_DIUNGGAH.video`), jadi tidak dibuat lagi kecuali memakai kata `paksa`. Versi vertikal dari desain yang sama dianggap mirip oleh Adobe (maks 3 versi).
+- **Jujur soal kualitas**: ini latar sederhana buatan kode; ada risiko ditolak karena kualitas atau dianggap terlalu polos. Periksa pratinjau, unggah sedikit dulu, dan lihat hasil moderasi.

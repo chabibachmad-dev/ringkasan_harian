@@ -11,6 +11,7 @@ import { LATAR, renderLatar } from "./latar-mesin.mjs";
 import { buatCsv, metadataUntuk, bersihkanJudul, bersihkanKataKunci } from "./metadata.js";
 import { URUTAN_PALET } from "./ikon3d.mjs";
 import { render3dPilih } from "./ikon3d-pilih.mjs";
+import { VIDEO, renderVideo, ambilBingkai, periksaVideo, namaBerkasVideo } from "./video-mesin.mjs";
 
 const SINI = path.dirname(fileURLToPath(import.meta.url));
 export const MESIN_IKON = path.join(SINI, "ikon-mesin.py");
@@ -18,9 +19,11 @@ export const MESIN_IKON = path.join(SINI, "ikon-mesin.py");
 export const SUDAH_DIUNGGAH = {
   ikon: ["hilal", "hilal-bintang", "masjid", "menara", "lentera", "ketupat", "kurma", "tasbih", "sajadah", "bedug", "alquran", "peci", "hadiah", "bintang-8", "minuman", "buka-puasa", "jam", "kalender", "amplop-thr", "kotak-donasi", "koin-hilal", "sahur", "weker-sahur", "kembang-api"],
   ikon3d: ["masjid", "hilal-bintang", "lentera", "menara", "ketupat", "hilal"],
+  video: ["bintang-islami-emas"],
   latar: ["batik-kawung-sogan", "batik-truntum-biru", "pola-islami-hijau-emas", "latar-malam-ramadan", "latar-lebaran-ketupat", "latar-abstrak-gradien"]
 };
-export const BATAS_PAKET = { ikon: 24, latar: 6 };
+export const BATAS_PAKET = { ikon: 24, latar: 6, video: 4 };
+const KATA_VERTIKAL = "vertical video,vertical background,vertical,9:16,portrait,mobile background";
 const KATA_IKON = "icon,icons,vector icon,glyph,silhouette,solid icon,symbol,sign,pictogram,flat design,minimal,simple,web icon,app icon,ui,design element,black and white,isolated,transparent";
 const KATA_RAMADAN = "eid mubarak,islamic,ramadan kareem";
 const KATA_3D = "3d icon,3d render,3d illustration,rendered,glossy,clay render,rounded,soft shadow,isolated on light background,web design,ui element,app,minimal";
@@ -39,19 +42,21 @@ export function kenaliPerintahStok(teks) {
   const s = String(teks || "").replace(/[‎‏]/g, "").trim().replace(/^(?:@\S+\s*)+/, "");
   const m = /^\/adobe\b\s*(.*)$/is.exec(s);
   if (!m) return null;
-  const sisa = m[1].trim(), kecil = sisa.toLowerCase();
+  const sisa = m[1].trim(); let kecil = sisa.toLowerCase();
   if (!kecil || /^(bantuan|help|\?)$/.test(kecil)) return { aksi: "bantuan" };
   if (/^(setuju|ya|ok|oke|lanjut)\b/.test(kecil)) return { aksi: "setuju" };
   if (/^(batal|tidak|cancel)\b/.test(kecil)) return { aksi: "batal" };
   if (/^riwayat\b/.test(kecil)) return { aksi: "riwayat" };
-  const ikon = /\bikon|icon/.test(kecil), latar = /\blatar|pola|background|backdrop/.test(kecil);
-  if (!ikon && !latar) return { aksi: "bantuan" };
+  kecil = kecil.replace(/\b(latar|pola|background)\s+(gerak|bergerak|animasi)\b/g, " video ");
+  const ikon = /\bikon|icon/.test(kecil), latar = /\blatar|pola|background|backdrop/.test(kecil), video = /\b(video|klip|animasi)\b|\bgerak\b/.test(kecil), vertikal = video && /\b(vertikal|vertical|portrait)\b|\b9\s*:\s*16\b/.test(kecil);
+  if (!ikon && !latar && !video) return { aksi: "bantuan" };
   const paksa = /\bpaksa\b/.test(kecil), tiga = ikon && /\b3\s*d\b|tiga\s*dimensi/.test(kecil);
-  const polos = kecil.replace(/\b3\s*d\b/g, " "), nLatar = /(\d+)\s*(?:latar|pola|background)/.exec(polos), nIkon = /(\d+)\s*(?:ikon|icon)/.exec(polos) || (ikon ? /(\d+)/.exec(polos) : null);
-  const temaTeks = polos.replace(/\b(paksa|dan|ikon|icon|latar|pola|background|backdrop|tema|untuk|buat|buatkan|paket|tiga\s*dimensi)\b/g, " ").replace(/\d+/g, " ").replace(/\s+/g, " ").trim();
+  const polos = kecil.replace(/\b3\s*d\b/g, " "), nLatar = /(\d+)\s*(?:latar|pola|background)/.exec(polos), nIkon = /(\d+)\s*(?:ikon|icon)/.exec(polos) || (ikon ? /(\d+)/.exec(polos) : null), nVideo = /(\d+)\s*(?:video|klip)/.exec(polos) || (video && !ikon && !latar ? /(\d+)/.exec(polos.replace(/\b9\s*:\s*16\b/g, " ")) : null);
+  const temaTeks = polos.replace(/\b\d+\s*:\s*\d+\b/g, " ").replace(/\b(paksa|dan|ikon|icon|latar|pola|background|backdrop|tema|untuk|buat|buatkan|paket|tiga\s*dimensi|video|klip|animasi|gerak|bergerak|vertikal|vertical|portrait|loop)\b/g, " ").replace(/\d+/g, " ").replace(/\s+/g, " ").trim();
   const jumlahIkon = ikon ? Math.min(BATAS_PAKET.ikon, Math.max(1, Number((nIkon || [])[1]) || 12)) : 0;
   const jumlahLatar = latar ? Math.min(BATAS_PAKET.latar, Math.max(1, Number((nLatar || [])[1]) || 3)) : 0;
-  return { aksi: "rencana", jenis: ikon && latar ? "keduanya" : ikon ? "ikon" : "latar", tema: normalisasiTema(temaTeks), temaAsli: temaTeks || "umum", jumlahIkon, jumlahLatar, paksa, tiga };
+  const jumlahVideo = video ? Math.min(BATAS_PAKET.video, Math.max(1, Number((nVideo || [])[1]) || 2)) : 0;
+  return { aksi: "rencana", jenis: video && !ikon && !latar ? "video" : ikon && latar ? "keduanya" : ikon ? "ikon" : "latar", tema: normalisasiTema(temaTeks), temaAsli: temaTeks || "umum", jumlahIkon, jumlahLatar, jumlahVideo, vertikal, paksa, tiga };
 }
 export function teksBantuanStok() {
   return [
@@ -59,7 +64,8 @@ export function teksBantuanStok() {
     "/adobe ikon dan latar ramadan 12 ikon 3 latar  -> bot menyusun rencana",
     "/adobe ikon 3d ramadan 6  -> ikon 3D (render relief membulat, JPEG ilustrasi)",
     "/adobe ikon idul adha 8  -> tema baru: ikon disusun AI (eksperimental, cek pratinjau)",
-    "/adobe setuju  -> bot membuat paket (zip: ikon SVG + latar JPEG + CSV + pratinjau)",
+    "/adobe video ramadan 3  -> latar gerak loop 10 detik (MP4 1080p, tanpa suara); tambah kata vertikal untuk 1080x1920",
+    "/adobe setuju  -> bot membuat paket (zip: ikon SVG + latar JPEG + video MP4 + CSV + pratinjau)",
     "/adobe batal   |   /adobe riwayat",
     "Unggah dan Submit tetap kamu kerjakan sendiri di contributor.stock.adobe.com (Upload CSV setelah berkasnya terunggah).",
     "Aturan penting: jangan unggah gambar yang mirip (maks 3 versi), patuhi batas pengiriman mingguan, dan putuskan label AI secara konsisten."
@@ -75,9 +81,9 @@ export function simpanRiwayat(folder, r) {
   fs.writeFileSync(t, JSON.stringify(r, null, 1)); fs.renameSync(t, p);
 }
 export function sudahAda(r) {
-  const ikon = new Set(SUDAH_DIUNGGAH.ikon), latar = new Set(SUDAH_DIUNGGAH.latar), ikon3d = new Set(SUDAH_DIUNGGAH.ikon3d);
-  for (const p of r.paket || []) { (p.ikon || []).forEach((x) => ikon.add(x)); (p.latar || []).forEach((x) => latar.add(x)); (p.ikon3d || []).forEach((x) => ikon3d.add(x)); }
-  return { ikon, latar, ikon3d };
+  const ikon = new Set(SUDAH_DIUNGGAH.ikon), latar = new Set(SUDAH_DIUNGGAH.latar), ikon3d = new Set(SUDAH_DIUNGGAH.ikon3d), video = new Set(SUDAH_DIUNGGAH.video);
+  for (const p of r.paket || []) { (p.video || []).forEach((x) => video.add(x)); (p.ikon || []).forEach((x) => ikon.add(x)); (p.latar || []).forEach((x) => latar.add(x)); (p.ikon3d || []).forEach((x) => ikon3d.add(x)); }
+  return { ikon, latar, ikon3d, video };
 }
 export const hariLalu = (tgl, n) => { const d = new Date(`${tgl}T00:00:00Z`); d.setUTCDate(d.getUTCDate() - n); return d.toISOString().slice(0, 10); };
 export function jumlahPaketPekanIni(r, tanggal) { const batas = hariLalu(tanggal, 6); return (r.paket || []).filter((p) => p.tanggal >= batas && p.tanggal <= tanggal).length; }
@@ -116,9 +122,9 @@ export async function usulIkonAi({ llm, tema, n, sudah }) {
 // ---------- rencana ----------
 export async function susunRencana({ perintah, riwayat, llm, katalog, tanggal }) {
   const ada = sudahAda(riwayat); const { jenis, tema, paksa } = perintah;
-  const tiga = !!perintah.tiga, rencana = { tema, temaAsli: perintah.temaAsli, jenis, tiga, ikon: [], latar: [], catatan: [], tanggal };
+  const tiga = !!perintah.tiga, rencana = { tema, temaAsli: perintah.temaAsli, jenis, tiga, vertikal: !!perintah.vertikal, ikon: [], latar: [], video: [], catatan: [], tanggal };
   const pakaiIkon = tiga ? ada.ikon3d : ada.ikon;
-  if (jenis !== "latar") {
+  if (jenis !== "latar" && jenis !== "video") {
     const cocok = (katalog || []).filter((k) => k.tema === tema && (paksa || !pakaiIkon.has(k.nama)));
     rencana.ikon = cocok.slice(0, perintah.jumlahIkon).map((k) => ({ nama: k.nama, judul: k.judul, kata: k.kata, sumber: "katalog" }));
     const kurang = perintah.jumlahIkon - rencana.ikon.length;
@@ -131,11 +137,19 @@ export async function susunRencana({ perintah, riwayat, llm, katalog, tanggal })
     if (tiga && rencana.ikon.length) rencana.catatan.push("Ikon 3D memakai bentuk yang sama dengan ikon datar yang sudah kamu unggah. Adobe menilai variasi kecil dari desain yang sama sebagai mirip (maks 3 versi). Mulai dengan sedikit (4-6) lalu lihat hasil review; untuk lebih aman pilih subjek yang belum ada versi datarnya.");
     if (rencana.ikon.length < perintah.jumlahIkon) rencana.catatan.push(`Hanya ${rencana.ikon.length} ikon tersedia untuk tema ini (${perintah.jumlahIkon} diminta).`);
   }
-  if (jenis !== "ikon") {
+  if (jenis !== "ikon" && jenis !== "video") {
     const grup = LATAR.filter((l) => l.tema.includes(tema) || (tema !== "ramadan" && tema !== "batik" && l.tema.includes("umum")));
     const pilih = grup.filter((l) => paksa || !ada.latar.has(l.nama));
     rencana.latar = pilih.slice(0, perintah.jumlahLatar).map((l) => ({ nama: l.nama, judul: l.judul, kata: l.kata }));
     if (rencana.latar.length < perintah.jumlahLatar) rencana.catatan.push(`Hanya ${rencana.latar.length} latar baru untuk tema ini; yang lain sudah pernah dibuat (Adobe menolak konten mirip).`);
+  }
+  if (perintah.jumlahVideo > 0) {
+    const grup = VIDEO.filter((v) => v.tema.includes(tema) || (tema !== "ramadan" && tema !== "batik" && v.tema.includes("umum")));
+    const pilih = grup.filter((v) => paksa || !ada.video.has(v.nama));
+    rencana.video = pilih.slice(0, perintah.jumlahVideo).map((v) => ({ nama: v.nama, judul: v.judul, kata: v.kata }));
+    if (rencana.video.length < perintah.jumlahVideo) rencana.catatan.push(`Hanya ${rencana.video.length} video baru untuk tema ini; desain lain sudah pernah dibuat (Adobe menolak konten mirip, maks 3 versi).`);
+    if (rencana.vertikal && rencana.video.length) rencana.catatan.push("Versi vertikal dari desain yang sama dengan klip horizontal dihitung mirip oleh Adobe; utamakan desain yang belum pernah kamu unggah.");
+    if (rencana.video.length) rencana.catatan.push("Render video butuh beberapa menit per klip (hasil: MP4 H.264 10 dtk, 30 fps, tanpa suara, loop mulus).");
   }
   return rencana;
 }
@@ -143,8 +157,9 @@ export function teksRencana(r) {
   const b = [`Rencana paket Adobe Stock - tema: ${r.temaAsli}`];
   if (r.ikon.length) b.push(`Ikon${r.tiga ? " 3D" : ""} (${r.ikon.length}): ${r.ikon.map((i) => i.nama + (i.sumber === "ai" ? "*" : "")).join(", ")}`);
   if (r.latar.length) b.push(`Latar (${r.latar.length}): ${r.latar.map((l) => l.nama).join(", ")}`);
+  if ((r.video || []).length) b.push(`Video${r.vertikal ? " vertikal" : ""} (${r.video.length}): ${r.video.map((v) => v.nama).join(", ")}`);
   b.push(...r.catatan.map((c) => `- ${c}`));
-  b.push(r.ikon.length + r.latar.length ? "Balas /adobe setuju untuk membuat, atau /adobe batal." : "Tidak ada yang bisa dibuat untuk permintaan ini.");
+  b.push(r.ikon.length + r.latar.length + (r.video || []).length ? "Balas /adobe setuju untuk membuat, atau /adobe batal." : "Tidak ada yang bisa dibuat untuk permintaan ini.");
   return b.join("\n");
 }
 
@@ -177,11 +192,18 @@ export const PETUNJUK = `PAKET ADOBE STOCK
 5. Periksa beberapa berkas, lalu Submit. Jangan unggah gambar yang mirip; patuhi batas pengiriman mingguan.
 Bot tidak mengunggah apa pun.
 `;
+export const PETUNJUK_VIDEO = `
+VIDEO (folder video/, MP4 tanpa suara, loop mulus)
+- Unggah lewat Contributor Portal > Upload. Pilih label "Created using generative AI tools" (konsisten dengan konten lain). Tanpa model/property release karena tidak ada orang atau properti.
+- Judul dan kata kunci ada di metadata-video.txt (dan metadata-video.csv bila portal menyediakan Upload CSV untuk video; bila tidak, ketik atau salin manual). Klip vertikal sudah memuat kata "vertical".
+- Spesifikasi sudah diperiksa bot dengan ffprobe: H.264 MP4, 5-60 detik, frame rate dan resolusi yang diterima Adobe. Jangan ubah ukuran atau frame rate-nya.
+- Moderasi video bisa berminggu-minggu. Jangan unggah banyak variasi dari desain yang sama (maks 3 versi).
+`;
 
-export async function buatPaket({ rencana, llm, folder, python, tanggal }) {
+export async function buatPaket({ rencana, llm, folder, python, tanggal, videoOpsi = {} }) {
   const id = `${tanggal}-${Date.now().toString(36)}`, kerja = path.join(folder, `paket-${id}`);
   const dIkon = path.join(kerja, "ikon"), dLatar = path.join(kerja, "latar"); fs.mkdirSync(kerja, { recursive: true });
-  const lapor = { ikon: [], ikon3d: [], latar: [], gagal: [], info: [] }, pratinjau = [], dIkon3d = path.join(kerja, "ikon3d");
+  const lapor = { ikon: [], ikon3d: [], latar: [], video: [], gagal: [], info: [] }, pratinjau = [], dIkon3d = path.join(kerja, "ikon3d");
   if (rencana.ikon.length) {
     const dSvg = rencana.tiga ? path.join(kerja, "_svg") : dIkon;
     const hasil = jalankanPython(["render", "--keluar", dSvg], { python, masuk: JSON.stringify({ ikon: rencana.ikon.map((i) => ({ nama: i.nama, spek: i.spek })) }) });
@@ -212,13 +234,30 @@ export async function buatPaket({ rencana, llm, folder, python, tanggal }) {
       lapor.latar.push({ ...meta, nama: l.nama, jalur: berkas }); pratinjau.push({ nama: l.nama, berkas });
     } catch (e) { lapor.gagal.push(`${l.nama}: ${String(e.message).slice(0, 120)}`); }
   }
+  const dVideo = path.join(kerja, "video"), dPr = path.join(folder, `_pr-${id}`);
+  for (const v of rencana.video || []) {
+    try {
+      const nm = namaBerkasVideo(v.nama, rencana.vertikal), berkas = path.join(dVideo, nm);
+      await renderVideo(v.nama, berkas, { vertikal: rencana.vertikal, detik: videoOpsi.detik, fps: videoOpsi.fps, lebar: videoOpsi.lebar, tinggi: videoOpsi.tinggi });
+      const pk = periksaVideo(berkas, { longgar: !!videoOpsi.longgar });
+      if (!pk.ok) throw new Error(`tidak memenuhi syarat Adobe: ${pk.masalah.join("; ")}`);
+      const bingkai = ambilBingkai(berkas, path.join(dPr, `${v.nama}.jpg`), Math.min(3, (videoOpsi.detik || 10) / 3));
+      const meta = await metadataUntuk({ llm, berkas: nm, subjek: v.judul, jenis: "video", tema: rencana.temaAsli, judulBawaan: rencana.vertikal ? `Vertical ${v.judul}` : v.judul, kataBawaan: rencana.vertikal ? `${KATA_VERTIKAL},${v.kata}` : v.kata });
+      lapor.video.push({ ...meta, nama: v.nama, jalur: berkas, info: pk.info }); pratinjau.push({ nama: `v-${v.nama}`, berkas: bingkai });
+    } catch (e) { lapor.gagal.push(`${v.nama} (video): ${String(e.message).slice(0, 140)}`); }
+  }
   if (lapor.ikon.length) fs.writeFileSync(path.join(kerja, "metadata-ikon.csv"), buatCsv(lapor.ikon.map((m) => ({ berkas: m.berkas, judul: m.judul, kata: m.kata }))));
   if (lapor.ikon3d.length) fs.writeFileSync(path.join(kerja, "metadata-ikon3d.csv"), buatCsv(lapor.ikon3d.map((m) => ({ berkas: m.berkas, judul: m.judul, kata: m.kata }))));
   if (lapor.latar.length) fs.writeFileSync(path.join(kerja, "metadata-latar.csv"), buatCsv(lapor.latar.map((m) => ({ berkas: m.berkas, judul: m.judul, kata: m.kata }))));
-  fs.writeFileSync(path.join(kerja, "PETUNJUK.txt"), PETUNJUK);
+  if (lapor.video.length) {
+    fs.writeFileSync(path.join(kerja, "metadata-video.csv"), buatCsv(lapor.video.map((m) => ({ berkas: m.berkas, judul: m.judul, kata: m.kata }))));
+    fs.writeFileSync(path.join(kerja, "metadata-video.txt"), lapor.video.map((m) => `Berkas: ${m.berkas}\nJudul: ${m.judul}\nKata kunci: ${m.kata.join(", ")}\nKategori: Graphic Resources\nLabel: Created using generative AI tools\nSpesifikasi: ${m.info.lebar}x${m.info.tinggi}, ${m.info.fps} fps, ${m.info.detik} dtk, ${m.info.kodek}, ${m.info.ukuranMB} MB\n`).join("\n"));
+  }
+  fs.writeFileSync(path.join(kerja, "PETUNJUK.txt"), PETUNJUK + (lapor.video.length ? PETUNJUK_VIDEO : ""));
   const zip = path.join(folder, `paket-adobe-${id}.zip`); zipkan(kerja, zip, python);
   const png = pratinjau.length ? await buatPratinjau(pratinjau, path.join(folder, `pratinjau-${id}.png`)) : null;
-  return { id, folder: kerja, zip, pratinjau: png, lapor, ikon: lapor.ikon.map((m) => m.nama), ikon3d: lapor.ikon3d.map((m) => m.nama), latar: lapor.latar.map((m) => m.nama) };
+  fs.rmSync(dPr, { recursive: true, force: true });
+  return { id, folder: kerja, zip, pratinjau: png, lapor, ikon: lapor.ikon.map((m) => m.nama), ikon3d: lapor.ikon3d.map((m) => m.nama), latar: lapor.latar.map((m) => m.nama), video: lapor.video.map((m) => m.nama) };
 }
 
 // ---------- penangan WhatsApp ----------
@@ -237,26 +276,26 @@ export async function tanganiStokWa(o) {
   if (p.aksi === "batal") { tunda.delete(chatId); await kirimTeks("Rencana dibatalkan."); return true; }
   const riwayat = muatRiwayat(folder);
   if (p.aksi === "riwayat") {
-    const a = sudahAda(riwayat); await kirimTeks(`Sudah dibuat/diunggah: ${a.ikon.size} ikon, ${a.ikon3d.size} ikon 3D, ${a.latar.size} latar. Paket 7 hari terakhir: ${jumlahPaketPekanIni(riwayat, tanggal)} (batas ${konfig.maksPekan ?? 2}).`); return true;
+    const a = sudahAda(riwayat); await kirimTeks(`Sudah dibuat/diunggah: ${a.ikon.size} ikon, ${a.ikon3d.size} ikon 3D, ${a.latar.size} latar, ${a.video.size} video. Paket 7 hari terakhir: ${jumlahPaketPekanIni(riwayat, tanggal)} (batas ${konfig.maksPekan ?? 2}).`); return true;
   }
   if (p.aksi === "rencana") {
     const maks = konfig.maksPekan ?? 2;
     if (!p.paksa && jumlahPaketPekanIni(riwayat, tanggal) >= maks) { await kirimTeks(`Batas ${maks} paket per 7 hari sudah tercapai (agar tidak menumpuk konten dan melewati batas pengiriman Adobe). Tambahkan kata "paksa" bila memang perlu.`); return true; }
-    let katalog = []; try { katalog = katalogIkon({ python }); } catch (e) { await kirimTeks(`Mesin ikon belum siap (${String(e.message).slice(0, 100)}). Pasang: pip install skia-pathops`); return true; }
+    let katalog = []; if (p.jumlahIkon > 0) try { katalog = katalogIkon({ python }); } catch (e) { await kirimTeks(`Mesin ikon belum siap (${String(e.message).slice(0, 100)}). Pasang: pip install skia-pathops`); return true; }
     const rencana = await susunRencana({ perintah: p, riwayat, llm: deps.llm, katalog, tanggal });
-    if (!rencana.ikon.length && !rencana.latar.length) { await kirimTeks(teksRencana(rencana)); return true; }
+    if (!rencana.ikon.length && !rencana.latar.length && !(rencana.video || []).length) { await kirimTeks(teksRencana(rencana)); return true; }
     tunda.set(chatId, { rencana, waktu: Date.now() }); await kirimTeks(teksRencana(rencana)); return true;
   }
   if (p.aksi === "setuju") {
     const t = tunda.get(chatId);
     if (!t || Date.now() - t.waktu > 30 * 60 * 1000) { tunda.delete(chatId); await kirimTeks("Tidak ada rencana yang menunggu (atau sudah lewat 30 menit). Ketik /adobe ikon ... lagi."); return true; }
     tunda.delete(chatId); await kirimTeks("Siap, paket sedang dibuat...");
-    const kerja = () => buatPaket({ rencana: t.rencana, llm: deps.llm, folder, python, tanggal });
+    const kerja = () => buatPaket({ rencana: t.rencana, llm: deps.llm, folder, python, tanggal, videoOpsi: konfig.videoOpsi || {} });
     try {
       const h = antrean ? await antrean.jalankan(kerja) : await kerja();
-      riwayat.paket.push({ tanggal, tema: t.rencana.temaAsli, ikon: h.ikon, ikon3d: h.ikon3d, latar: h.latar }); simpanRiwayat(folder, riwayat);
+      riwayat.paket.push({ tanggal, tema: t.rencana.temaAsli, ikon: h.ikon, ikon3d: h.ikon3d, latar: h.latar, video: h.video }); simpanRiwayat(folder, riwayat);
       if (h.pratinjau) await (kirimGambar || kirimDokumen)(h.pratinjau, path.basename(h.pratinjau), "Pratinjau: periksa dulu sebelum mengunggah.");
-      const ket = [`Paket siap: ${h.ikon.length} ikon, ${h.ikon3d.length} ikon 3D, ${h.latar.length} latar. Kata kunci: ${[...h.lapor.ikon, ...h.lapor.ikon3d, ...h.lapor.latar].filter((m) => m.sumber === "ai").length} dari AI, sisanya dari katalog.`, ...(h.lapor.gagal.length ? [`Gagal: ${h.lapor.gagal.join("; ")}`] : []), ...((h.lapor.info || []).length ? [`Info 3D: ${[...new Set(h.lapor.info.map((x) => x.split(": ").slice(1).join(": ")))].join("; ")}`] : []), "Unggah dan Submit kamu kerjakan sendiri (petunjuk ada di dalam zip)."].join("\n");
+      const ket = [`Paket siap: ${h.ikon.length} ikon, ${h.ikon3d.length} ikon 3D, ${h.latar.length} latar, ${h.video.length} video. Kata kunci: ${[...h.lapor.ikon, ...h.lapor.ikon3d, ...h.lapor.latar, ...h.lapor.video].filter((m) => m.sumber === "ai").length} dari AI, sisanya dari katalog.`, ...(h.lapor.gagal.length ? [`Gagal: ${h.lapor.gagal.join("; ")}`] : []), ...((h.lapor.info || []).length ? [`Info 3D: ${[...new Set(h.lapor.info.map((x) => x.split(": ").slice(1).join(": ")))].join("; ")}`] : []), "Unggah dan Submit kamu kerjakan sendiri (petunjuk ada di dalam zip)."].join("\n");
       await kirimDokumen(h.zip, path.basename(h.zip), ket);
     } catch (e) { await kirimTeks(`Maaf, paket gagal dibuat (${String(e.message).slice(0, 140)}).`); }
     return true;

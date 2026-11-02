@@ -44,14 +44,14 @@ function ekstrakJson(t) {
   if (a < 0 || b <= a) return null; try { return JSON.parse(s.slice(a, b + 1)); } catch { return null; }
 }
 export function promptMetadata({ subjek, jenis, tema, dasarKata = [] }) {
-  const apa = jenis === "ikon" ? "vector icon" : jenis === "ikon3d" ? "3D rendered icon illustration (rounded relief look, soft shadow, plain light background)" : "illustration/background image";
+  const apa = jenis === "ikon" ? "vector icon" : jenis === "ikon3d" ? "3D rendered icon illustration (rounded relief look, soft shadow, plain light background)" : jenis === "video" ? "silent looping motion-background video clip (10 seconds, no people, no text)" : "illustration/background image";
   return `You write Adobe Stock metadata in English for ONE ${apa}.
 Subject: ${subjek}
 Theme: ${tema}
 Hint keywords (use only if they really describe the image): ${dasarKata.slice(0, 20).join(", ")}
 Rules:
 - title: 35-65 characters, plain words only, NO commas or special characters, describes what the image shows. ${jenis === "ikon" || jenis === "ikon3d" ? 'End with the word "icon".' : ""}${jenis === "ikon3d" ? " Start with 3D." : ""}
-- keywords: 35-50 single or two-word terms, most important first (the first 10 matter most), no duplicates, no brand names, no artist/person/character names, no camera info, nothing that is not in the image.
+- ${jenis === "video" ? "for a video, describe the motion and mood (looping, floating, rising, flowing); do not call it an image. " : ""}keywords: 35-50 single or two-word terms, most important first (the first 10 matter most), no duplicates, no brand names, no artist/person/character names, no camera info, nothing that is not in the image.
 Return ONLY JSON: {"title":"...","keywords":["..."]}`;
 }
 /** Metadata dari LLM bila ada, jatuh ke bawaan katalog bila gagal/tidak valid. */
