@@ -56,5 +56,13 @@ check(allRows.every((r) => menuIconSrc.includes(r.icon === "moon" || r.icon === 
 check(Object.keys(PAGE_ICONS).length === 4, "4 ikon halaman");
 for (const [n, v] of Object.entries({ ICON_USER_PLUS, ICON_BOOK_OPEN, ICON_TROPHY, ICON_MIC })) check(/stroke="currentColor"/.test(v) && /stroke-width="1.8"/.test(v) && /stroke-linecap="round"/.test(v) && /stroke-linejoin="round"/.test(v) && /width="20"/.test(v) && noHard(v), `${n}: garis 1.8, round, 20px, currentColor`);
 check(/menuIcon = \(name\) =>/.test(studySrc) && !/^const MENU_ICONS/m.test(studySrc), "ikon dibaca lewat fungsi menuIcon (bukan konstanta tingkat-atas)");
+// Pemain Baru tanpa "+" (ikon sudah ada); sub-tab leaderboard bawaan "Hari ini"
+const i18nSrc = fs.readFileSync(new URL("../src/i18n.js", import.meta.url), "utf8");
+const np = [...i18nSrc.matchAll(/study_new_player: "([^"]*)"/g)].map((m) => m[1]);
+check(np.join("|") === "Pemain Baru|New Player", `teks menu Pemain Baru tanpa "+" (${np.join("|")})`);
+check((studySrc.match(/study_new_player/g) || []).length === 1, "string study_new_player hanya dipakai di menu");
+check(/boardMode: "today"/.test(studySrc), "sub-tab leaderboard bawaan = today");
+check(/export function showStudyScreen\(\) \{[\s\S]{0,200}S\.boardMode = "today"/.test(studySrc), "masuk Study lagi mengembalikan ke Hari ini");
+check(!/localStorage[^\n]*boardMode|boardMode[^\n]*localStorage/.test(studySrc), "pilihan sub-tab tidak disimpan permanen");
 if (gagal) { console.log(`\n${gagal} tes GAGAL`); process.exit(1); }
 console.log("\nSemua tes app-header lolos");

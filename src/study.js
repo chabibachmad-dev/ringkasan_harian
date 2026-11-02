@@ -121,7 +121,7 @@ const S = {
   notif: { unread: 0, items: [], loading: false, error: "", available: true, forId: "" }, // notifikasi suka & komentar (migrasi 0034)
   speak: null, // latihan speaking: { player, creds, list, session, turns, ... } (migrasi 0035)
   boardQuery: "", // kata kunci kotak cari leaderboard (hanya di memori; kosong saat keluar dari tab)
-  boardMode: "total", // papan leaderboard: "total" | "today" (poin didapat hari ini)
+  boardMode: "today", // papan leaderboard: "today" (bawaan, poin didapat hari ini) | "total"; hanya di memori, kembali ke "today" tiap masuk Study
   avatarBusy: false,
   avatarMsg: "",
   view: "home",
@@ -315,6 +315,7 @@ export function hideStudyScreen() {
 export function showStudyScreen() {
   $("screen-study").hidden = false;
   S.view = "home";
+  S.boardMode = "today"; // masuk Study lagi = sub-tab Leaderboard kembali ke "Hari ini"
   S.pin = "";
   S.player = null;
   S.profile = null;
