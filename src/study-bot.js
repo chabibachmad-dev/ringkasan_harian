@@ -3,7 +3,7 @@
 //   * isi VITE_STUDY_BOT_WA_NUMBER di env build (mis. 6281234567890), atau
 //   * isi BOT_WA_NUMBER_BAWAAN di bawah.
 // Format internasional, angka saja (tanpa +, spasi, atau strip). Kosong = tombol "Chat bot" dan nomor disembunyikan.
-const BOT_WA_NUMBER_BAWAAN = "";
+const BOT_WA_NUMBER_BAWAAN = "6285604512090";
 
 const digits = (v) => String(v ?? "").replace(/\D/g, "");
 /** Nomor bot (angka saja) atau "" bila belum diatur. */
