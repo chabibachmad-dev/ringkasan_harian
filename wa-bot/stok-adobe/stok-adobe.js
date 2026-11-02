@@ -128,11 +128,14 @@ export async function susunRencana({ perintah, riwayat, llm, katalog, tanggal })
     const cocok = (katalog || []).filter((k) => k.tema === tema && (paksa || !pakaiIkon.has(k.nama)));
     rencana.ikon = cocok.slice(0, perintah.jumlahIkon).map((k) => ({ nama: k.nama, judul: k.judul, kata: k.kata, sumber: "katalog" }));
     const kurang = perintah.jumlahIkon - rencana.ikon.length;
+    if (kurang > 0 && typeof llm !== "function") rencana.catatan.push("Model AI belum tersambung ke fitur ini (deps.llm kosong), jadi hanya ikon dari katalog yang bisa dipakai. Pakai tema katalog (mis. ramadan) atau minta penyambungan model AI.");
     if (kurang > 0 && typeof llm === "function") {
       try {
         const ai = await usulIkonAi({ llm, tema: perintah.temaAsli, n: kurang, sudah: new Set([...pakaiIkon, ...(katalog || []).map((k) => k.nama)]) });
-        rencana.ikon.push(...ai); if (ai.length) rencana.catatan.push(`${ai.length} ikon disusun AI (eksperimental): periksa lembar pratinjau sebelum mengunggah.`);
-      } catch { rencana.catatan.push("Gagal meminta usulan ikon dari AI."); }
+        rencana.ikon.push(...ai);
+        if (ai.length) rencana.catatan.push(`${ai.length} ikon disusun AI (eksperimental): periksa lembar pratinjau sebelum mengunggah.`);
+        else rencana.catatan.push("Model AI menjawab, tetapi tidak ada usulan ikon yang valid (jawaban bukan JSON yang sesuai atau semua nama bentrok). Coba ulangi atau perkecil jumlah ikon.");
+      } catch (e) { rencana.catatan.push(`Gagal meminta usulan ikon dari AI (${String(e && e.message || e).slice(0, 100)}).`); }
     }
     if (tiga && rencana.ikon.length) rencana.catatan.push("Ikon 3D memakai bentuk yang sama dengan ikon datar yang sudah kamu unggah. Adobe menilai variasi kecil dari desain yang sama sebagai mirip (maks 3 versi). Mulai dengan sedikit (4-6) lalu lihat hasil review; untuk lebih aman pilih subjek yang belum ada versi datarnya.");
     if (rencana.ikon.length < perintah.jumlahIkon) rencana.catatan.push(`Hanya ${rencana.ikon.length} ikon tersedia untuk tema ini (${perintah.jumlahIkon} diminta).`);

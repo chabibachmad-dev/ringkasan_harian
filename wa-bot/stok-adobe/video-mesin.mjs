@@ -128,7 +128,7 @@ export const VIDEO = [
   { nama: "lentera-melayang", tema: ["ramadan"], judul: "Glowing paper lanterns floating up in the night sky seamless loop",
     kata: "lanterns,floating lanterns,glowing lantern,paper lantern,sky lantern,night sky,night,festival,celebration,ramadan,eid mubarak,ramadan kareem,lebaran,islamic,festive,magic,warm light,glow,golden light,orange,dark blue,stars,twinkling stars,peaceful,dreamy,hope,wish,tradition,culture,holiday,backdrop" },
   { nama: "bulan-bintang-malam", tema: ["ramadan"], judul: "Crescent moon and twinkling stars over mosque silhouette seamless loop",
-    kata: "crescent moon,crescent,moon,stars,twinkling stars,night sky,starry night,mosque,mosque silhouette,silhouette,ramadan,ramadan kareem,eid mubarak,islamic,dome,minaret,night,dark blue,golden,glow,peaceful,spiritual,religion,culture,celebration,holiday,greeting,backdrop,sky,landscape" },
+    kata: "crescent moon,crescent,moon,stars,twinkling stars,night sky,starry night,mosque,mosque silhouette,silhouette,ramadan,ramadan kareem,eid mubarak,islamic,dome,minaret,night,dark blue,golden,glow,peaceful,spiritual,religion,culture,celebration,holiday,backdrop,sky" },
   { nama: "gradien-cair", tema: ["umum"], judul: "Abstract fluid colorful gradient glowing blobs seamless loop",
     kata: "abstract,gradient,fluid,liquid,colorful,glowing,blobs,flowing,smooth,soft,aurora,vibrant,neon,modern,futuristic,technology,creative,dynamic,blur,blurred,light,color,purple,teal,pink,orange,blue,backdrop,wallpaper" },
   { nama: "bokeh-emas", tema: ["ramadan", "umum"], judul: "Golden bokeh lights particles rising on dark background seamless loop",

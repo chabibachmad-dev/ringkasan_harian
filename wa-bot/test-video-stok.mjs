@@ -53,6 +53,15 @@ const k = S.kenaliPerintahStok;
   r = await S.susunRencana({ perintah: k("/adobe video ramadan 1"), riwayat: { paket: [{ tanggal: "2026-11-01", video: ["lentera-melayang", "bulan-bintang-malam", "bokeh-emas"] }] }, llm: null, katalog, tanggal: "2026-11-02" });
   check(r.video.length === 0 && /Tidak ada yang bisa dibuat/.test(S.teksRencana(r)), "rencana: riwayat video mencegah pengulangan");
 }
+// 3b. diagnosis tema baru tanpa katalog
+{
+  let r = await S.susunRencana({ perintah: k("/adobe ikon 3d natal 3"), riwayat: { paket: [] }, llm: null, katalog: [], tanggal: "2026-11-02" });
+  check(r.ikon.length === 0 && r.catatan.some((c) => /belum tersambung/.test(c)), "diagnosis: tanpa llm dijelaskan");
+  r = await S.susunRencana({ perintah: k("/adobe ikon natal 3"), riwayat: { paket: [] }, llm: async () => "maaf, tidak bisa", katalog: [], tanggal: "2026-11-02" });
+  check(r.ikon.length === 0 && r.catatan.some((c) => /tidak ada usulan ikon yang valid/.test(c)), "diagnosis: jawaban AI tidak valid dijelaskan");
+  r = await S.susunRencana({ perintah: k("/adobe ikon natal 3"), riwayat: { paket: [] }, llm: async () => { throw new Error("kuota habis"); }, katalog: [], tanggal: "2026-11-02" });
+  check(r.catatan.some((c) => /kuota habis/.test(c)), "diagnosis: galat AI ditampilkan");
+}
 // 4. render kecil semua desain
 const kecil = { detik: 1, fps: 24, lebar: 320, tinggi: 180, crf: 30 };
 for (const v of VIDEO) {
