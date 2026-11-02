@@ -23,9 +23,16 @@ begin
   perform pg_temp.chk('tautan ganda ditolak', ok);
   insert into study_parent_children values (pb,a1);
   perform pg_temp.chk('satu anak boleh punya dua orang tua', (select count(*) from study_parent_children where player_id = a1) = 2);
+  update study_parents set wa_jid = '628111@s.whatsapp.net' where id in (pa, pb);
+  perform pg_temp.chk('satu nomor WA boleh dipakai beberapa orang tua', (select count(*) from study_parents where wa_jid = '628111@s.whatsapp.net') = 2);
+  insert into study_parent_wa_codes(parent_id,code_hash,expires_at) values (pa,'h',now() + interval '30 minutes');
+  insert into study_parent_reset_codes(parent_id,code_salt,code_hash,via,expires_at) values (pa,'s','h','wa',now() + interval '15 minutes');
+  begin insert into study_parent_reset_codes(parent_id,code_salt,code_hash,via,expires_at) values (pa,'s','h','sms',now()); ok := false; exception when check_violation then ok := true; end;
+  perform pg_temp.chk('kanal kode reset hanya wa/owner', ok);
   insert into study_parent_actions(parent_id,parent_name,action,player_id,detail) values (pa,'Ibu Ani','penalty',a1,'10 poin');
   delete from study_parents where id = pa;
   perform pg_temp.chk('hapus orang tua: tautan ikut terhapus', not exists (select 1 from study_parent_children where parent_id = pa));
+  perform pg_temp.chk('hapus orang tua: kode WA dan kode reset ikut terhapus', not exists (select 1 from study_parent_wa_codes where parent_id = pa) and not exists (select 1 from study_parent_reset_codes where parent_id = pa));
   perform pg_temp.chk('hapus orang tua: pemain tetap ada', (select count(*) from study_players where name like 'PrAnak%') = 3);
   perform pg_temp.chk('hapus orang tua: log tetap ada dengan nama tersalin', (select parent_name from study_parent_actions where player_id = a1 limit 1) = 'Ibu Ani');
   update study_settings set parent_pin_hash = null where id = 1;

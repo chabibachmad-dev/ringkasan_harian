@@ -6,6 +6,7 @@
 import { t } from "./i18n.js";
 import { clearDeviceLogin, isDeviceToken, readDeviceLogin, saveDeviceLogin, studyCall, studyHooks } from "./study-client.js";
 import { openFormDialog } from "./study-form.js";
+import { BOT_WA_NUMBER, formatWaNumber, waLink } from "./study-bot.js";
 import { fileToAvatarBase64 } from "./study-avatar.js";
 import { renderAiMarkdown, typesetMath } from "./markdown.js";
 import { buildStudyPdf, shareOrSaveStudyPdf, buildMaterialPdf, shareOrSaveMaterialPdf, buildRoomPdf, shareOrSaveRoomPdf } from "./study-pdf.js";
@@ -1276,14 +1277,32 @@ async function registerWa(parentId, parentPin) {
     window.alert(errText(r));
     return false;
   }
+  // Link dibuat dari kode yang sedang tampil: kode baru (dialog dibuka lagi) = link baru.
+  const link = waLink(BOT_WA_NUMBER, r.code);
   return openFormDialog({
     title: L("study_wa_title"),
     intro: L("study_wa_intro"),
     okLabel: L("study_wa_done"),
     cancelLabel: L("study_wa_skip"),
     busyLabel: L("study_loading"),
-    fields: [{ key: "note", type: "note", label: L("study_wa_code_line", { code: r.code, minutes: r.minutes }) }],
+    fields: [
+      { key: "note", type: "note", label: L("study_wa_code_line", { code: r.code, minutes: r.minutes }) },
+      ...(BOT_WA_NUMBER ? [{ key: "num", type: "note", label: L("study_wa_bot_number", { number: formatWaNumber(BOT_WA_NUMBER) }) }] : []),
+      { key: "why", type: "note", label: L("study_wa_bot_note") }
+    ],
     extra: [
+      ...(link ? [{ label: L("study_wa_chat_bot"), onClick: () => window.open(link, "_blank", "noopener,noreferrer") }] : []),
+      {
+        label: L("study_wa_copy"),
+        onClick: async () => {
+          try {
+            await navigator.clipboard.writeText(r.code);
+            window.alert(L("study_wa_copied", { code: r.code }));
+          } catch (_e) {
+            window.prompt(L("study_wa_copy_manual"), r.code); // clipboard tidak tersedia: tampilkan supaya bisa disalin manual
+          }
+        }
+      },
       {
         label: L("study_wa_check"),
         onClick: async () => {
