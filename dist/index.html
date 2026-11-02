@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-    <title>Daily Insider</title>
+    <title>Ayyubi</title>
     <meta name="description" content="Asisten AI pribadi untuk ngobrol kapan saja." />
 
     <link rel="manifest" href="manifest.webmanifest" />
@@ -13,7 +13,7 @@
     <link rel="apple-touch-icon" href="icons/icon-192.png" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-    <meta name="apple-mobile-web-app-title" content="Daily Insider" />
+    <meta name="apple-mobile-web-app-title" content="Ayyubi" />
 
     <link rel="icon" href="icons/icon-192.png" />
 
@@ -25,15 +25,15 @@
       rel="stylesheet"
     />
 
-    <script type="module" crossorigin src="/assets/index-Bq3ek7yC.js"></script>
-    <link rel="stylesheet" crossorigin href="/assets/index-ntmixWBS.css">
+    <script type="module" crossorigin src="/assets/index-CZJQQg4W.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-BEQpMw9K.css">
   </head>
   <body>
     <div id="app">
       <!-- Beranda: menu daftar + thumbnail ke semua fitur -->
       <section id="screen-home" class="screen">
         <header class="topbar">
-          <h1 class="brand"><span data-i18n="brand">Daily Insider</span></h1>
+          <h1 class="brand"><span data-i18n="brand">Ayyubi</span></h1>
           <div class="topbar-actions">
             <button id="lang-toggle" class="icon-btn" title="Ganti bahasa / Switch language" aria-label="Ganti bahasa">
               <span id="lang-label">ID</span>
@@ -57,6 +57,10 @@
               <span id="menu-whatsapp-icon" class="menu-thumb"></span>
               <span class="menu-caption" data-i18n="menu_s_whatsapp">WhatsApp</span>
             </button>
+            <button type="button" id="menu-office" class="menu-item">
+              <span id="menu-office-icon" class="menu-thumb"></span>
+              <span class="menu-caption" data-i18n="menu_s_office">Kantor AI</span>
+            </button>
             <button type="button" id="menu-prayer" class="menu-item">
               <span id="menu-prayer-icon" class="menu-thumb"></span>
               <span class="menu-caption" data-i18n="menu_s_prayer">Shalat</span>
@@ -65,9 +69,17 @@
               <span id="menu-quran-icon" class="menu-thumb"></span>
               <span class="menu-caption" data-i18n="menu_s_quran">Al-Qur'an</span>
             </button>
+            <button type="button" id="menu-study" class="menu-item">
+              <span id="menu-study-icon" class="menu-thumb"></span>
+              <span class="menu-caption" data-i18n="menu_s_study">Study</span>
+            </button>
             <button type="button" id="menu-kb" class="menu-item">
               <span id="menu-kb-icon" class="menu-thumb"></span>
               <span class="menu-caption" data-i18n="menu_s_kb">Dokumen</span>
+            </button>
+            <button type="button" id="menu-md" class="menu-item">
+              <span id="menu-md-icon" class="menu-thumb"></span>
+              <span class="menu-caption" data-i18n="menu_s_md">PDF → MD</span>
             </button>
             <button type="button" id="menu-qr" class="menu-item">
               <span id="menu-qr-icon" class="menu-thumb"></span>
@@ -185,11 +197,17 @@
           </div>
 
           <div id="chat-agent-bar" class="chat-agent-bar" role="radiogroup" data-i18n-aria-label="agent_label" aria-label="Agen AI" hidden>
-            <button type="button" class="chat-agent-pill" data-agent="auto" role="radio" aria-checked="true" data-i18n-title="agent_auto_hint" title="Gemini dulu; kalau gagal otomatis pakai Ollama">
+            <button type="button" class="chat-agent-pill" data-agent="auto" role="radio" aria-checked="true" data-i18n-title="agent_auto_hint" title="Gemini dulu; kalau gagal otomatis pakai Groq/OpenRouter, lalu Ollama">
               <span data-i18n="agent_auto">Auto</span>
             </button>
             <button type="button" class="chat-agent-pill" data-agent="gemini" role="radio" aria-checked="false" data-i18n-title="agent_gemini_hint" title="Gemini (cloud, pakai API key)">
               <span data-i18n="agent_gemini">Gemini</span>
+            </button>
+            <button type="button" class="chat-agent-pill" data-agent="groq" role="radio" aria-checked="false" data-i18n-title="agent_groq_hint" title="Groq (cloud, cepat, jatah gratis)">
+              <span data-i18n="agent_groq">Groq</span>
+            </button>
+            <button type="button" class="chat-agent-pill" data-agent="openrouter" role="radio" aria-checked="false" data-i18n-title="agent_openrouter_hint" title="OpenRouter (cloud, model gratis)">
+              <span data-i18n="agent_openrouter">OpenRouter</span>
             </button>
             <button type="button" class="chat-agent-pill" data-agent="ollama" role="radio" aria-checked="false" data-i18n-title="agent_ollama_hint" title="Ollama (model lokal di laptop, cocok untuk analisis dokumen)">
               <span class="chat-agent-dot" aria-hidden="true"></span>
@@ -332,6 +350,33 @@
             <button type="button" id="quran-nav-next" class="secondary-btn" data-i18n="quran_next">Berikutnya ›</button>
           </div>
         </div>
+      </section>
+
+      <!-- Layar Study: latihan soal pilihan ganda buatan AI + poin, leaderboard, redeem (lihat src/study.js). -->
+      <section id="screen-study" class="screen" hidden>
+        <header class="topbar detail-topbar">
+          <div class="detail-topbar-row">
+            <button id="study-back-btn" class="icon-btn" title="Kembali" aria-label="Kembali">←</button>
+            <h1 id="study-title" class="detail-title">Study</h1>
+            <button id="study-notif-btn" class="icon-btn study-notif-btn" hidden title="Notifikasi" aria-label="Notifikasi" data-i18n-title="study_notif_title"><span id="study-notif-icon"></span><span id="study-notif-badge" class="study-notif-badge" hidden></span></button>
+            <button id="study-settings-btn" class="icon-btn" title="Setting" aria-label="Setting" data-i18n-title="study_settings" data-i18n-aria-label="study_settings"><span id="study-settings-icon"></span></button>
+            <button id="study-menu-btn" class="icon-btn" hidden aria-haspopup="menu" aria-expanded="false" aria-controls="study-menu" title="Menu" aria-label="Menu" data-i18n-title="study_menu" data-i18n-aria-label="study_menu"><span id="study-menu-icon"></span></button>
+          </div>
+          <div id="study-menu" class="study-menu" role="menu" hidden></div>
+        </header>
+        <main class="content" id="study-body"></main>
+      </section>
+
+      <!-- Layar Kantor: karyawan AI (bot & agen) digambar sebagai tokoh piksel yang bekerja (lihat src/office.js). -->
+      <section id="screen-office" class="screen" hidden>
+        <header class="topbar detail-topbar">
+          <div class="detail-topbar-row">
+            <button id="office-back-btn" class="icon-btn" title="Kembali" aria-label="Kembali">←</button>
+            <h1 class="detail-title">Kantor AI</h1>
+            <button id="office-pause-btn" class="secondary-btn office-pause" type="button">Jeda</button>
+          </div>
+        </header>
+        <main class="content" id="office-body"></main>
       </section>
 
       <!-- Popup kode akses -->
@@ -560,6 +605,34 @@
         </div>
       </dialog>
 
+      <!-- Dialog PDF → MD: PDF peraturan diubah jadi Markdown terstruktur di laptop (lihat wa-bot/doc-folder.js). -->
+      <dialog id="md-dialog" class="kb-dialog">
+        <div class="kb-dialog-card">
+          <h2 data-i18n="md_title">PDF → Markdown</h2>
+          <p class="kb-intro" data-i18n="md_intro">
+            Unggah PDF peraturan. Laptop mengubahnya menjadi file .md terstruktur (BAB, Pasal, ayat, tabel) dan menyimpannya
+            di folder lokal. Isinya tidak disimpan di server dan hanya bisa dijawab Ollama.
+          </p>
+
+          <form id="md-upload-form" class="kb-upload-form">
+            <input id="md-file-input" type="file" accept="application/pdf,.pdf" multiple />
+            <button type="submit" id="md-upload-btn" class="primary-btn" data-i18n="md_upload_btn">Ubah jadi .md</button>
+          </form>
+          <p id="md-upload-status" class="kb-upload-status" hidden></p>
+          <div id="md-batch" class="md-batch" hidden></div>
+
+          <div id="md-job-list" class="kb-doc-list"></div>
+          <p id="md-job-list-empty" class="status-text" hidden></p>
+          <p class="kb-doc-meta" data-i18n="md_folder_hint">
+            Cara lain: taruh PDF di folder dokumen/peraturan-pdf/ di laptop; hasilnya muncul di dokumen/peraturan-md/ dan di daftar ini.
+          </p>
+
+          <div class="chat-code-dialog-actions">
+            <button type="button" id="md-close-btn" class="primary-btn" data-i18n="detail_close">Tutup</button>
+          </div>
+        </div>
+      </dialog>
+
       <!-- Dialog Template Jawaban WA: pesan WA masuk yang cocok dgn kata kunci
            dijawab langsung dari template (AI tidak dipanggil). Dibaca bot
            wa-bot/ dari tabel wa_quick_replies. -->
@@ -619,11 +692,18 @@
           <p class="kb-intro" data-i18n="sys_intro">Kondisi bot di laptop, WhatsApp, Ollama, dan antreannya.</p>
           <div id="sys-status" class="sys-status"></div>
 
-          <h3 class="sys-subtitle" data-i18n="sys_gemini">Kuota API Gemini</h3>
-          <p class="kb-intro" data-i18n="keys_intro">
-            Pemakaian tiap API key hari ini, dihitung dari panggilan yang tercatat di sistem ini (bot WhatsApp + chat di
-            aplikasi). Angkanya perkiraan -- pemakaian di luar aplikasi ini tidak ikut terhitung.
-          </p>
+          <!-- Tiga tombol penyedia AI: klik untuk melihat monitoring key-nya (Gemini utama; Groq & OpenRouter cadangan). -->
+          <div id="keys-tabs" class="keys-tabs" role="tablist">
+            <button type="button" class="keys-tab" role="tab" data-provider="gemini" aria-selected="true" data-i18n="keys_tab_gemini">Gemini</button>
+            <button type="button" class="keys-tab" role="tab" data-provider="openrouter" aria-selected="false" data-i18n="keys_tab_openrouter">OpenRouter</button>
+            <button type="button" class="keys-tab" role="tab" data-provider="groq" aria-selected="false" data-i18n="keys_tab_groq">Groq</button>
+            <button type="button" class="keys-tab" role="tab" data-provider="tavily" aria-selected="false" data-i18n="keys_tab_tavily">Tavily</button>
+            <button type="button" class="keys-tab" role="tab" data-provider="serper" aria-selected="false" data-i18n="keys_tab_serper">Serper</button>
+            <button type="button" class="keys-tab" role="tab" data-provider="brave" aria-selected="false" data-i18n="keys_tab_brave">Brave</button>
+            <button type="button" class="keys-tab" role="tab" data-provider="cloudflare" aria-selected="false" data-i18n="keys_tab_cloudflare">Cloudflare</button>
+          </div>
+          <h3 id="keys-title" class="sys-subtitle">Kuota API Gemini</h3>
+          <p id="keys-intro" class="kb-intro"></p>
 
           <div id="keys-list" class="kb-doc-list keys-list"></div>
           <p id="keys-status" class="status-text" hidden></p>
