@@ -86,12 +86,12 @@
 //   speak_get           { playerId, pin, sessionId }                          -> { session, turns:[{idx,role,body,correction,tip,at}] }
 //                         overview.speak = false bila migrasi belum dijalankan; aksi speak_* lalu menjawab { ok:true, unavailable:true }.
 //   -- materi pelajaran buatan AI (tab "Materi"); DAFTAR & ISI bisa dibaca semua orang tanpa PIN, membuat butuh PIN pemain
-//   material_list       { before? }                                          -> { items:[{id,title,subject,grade,detail,creatorName,createdAt}], hasMore }
+//   material_list       { before?, ownerId? }                                          -> { items:[{id,title,subject,grade,detail,creatorName,createdAt}], hasMore }
 //   material_get        { materialId }                                       -> { material:{...,content} }
 //   material_create     { playerId, pin, subject, grade, classLevel?, detail, engine? }   -> { material:{...,content} }
 //   material_chat       { materialId, playerId, pin, question, history?:[{role:"user"|"ai",text}] }   -> { reply, provider, remaining }   (diskusi AI tentang SATU materi; tanpa tabel: riwayat dikirim klien tiap giliran dan dipangkas di server; Gemini dulu, penyedia cadangan bila Gemini gagal)
 //   material_delete     { materialId, playerId?, pin? | parentPin }          -> { ok }   (pembuatnya dengan PIN, atau orang tua bila PIN-nya sudah dibuat)
-//   class_list          { before? }                                          -> { items:[{id,title,fileName,lang,pageCount,creatorName,createdAt}], hasMore }   (tab "Class"; tanpa PIN)
+//   class_list          { before?, ownerId? }                                          -> { items:[{id,title,fileName,lang,pageCount,creatorName,createdAt}], hasMore }   (tab "Class"; tanpa PIN)
 //   class_get           { classId }                                          -> { classroom:{...,summary,sections:[{heading,say}]} }   (tanpa PIN; teks sumber PDF tidak dikirim)
 //   class_create        { playerId, pin, text, fileName?, pageCount?, engine? }  -> { classroom:{...} }   (teks PDF diekstrak di peramban; AI meringkas + menulis naskah lisan per bagian)
 //   class_live          { playerId, pin, topic, engine? }                    -> { classroom:{...,kind:"live",topic} }   (KELAS LIVE tanpa PDF: AI menyiapkan penjelasan materi yang diminta pemain sesuai grade/kelasnya; butuh migrasi 0043)
@@ -1536,8 +1536,11 @@ Deno.serve(async (req) => {
         }
         before = body.before;
       }
+      // ownerId (opsional) = hanya materi buatan pemain itu (kolom creator_id; baris tanpa pembuat hanya muncul tanpa ownerId).
+      if (body.ownerId !== undefined && body.ownerId !== null && !isUuid(body.ownerId)) return fail("Pemain tidak valid.");
       let q = admin.from("study_materials").select("id,title,subject,grade,class_level,detail,creator_name,created_at").order("created_at", { ascending: false }).limit(MATERIAL_PAGE + 1);
       if (before) q = q.lt("created_at", before);
+      if (body.ownerId) q = q.eq("creator_id", body.ownerId);
       const { data, error } = await q;
       if (error) return fail(error.message, 500);
       const rows = (data ?? []) as Row[];
@@ -1696,9 +1699,11 @@ Deno.serve(async (req) => {
         }
         before = body.before;
       }
+      if (body.ownerId !== undefined && body.ownerId !== null && !isUuid(body.ownerId)) return fail("Pemain tidak valid.");
       const { data, error } = await selectClass((cols) => {
         let q = admin.from("study_classrooms").select(cols).order("created_at", { ascending: false }).limit(CLASS_PAGE + 1);
         if (before) q = q.lt("created_at", before);
+        if (body.ownerId) q = q.eq("creator_id", body.ownerId); // ownerId (opsional): hanya kelas buatan pemain itu (PDF dan Live)
         return q;
       }, "id,creator_id,title,file_name,lang,page_count,creator_name,created_at");
       if (error) return classMissing(error) ? classUnavailable() : fail(error.message, 500);

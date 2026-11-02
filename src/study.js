@@ -613,10 +613,13 @@ function renderHome(body) {
   body.innerHTML = `
     <div class="study-tabs" role="tablist">${tab("timeline", L("study_tab_timeline"))}${tab("board", L("study_tab_board"))}${tab("materi", L("study_tab_materi"))}${tab("class", L("study_tab_class"))}</div>
     ${S.loading && S.tab === "board" ? `<p class="status-text">${esc(L("study_loading"))}</p>` : ""}
-    ${S.tab === "timeline" ? "" : viewerBarHtml()}
+    ${S.tab === "timeline" ? "" : viewerBarHtml()}${S.tab === "materi" || S.tab === "class" ? scopeToggleHtml() : ""}
     <div role="tabpanel">${S.tab === "materi" ? materialsHtml() : S.tab === "class" ? classesHtml() : S.tab === "timeline" ? timelineHtml() : boardHtml}</div>`;
   // kegiatan baru (pelajaran/kompetisi/materi selesai) sejak timeline dimuat: segarkan diam-diam
   if (S.tab === "timeline" && S.feed && !S.feed.loading && (S.feed.stale || S.feed.scopeKey !== tlScopeKey())) setTimeout(() => S.feed && loadFeed(S.feed, "refresh"), 0);
+  // Materi/Class: cakupan berubah (masuk/keluar/ganti pemain) sejak dimuat -> muat ulang
+  if (S.tab === "materi" && !S.materials.loading && S.materials.scopeKey !== tlScopeKey()) setTimeout(() => loadMaterials(true), 0);
+  if (S.tab === "class" && !S.classes.loading && S.classes.scopeKey !== tlScopeKey()) setTimeout(() => loadClasses(true), 0);
 }
 
 function renderProfile(body) {
@@ -839,7 +842,7 @@ function onBodyChange(e) {
   const tl = e.target.closest?.("input[data-tl-all]");
   if (tl) {
     setTlAll(tl.checked);
-    return loadFeed(S.feed, "first"); // cakupan berubah: kueri ulang + gambar ulang
+    return reloadScoped(); // cakupan berubah: kueri ulang + gambar ulang
   }
   const input = e.target.closest?.('input[type="radio"][data-q]');
   if (!input || !S.quiz) return;
@@ -1806,20 +1809,45 @@ function setTlAll(on) {
   }
 }
 const tlScopeKey = () => `${tlAll() ? 1 : 0}:${S.viewer?.id || ""}`;
-// Samakan feed beranda dengan cakupan sekarang; berubah (toggle/ganti pemain/masuk/keluar) = daftar lama dibuang.
+// Satu helper untuk tiga daftar (timeline, Materi, Class): samakan daftar dengan cakupan sekarang.
+// Berubah (toggle/ganti pemain/masuk/keluar) = isi lama dibuang. true = berubah.
+function scopeList(list) {
+  list.needLogin = !tlAll() && !S.viewer;
+  const key = tlScopeKey();
+  if (list.scopeKey === key) return false;
+  list.scopeKey = key;
+  list.items = [];
+  list.hasMore = false;
+  list.loaded = false;
+  list.error = "";
+  return true;
+}
+// ownerId untuk kueri: kosong = semua pemain.
+const scopeOwner = () => (tlAll() ? undefined : S.viewer?.id || undefined);
+// Pengaman tampilan bila server lama belum menyaring ownerId (bukan pengganti saringan di kueri).
+const scopedItems = (list) => (tlAll() || !S.viewer ? list.items : list.items.filter((i) => i.creatorId === S.viewer.id));
 function scopeFeed(feed) {
   if (feed !== S.feed) return;
-  const all = tlAll();
-  feed.needLogin = !all && !S.viewer;
-  const key = tlScopeKey();
-  if (feed.scopeKey === key) return;
-  feed.scopeKey = key;
-  feed.ownerId = all ? null : S.viewer?.id || null;
-  feed.items = [];
-  feed.hasMore = false;
-  feed.loaded = false;
-  feed.error = "";
+  if (!scopeList(feed)) return;
+  feed.ownerId = scopeOwner() || null;
   feed.comments = {};
+}
+// Komponen toggle yang SAMA di tab Timeline, Materi, dan Class (satu keadaan bersama).
+function scopeToggleHtml() {
+  const on = tlAll();
+  return `<label class="study-tl-toggle"><span class="study-tl-toggle-text"><strong>${esc(L("study_tl_all"))}</strong><small>${esc(L(on ? "study_tl_all_on" : "study_tl_all_off"))}</small></span><input type="checkbox" role="switch" data-tl-all ${on ? "checked" : ""} aria-label="${esc(L("study_tl_all"))}"><span class="study-tl-switch" aria-hidden="true"></span></label>`;
+}
+// Keadaan kosong/butuh masuk untuk daftar Materi dan Class saat OFF.
+function scopeEmptyHtml(list, emptyKey, mineKey) {
+  if (list.needLogin) return `<p class="status-text">${esc(L("study_scope_need_login"))}</p>`;
+  if (list.loaded && scopedItems(list).length === 0 && !list.error) return `<p class="status-text">${esc(L(tlAll() ? emptyKey : mineKey))}${tlAll() ? "" : `<br><small>${esc(L("study_scope_hint"))}</small>`}</p>`;
+  return "";
+}
+// Muat ulang daftar pada tab yang sedang tampil (dipakai toggle); tab lain menyusul saat dibuka.
+function reloadScoped() {
+  if (S.tab === "materi") return loadMaterials(true);
+  if (S.tab === "class") return loadClasses(true);
+  return loadFeed(S.feed, "first");
 }
 
 // mode: "first" (kosongkan lalu muat), "refresh" (muat ulang, isi lama tetap tampil sampai data baru datang), "more" (halaman berikutnya)
@@ -2165,7 +2193,7 @@ function timelineHtml() {
   if (!S.feed) S.feed = newFeed(null, null);
   const composeBar = `<button type="button" class="study-compose-bar" data-act="new-lesson">${S.viewer ? avatarHtml(S.viewer.id, S.viewer.name, "study-avatar--sm", true) : '<span class="study-avatar study-avatar--sm" aria-hidden="true">+</span>'}<span class="study-compose-text">${esc(L("study_compose_ph"))}</span></button>`;
   const on = tlAll();
-  const toggle = `<label class="study-tl-toggle"><span class="study-tl-toggle-text"><strong>${esc(L("study_tl_all"))}</strong><small>${esc(L(on ? "study_tl_all_on" : "study_tl_all_off"))}</small></span><input type="checkbox" role="switch" data-tl-all ${on ? "checked" : ""} aria-label="${esc(L("study_tl_all"))}"><span class="study-tl-switch" aria-hidden="true"></span></label>`;
+  const toggle = scopeToggleHtml();
   scopeFeed(S.feed);
   const body = S.feed.needLogin
     ? `<p class="status-text">${esc(L("study_tl_need_login"))}</p>`
@@ -2383,24 +2411,32 @@ function switchTab(tab) {
   if (tab !== "timeline" && tab !== "board" && tab !== "materi" && tab !== "class") return;
   S.tab = tab;
   render();
-  if (tab === "materi" && !S.materials.loaded && !S.materials.loading) loadMaterials(true);
-  if (tab === "class" && !S.classes.loaded && !S.classes.loading) loadClasses(true);
+  if (tab === "materi" && !S.materials.loading && (!S.materials.loaded || S.materials.scopeKey !== tlScopeKey())) loadMaterials(true);
+  if (tab === "class" && !S.classes.loading && (!S.classes.loaded || S.classes.scopeKey !== tlScopeKey())) loadClasses(true);
   if (tab === "timeline" && S.feed && !S.feed.loaded && !S.feed.loading) loadFeed(S.feed, "first");
 }
 
 async function loadMaterials(reset) {
   const m = S.materials;
+  scopeList(m);
   if (m.loading) return;
+  if (m.needLogin) {
+    m.loaded = true;
+    if (S.view === "home") render();
+    return;
+  }
   m.loading = true;
   m.error = "";
+  const scope = m.scopeKey;
   if (reset) {
     m.items = [];
     m.hasMore = false;
   }
   render();
   const last = m.items[m.items.length - 1];
-  const res = await studyCall("material_list", { before: reset ? undefined : last?.createdAt });
+  const res = await studyCall("material_list", { before: reset ? undefined : last?.createdAt, ownerId: scopeOwner() });
   m.loading = false;
+  if (m.scopeKey !== scope || scope !== tlScopeKey()) return loadMaterials(true); // cakupan berubah saat memuat: hasil basi
   if (!res.ok) {
     m.error = errText(res);
   } else {
@@ -2414,7 +2450,8 @@ async function loadMaterials(reset) {
 
 function materialsHtml() {
   const m = S.materials;
-  const cards = m.items
+  scopeList(m);
+  const cards = scopedItems(m)
     .map(
       (it) => `
     <article class="study-material" data-mat="${esc(it.id)}">
@@ -2434,7 +2471,7 @@ function materialsHtml() {
   return `
     <div class="study-actions"><button type="button" class="primary-btn" data-act="mat-new">${esc(L("study_mat_new"))}</button></div>
     ${m.error ? `<div class="study-card"><p>${esc(m.error)}</p><button type="button" class="secondary-btn" data-act="mat-more">${esc(L("study_reload"))}</button></div>` : ""}
-    ${m.loaded && m.items.length === 0 && !m.error ? `<p class="status-text">${esc(L("study_mat_empty"))}</p>` : ""}
+    ${scopeEmptyHtml(m, "study_mat_empty", "study_mat_mine_empty")}
     ${cards}
     ${m.loading ? `<p class="status-text">${esc(L("study_loading"))}</p>` : m.hasMore ? `<div class="study-actions"><button type="button" class="secondary-btn" data-act="mat-more">${esc(L("study_tl_more"))}</button></div>` : ""}`;
 }
@@ -2736,17 +2773,25 @@ const classroom = createClassroom({
 
 async function loadClasses(reset) {
   const c = S.classes;
+  scopeList(c);
   if (c.loading) return;
+  if (c.needLogin) {
+    c.loaded = true;
+    if (S.view === "home") render();
+    return;
+  }
   c.loading = true;
   c.error = "";
+  const scope = c.scopeKey;
   if (reset) {
     c.items = [];
     c.hasMore = false;
   }
   render();
   const last = c.items[c.items.length - 1];
-  const res = await studyCall("class_list", { before: reset ? undefined : last?.createdAt });
+  const res = await studyCall("class_list", { before: reset ? undefined : last?.createdAt, ownerId: scopeOwner() });
   c.loading = false;
+  if (c.scopeKey !== scope || scope !== tlScopeKey()) return loadClasses(true); // cakupan berubah saat memuat: hasil basi
   if (!res.ok) {
     c.error = errText(res);
   } else {
@@ -2760,7 +2805,8 @@ async function loadClasses(reset) {
 
 function classesHtml() {
   const c = S.classes;
-  const cards = c.items
+  scopeList(c);
+  const cards = scopedItems(c)
     .map(
       (it) => `
     <article class="study-material" data-class="${esc(it.id)}">
@@ -2780,7 +2826,7 @@ function classesHtml() {
     <p class="study-hint">${esc(L("study_cls_intro"))}</p>
     ${S.classBusy ? `<div class="study-card" role="status"><p>${esc(S.classBusy)}</p></div>` : ""}
     ${c.error ? `<div class="study-card"><p>${esc(c.error)}</p><button type="button" class="secondary-btn" data-act="class-reload">${esc(L("study_reload"))}</button></div>` : ""}
-    ${c.loaded && c.items.length === 0 && !c.error ? `<p class="status-text">${esc(L("study_cls_empty"))}</p>` : ""}
+    ${scopeEmptyHtml(c, "study_cls_empty", "study_cls_mine_empty")}
     ${cards}
     ${c.loading ? `<p class="status-text">${esc(L("study_loading"))}</p>` : c.hasMore ? `<div class="study-actions"><button type="button" class="secondary-btn" data-act="class-more">${esc(L("study_tl_more"))}</button></div>` : ""}`;
 }
