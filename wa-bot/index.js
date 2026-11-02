@@ -71,6 +71,7 @@ import { createMotion, readMotionConfig } from "./edu-motion.js";
 import { buatAntrean, buatPembatas, konfigDariEnv as konfigVideoWa } from "./motion/perintah-wa.js";
 import { createWaVideo } from "./wa-video.js";
 import { createWaGambar } from "./wa-gambar.js";
+import { createWaStokAdobe } from "./wa-stok-adobe.js";
 import { createYoutube, readYoutubeConfig } from "./youtube.js";
 import { buildTutorSystemPrompt, buildTutorUserPrompt, parseTutorReply } from "./tutor.js";
 import { createAppAgentWorker } from "./app-agent.js";
@@ -3242,6 +3243,8 @@ async function handleGroupMessage(msg, sock) {
     }
   }
   // Permintaan video motion graphic ("/video ...", "buatkan video ..."): di grup cukup dengan /video, atau bila bot dipanggil.
+  // Perintah /adobe diperiksa sebelum alur lain (hanya pemilik; di grup non-pemilik tidak dijawab).
+  if (!msg.key.fromMe && !fromBot && !photo && !docAttached && !groupAudio && !groupVideo && (await tanganiStokAdobe(sock, msg, { teks: text, grup: groupJid, disebut: triggered }))) return;
   if (!msg.key.fromMe && !fromBot && !groupAudio && !groupVideo && (await tanganiGambarStok(sock, msg, { teks: text, grup: groupJid, disebut: triggered }))) return;
   if (!msg.key.fromMe && !fromBot && !photo && !docAttached && !groupAudio && !groupVideo && (await tanganiVideoWa(sock, msg, { teks: text, grup: groupJid, disebut: triggered }))) return;
   if (!triggered) {
@@ -4523,6 +4526,17 @@ const tanganiGambarStok = createWaGambar({
   antrean: waVideoAntrean
 });
 
+// Paket Adobe Stock (/adobe, hanya pemilik; stok-adobe/README.md): bot hanya menyiapkan zip, mengunggah tetap pemilik. Antrean SAMA dengan render video dan gambar stok.
+// Hasil dan riwayat ada di data/stok-adobe (di luar kb/ dan di luar git). Berlaku untuk nomor utama dan nomor kedua (penangan pesan dipakai bersama).
+const tanganiStokAdobe = createWaStokAdobe({
+  llm: motionLlm,
+  adalahPemilik: (msg, selfChat) => isOwnerSender(msg, selfChat),
+  grupBoleh: async (sock, grup) => { const subject = await getGroupSubject(sock, grup); return { boleh: isGroupAllowed(grup, subject, sock), subject }; },
+  balasGrup: (sock, grup, msg, subject, t) => replyGroupText(sock, grup, msg, subject, t),
+  antrean: waVideoAntrean,
+  folder: process.env.STOK_ADOBE_DIR?.trim() || fileURLToPath(new URL("./data/stok-adobe", import.meta.url))
+});
+
 /** Pemilik meminta gambar di chat pribadi ("buatkan gambar ..." / "/gambar ..."). true = ditangani. */
 async function handleWaImageCommand(sock, jid, msg, text) {
   if (!imageGen.available()) return false;
@@ -4720,6 +4734,7 @@ async function handleIncoming(msg, sock) {
     }
   }
   // PDF di chat pribadi: dilampirkan (juga yang bersama keterangan), atau dibalas dengan pertanyaan -> dibaca semua halamannya lalu dijawab dengan kutipan halaman.
+  if (!viaVoice && (await tanganiStokAdobe(sock, msg, { teks: text || "", isSelfChat }))) return;
   if (!viaVoice && (await tanganiGambarStok(sock, msg, { teks: text || "", isSelfChat }))) return;
   const dmPdf = !isSelfChat ? dmPdfCandidate(msg, text || "") : null;
   if (dmPdf) text = dmPdf.text;

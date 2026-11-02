@@ -36,3 +36,7 @@ wa-bot/.health-starts.json
 wa-bot/skills/.terhapus/
 .ops-backup/
 dokumen/
+
+# Paket Adobe Stock (wa-bot/stok-adobe): venv Python untuk mesin ikon dan folder hasil/riwayat
+.venv-stok/
+wa-bot/data/stok-adobe/
