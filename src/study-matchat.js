@@ -55,6 +55,11 @@ export const chatRemembered = (turns) => Math.ceil(chatHistoryPayload(turns).len
 // ---------------------------------------------------------------- panel (DOM)
 // deps: { L, esc, renderMd(text)->html, typeset(el), getChat()->chat|null, getTitle()->string,
 //         ask(question, history)->Promise<res>, errText(res)->string, onReset?() }
+// Pilihan (dipakai "Cek dengan AI" di halaman Hasil; tanpa pilihan ini tampilannya sama persis dengan diskusi materi):
+//   titleText, placeholder, noteText, hideNew (sembunyikan "Percakapan baru"),
+//   contextLine() -> string (satu baris di bawah judul), quick: [{ text, label }] (tombol cepat yang selalu tampak),
+//   retryLabel (tombol "Coba lagi" di kotak galat), onClosed?()
+let sheetSeq = 0;
 export function createMatChatSheet(deps) {
   const { L, esc } = deps;
   let dlg = null;
@@ -65,20 +70,22 @@ export function createMatChatSheet(deps) {
   function build() {
     dlg = document.createElement("dialog");
     dlg.className = "study-sheet";
-    dlg.setAttribute("aria-labelledby", "study-sheet-title");
+    const titleId = `study-sheet-title-${++sheetSeq}`;
+    dlg.setAttribute("aria-labelledby", titleId);
     dlg.tabIndex = -1;
     dlg.innerHTML = `
       <div class="study-sheet-grab" aria-hidden="true"></div>
       <header class="study-sheet-head">
-        <div class="study-sheet-titles"><strong id="study-sheet-title">${esc(L("study_mchat_title"))}</strong><span class="study-sheet-sub" data-sheet-sub></span></div>
-        <button type="button" class="study-sheet-btn" data-sheet="new">${esc(L("study_mchat_new"))}</button>
+        <div class="study-sheet-titles"><strong id="${titleId}">${esc(deps.titleText || L("study_mchat_title"))}</strong><span class="study-sheet-sub" data-sheet-sub></span></div>
+        ${deps.hideNew ? "" : `<button type="button" class="study-sheet-btn" data-sheet="new">${esc(L("study_mchat_new"))}</button>`}
         <button type="button" class="study-sheet-close" data-sheet="close" aria-label="${esc(L("study_mchat_close"))}">&times;</button>
       </header>
       <div class="study-sheet-log" data-sheet-log role="log" aria-live="polite"></div>
-      <p class="study-sheet-error" data-sheet-error role="alert" hidden></p>
+      <div class="study-sheet-error" data-sheet-error role="alert" hidden><span data-sheet-error-text></span>${deps.retryLabel ? ` <button type="button" class="study-sheet-btn" data-sheet="retry">${esc(deps.retryLabel)}</button>` : ""}</div>
+      ${deps.quick && deps.quick.length ? `<div class="study-chat-chips study-chat-quick" data-sheet-quick>${deps.quick.map((c) => `<button type="button" class="study-chat-chip" data-chip="1" data-text="${esc(c.text)}">${esc(c.label || c.text)}</button>`).join("")}</div>` : ""}
       <p class="study-sheet-note" data-sheet-note></p>
       <form class="study-sheet-composer" data-sheet-form>
-        <textarea rows="1" maxlength="${CHAT_QUESTION_MAX}" data-sheet-input placeholder="${esc(L("study_mchat_ph"))}" aria-label="${esc(L("study_mchat_ph"))}" autocomplete="off" autocapitalize="sentences"></textarea>
+        <textarea rows="1" maxlength="${CHAT_QUESTION_MAX}" data-sheet-input placeholder="${esc(deps.placeholder || L("study_mchat_ph"))}" aria-label="${esc(deps.placeholder || L("study_mchat_ph"))}" autocomplete="off" autocapitalize="sentences"></textarea>
         <button type="submit" class="primary-btn" data-sheet-send>${esc(L("study_mchat_send"))}</button>
       </form>`;
     document.body.appendChild(dlg);
@@ -89,6 +96,10 @@ export function createMatChatSheet(deps) {
       if (btn) {
         if (btn.dataset.sheet === "close") close();
         else if (btn.dataset.sheet === "new") reset();
+        else if (btn.dataset.sheet === "retry") {
+          const c = deps.getChat();
+          if (c && c.draft) send(c.draft);
+        }
         return;
       }
       const chip = e.target.closest("[data-chip]");
@@ -159,7 +170,7 @@ export function createMatChatSheet(deps) {
     const log = q("[data-sheet-log]");
     const input = q("[data-sheet-input]");
     const send = q("[data-sheet-send]");
-    q("[data-sheet-sub]").textContent = deps.getTitle();
+    q("[data-sheet-sub]").textContent = deps.contextLine ? deps.contextLine() : deps.getTitle();
     if (shownChat !== chat) {
       log.innerHTML = "";
       shownChat = chat;
@@ -200,10 +211,12 @@ export function createMatChatSheet(deps) {
     }
     const err = q("[data-sheet-error]");
     err.hidden = !chat.error;
-    err.textContent = chat.error || "";
+    q("[data-sheet-error-text]").textContent = chat.error || "";
+    const quick = q("[data-sheet-quick]");
+    if (quick) quick.querySelectorAll("button").forEach((b) => (b.disabled = chat.busy || !chat.turns.length));
     const note = q("[data-sheet-note]");
     const left = chat.remaining;
-    note.textContent = typeof left === "number" && left <= 10 ? L("study_mchat_remaining", { n: left }) : L("study_mchat_note");
+    note.textContent = typeof left === "number" && left <= 10 ? L("study_mchat_remaining", { n: left }) : deps.noteText || L("study_mchat_note");
     input.disabled = chat.busy;
     send.disabled = chat.busy;
     if (input.value !== (chat.draft || "")) input.value = chat.draft || "";
@@ -274,5 +287,5 @@ export function createMatChatSheet(deps) {
     shownChat = null;
   }
 
-  return { open, close, paint, destroy, isOpen: () => !!(dlg && dlg.open) };
+  return { open, close, paint, destroy, send, isOpen: () => !!(dlg && dlg.open) };
 }

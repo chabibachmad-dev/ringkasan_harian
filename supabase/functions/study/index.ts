@@ -90,6 +90,7 @@
 //   material_get        { materialId }                                       -> { material:{...,content} }
 //   material_create     { playerId, pin, subject, grade, classLevel?, detail, engine? }   -> { material:{...,content} }
 //   material_chat       { materialId, playerId, pin, question, history?:[{role:"user"|"ai",text}] }   -> { reply, provider, remaining }   (diskusi AI tentang SATU materi; tanpa tabel: riwayat dikirim klien tiap giliran dan dipangkas di server; Gemini dulu, penyedia cadangan bila Gemini gagal)
+//   question_chat       { sessionId, idx, playerId, pin, lang:"id"|"en", first?:true, question?, history? } -> { reply, provider, remaining, context }   ("Cek dengan AI" untuk satu soal yang salah di Hasil; konteks soal diambil dari database, hanya membaca; jatah harian sama dengan material_chat + batas per jam)
 //   material_delete     { materialId, playerId?, pin? | parentPin }          -> { ok }   (pembuatnya dengan PIN, atau orang tua bila PIN-nya sudah dibuat)
 //   class_list          { before?, ownerId? }                                          -> { items:[{id,title,fileName,lang,pageCount,creatorName,createdAt}], hasMore }   (tab "Class"; tanpa PIN)
 //   class_get           { classId }                                          -> { classroom:{...,summary,sections:[{heading,say}]} }   (tanpa PIN; teks sumber PDF tidak dikirim)
@@ -134,6 +135,10 @@ import {
   buildExplainPrompt,
   buildMaterialPrompt,
   buildMaterialChatPrompt,
+  buildQuestionChatPrompt,
+  questionContextLine,
+  questionLang,
+  QUESTION_CHAT_PER_PLAYER_HOUR,
   cleanChatHistory,
   cleanChatQuestion,
   cleanChatReply,
@@ -611,6 +616,7 @@ const MATERIAL_CHAT_PER_PLAYER_DAY = 80; // batas LUNAK (ingatan isolate, bisa t
 const MATERIAL_CHAT_GLOBAL_DAY = 600; // batas lunak semua pemain per hari
 const materialChatUse = new Map<string, { day: number; n: number }>();
 let materialChatGlobal = { day: 0, n: 0 };
+const questionChatHour = new Map<string, { hour: number; n: number }>(); // batas lunak per jam untuk "Cek dengan AI"
 const MATERIAL_PER_PLAYER_ATTEMPTS = 2; // percobaan membuat materi (bila AI mengembalikan jawaban tak layak)
 
 const materialRow = (m: Row, withContent = false) => ({
@@ -1782,6 +1788,89 @@ Deno.serve(async (req) => {
       if (error) return fail(error.message, 500);
       if (!m) return fail("Materi itu tidak ditemukan.", 404);
       return json({ ok: true, material: materialRow(m, true) });
+    }
+
+    // ------------------------------------------------------------ hasil: "Cek dengan AI" untuk satu soal yang salah (PIN / token pemain)
+    // Hanya MEMBACA soal milik sesi pemain yang login; tidak mengubah skor, status benar/salah, atau kunci jawaban.
+    // Jatah harian dipakai bersama diskusi materi (MATERIAL_CHAT_*), ditambah batas per jam. Isi chat tidak disimpan dan tidak lewat bot WA.
+    if (action === "question_chat") {
+      const auth = await checkPlayerPin(admin, body.playerId, body.pin);
+      if (auth instanceof Response) return auth;
+      const p = auth.player;
+      const owned = await loadOwnedSession(admin, body.sessionId, p.id as string);
+      if (owned instanceof Response) return owned;
+      if (owned.session.status !== "submitted") return fail("Pelajaran belum dikumpulkan.", 409);
+      const idx = typeof body.idx === "number" && Number.isInteger(body.idx) && body.idx >= 0 && body.idx < 200 ? body.idx : -1;
+      if (idx < 0) return fail("Soal tidak valid.");
+      const { data: q, error: qerr } = await admin.from("study_questions").select("*").eq("session_id", owned.session.id).eq("idx", idx).maybeSingle();
+      if (qerr) return fail(qerr.message, 500);
+      if (!q) return fail("Soal itu tidak ditemukan.", 404);
+      if (q.user_answer !== null && q.user_answer === q.correct_index) return fail("Tombol ini hanya untuk soal yang jawabannya salah.");
+      const lang = questionLang(body.lang);
+      const message = body.first === true ? "" : cleanChatQuestion(body.question);
+      if (body.first !== true && message.length < 1) return fail("Tulis pertanyaannya dulu.");
+
+      const day = Math.floor(Date.now() / 86_400_000);
+      const hour = Math.floor(Date.now() / 3_600_000);
+      const used = materialChatUse.get(p.id as string);
+      const mine = used && used.day === day ? used : { day, n: 0 };
+      const hr = questionChatHour.get(p.id as string);
+      const myHour = hr && hr.hour === hour ? hr : { hour, n: 0 };
+      if (materialChatGlobal.day !== day) materialChatGlobal = { day, n: 0 };
+      if (myHour.n >= QUESTION_CHAT_PER_PLAYER_HOUR) return fail(`Batas per jam tercapai: maksimal ${QUESTION_CHAT_PER_PLAYER_HOUR} pesan cek soal per jam. Coba lagi nanti.`, 429, { dailyLimit: true });
+      if (mine.n >= MATERIAL_CHAT_PER_PLAYER_DAY) return fail(`Batas harian tercapai: maksimal ${MATERIAL_CHAT_PER_PLAYER_DAY} pesan diskusi AI per pemain per hari. Coba lagi besok.`, 429, { dailyLimit: true });
+      if (materialChatGlobal.n >= MATERIAL_CHAT_GLOBAL_DAY) return fail("Batas harian diskusi AI untuk seluruh pemain sudah tercapai. Coba lagi besok.", 429, { dailyLimit: true });
+      mine.n++;
+      myHour.n++;
+      materialChatGlobal.n++;
+      materialChatUse.set(p.id as string, mine);
+      questionChatHour.set(p.id as string, myHour);
+
+      await wireReporters(admin);
+      const keys = getGeminiApiKeys();
+      const prompt = buildQuestionChatPrompt({
+        lang,
+        subject: String(owned.session.subject ?? ""),
+        grade: String(owned.session.material_grade ?? p.grade ?? ""),
+        classLevel: owned.session.material_class ?? p.class_level ?? null,
+        number: idx + 1,
+        question: String(q.question ?? ""),
+        options: Array.isArray(q.options) ? q.options.map((o: unknown) => String(o ?? "")) : [],
+        userAnswer: q.user_answer ?? null,
+        correctIndex: q.correct_index,
+        explanation: q.explanation ?? null,
+        doubtful: !!q.doubtful,
+        history: cleanChatHistory(body.history),
+        message
+      });
+      let reply = "";
+      let provider = "gemini";
+      let lastError = "";
+      let tokens = 0;
+      let cost = 0;
+      for (let attempt = 0; attempt < 2 && !reply; attempt++) {
+        try {
+          const r = await generateJsonText(prompt.system, prompt.user, keys, { temperature: 0.3, engine: "auto", order: "gemini-first", plain: true, budgetMs: 30_000 });
+          tokens += r.tokensUsed;
+          cost += r.costUsd;
+          if (r.provider) provider = r.provider;
+          reply = cleanChatReply(r.text);
+          if (!reply) lastError = "AI mengembalikan jawaban kosong.";
+        } catch (err) {
+          lastError = err instanceof Error ? err.message : String(err);
+          console.error("study question_chat:", lastError);
+          if (/429|quota|exhaust|batas kuota|rate.?limit|PerDay/i.test(lastError)) break;
+        }
+      }
+      await recordTokens(admin, tokens, cost);
+      if (!reply) {
+        mine.n = Math.max(0, mine.n - 1); // giliran yang gagal tidak memakan jatah
+        myHour.n = Math.max(0, myHour.n - 1);
+        materialChatGlobal.n = Math.max(0, materialChatGlobal.n - 1);
+        const quota = /429|quota|exhaust|batas kuota|rate.?limit|PerDay/i.test(lastError);
+        return fail(quota ? "Guru AI sedang penuh (kuota gratis habis). Tunggu sebentar lalu coba lagi." : `Guru AI belum menjawab. ${lastError}`.trim().slice(0, 300), 502, { generationFailed: true });
+      }
+      return json({ ok: true, reply, provider, remaining: Math.max(0, MATERIAL_CHAT_PER_PLAYER_DAY - mine.n), context: questionContextLine({ lang, number: idx + 1, options: Array.isArray(q.options) ? q.options.map((o: unknown) => String(o ?? "")) : [], userAnswer: q.user_answer ?? null, correctIndex: q.correct_index }) });
     }
 
     // ------------------------------------------------------------ materi: diskusi AI (PIN / token pemain)

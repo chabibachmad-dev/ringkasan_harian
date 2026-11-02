@@ -5550,3 +5550,32 @@ button.study-trow:active {
   opacity: 0.6;
   pointer-events: none;
 }
+
+/* ---- Hasil: tombol "Cek dengan AI" di bawah kartu soal yang salah ---- */
+.study-check-ai {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 10px;
+}
+
+.study-check-ai-btn {
+  width: 100%;
+  min-height: 44px;
+}
+
+.study-check-ai small {
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  text-align: center;
+}
+
+.study-chat-quick {
+  flex: 0 0 auto;
+  padding: 0 16px 6px;
+}
+
+.study-sheet-error [data-sheet="retry"] {
+  min-height: 36px;
+  margin-left: 6px;
+}

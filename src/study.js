@@ -17,7 +17,7 @@ import { countText, headerMenuRows, menuDot } from "./app-header.js";
 import { ICON_MOON, ICON_SUN, ICON_SETTINGS } from "./icons.js";
 import { createMatChatSheet, newChat } from "./study-matchat.js";
 import { CLASS_SOURCE_LIMIT, checkPdfFile, createClassroom } from "./study-class.js";
-import { allowedClasses, allowedMaterialGrades, classesOf, classPercent, computePoints, formatClock, gradeText, lessonClasses, lessonGrades, PRACTICE_QUESTIONS as PRACTICE_COUNT, timeLimitSeconds } from "../supabase/functions/_shared/study-core.ts";
+import { allowedClasses, allowedMaterialGrades, classesOf, classPercent, computePoints, formatClock, gradeText, lessonClasses, lessonGrades, PRACTICE_QUESTIONS as PRACTICE_COUNT, questionContextLine, timeLimitSeconds } from "../supabase/functions/_shared/study-core.ts";
 
 const $ = (id) => document.getElementById(id);
 let ctx = { getLang: () => "id" };
@@ -144,6 +144,7 @@ const S = {
   room: null, // room yang sedang diikuti: { id, creds, state, busy, leftQuiz }
   materials: { items: [], hasMore: false, loading: false, loaded: false, error: "" },
   material: null, // materi yang sedang dibaca: { id, title, ..., content (null = masih dimuat) }
+  qChat: null, // "Cek dengan AI" untuk satu soal di Hasil (hanya di memori)
   matChat: null, // diskusi AI tentang materi yang sedang dibaca (hanya di memori; hilang saat keluar dari materi)
   classes: { items: [], hasMore: false, loading: false, loaded: false, error: "" }, // tab Class: daftar kelas (PDF yang dijelaskan guru AI)
   classBusy: "" // teks status selagi PDF dibaca/diringkas ("" = tidak sedang mengunggah)
@@ -300,6 +301,7 @@ export function hideStudyScreen() {
   S.view = "home";
   closeStudyMenu();
   dropMatChat();
+  dropQChat();
   classroom.dispose();
   stopSpeakIO();
   S.speak = null;
@@ -337,9 +339,12 @@ export function rerenderStudy() {
   if (!$("screen-study") || $("screen-study").hidden) return;
   // ganti bahasa: teks panel diskusi dibangun ulang (percakapan tetap)
   const reopen = !!(matSheet && matSheet.isOpen() && S.matChat);
+  const reopenQ = !!(qSheet && qSheet.isOpen() && S.qChat);
   if (matSheet) matSheet.destroy();
+  if (qSheet) qSheet.destroy();
   render();
   if (reopen) getMatSheet().open();
+  if (reopenQ) getQSheet().open();
 }
 
 function onBack() {
@@ -563,6 +568,7 @@ function render() {
   else if (S.view === "speak") renderSpeakChat(body);
   if (S.view !== "class") classroom.dispose(); // suara & mikrofon guru berhenti begitu keluar dari layar kelas
   // diskusi AI hanya hidup selama layar materi yang sama masih terbuka
+  if (S.qChat && (S.view !== "result" || S.result?.session?.id !== S.qChat.sessionId)) dropQChat();
   if (S.matChat && (S.view !== "material" || !S.material || S.material.id !== S.matChat.materialId)) dropMatChat();
   typesetMath(body).catch(() => {});
   syncQuizTimer();
@@ -868,6 +874,7 @@ function renderResult(body) {
             : `<div class="study-expl study-expl--missing">${esc(L("study_explanation_missing"))}</div>`
         }
         ${it.doubtful ? `<div class="study-doubtful">⚠ ${esc(L("study_doubtful"))}</div>` : ""}
+        ${!unanswered && !it.isCorrect && ownerAuthFor(r) ? `<div class="study-check-ai"><button type="button" class="secondary-btn study-check-ai-btn" data-act="check-ai" data-idx="${it.idx}">${esc(L("study_qchat_btn"))}</button><small>${esc(L("study_qchat_hint"))}</small></div>` : ""}
       </article>`;
     })
     .join("");
@@ -937,6 +944,7 @@ async function onBodyClick(e) {
     S.boardMode = btn.dataset.mode === "today" ? "today" : "total";
     return render();
   }
+  if (act === "check-ai") return openQuestionChat(Number(btn.dataset.idx));
   if (act === "speak") return openSpeak();
   if (act === "speak-new") return openSpeakNew();
   if (act === "speak-open") return openSpeakSession(id);
@@ -1106,6 +1114,7 @@ async function logoutDevice() {
 function forgetViewer() {
   S.viewer = null;
   dropMatChat();
+  dropQChat();
   if (S.player) {
     S.player = null;
     S.pin = "";
@@ -2762,6 +2771,75 @@ function getMatSheet() {
     });
   }
   return matSheet;
+}
+
+// ---- "Cek dengan AI" di halaman Hasil: chat AI yang sama dengan diskusi materi (panel yang sama), konteksnya satu soal.
+// Hanya untuk hasil milik pemain yang sedang masuk di perangkat ini; tidak mengubah skor / kunci jawaban.
+let qSheet = null;
+function ownerAuthFor(r) {
+  const id = r?.player?.id;
+  if (!id) return null;
+  if (S.player?.id === id && S.pin) return { id, pin: S.pin };
+  if (S.viewer?.id === id) return { id, pin: S.viewer.pin };
+  return null;
+}
+function qItem() {
+  const c = S.qChat;
+  return c ? S.result?.items?.find((x) => x.idx === c.idx) : null;
+}
+function getQSheet() {
+  if (!qSheet) {
+    qSheet = createMatChatSheet({
+      L,
+      esc,
+      renderMd: mdBlock,
+      typeset: (el) => typesetMath(el).catch(() => {}),
+      getChat: () => S.qChat,
+      getTitle: () => "",
+      titleText: L("study_qchat_title"),
+      placeholder: L("study_qchat_ph"),
+      noteText: L("study_qchat_note"),
+      retryLabel: L("study_qchat_retry"),
+      hideNew: true,
+      contextLine: () => {
+        const it = qItem();
+        return it ? questionContextLine({ lang: ctx.getLang?.() || "id", number: it.idx + 1, options: it.options, userAnswer: it.userAnswer, correctIndex: it.correctIndex }) : "";
+      },
+      quick: [{ text: L("study_qchat_q1") }, { text: L("study_qchat_q2") }],
+      errText,
+      ask: async (question, history) => {
+        const chat = S.qChat;
+        const auth = ownerAuthFor(S.result);
+        if (!chat || !auth) return { ok: false, message: L("study_mchat_login") };
+        const first = history.length === 0 && question === L("study_qchat_first");
+        const res = await studyCall(
+          "question_chat",
+          { sessionId: chat.sessionId, idx: chat.idx, playerId: auth.id, pin: auth.pin, lang: ctx.getLang?.() || "id", ...(first ? { first: true } : { question, history }) },
+          { timeoutMs: 60000 }
+        );
+        return res;
+      }
+    });
+  }
+  return qSheet;
+}
+
+function dropQChat() {
+  S.qChat = null;
+  if (qSheet) qSheet.destroy();
+}
+
+async function openQuestionChat(idx) {
+  const r = S.result;
+  const it = r?.items?.find((x) => x.idx === idx);
+  if (!r || !it || !ownerAuthFor(r)) return;
+  if (!S.qChat || S.qChat.sessionId !== r.session.id || S.qChat.idx !== idx) {
+    if (qSheet) qSheet.destroy();
+    S.qChat = { ...newChat(r.session.id), sessionId: r.session.id, idx };
+  }
+  const sheet = getQSheet();
+  sheet.open();
+  if (!S.qChat.turns.length && !S.qChat.busy) sheet.send(L("study_qchat_first")); // pesan pertama terkirim otomatis
 }
 
 function dropMatChat() {
