@@ -617,6 +617,8 @@ function renderHome(body) {
     <div role="tabpanel">${S.tab === "materi" ? materialsHtml() : S.tab === "class" ? classesHtml() : S.tab === "timeline" ? timelineHtml() : boardHtml}</div>`;
   // kegiatan baru (pelajaran/kompetisi/materi selesai) sejak timeline dimuat: segarkan diam-diam
   if (S.tab === "timeline" && S.feed && !S.feed.loading && (S.feed.stale || S.feed.scopeKey !== tlScopeKey())) setTimeout(() => S.feed && loadFeed(S.feed, "refresh"), 0);
+  // anak yang masuk tetapi belum tertaut ke PIN orang tua: tawarkan membuatnya
+  if (S.viewer && S.viewer.grade !== "Umum" && !parentAsked.has(S.viewer.id)) setTimeout(() => promptParentIfNeeded(), 0);
   // Materi/Class: cakupan berubah (masuk/keluar/ganti pemain) sejak dimuat -> muat ulang
   if (S.tab === "materi" && !S.materials.loading && S.materials.scopeKey !== tlScopeKey()) setTimeout(() => loadMaterials(true), 0);
   if (S.tab === "class" && !S.classes.loading && S.classes.scopeKey !== tlScopeKey()) setTimeout(() => loadClasses(true), 0);
@@ -1215,29 +1217,103 @@ async function removeAvatar() {
   render();
 }
 
-function openEditLevel() {
+// ---- Popup "Buat PIN orang tua": muncul di login anak (bukan kategori Umum) yang belum tertaut ke PIN orang tua mana pun.
+// "Nanti saja" menutupnya, tetapi muncul lagi di login/pembukaan aplikasi berikutnya (ingatan hanya selama halaman ini terbuka).
+const parentAsked = new Set();
+let parentPromptBusy = false;
+async function promptParentIfNeeded(force = false) {
+  const v = S.viewer;
+  if (!v || v.grade === "Umum" || parentPromptBusy) return;
+  if (!force && parentAsked.has(v.id)) return;
+  parentAsked.add(v.id);
+  parentPromptBusy = true;
+  try {
+    const st = await studyCall("parent_status", { playerId: v.id, pin: v.pin });
+    if (!st.ok || !st.needPrompt) return;
+    const all = await studyCall("parent_list", {});
+    const parents = all.ok ? all.parents || [] : [];
+    const modes = [{ value: "new", label: L("study_parent_mode_new") }, ...(parents.length ? [{ value: "link", label: L("study_parent_mode_link") }] : [])];
+    const done = await openFormDialog({
+      title: L("study_parent_prompt_title"),
+      intro: L("study_parent_prompt_intro", { name: v.name }),
+      okLabel: L("study_set_save"),
+      cancelLabel: L("study_parent_later"),
+      busyLabel: L("study_busy_saving"),
+      fields: [
+        { key: "mode", label: L("study_parent_mode"), type: "select", value: "new", options: modes },
+        { key: "name", label: L("study_parent_name"), type: "text", maxlength: 30, show: (x) => x.mode === "new" },
+        { key: "pin", label: L("study_parent_pin"), type: "pin", show: (x) => x.mode === "new" },
+        { key: "pin2", label: L("study_new_pin2"), type: "pin", show: (x) => x.mode === "new" },
+        { key: "parentId", label: L("study_parent_who"), type: "select", value: parents[0]?.id, options: parents.map((x) => ({ value: x.id, label: x.name })), show: (x) => x.mode === "link" },
+        { key: "parentPin", label: L("study_parent_pin"), type: "pin", show: (x) => x.mode === "link" }
+      ],
+      onSubmit: async (x) => {
+        if (x.mode === "link") {
+          if (!validPinFormat(x.parentPin)) return { ok: false, error: L("study_pin_invalid") };
+          const r = await studyCall("parent_link", { playerId: v.id, pin: v.pin, parentId: x.parentId, parentPin: x.parentPin });
+          return r.ok ? { ok: true, value: r.parent } : { ok: false, error: errText(r) };
+        }
+        if (!String(x.name || "").trim()) return { ok: false, error: L("study_parent_name_required") };
+        if (!validPinFormat(x.pin)) return { ok: false, error: L("study_pin_invalid") };
+        if (x.pin !== x.pin2) return { ok: false, error: L("study_np_mismatch") };
+        const r = await studyCall("parent_create", { playerId: v.id, pin: v.pin, name: String(x.name).trim(), newPin: x.pin });
+        return r.ok ? { ok: true, value: r.parent } : { ok: false, error: errText(r) };
+      }
+    });
+    if (done) window.alert(L("study_parent_done", { name: done.name }));
+  } finally {
+    parentPromptBusy = false;
+  }
+}
+
+// ---- PIN orang tua per orang tua: pilih orang tua (yang tertaut ke anak) + PIN. Verifikasi sebenarnya di server (parentId + parentPin).
+// playerId kosong = semua orang tua (Setting). Mengembalikan { fields, auth(v) }, atau null bila belum ada (pemain diarahkan membuat PIN).
+async function parentGate(playerId) {
+  const r = await studyCall("parent_list", playerId ? { playerId } : {});
+  if (!r.ok) {
+    handleFailure(r);
+    return null;
+  }
+  const parents = r.parents || [];
+  if (parents.length === 0) {
+    window.alert(L(playerId ? "study_parent_none_child" : "study_parent_none"));
+    if (S.viewer) promptParentIfNeeded(true);
+    return null;
+  }
+  return {
+    parents,
+    fields: [
+      { key: "parentId", label: L("study_parent_who"), type: "select", value: parents[0].id, options: parents.map((x) => ({ value: x.id, label: x.name })) },
+      { key: "parentPin", label: L("study_parent_pin"), type: "pin" }
+    ],
+    auth: (v) => ({ parentId: v.parentId, parentPin: v.parentPin })
+  };
+}
+
+async function openEditLevel() {
   const me = S.player;
   if (!me) return;
-  const parentSet = !!S.overview?.settings?.parentPinSet;
+  const gate = await parentGate(me.id);
+  if (!gate) return;
   return openFormDialog({
     title: L("study_edit_level_title"),
-    intro: parentSet ? L("study_edit_level_intro_parent") : L("study_edit_level_intro"),
+    intro: L("study_edit_level_intro_parent"),
     okLabel: L("study_save"),
     cancelLabel: L("study_cancel"),
     busyLabel: L("study_busy_saving"),
     fields: [
       { key: "grade", label: L("study_np_grade"), type: "select", value: me.grade, options: gradeOptions() },
       classField((v) => v.grade, (v) => classesOf(v.grade), (v) => (v.grade === me.grade && me.classLevel ? String(me.classLevel) : undefined), me.classLevel),
-      ...(parentSet ? [{ key: "parentPin", label: L("study_parent_pin"), type: "pin" }] : [])
+      ...gate.fields
     ],
     onSubmit: async (v) => {
-      if (parentSet && !validPinFormat(v.parentPin)) return { ok: false, error: L("study_pin_invalid") };
+      if (!validPinFormat(v.parentPin)) return { ok: false, error: L("study_pin_invalid") };
       const res = await studyCall("player_update_level", {
         playerId: me.id,
         pin: S.pin,
         grade: v.grade,
         classLevel: classValue(v.grade, v.classLevel),
-        parentPin: v.parentPin
+        ...gate.auth(v)
       });
       if (!res.ok) return { ok: false, error: errText(res) };
       return { ok: true, value: res.player };
@@ -1252,23 +1328,25 @@ function openEditLevel() {
 }
 
 // Reset PIN pemain: butuh PIN orang tua (bila sudah dibuat) + PIN baru.
-function openResetPin(player) {
-  const parentSet = !!S.overview?.settings?.parentPinSet;
+async function openResetPin(player) {
+  const gate = await parentGate(player.id);
+  if (!gate) return false;
   return openFormDialog({
     title: L("study_reset_title", { name: player.name }),
-    intro: parentSet ? L("study_reset_intro_parent") : L("study_reset_intro_open"),
+    intro: L("study_reset_intro_parent"),
     okLabel: L("study_reset_ok"),
     cancelLabel: L("study_cancel"),
     busyLabel: L("study_busy_saving"),
     fields: [
-      ...(parentSet ? [{ key: "parentPin", label: L("study_parent_pin"), type: "pin" }] : []),
+      ...gate.fields,
       { key: "newPin", label: L("study_new_pin"), type: "pin" },
       { key: "newPin2", label: L("study_new_pin2"), type: "pin" }
     ],
     onSubmit: async (v) => {
       if (!validPinFormat(v.newPin)) return { ok: false, error: L("study_pin_invalid") };
       if (v.newPin !== v.newPin2) return { ok: false, error: L("study_np_mismatch") };
-      const res = await studyCall("pin_reset", { playerId: player.id, newPin: v.newPin, parentPin: v.parentPin });
+      if (!validPinFormat(v.parentPin)) return { ok: false, error: L("study_pin_invalid") };
+      const res = await studyCall("pin_reset", { playerId: player.id, newPin: v.newPin, ...gate.auth(v) });
       if (!res.ok) return { ok: false, error: errText(res) };
       return { ok: true };
     }
@@ -2037,7 +2115,7 @@ function commentsHtml(it, feed) {
   const cm = feed.comments[key];
   if (!cm || !cm.open) return "";
   const isOwn = isOwnItem(it);
-  const parentSet = !!S.overview?.settings?.parentPinSet;
+  const parentSet = true; // PIN orang tua kini per orang tua; ada/tidaknya dicek saat tombol ditekan
   let list;
   if (cm.loading) list = `<p class="status-text">${esc(L("study_loading"))}</p>`;
   else if (!cm.list || cm.list.length === 0) list = `<p class="study-row-meta">${esc(L("study_comment_none"))}</p>`;
@@ -2360,15 +2438,18 @@ async function deleteComment(commentId, key, byParent) {
   if (!it || !cm) return;
   let res;
   if (byParent) {
+    const author = (cm.list || []).find((c) => c.id === commentId)?.playerId;
+    const gate = await parentGate(author);
+    if (!gate) return;
     res = await openFormDialog({
       title: L("study_comment_parent_title"),
       okLabel: L("study_comment_delete"),
       cancelLabel: L("study_cancel"),
       busyLabel: L("study_loading"),
-      fields: [{ key: "parentPin", label: L("study_parent_pin"), type: "pin" }],
+      fields: gate.fields,
       onSubmit: async (v) => {
         if (!validPinFormat(v.parentPin)) return { ok: false, error: L("study_pin_invalid") };
-        const r = await studyCall("comment_delete", { commentId, parentPin: v.parentPin });
+        const r = await studyCall("comment_delete", { commentId, ...gate.auth(v) });
         if (!r.ok) return { ok: false, error: errText(r) };
         return { ok: true, value: r };
       }
@@ -2718,11 +2799,12 @@ function openMaterialDone(material) {
 async function deleteMaterial(id) {
   const m = S.materials.items.find((i) => i.id === id);
   if (!m) return;
-  const parentSet = !!S.overview?.settings?.parentPinSet;
   const creatorOk = !!m.creatorId && (S.overview?.players || []).some((p) => p.id === m.creatorId);
+  const pl = m.creatorId ? await studyCall("parent_list", { playerId: m.creatorId }) : null;
+  const parents = pl?.ok ? pl.parents || [] : [];
   const options = [];
   if (creatorOk) options.push({ value: "creator", label: L("study_mat_del_creator") });
-  if (parentSet) options.push({ value: "parent", label: L("study_mat_del_parent") });
+  if (parents.length) options.push({ value: "parent", label: L("study_mat_del_parent") });
   if (options.length === 0) return window.alert(L("study_mat_del_no_way"));
   const done = await openFormDialog({
     title: L("study_mat_del_title"),
@@ -2732,11 +2814,12 @@ async function deleteMaterial(id) {
     busyLabel: L("study_loading"),
     fields: [
       { key: "as", label: L("study_mat_del_as"), type: "select", value: options[0].value, options },
+      ...(parents.length > 1 ? [{ key: "parentId", label: L("study_parent_who"), type: "select", value: parents[0].id, options: parents.map((x) => ({ value: x.id, label: x.name })) }] : []),
       { key: "pin", label: L("study_pin"), type: "pin" }
     ],
     onSubmit: async (v) => {
       if (!validPinFormat(v.pin)) return { ok: false, error: L("study_pin_invalid") };
-      const params = v.as === "parent" ? { parentPin: v.pin } : { playerId: m.creatorId, pin: v.pin };
+      const params = v.as === "parent" ? { parentId: v.parentId || parents[0].id, parentPin: v.pin } : { playerId: m.creatorId, pin: v.pin };
       const res = await studyCall("material_delete", { materialId: id, ...params });
       if (!res.ok) return { ok: false, error: errText(res) };
       return { ok: true, value: true };
@@ -2972,11 +3055,12 @@ async function fetchClassBody(id) {
 async function deleteClass(id) {
   const c = S.classes.items.find((i) => i.id === id);
   if (!c) return;
-  const parentSet = !!S.overview?.settings?.parentPinSet;
   const creatorOk = !!c.creatorId && (S.overview?.players || []).some((p) => p.id === c.creatorId);
+  const pl = c.creatorId ? await studyCall("parent_list", { playerId: c.creatorId }) : null;
+  const parents = pl?.ok ? pl.parents || [] : [];
   const options = [];
   if (creatorOk) options.push({ value: "creator", label: L("study_cls_del_creator") });
-  if (parentSet) options.push({ value: "parent", label: L("study_mat_del_parent") });
+  if (parents.length) options.push({ value: "parent", label: L("study_mat_del_parent") });
   if (options.length === 0) return window.alert(L("study_cls_del_no_way"));
   const done = await openFormDialog({
     title: L("study_cls_del_title"),
@@ -2986,11 +3070,12 @@ async function deleteClass(id) {
     busyLabel: L("study_loading"),
     fields: [
       { key: "as", label: L("study_mat_del_as"), type: "select", value: options[0].value, options },
+      ...(parents.length > 1 ? [{ key: "parentId", label: L("study_parent_who"), type: "select", value: parents[0].id, options: parents.map((x) => ({ value: x.id, label: x.name })) }] : []),
       { key: "pin", label: L("study_pin"), type: "pin" }
     ],
     onSubmit: async (v) => {
       if (!validPinFormat(v.pin)) return { ok: false, error: L("study_pin_invalid") };
-      const params = v.as === "parent" ? { parentPin: v.pin } : { playerId: c.creatorId, pin: v.pin };
+      const params = v.as === "parent" ? { parentId: v.parentId || parents[0].id, parentPin: v.pin } : { playerId: c.creatorId, pin: v.pin };
       const res = await studyCall("class_delete", { classId: id, ...params });
       if (!res.ok) return { ok: false, error: errText(res) };
       return { ok: true, value: true };
@@ -3696,7 +3781,8 @@ async function openNotifItem(i) {
 
 // ================================================================ Setting (area orang tua)
 let settingsDlg = null;
-let parentPin = "";
+let parentPin = ""; // PIN + id orang tua yang membuka Setting; hanya di memori selama dialog Setting terbuka (tidak diminta lagi di dalamnya)
+let parentId = "";
 
 async function openSettings() {
   if (!S.overview) {
@@ -3704,27 +3790,25 @@ async function openSettings() {
     return;
   }
   parentPin = "";
-  let data = null;
-  if (S.overview.settings.parentPinSet) {
-    data = await openFormDialog({
-      title: L("study_set_gate_title"),
-      okLabel: L("study_open"),
-      cancelLabel: L("study_cancel"),
-      busyLabel: L("study_loading"),
-      fields: [{ key: "pin", label: L("study_parent_pin"), type: "pin" }],
-      onSubmit: async (v) => {
-        if (!validPinFormat(v.pin)) return { ok: false, error: L("study_pin_invalid") };
-        const res = await studyCall("settings_open", { parentPin: v.pin });
-        if (!res.ok) return { ok: false, error: errText(res) };
-        parentPin = v.pin;
-        return { ok: true, value: res };
-      }
-    });
-    if (!data) return;
-  } else {
-    data = await studyCall("settings_open", {});
-    if (!data.ok) return handleFailure(data);
-  }
+  parentId = "";
+  const gate = await parentGate(null);
+  if (!gate) return;
+  const data = await openFormDialog({
+    title: L("study_set_gate_title"),
+    okLabel: L("study_open"),
+    cancelLabel: L("study_cancel"),
+    busyLabel: L("study_loading"),
+    fields: gate.fields,
+    onSubmit: async (v) => {
+      if (!validPinFormat(v.parentPin)) return { ok: false, error: L("study_pin_invalid") };
+      const res = await studyCall("settings_open", gate.auth(v));
+      if (!res.ok) return { ok: false, error: errText(res) };
+      parentPin = v.parentPin;
+      parentId = v.parentId;
+      return { ok: true, value: res };
+    }
+  });
+  if (!data) return;
   showSettingsDialog(data);
 }
 
@@ -3737,6 +3821,7 @@ function showSettingsDialog(data) {
     });
     settingsDlg.addEventListener("close", () => {
       parentPin = "";
+      parentId = "";
       loadOverview();
     });
     settingsDlg.addEventListener("click", onSettingsClick);
@@ -3762,7 +3847,7 @@ function renderSettings(data) {
   settingsDlg.innerHTML = `
   <div class="kb-dialog-card">
     <h2>${esc(L("study_set_title"))}</h2>
-    ${s.parentPinSet ? "" : `<p class="study-warn">${esc(L("study_set_no_parent_pin"))}</p>`}
+    <p class="study-row-meta">${esc(L("study_set_signed_parent", { name: data.parent?.name || "" }))}</p>
 
     <h3 class="sys-subtitle">${esc(L("study_set_points"))}</h3>
     <form id="study-points-form" class="study-set-form">
@@ -3804,7 +3889,7 @@ function renderSettings(data) {
             .map(
               (b) => `
       <div class="study-row">
-        <div class="study-row-main"><div class="study-row-title">${esc(b.name || "-")}</div><div class="study-row-meta">${esc(L("study_bonus_recent_row", { points: fmt(b.points), names: (b.players || []).join(", ") }))} · ${fmtDate(b.createdAt)}</div></div>
+        <div class="study-row-main"><div class="study-row-title">${esc(b.name || "-")}</div><div class="study-row-meta">${esc(L("study_bonus_recent_row", { points: fmt(b.points), names: (b.players || []).join(", ") }))} · ${fmtDate(b.createdAt)}${b.parentName ? ` · ${esc(L("study_by_parent", { name: b.parentName }))}` : ""}</div></div>
       </div>`
             )
             .join("")}</details>`
@@ -3830,7 +3915,7 @@ function renderSettings(data) {
     }
 
     <h3 class="sys-subtitle">${esc(L("study_parent_pin"))}</h3>
-    <button type="button" class="secondary-btn" data-sact="parent-pin">${esc(L(s.parentPinSet ? "study_set_change_pin" : "study_set_create_pin"))}</button>
+    <div class="study-actions"><button type="button" class="secondary-btn" data-sact="parent-pin">${esc(L("study_set_change_pin"))}</button><button type="button" class="secondary-btn" data-sact="parent-link">${esc(L("study_set_link_child"))}</button></div>
 
     <div class="chat-code-dialog-actions">
       <button type="button" class="primary-btn" data-sact="close">${esc(L("study_close"))}</button>
@@ -3841,7 +3926,7 @@ function renderSettings(data) {
 }
 
 async function reloadSettings() {
-  const res = await studyCall("settings_open", { parentPin });
+  const res = await studyCall("settings_open", { parentId, parentPin });
   if (!res.ok) {
     handleFailure(res);
     closeSettings();
@@ -3858,6 +3943,7 @@ async function onPointsSubmit(e) {
   const btn = f.querySelector('button[type="submit"]');
   btn.disabled = true;
   const res = await studyCall("settings_save", {
+    parentId,
     parentPin,
     perQuestionPoints: num("perQuestionPoints"),
     perfectBonusPercent: num("perfectBonusPercent"),
@@ -3901,7 +3987,7 @@ async function onSettingsClick(e) {
         { key: "cost", label: L("study_reward_cost"), type: "number", min: 1, value: cur?.cost ?? "" }
       ],
       onSubmit: async (v) => {
-        const res = await studyCall("redeem_item_save", { parentPin, id: cur?.id, name: v.name, cost: v.cost });
+        const res = await studyCall("redeem_item_save", { parentId, parentPin, id: cur?.id, name: v.name, cost: v.cost });
         return res.ok ? { ok: true } : { ok: false, error: errText(res) };
       }
     });
@@ -3912,13 +3998,13 @@ async function onSettingsClick(e) {
   if (act === "delete-reward") {
     const cur = data.settings.redeemItems.find((i) => i.id === id);
     if (!cur || !window.confirm(L("study_set_delete_confirm", { name: cur.name }))) return;
-    const res = await studyCall("redeem_item_delete", { parentPin, id });
+    const res = await studyCall("redeem_item_delete", { parentId, parentPin, id });
     if (!res.ok) return handleFailure(res);
     return reloadSettings();
   }
 
   if (act === "mark-given") {
-    const res = await studyCall("redeem_mark", { parentPin, redemptionId: id, status: "given" });
+    const res = await studyCall("redeem_mark", { parentId, parentPin, redemptionId: id, status: "given" });
     if (!res.ok) return handleFailure(res);
     return reloadSettings();
   }
@@ -3947,7 +4033,7 @@ async function onSettingsClick(e) {
         if (!String(v.name || "").trim()) return { ok: false, error: L("study_bonus_name_required") };
         if (!Number.isInteger(v.points) || v.points < 1) return { ok: false, error: L("study_bonus_points_invalid") };
         if (!(v.playerIds || []).length) return { ok: false, error: L("study_bonus_players_required") };
-        const res = await studyCall("bonus_give", { parentPin, playerIds: v.playerIds, points: v.points, name: String(v.name).trim() });
+        const res = await studyCall("bonus_give", { parentId, parentPin, playerIds: v.playerIds, points: v.points, name: String(v.name).trim() });
         if (!res.ok) return { ok: false, error: errText(res) };
         return { ok: true, value: res };
       }
@@ -3974,7 +4060,7 @@ async function onSettingsClick(e) {
       onSubmit: async (v) => {
         if (!v.points || v.points < 1) return { ok: false, error: L("study_penalty_points_invalid") };
         if (!String(v.reason || "").trim()) return { ok: false, error: L("study_penalty_reason_required") };
-        const res = await studyCall("penalty", { parentPin, playerId: v.playerId, points: v.points, reason: v.reason });
+        const res = await studyCall("penalty", { parentId, parentPin, playerId: v.playerId, points: v.points, reason: v.reason });
         if (!res.ok) return { ok: false, error: errText(res) };
         return { ok: true, value: { res, name: players.find((p) => p.id === v.playerId)?.name || "" } };
       }
@@ -3989,30 +4075,50 @@ async function onSettingsClick(e) {
   }
 
   if (act === "parent-pin") {
-    const has = data.settings.parentPinSet;
     const ok = await openFormDialog({
-      title: L(has ? "study_set_change_pin" : "study_set_create_pin"),
+      title: L("study_set_change_pin"),
       okLabel: L("study_set_save"),
       cancelLabel: L("study_cancel"),
       busyLabel: L("study_busy_saving"),
       fields: [
-        ...(has ? [{ key: "current", label: L("study_parent_pin_current"), type: "pin" }] : []),
+        { key: "current", label: L("study_parent_pin_current"), type: "pin" },
         { key: "newPin", label: L("study_new_pin"), type: "pin" },
         { key: "newPin2", label: L("study_new_pin2"), type: "pin" }
       ],
       onSubmit: async (v) => {
-        if (!validPinFormat(v.newPin)) return { ok: false, error: L("study_pin_invalid") };
+        if (!validPinFormat(v.current) || !validPinFormat(v.newPin)) return { ok: false, error: L("study_pin_invalid") };
         if (v.newPin !== v.newPin2) return { ok: false, error: L("study_np_mismatch") };
-        const res = await studyCall("parent_pin_set", { parentPin: has ? v.current : undefined, newPin: v.newPin });
+        const res = await studyCall("parent_pin_change", { parentId, parentPin: v.current, newPin: v.newPin });
         if (!res.ok) return { ok: false, error: errText(res) };
         parentPin = v.newPin;
         return { ok: true };
       }
     });
-    if (ok) {
-      S.overview.settings.parentPinSet = true;
-      reloadSettings();
-    }
+    if (ok) window.alert(L("study_parent_pin_changed"));
+    return;
+  }
+
+  if (act === "parent-link") {
+    const players = (S.overview?.players || []).filter((p) => p.grade !== "Umum" && !(data.players || []).some((x) => x.id === p.id));
+    if (players.length === 0) return window.alert(L("study_set_link_none"));
+    const ok = await openFormDialog({
+      title: L("study_set_link_child"),
+      intro: L("study_set_link_intro"),
+      okLabel: L("study_set_save"),
+      cancelLabel: L("study_cancel"),
+      busyLabel: L("study_busy_saving"),
+      fields: [
+        { key: "playerId", label: L("study_pick_player"), type: "select", value: players[0].id, options: players.map((p) => ({ value: p.id, label: `${p.name} (${gradeText(p.grade, p.classLevel)})` })) },
+        { key: "playerPin", label: L("study_pin"), type: "pin" }
+      ],
+      onSubmit: async (v) => {
+        if (!validPinFormat(v.playerPin)) return { ok: false, error: L("study_pin_invalid") };
+        const res = await studyCall("parent_link_child", { parentId, parentPin, playerId: v.playerId, playerPin: v.playerPin });
+        if (!res.ok) return { ok: false, error: errText(res) };
+        return { ok: true };
+      }
+    });
+    if (ok) reloadSettings();
   }
 }
 

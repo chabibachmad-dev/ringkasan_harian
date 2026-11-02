@@ -16,7 +16,7 @@
 //                         (pelajaran, kompetisi, bonus pemenang) per hari (zona Asia/Jakarta) dipotong sampai batas; redeem/hukuman tidak membuka jatah lagi.
 //                         todayPoints = poin didapat hari ini. Hasil pelajaran membawa rawPoints/capped; session_submit & player_profile membawa daily.
 //   player_create       { name, grade, classLevel?, pin }                    -> { player }   (classLevel wajib untuk SD/SMP/SMA: SD 1-6, SMP 7-9, SMA 10-12)
-//   player_update_level { playerId, pin, grade, classLevel?, parentPin? }    -> { player }   (naik kelas / ralat; PIN orang tua bila sudah dibuat)
+//   player_update_level { playerId, pin, grade, classLevel?, parentId, parentPin }    -> { player }   (naik kelas / ralat; WAJIB PIN orang tua yang tertaut ke anak ini, migrasi 0044)
 //   player_profile      { playerId, pin }                                    -> { player, balance, totalEarned, daily, sessions, redemptions, penalties, allowedGrades }   (daily = dasbor poin hari ini, null bila migrasi 0032 belum ada)
 //   pin_reset           { playerId, newPin, parentPin? }                     -> { ok }
 //   session_start       { playerId, pin, subject, topic?, materialGrade, materialClass?, level, count, engine? }
@@ -27,7 +27,7 @@
 //   session_explain     { playerId, pin, sessionId, engine? }                -> { result, explainFailed }   (ulangi pembahasan yang gagal)
 //   session_cancel      { playerId, pin, sessionId }                         -> { ok }   (hanya sesi yang belum dikumpulkan)
 //   redeem              { playerId, pin, itemId }                            -> { redemption }
-//   settings_open       { parentPin? }                                       -> { settings, pendingRedemptions, players }
+//   settings_open       { parentId, parentPin }                                       -> { settings, pendingRedemptions, players }
 //   ANTI-SPAM PENGULANGAN (migrasi 0033): mata pelajaran yang SAMA dikumpulkan lagi di hari yang sama (ke-2 dst) -> poin x settings.repeatSubjectPercent
 //                         (bawaan 50; null = migrasi belum ada). session_start/session_get(aktif) membawa repeat:{count,percent} (percent 100 = tanpa pengurangan);
 //                         hasil membawa repeatPercent; player_profile.daily.subjects = mata pelajaran yang sudah dikerjakan hari ini.
@@ -39,14 +39,14 @@
 //   BOBOT KELAS (migrasi 0040): pelajaran solo/latihan boleh memilih tingkat & kelas mana pun; poin x classPercent/100 dengan
 //                         classPercent = 100 + 10 x (tingkat materi - tingkat pemain), dibatasi 50-200 (materi "Umum"/pemain tanpa kelas = 100).
 //                         Hasil & riwayat membawa classPercent (null = pelajaran lama). Kompetisi (room) tidak berubah: tetap tidak boleh lebih rendah, tanpa bobot kelas.
-//   settings_save       { parentPin?, perQuestionPoints, perfectBonusPercent, secondsPerQuestion, competitionWinBonus, dailyPointsCap?, repeatSubjectPercent?, weights:{easy,normal,hard}, subjects:[...] } -> { settings }   (dailyPointsCap 0-1000000, 0 = tanpa batas; repeatSubjectPercent 0-100, 100 = tanpa pengurangan; dihilangkan = tidak diubah)
-//   redeem_item_save    { parentPin?, id?, name, cost }                      -> { items }
-//   redeem_item_delete  { parentPin?, id }                                   -> { items }
-//   redeem_mark         { parentPin?, redemptionId, status:"given"|"pending" } -> { ok }
-//   penalty             { parentPin?, playerId, points, reason }             -> { requested, applied, balance }
-//   bonus_give          { parentPin?, playerIds:[uuid], points, name }       -> { given, points, name }   (EXTRA POIN dari orang tua, migrasi 0036: poin 1-1.000.000, nama maks 80 huruf, 1-100 pemain;
+//   settings_save       { parentId, parentPin, perQuestionPoints, perfectBonusPercent, secondsPerQuestion, competitionWinBonus, dailyPointsCap?, repeatSubjectPercent?, weights:{easy,normal,hard}, subjects:[...] } -> { settings }   (dailyPointsCap 0-1000000, 0 = tanpa batas; repeatSubjectPercent 0-100, 100 = tanpa pengurangan; dihilangkan = tidak diubah)
+//   redeem_item_save    { parentId, parentPin, id?, name, cost }                      -> { items }
+//   redeem_item_delete  { parentId, parentPin, id }                                   -> { items }
+//   redeem_mark         { parentId, parentPin, redemptionId, status:"given"|"pending" } -> { ok }
+//   penalty             { parentId, parentPin, playerId, points, reason }             -> { requested, applied, balance }
+//   bonus_give          { parentId, parentPin, playerIds:[uuid], points, name }       -> { given, points, name }   (EXTRA POIN dari orang tua, migrasi 0036: poin 1-1.000.000, nama maks 80 huruf, 1-100 pemain;
 //                                                                              TIDAK dihitung ke batas poin harian, masuk saldo; semua pemain terpilih atau tidak sama sekali)
-//   parent_pin_set      { newPin, parentPin? }                               -> { ok }
+//   parent_list / parent_status / parent_create / parent_link / parent_link_child / parent_pin_change : lihat bagian "PIN orang tua per orang tua" di bawah
 //   -- timeline (Facebook-like): lihat kegiatan pemain, suka, komentar, detil. Melihat timeline & komentar tidak perlu PIN;
 //      suka/komentar/detil butuh PIN penonton (viewerId + viewerPin) dan tidak boleh pada kegiatan sendiri (suka/komentar).
 //   player_avatar_set   { playerId, pin, image }                            -> { avatarUrl }   (foto profil: JPEG base64 <= 150 KB, sudah dipotong persegi di peramban; bucket publik study-avatars, migrasi 0031)
@@ -241,30 +241,49 @@ async function checkPlayerPin(admin: Admin, playerId: unknown, pin: unknown): Pr
   });
 }
 
-// PIN orang tua belum diatur = lolos (aplikasi menyarankan membuatnya).
-async function checkParentPin(admin: Admin, parentPin: unknown): Promise<{ settings: Row } | Response> {
-  const { data: s, error } = await admin.from("study_settings").select("*").eq("id", 1).maybeSingle();
-  if (error || !s) return fail(error?.message || "Setting Study belum ada. Jalankan migrasi 0023.", 500);
-  if (!s.parent_pin_hash) return { settings: s };
-  const left = lockSecondsLeft(s.parent_pin_locked_until, Date.now());
-  if (left > 0) return fail(`PIN orang tua terkunci. Coba lagi ${Math.ceil(left / 60)} menit lagi.`, 429, { locked: true, seconds: left });
-  if (typeof parentPin === "string" && validPin(parentPin) && (await verifyPin(parentPin, s.parent_pin_salt, s.parent_pin_hash))) {
-    if (s.parent_pin_failures > 0) await admin.from("study_settings").update({ parent_pin_failures: 0, parent_pin_locked_until: null }).eq("id", 1);
-    return { settings: s };
+// PIN orang tua PER ORANG TUA (migrasi 0044). Permintaan membawa { parentId, parentPin }. Tanpa orang tua/PIN = ditolak.
+// 5 kali salah beruntun mengunci orang tua itu 15 menit (disimpan di database). playerIds: anak-anak yang disentuh aksi;
+// SEMUANYA harus tertaut ke orang tua ini (diperiksa SETELAH PIN benar, supaya tautan tidak bocor ke yang tidak punya PIN).
+const PARENT_LOCK_MS = 15 * 60 * 1000;
+const PARENT_NO_TABLE = /study_parents|study_parent_children|schema cache|does not exist/i;
+async function checkParent(admin: Admin, body: Row, playerIds: string[] = []): Promise<{ parent: Row } | Response> {
+  if (!isUuid(body.parentId)) return fail("Pilih orang tua dan masukkan PIN-nya.", 400, { parentRequired: true });
+  const { data: parent, error } = await admin.from("study_parents").select("*").eq("id", body.parentId).maybeSingle();
+  if (error) return fail(PARENT_NO_TABLE.test(error.message) ? "PIN orang tua belum aktif di server (migrasi 0044 belum dijalankan)." : error.message, 500);
+  if (!parent) return fail("Orang tua tidak ditemukan.", 404, { parentRequired: true });
+  const left = lockSecondsLeft(parent.pin_locked_until, Date.now());
+  if (left > 0) return fail(`PIN orang tua terkunci. Coba lagi ${Math.ceil(left / 60)} menit lagi.`, 429, { locked: true, parent: true, seconds: left });
+  if (typeof body.parentPin === "string" && validPin(body.parentPin) && (await verifyPin(body.parentPin, parent.pin_salt, parent.pin_hash))) {
+    if (parent.pin_failures > 0) await admin.from("study_parents").update({ pin_failures: 0, pin_locked_until: null }).eq("id", parent.id);
+    if (playerIds.length) {
+      const ids = [...new Set(playerIds)];
+      const { data: links } = await admin.from("study_parent_children").select("player_id").eq("parent_id", parent.id).in("player_id", ids);
+      if ((links ?? []).length !== ids.length) return fail("PIN ini bukan milik orang tua dari anak tersebut.", 403, { notLinked: true, parent: true });
+    }
+    return { parent };
   }
-  const failures = (s.parent_pin_failures ?? 0) + 1;
+  const failures = (parent.pin_failures ?? 0) + 1;
   const lock = failures >= PIN_MAX_FAILURES;
   await admin
-    .from("study_settings")
-    .update({ parent_pin_failures: lock ? 0 : failures, parent_pin_locked_until: lock ? new Date(Date.now() + PIN_LOCK_MS).toISOString() : null })
-    .eq("id", 1);
-  return fail(lock ? "PIN orang tua salah terlalu sering. Terkunci 5 menit." : `PIN orang tua salah. Sisa percobaan: ${PIN_MAX_FAILURES - failures}.`, 403, {
+    .from("study_parents")
+    .update({ pin_failures: lock ? 0 : failures, pin_locked_until: lock ? new Date(Date.now() + PARENT_LOCK_MS).toISOString() : null })
+    .eq("id", parent.id);
+  return fail(lock ? "PIN orang tua salah terlalu sering. Terkunci 15 menit." : `PIN orang tua salah. Sisa percobaan: ${PIN_MAX_FAILURES - failures}.`, 403, {
     pinWrong: true,
     parent: true,
     locked: lock,
     attemptsLeft: lock ? 0 : PIN_MAX_FAILURES - failures,
-    seconds: lock ? PIN_LOCK_MS / 1000 : 0
+    seconds: lock ? PARENT_LOCK_MS / 1000 : 0
   });
+}
+// Catat siapa bertindak (gagal mencatat tidak membatalkan aksi).
+async function logParent(admin: Admin, parent: Row, action: string, playerId: string | null, detail: string) {
+  await admin.from("study_parent_actions").insert({ parent_id: parent.id, parent_name: parent.name, action, player_id: playerId, detail: detail.slice(0, 300) }).then(() => {}, () => {});
+}
+// Anak (id) yang tertaut ke orang tua ini.
+async function linkedChildIds(admin: Admin, parentId: string): Promise<string[]> {
+  const { data } = await admin.from("study_parent_children").select("player_id").eq("parent_id", parentId);
+  return (data ?? []).map((r: Row) => r.player_id as string);
 }
 
 // ---------------------------------------------------------------- bentuk data ke klien
@@ -277,7 +296,7 @@ const publicSettings = (s: Row, items: Row[]) => ({
   dailyPointsCap: typeof s.daily_points_cap === "number" ? s.daily_points_cap : null, // 0 = tanpa batas; null = migrasi 0032 belum dijalankan
   weights: { easy: s.weight_easy, normal: s.weight_normal, hard: s.weight_hard },
   subjects: Array.isArray(s.subjects) ? s.subjects : [],
-  parentPinSet: !!s.parent_pin_hash,
+  parentPinSet: false, // PIN orang tua kini per orang tua (study_parents); klien memakai parent_status
   redeemItems: items.map((i) => ({ id: i.id, name: i.name, cost: i.cost }))
 });
 
@@ -980,11 +999,12 @@ Deno.serve(async (req) => {
       const cls = classOf(body.classLevel);
       if (classesOf(body.grade).length > 0 && cls === null) return fail("Pilih kelasnya.");
       if (!validClass(body.grade, cls)) return fail("Kelas tidak sesuai dengan grade.");
-      // Menurunkan tingkat membuka materi yang lebih rendah, jadi bila PIN orang tua sudah dibuat, ia wajib.
-      const par = await checkParentPin(admin, body.parentPin);
+      // Menurunkan tingkat membuka materi yang lebih rendah: wajib PIN orang tua dari anak ini.
+      const par = await checkParent(admin, body, [auth.player.id]);
       if (par instanceof Response) return par;
       const { data, error } = await admin.from("study_players").update({ grade: body.grade, class_level: cls }).eq("id", auth.player.id).select("id,name,grade,class_level").single();
       if (error || !data) return fail(error?.message || "Gagal menyimpan.", 500);
+      await logParent(admin, par.parent, "level", data.id, `${body.grade}${cls ? " " + cls : ""}`);
       return json({ ok: true, player: { id: data.id, name: data.name, grade: data.grade, classLevel: data.class_level ?? null } });
     }
 
@@ -1046,9 +1066,9 @@ Deno.serve(async (req) => {
 
     // ------------------------------------------------------------ reset PIN pemain (orang tua)
     if (action === "pin_reset") {
-      const par = await checkParentPin(admin, body.parentPin);
-      if (par instanceof Response) return par;
       if (!isUuid(body.playerId)) return fail("Pemain tidak valid.");
+      const par = await checkParent(admin, body, [body.playerId]);
+      if (par instanceof Response) return par;
       if (!validPin(body.newPin)) return fail("PIN baru harus 4-6 angka.");
       const { salt, hash } = await hashPin(body.newPin as string);
       const { data, error } = await admin
@@ -1060,6 +1080,7 @@ Deno.serve(async (req) => {
       if (error) return fail(error.message, 500);
       if (!data) return fail("Pemain tidak ditemukan.", 404);
       await admin.from("study_device_tokens").delete().eq("player_id", body.playerId); // PIN baru = semua perangkat harus masuk lagi
+      await logParent(admin, par.parent, "pin_reset", body.playerId, "reset PIN anak");
       return json({ ok: true });
     }
 
@@ -1261,34 +1282,36 @@ Deno.serve(async (req) => {
 
     // ------------------------------------------------------------ area orang tua
     if (action === "settings_open") {
-      const par = await checkParentPin(admin, body.parentPin);
+      const par = await checkParent(admin, body);
       if (par instanceof Response) return par;
+      const kids = await linkedChildIds(admin, par.parent.id);
       const [items, pending, players] = await Promise.all([
         loadItems(admin),
-        admin.from("study_redemptions").select("id,player_id,item_name,cost,created_at").eq("status", "pending").order("created_at", { ascending: true }).limit(200),
-        admin.from("study_players").select("id,name,grade,class_level").order("name", { ascending: true })
+        kids.length ? admin.from("study_redemptions").select("id,player_id,item_name,cost,created_at").eq("status", "pending").in("player_id", kids).order("created_at", { ascending: true }).limit(200) : Promise.resolve({ data: [] as Row[] }),
+        kids.length ? admin.from("study_players").select("id,name,grade,class_level").in("id", kids).order("name", { ascending: true }) : Promise.resolve({ data: [] as Row[] })
       ]);
       const names = new Map<string, string>((players.data ?? []).map((x: Row) => [x.id, x.name]));
-      // Riwayat extra poin terakhir (per batch): nama, poin per anak, siapa saja. Kosong bila migrasi 0036 belum dijalankan.
-      const { data: bonusRows } = await admin.from("study_ledger").select("player_id,points,note,meta,created_at").eq("kind", "bonus").order("created_at", { ascending: false }).limit(300);
-      const batches = new Map<string, { name: string; points: number; createdAt: string; players: string[] }>();
+      // Riwayat extra poin terakhir (per batch): nama, poin per anak, siapa saja, dan orang tua yang memberi. Hanya anak yang tertaut.
+      const { data: bonusRows } = kids.length ? await admin.from("study_ledger").select("player_id,points,note,meta,created_at").eq("kind", "bonus").in("player_id", kids).order("created_at", { ascending: false }).limit(300) : { data: [] as Row[] };
+      const batches = new Map<string, { name: string; points: number; createdAt: string; players: string[]; parentName: string }>();
       for (const r of (bonusRows ?? []) as Row[]) {
         const key = String(r.meta?.batch ?? `${r.created_at}|${r.note}|${r.points}`);
-        const b = batches.get(key) ?? { name: r.note ?? "", points: r.points, createdAt: r.created_at, players: [] };
+        const b = batches.get(key) ?? { name: r.note ?? "", points: r.points, createdAt: r.created_at, players: [], parentName: String(r.meta?.parentName ?? "") };
         b.players.push(names.get(r.player_id) ?? "?");
         batches.set(key, b);
       }
       return json({
         ok: true,
+        parent: { id: par.parent.id, name: par.parent.name },
         recentBonuses: [...batches.values()].slice(0, 10),
-        settings: publicSettings(par.settings, items),
+        settings: publicSettings(await loadSettings(admin) as Row, items),
         pendingRedemptions: (pending.data ?? []).map((r: Row) => ({ id: r.id, playerName: names.get(r.player_id) ?? "?", itemName: r.item_name, cost: r.cost, createdAt: r.created_at })),
         players: (players.data ?? []).map((x: Row) => ({ id: x.id, name: x.name, grade: x.grade, classLevel: x.class_level ?? null }))
       });
     }
 
     if (action === "settings_save") {
-      const par = await checkParentPin(admin, body.parentPin);
+      const par = await checkParent(admin, body);
       if (par instanceof Response) return par;
       const parsed = readSettingsInput(body);
       if (!parsed.ok) return fail(parsed.error);
@@ -1299,7 +1322,7 @@ Deno.serve(async (req) => {
     }
 
     if (action === "redeem_item_save") {
-      const par = await checkParentPin(admin, body.parentPin);
+      const par = await checkParent(admin, body);
       if (par instanceof Response) return par;
       const name = cleanLine(body.name, 80);
       const cost = body.cost;
@@ -1318,7 +1341,7 @@ Deno.serve(async (req) => {
     }
 
     if (action === "redeem_item_delete") {
-      const par = await checkParentPin(admin, body.parentPin);
+      const par = await checkParent(admin, body);
       if (par instanceof Response) return par;
       if (!isUuid(body.id)) return fail("Hadiah tidak valid.");
       const { error } = await admin.from("study_redeem_items").delete().eq("id", body.id);
@@ -1327,13 +1350,16 @@ Deno.serve(async (req) => {
     }
 
     if (action === "redeem_mark") {
-      const par = await checkParentPin(admin, body.parentPin);
-      if (par instanceof Response) return par;
       if (!isUuid(body.redemptionId)) return fail("Penukaran tidak valid.");
       if (body.status !== "given" && body.status !== "pending") return fail("Status tidak valid.");
+      const { data: red } = await admin.from("study_redemptions").select("id,player_id").eq("id", body.redemptionId).maybeSingle();
+      if (!red) return fail("Penukaran tidak ditemukan.", 404);
+      const par = await checkParent(admin, body, [red.player_id]);
+      if (par instanceof Response) return par;
+      await logParent(admin, par.parent, "redeem_" + body.status, red.player_id, String(body.redemptionId));
       const { data, error } = await admin
         .from("study_redemptions")
-        .update({ status: body.status, given_at: body.status === "given" ? new Date().toISOString() : null })
+        .update({ status: body.status, given_at: body.status === "given" ? new Date().toISOString() : null, given_by_parent_id: body.status === "given" ? par.parent.id : null })
         .eq("id", body.redemptionId)
         .select("id")
         .maybeSingle();
@@ -1343,23 +1369,27 @@ Deno.serve(async (req) => {
     }
 
     if (action === "penalty") {
-      const par = await checkParentPin(admin, body.parentPin);
-      if (par instanceof Response) return par;
       if (!isUuid(body.playerId)) return fail("Pemain tidak valid.");
+      const par = await checkParent(admin, body, [body.playerId]);
+      if (par instanceof Response) return par;
       const points = body.points;
       if (typeof points !== "number" || !Number.isInteger(points) || points < 1 || points > 10_000_000) return fail("Poin hukuman harus bilangan bulat positif.");
       const reason = cleanLine(body.reason, 200);
       if (!reason) return fail("Alasan hukuman wajib diisi.");
       const { data, error } = await admin.rpc("study_apply_penalty", { p_player: body.playerId, p_points: points, p_reason: reason });
       if (error) return fail(/PEMAIN_TIDAK_ADA/.test(error.message) ? "Pemain tidak ditemukan." : error.message, /PEMAIN_TIDAK_ADA/.test(error.message) ? 404 : 500);
+      await logParent(admin, par.parent, "penalty", body.playerId, `${points} poin: ${reason}`);
+      // tandai baris riwayat poinnya dengan nama orang tua (meta jsonb, tanpa perubahan skema)
+      const { data: led } = await admin.from("study_ledger").select("id,meta").eq("player_id", body.playerId).eq("kind", "penalty").order("created_at", { ascending: false }).limit(1).maybeSingle();
+      if (led) await admin.from("study_ledger").update({ meta: { ...(led.meta ?? {}), parentId: par.parent.id, parentName: par.parent.name } }).eq("id", led.id);
       return json({ ok: true, ...(data as Row) });
     }
 
     if (action === "bonus_give") {
-      const par = await checkParentPin(admin, body.parentPin);
-      if (par instanceof Response) return par;
       const ids = Array.isArray(body.playerIds) ? [...new Set(body.playerIds.filter((x: unknown): x is string => isUuid(x)))] : [];
       if (ids.length === 0) return fail("Pilih minimal satu pemain.");
+      const par = await checkParent(admin, body, ids);
+      if (par instanceof Response) return par;
       if (ids.length > 100) return fail("Terlalu banyak pemain dalam satu pemberian (maksimal 100).");
       const points = body.points;
       if (typeof points !== "number" || !Number.isInteger(points) || points < 1 || points > 1_000_000) return fail("Poin extra harus bilangan bulat positif (maksimal 1.000.000).");
@@ -1372,19 +1402,99 @@ Deno.serve(async (req) => {
         if (/check constraint|study_ledger_kind_check/i.test(error.message)) return fail("Fitur extra poin belum aktif: jalankan migrasi 0036_study_parent_bonus.sql di Supabase.", 500);
         return fail(error.message, 500);
       }
+      await logParent(admin, par.parent, "bonus", ids.length === 1 ? ids[0] : null, `${points} poin x ${ids.length} anak: ${name}`);
+      const batch = (data as Row)?.batch;
+      if (batch) {
+        const { data: rows } = await admin.from("study_ledger").select("id,meta").eq("kind", "bonus").eq("meta->>batch", String(batch));
+        for (const r of (rows ?? []) as Row[]) await admin.from("study_ledger").update({ meta: { ...(r.meta ?? {}), parentId: par.parent.id, parentName: par.parent.name } }).eq("id", r.id);
+      }
       return json({ ok: true, ...(data as Row) });
     }
 
-    if (action === "parent_pin_set") {
-      const par = await checkParentPin(admin, body.parentPin);
+    // ------------------------------------------------------------ PIN orang tua per orang tua (migrasi 0044)
+    // parent_list    { playerId? }                                   -> { parents:[{id,name}] }   (nama saja; dengan playerId = hanya yang tertaut ke anak itu)
+    // parent_status  { playerId, pin }                               -> { linked:[{id,name}], needPrompt }   (anak yang masuk; needPrompt = belum ada PIN tertaut)
+    // parent_create  { playerId, pin, name, newPin }                 -> { parent:{id,name} }   (buat orang tua + tautkan ke anak ini)
+    // parent_link    { playerId, pin, parentId, parentPin }          -> { parent }   (tautkan anak ini ke orang tua yang sudah ada)
+    // parent_link_child { parentId, parentPin, playerId, playerPin } -> { ok }   (dari Setting: tautkan anak lain; butuh PIN anak itu)
+    // parent_pin_change { parentId, parentPin, newPin }              -> { ok }
+    if (action === "parent_list") {
+      let q = admin.from("study_parents").select("id,name").order("name", { ascending: true });
+      if (body.playerId !== undefined && body.playerId !== null) {
+        if (!isUuid(body.playerId)) return fail("Pemain tidak valid.");
+        const { data: links, error: e1 } = await admin.from("study_parent_children").select("parent_id").eq("player_id", body.playerId);
+        if (e1) return fail(PARENT_NO_TABLE.test(e1.message) ? "PIN orang tua belum aktif di server (migrasi 0044 belum dijalankan)." : e1.message, 500);
+        const ids = (links ?? []).map((l: Row) => l.parent_id as string);
+        if (ids.length === 0) return json({ ok: true, parents: [] });
+        q = q.in("id", ids);
+      }
+      const { data, error } = await q;
+      if (error) return fail(PARENT_NO_TABLE.test(error.message) ? "PIN orang tua belum aktif di server (migrasi 0044 belum dijalankan)." : error.message, 500);
+      return json({ ok: true, parents: (data ?? []).map((r: Row) => ({ id: r.id, name: r.name })) });
+    }
+
+    if (action === "parent_status") {
+      const auth = await checkPlayerPin(admin, body.playerId, body.pin);
+      if (auth instanceof Response) return auth;
+      const { data: links, error } = await admin.from("study_parent_children").select("parent_id").eq("player_id", auth.player.id);
+      if (error) return PARENT_NO_TABLE.test(error.message) ? json({ ok: true, linked: [], needPrompt: false, unavailable: true }) : fail(error.message, 500);
+      const ids = (links ?? []).map((l: Row) => l.parent_id as string);
+      let linked: Row[] = [];
+      if (ids.length) linked = ((await admin.from("study_parents").select("id,name").in("id", ids)).data ?? []) as Row[];
+      return json({ ok: true, linked: linked.map((r) => ({ id: r.id, name: r.name })), needPrompt: auth.player.grade !== "Umum" && linked.length === 0 });
+    }
+
+    if (action === "parent_create") {
+      const auth = await checkPlayerPin(admin, body.playerId, body.pin);
+      if (auth instanceof Response) return auth;
+      if (auth.player.grade === "Umum") return fail("Kategori Umum tidak memakai PIN orang tua.", 400);
+      const name = cleanLine(body.name, 30);
+      if (!name) return fail("Nama orang tua wajib diisi.");
+      if (!validPin(body.newPin)) return fail("PIN harus 4-6 angka.");
+      const { salt, hash } = await hashPin(body.newPin as string);
+      const { data: par, error } = await admin.from("study_parents").insert({ name, pin_salt: salt, pin_hash: hash }).select("id,name").single();
+      if (error || !par) {
+        if (error?.code === "23505") return fail("Nama orang tua itu sudah dipakai. Pilih \"Sudah punya PIN\", atau tambahkan nama belakang.", 409);
+        return fail(PARENT_NO_TABLE.test(error?.message ?? "") ? "PIN orang tua belum aktif di server (migrasi 0044 belum dijalankan)." : error?.message || "Gagal menyimpan.", 500);
+      }
+      const { error: e2 } = await admin.from("study_parent_children").insert({ parent_id: par.id, player_id: auth.player.id });
+      if (e2) return fail(e2.message, 500);
+      await logParent(admin, par, "parent_create", auth.player.id, "buat PIN orang tua");
+      return json({ ok: true, parent: { id: par.id, name: par.name } });
+    }
+
+    if (action === "parent_link") {
+      const auth = await checkPlayerPin(admin, body.playerId, body.pin);
+      if (auth instanceof Response) return auth;
+      if (auth.player.grade === "Umum") return fail("Kategori Umum tidak memakai PIN orang tua.", 400);
+      const par = await checkParent(admin, body);
+      if (par instanceof Response) return par;
+      const { error } = await admin.from("study_parent_children").upsert({ parent_id: par.parent.id, player_id: auth.player.id }, { onConflict: "parent_id,player_id", ignoreDuplicates: true });
+      if (error) return fail(error.message, 500);
+      await logParent(admin, par.parent, "parent_link", auth.player.id, "tautkan anak");
+      return json({ ok: true, parent: { id: par.parent.id, name: par.parent.name } });
+    }
+
+    if (action === "parent_link_child") {
+      const par = await checkParent(admin, body);
+      if (par instanceof Response) return par;
+      const kid = await checkPlayerPin(admin, body.playerId, body.playerPin);
+      if (kid instanceof Response) return kid;
+      if (kid.player.grade === "Umum") return fail("Kategori Umum tidak memakai PIN orang tua.", 400);
+      const { error } = await admin.from("study_parent_children").upsert({ parent_id: par.parent.id, player_id: kid.player.id }, { onConflict: "parent_id,player_id", ignoreDuplicates: true });
+      if (error) return fail(error.message, 500);
+      await logParent(admin, par.parent, "parent_link", kid.player.id, "tautkan anak dari Setting");
+      return json({ ok: true });
+    }
+
+    if (action === "parent_pin_change") {
+      const par = await checkParent(admin, body);
       if (par instanceof Response) return par;
       if (!validPin(body.newPin)) return fail("PIN baru harus 4-6 angka.");
       const { salt, hash } = await hashPin(body.newPin as string);
-      const { error } = await admin
-        .from("study_settings")
-        .update({ parent_pin_salt: salt, parent_pin_hash: hash, parent_pin_failures: 0, parent_pin_locked_until: null, updated_at: new Date().toISOString() })
-        .eq("id", 1);
+      const { error } = await admin.from("study_parents").update({ pin_salt: salt, pin_hash: hash, pin_failures: 0, pin_locked_until: null }).eq("id", par.parent.id);
       if (error) return fail(error.message, 500);
+      await logParent(admin, par.parent, "parent_pin_change", null, "ganti PIN");
       return json({ ok: true });
     }
 
@@ -1504,10 +1614,11 @@ Deno.serve(async (req) => {
         if (v.player.id !== c.player_id) return fail("Hanya penulis komentar yang bisa menghapusnya.", 403);
       } else {
         // orang tua: wajib PIN orang tua yang SUDAH dibuat (tidak terbuka bagi semua orang)
-        const settings = await loadSettings(admin);
-        if (!settings?.parent_pin_hash) return fail("PIN orang tua belum dibuat. Buat dulu di Setting.", 403);
-        const par = await checkParentPin(admin, body.parentPin);
+        // orang tua dari penulis komentar (PIN orang tua yang tertaut ke anak itu)
+        if (!c.player_id) return fail("Komentar ini tidak punya penulis tertaut.", 403);
+        const par = await checkParent(admin, body, [c.player_id]);
         if (par instanceof Response) return par;
+        await logParent(admin, par.parent, "comment_delete", c.player_id, String(c.id));
       }
       const { error } = await admin.from("study_comments").delete().eq("id", c.id);
       if (error) return fail(error.message, 500);
@@ -1680,10 +1791,10 @@ Deno.serve(async (req) => {
         if (v instanceof Response) return v;
         if (v.player.id !== m.creator_id) return fail("Hanya pembuat materi yang bisa menghapusnya.", 403);
       } else {
-        const settings = await loadSettings(admin);
-        if (!settings?.parent_pin_hash) return fail("PIN orang tua belum dibuat. Buat dulu di Setting.", 403);
-        const par = await checkParentPin(admin, body.parentPin);
+        if (!m.creator_id) return fail("Materi ini tidak punya pembuat tertaut.", 403);
+        const par = await checkParent(admin, body, [m.creator_id]);
         if (par instanceof Response) return par;
+        await logParent(admin, par.parent, "material_delete", m.creator_id, String(m.id));
       }
       const { error } = await admin.from("study_materials").delete().eq("id", m.id);
       if (error) return fail(error.message, 500);
@@ -1947,10 +2058,10 @@ Deno.serve(async (req) => {
         if (v instanceof Response) return v;
         if (v.player.id !== c.creator_id) return fail("Hanya pembuat kelas yang bisa menghapusnya.", 403);
       } else {
-        const settings = await loadSettings(admin);
-        if (!settings?.parent_pin_hash) return fail("PIN orang tua belum dibuat. Buat dulu di Setting.", 403);
-        const par = await checkParentPin(admin, body.parentPin);
+        if (!c.creator_id) return fail("Kelas ini tidak punya pembuat tertaut.", 403);
+        const par = await checkParent(admin, body, [c.creator_id]);
         if (par instanceof Response) return par;
+        await logParent(admin, par.parent, "class_delete", c.creator_id, String(c.id));
       }
       const { error } = await admin.from("study_classrooms").delete().eq("id", c.id);
       if (error) return fail(error.message, 500);
