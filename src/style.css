@@ -4998,20 +4998,22 @@ button.study-trow:active {
 .study-menu {
   position: absolute;
   top: calc(100% - 4px);
-  right: 12px;
+  right: 0;
   z-index: 40;
-  min-width: 200px;
+  min-width: 240px;
   padding: 6px;
-  border: 1px solid var(--border);
+  border: 1.5px solid var(--border);
   border-radius: 12px;
   background: var(--bg-card);
+  color: var(--text);
   box-shadow: 0 10px 28px rgba(0, 0, 0, 0.22);
   display: flex;
   flex-direction: column;
   gap: 2px;
 }
 
-.study-menu[hidden] {
+.study-menu[hidden],
+.study-menu-scrim[hidden] {
   display: none;
 }
 
@@ -5023,15 +5025,127 @@ button.study-trow:active {
   font: inherit;
   font-size: 0.95rem;
   text-align: left;
-  padding: 11px 12px;
+  min-height: 44px;
+  padding: 8px 12px;
   border-radius: 8px;
   cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.study-menu-ico {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: currentColor;
+}
+
+.study-menu-ico svg {
+  width: 20px;
+  height: 20px;
+  stroke: currentColor;
+}
+
+.study-menu-label {
+  flex: 1;
+  min-width: 0;
+}
+
+.study-menu-count {
+  flex: none;
+  min-width: 22px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--accent-contrast);
+  font-size: 0.75rem;
+  font-weight: 800;
+  text-align: center;
 }
 
 .study-menu-item:hover,
 .study-menu-item:focus-visible {
   background: var(--bg-hover, rgba(127, 127, 127, 0.14));
   outline: none;
+}
+
+/* Bilah atas Study: Kembali, Judul (boleh dipotong), Bahasa, Hamburger -- semua tombol 44px dan tidak menyusut */
+.detail-topbar-row .study-lang-btn,
+.detail-topbar-row .study-menu-btn {
+  width: 44px;
+  height: 44px;
+  flex: none;
+  position: relative;
+  font-size: 0.85rem;
+  font-weight: 700;
+}
+
+#screen-study .detail-topbar-row .icon-btn {
+  width: 44px;
+  height: 44px;
+  flex: none;
+}
+
+#screen-study .detail-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#screen-study .detail-topbar {
+  position: sticky;
+}
+
+#screen-study .detail-topbar-row {
+  justify-content: flex-start;
+}
+
+.study-menu-dot {
+  position: absolute;
+  top: 7px;
+  right: 7px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: 2px solid var(--bg);
+  box-sizing: content-box;
+}
+
+.study-menu-scrim {
+  display: none;
+}
+
+/* HP: menu jadi panel dari kanan (bukan dropdown kecil) */
+@media (max-width: 640px) {
+  .study-menu-scrim:not([hidden]) {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 39;
+    background: rgba(0, 0, 0, 0.45);
+  }
+
+  .study-menu {
+    position: fixed;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 41;
+    width: min(86vw, 320px);
+    min-width: 0;
+    border-radius: 0;
+    border-width: 0 0 0 1.5px;
+    padding: calc(16px + env(safe-area-inset-top, 0px)) 10px calc(16px + env(safe-area-inset-bottom, 0px));
+    overflow-y: auto;
+    box-shadow: -10px 0 28px rgba(0, 0, 0, 0.3);
+  }
 }
 
 /* ---------------------------------------------------------------- Study > Class (guru pixel-art) */

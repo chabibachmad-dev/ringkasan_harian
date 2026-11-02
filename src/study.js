@@ -13,6 +13,8 @@ import { buildStudyPdf, shareOrSaveStudyPdf, buildMaterialPdf, shareOrSaveMateri
 import { pointsFormula, studyCardFileName } from "./study-text.js";
 import { recognitionSupported, synthSupported, startListening, speakText, stopSpeaking, unlockSpeech, recorderSupported, startRecording, releaseMic, micHeld, idleAudio, playWav, speechToken, audioPlayable } from "./study-voice.js";
 import { renderLessonCard, renderRoomCard, shareOrSaveCard } from "./study-card.js";
+import { countText, headerMenuRows, menuDot } from "./app-header.js";
+import { ICON_MOON, ICON_SUN, ICON_SETTINGS } from "./icons.js";
 import { createMatChatSheet, newChat } from "./study-matchat.js";
 import { CLASS_SOURCE_LIMIT, checkPdfFile, createClassroom } from "./study-class.js";
 import { allowedClasses, allowedMaterialGrades, classesOf, classPercent, computePoints, formatClock, gradeText, lessonClasses, lessonGrades, PRACTICE_QUESTIONS as PRACTICE_COUNT, timeLimitSeconds } from "../supabase/functions/_shared/study-core.ts";
@@ -195,32 +197,54 @@ const mdBlock = (text) => renderAiMarkdown(String(text ?? ""));
 export function initStudy(context) {
   ctx = { ...ctx, ...context };
   $("study-back-btn")?.addEventListener("click", onBack);
-  $("study-settings-btn")?.addEventListener("click", () => openSettings());
-  const bell = $("study-notif-icon");
-  if (bell) bell.innerHTML = BELL_SVG;
-  $("study-notif-btn")?.addEventListener("click", () => openNotifications());
-  const menuIcon = $("study-menu-icon");
-  if (menuIcon) menuIcon.innerHTML = MENU_SVG;
+  $("study-menu-icon") && ($("study-menu-icon").innerHTML = MENU_SVG);
+  $("study-lang-btn")?.addEventListener("click", () => ctx.toggleLang?.());
   $("study-menu-btn")?.addEventListener("click", (e) => {
     e.stopPropagation();
     toggleStudyMenu();
   });
-  // pilihan di menu hamburger memakai penanganan yang sama dengan tombol di badan halaman
+  // pilihan di menu hamburger: Notifikasi / Pengaturan / Tema ditangani di sini, sisanya sama dengan tombol di badan halaman
   $("study-menu")?.addEventListener("click", (e) => {
     const b = e.target.closest?.("[data-act]");
     if (!b) return;
+    const act = b.getAttribute("data-act");
+    if (act === "menu-theme") {
+      ctx.toggleTheme?.();
+      closeStudyMenu();
+      return;
+    }
     closeStudyMenu();
+    if (act === "menu-notif") return void openNotifications();
+    if (act === "menu-settings") return void openSettings();
     onBodyClick({ target: b });
   });
+  $("study-menu-scrim")?.addEventListener("click", () => closeStudyMenu());
   document.addEventListener("click", (e) => {
     if (!$("study-menu") || $("study-menu").hidden) return;
     if (e.target.closest?.("#study-menu, #study-menu-btn")) return;
     closeStudyMenu();
   });
   document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && $("study-menu") && !$("study-menu").hidden) {
+    const m = $("study-menu");
+    if (!m || m.hidden) return;
+    if (e.key === "Escape") {
       closeStudyMenu();
       $("study-menu-btn")?.focus();
+    } else if (e.key === "Tab") {
+      // fokus tetap di dalam panel selama terbuka
+      const items = [...m.querySelectorAll(".study-menu-item")];
+      if (!items.length) return;
+      const first = items[0];
+      const last = items[items.length - 1];
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+      else if (!m.contains(document.activeElement)) { e.preventDefault(); first.focus(); }
+    } else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      const items = [...m.querySelectorAll(".study-menu-item")];
+      const i = items.indexOf(document.activeElement);
+      if (!items.length) return;
+      e.preventDefault();
+      items[(i + (e.key === "ArrowDown" ? 1 : -1) + items.length) % items.length].focus();
     }
   });
   $("study-body")?.addEventListener("click", onBodyClick);
@@ -430,7 +454,6 @@ async function loadProfile() {
 // ---------------------------------------------------------------- tampilan
 function setTopbar() {
   const title = $("study-title");
-  const settingsBtn = $("study-settings-btn");
   if (title) {
     const titles = {
       profile: S.player?.name,
@@ -448,16 +471,17 @@ function setTopbar() {
     };
     title.textContent = titles[S.view] || L("study_title");
   }
-  if (settingsBtn) settingsBtn.hidden = S.view !== "home";
-  const menuBtn = $("study-menu-btn");
-  if (menuBtn) menuBtn.hidden = S.view !== "home";
-  if (S.view !== "home") closeStudyMenu();
+  const lang = $("study-lang-label");
+  if (lang) lang.textContent = String(ctx.getLang?.() || "id").toUpperCase();
+  if (!$("study-menu")?.hidden) renderStudyMenu();
+  paintMenuDot();
 }
 
 // ---------------------------------------------------------------- menu hamburger (kanan atas)
 const MENU_SVG = '<svg class="study-menu-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>';
 
 function studyMenuItems() {
+  if (S.view !== "home") return [];
   return [
     ["new-player", L("study_new_player")],
     ["new-lesson", L("study_new_lesson")],
@@ -466,20 +490,56 @@ function studyMenuItems() {
   ];
 }
 
+const menuHasNotif = () => !!$("screen-study") && !$("screen-study").hidden && !!S.viewer && S.notif.available && S.view !== "quiz";
+const currentTheme = () => (ctx.getTheme?.() === "dark" ? "dark" : "light");
+const MENU_ICONS = { bell: BELL_SVG, gear: ICON_SETTINGS, sun: ICON_SUN, moon: ICON_MOON, "": "" };
+
+function renderStudyMenu() {
+  const m = $("study-menu");
+  if (!m) return;
+  const rows = headerMenuRows({
+    theme: currentTheme(),
+    unread: S.notif.unread,
+    hasNotif: menuHasNotif(),
+    hasSettings: S.view === "home",
+    pageItems: studyMenuItems(),
+    labels: { notif: L("study_notif_title"), settings: L("study_settings"), themeDark: L("study_menu_theme_dark"), themeLight: L("study_menu_theme_light") }
+  });
+  const hadFocus = m.contains(document.activeElement) ? document.activeElement.getAttribute("data-act") : "";
+  m.innerHTML = rows
+    .map((r) => `<button type="button" role="menuitem" class="study-menu-item" data-act="${r.act}"><span class="study-menu-ico" aria-hidden="true">${MENU_ICONS[r.icon] || ""}</span><span class="study-menu-label">${esc(r.label)}</span>${r.count ? `<span class="study-menu-count">${countText(r.count)}</span>` : ""}</button>`)
+    .join("");
+  if (hadFocus) m.querySelector(`[data-act="${hadFocus}"]`)?.focus();
+}
+
+function paintMenuDot() {
+  const dot = $("study-menu-dot");
+  const on = menuDot(S.notif.unread, menuHasNotif());
+  if (dot) dot.hidden = !on;
+  const btn = $("study-menu-btn");
+  if (btn) {
+    const base = L("study_menu");
+    btn.setAttribute("aria-label", on ? `${base} · ${L("study_notif_aria_n", { n: S.notif.unread })}` : base);
+  }
+}
+
 function closeStudyMenu() {
   const m = $("study-menu");
   if (m) m.hidden = true;
-  $("study-menu-btn")?.setAttribute("aria-expanded", "false");
+  if ($("study-menu-scrim")) $("study-menu-scrim").hidden = true;
+  const btn = $("study-menu-btn");
+  const wasOpen = btn?.getAttribute("aria-expanded") === "true";
+  btn?.setAttribute("aria-expanded", "false");
+  if (wasOpen && m && m.contains(document.activeElement)) btn.focus();
 }
 
 function toggleStudyMenu() {
   const m = $("study-menu");
   if (!m) return;
   if (!m.hidden) return closeStudyMenu();
-  m.innerHTML = studyMenuItems()
-    .map(([act, label]) => `<button type="button" role="menuitem" class="study-menu-item" data-act="${act}">${esc(label)}</button>`)
-    .join("");
+  renderStudyMenu();
   m.hidden = false;
+  if ($("study-menu-scrim")) $("study-menu-scrim").hidden = false;
   $("study-menu-btn")?.setAttribute("aria-expanded", "true");
   m.querySelector(".study-menu-item")?.focus();
 }
@@ -3736,19 +3796,8 @@ let notifTimerId = 0;
 const BELL_SVG = '<svg class="study-bell" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 16.5V11a6 6 0 0 1 12 0v5.5l1.5 2h-15z"/><path d="M10 20.5a2 2 0 0 0 4 0"/></svg>';
 
 function paintNotif() {
-  const btn = $("study-notif-btn");
-  if (!btn) return;
-  const screenOpen = !!$("screen-study") && !$("screen-study").hidden;
-  const on = screenOpen && !!S.viewer && S.notif.available && S.view !== "quiz";
-  btn.hidden = !on;
-  const badge = $("study-notif-badge");
-  const n = on ? S.notif.unread : 0;
-  if (badge) {
-    badge.hidden = n <= 0;
-    badge.textContent = n > 99 ? "99+" : String(n);
-  }
-  btn.setAttribute("aria-label", n > 0 ? L("study_notif_aria_n", { n }) : L("study_notif_title"));
-  btn.classList.toggle("has-new", n > 0);
+  paintMenuDot();
+  if (!$("study-menu")?.hidden) renderStudyMenu();
 }
 
 // Dipanggil dari render(): tampilkan/sembunyikan lonceng, mulai/hentikan pengecekan berkala.

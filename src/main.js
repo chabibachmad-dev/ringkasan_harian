@@ -48,6 +48,7 @@ import {
   stopFeatures,
   hideFeatureScreens
 } from "./features.js";
+import { applyThemeTo, nextLang, nextTheme, resolveTheme } from "./app-header.js";
 import { initStudy, showStudyScreen, hideStudyScreen, rerenderStudy } from "./study.js";
 import { initOffice, showOfficeScreen, hideOfficeScreen, officeCodeChanged } from "./office.js";
 import { registerServiceWorker } from "./push.js";
@@ -287,7 +288,7 @@ const els = {
 
 const state = {
   lang: localStorage.getItem("rh_lang") || "id",
-  theme: localStorage.getItem("rh_theme") || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"),
+  theme: resolveTheme(localStorage.getItem("rh_theme"), matchMedia("(prefers-color-scheme: dark)").matches),
   currentDate: null,
   // Penyedia yang sedang dilihat di layar Status Sistem: "gemini" | "openrouter" | "groq".
   keysProvider: "gemini",
@@ -528,14 +529,24 @@ function getDisplayLabel(id) {
   return getCustomTitle(id) || getDefaultLabel(id);
 }
 
-const META_THEME_COLOR = document.getElementById("meta-theme-color");
-
 function applyTheme() {
-  document.documentElement.setAttribute("data-theme", state.theme);
+  applyThemeTo(document, state.theme);
   els.themeIcon.innerHTML = state.theme === "dark" ? ICON_SUN : ICON_MOON;
-  if (META_THEME_COLOR) {
-    META_THEME_COLOR.setAttribute("content", state.theme === "dark" ? "#000000" : "#ffffff");
-  }
+}
+
+function toggleTheme() {
+  state.theme = nextTheme(state.theme);
+  localStorage.setItem("rh_theme", state.theme);
+  applyTheme();
+  rerenderStudy(); // ikon/label menu Study ikut berubah
+}
+
+function toggleLang() {
+  state.lang = nextLang(state.lang);
+  localStorage.setItem("rh_lang", state.lang);
+  applyLang();
+  handleRoute();
+  rerenderStudy();
 }
 
 function applyLang() {
@@ -2886,18 +2897,8 @@ async function renderKeysList() {
 }
 
 function wireEvents() {
-  els.langToggle.addEventListener("click", () => {
-    state.lang = state.lang === "id" ? "en" : "id";
-    localStorage.setItem("rh_lang", state.lang);
-    applyLang();
-    handleRoute();
-  });
-
-  els.themeToggle.addEventListener("click", () => {
-    state.theme = state.theme === "dark" ? "light" : "dark";
-    localStorage.setItem("rh_theme", state.theme);
-    applyTheme();
-  });
+  els.langToggle.addEventListener("click", toggleLang);
+  els.themeToggle.addEventListener("click", toggleTheme);
 
   els.settingsToggle.addEventListener("click", () => openSettingsDialog());
 
@@ -3320,7 +3321,6 @@ function wireEvents() {
   els.menuOfficeIcon.innerHTML = ICON_OFFICE;
   els.menuQuranIcon.innerHTML = ICON_BOOK;
   els.menuStudyIcon.innerHTML = ICON_STUDY;
-  document.getElementById("study-settings-icon").innerHTML = ICON_SETTINGS;
   document.getElementById("prayer-refresh-icon").innerHTML = ICON_LOCATE;
 
   // ---------- Menu titik-3 PER-PESAN (di dalam obrolan): salin / hapus ----------
@@ -3887,7 +3887,7 @@ async function main() {
   applyLang();
   wireEvents();
   initFeatures({ getLang: () => state.lang, getCode: () => state.chatCode });
-  initStudy({ getLang: () => state.lang });
+  initStudy({ getLang: () => state.lang, getTheme: () => state.theme, toggleTheme, toggleLang });
   initOffice({ getCode: () => state.chatCode, askCode: () => openChatCodeDialog() });
   fixStickyHeaderOnIOSKeyboard();
   await registerServiceWorker();
