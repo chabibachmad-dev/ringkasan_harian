@@ -5579,3 +5579,62 @@ button.study-trow:active {
   min-height: 36px;
   margin-left: 6px;
 }
+
+/* ---- Leaderboard: kotak cari ---- */
+.study-board-search {
+  position: relative;
+  margin: 10px 0;
+}
+
+.study-board-q {
+  width: 100%;
+  min-height: 44px;
+  padding: 8px 46px 8px 40px;
+  border: 1.5px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-card);
+  color: var(--text);
+  font: inherit;
+  font-size: 1rem;
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+.study-board-q::-webkit-search-cancel-button {
+  display: none;
+}
+
+.study-board-search-ico {
+  position: absolute;
+  left: 14px;
+  top: 50%;
+  width: 18px;
+  height: 18px;
+  margin-top: -9px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  color: var(--text-muted);
+  pointer-events: none;
+}
+
+.study-board-clear {
+  position: absolute;
+  right: 0;
+  top: 0;
+  width: 44px;
+  height: 44px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 1rem;
+  cursor: pointer;
+}
+
+.study-hl {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  text-decoration-thickness: 2px;
+}

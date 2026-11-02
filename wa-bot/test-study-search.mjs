@@ -1,5 +1,5 @@
 // Tes penyaringan pemain untuk pemilih yang bisa dicari (src/study-search.js).  node test-study-search.mjs
-import { filterPlayers, normalizeName } from "../src/study-search.js";
+import { filterPlayers, filterRanked, matchRange, matchesQuery, normalizeName } from "../src/study-search.js";
 
 let gagal = 0;
 const check = (c, n) => { console.log(`${c ? "ok" : "GAGAL"}: ${n}`); if (!c) gagal++; };
@@ -27,5 +27,22 @@ const asli = P.map((p) => p.name).join(",");
 filterPlayers(P, "a");
 check(P.map((p) => p.name).join(",") === asli, "daftar asli tidak diubah urutannya");
 check(normalizeName("  Éa  B ") === "ea b", "normalizeName: aksen, spasi, huruf kecil");
+// ---- leaderboard: peringkat asli + garis bawah
+const R = [{ name: "Ayyubi" }, { name: "Zahra" }, { name: "Ananda Putri" }, { name: "Fátima" }, { name: "budi" }];
+let fr = filterRanked(R, "a");
+check(fr.map((x) => x.rank).join() === "1,2,3,4" && fr.map((x) => x.p.name).join() === "Ayyubi,Zahra,Ananda Putri,Fátima", "filterRanked: peringkat asli & urutan peringkat dipertahankan");
+fr = filterRanked(R, "  FATIMA ");
+check(fr.length === 1 && fr[0].rank === 4, "filterRanked: peringkat 4 tetap 4 (bukan 1), tanpa aksen/huruf besar/spasi tepi");
+check(filterRanked(R, "BUD")[0].rank === 5, "filterRanked: peringkat 5 tetap 5");
+check(filterRanked(R, "xyz").length === 0, "filterRanked: tidak ketemu -> kosong");
+check(filterRanked(R, "").length === 5, "filterRanked: kata kunci kosong -> semua");
+check(JSON.stringify(R.map((x) => x.name)) === JSON.stringify(["Ayyubi", "Zahra", "Ananda Putri", "Fátima", "budi"]), "filterRanked: data asli tidak berubah");
+check(matchesQuery("Ayyubi", "yub") && !matchesQuery("Ayyubi", "z"), "matchesQuery");
+let rg = matchRange("Fátima Zahra", "TIMA");
+check(rg && "Fátima Zahra".slice(rg[0], rg[1]) === "tima", "matchRange: aksen & huruf besar-kecil");
+rg = matchRange("Ananda  Putri", "da pu");
+check(rg && "Ananda  Putri".slice(rg[0], rg[1]).replace(/\s+/g, " ").toLowerCase() === "da pu", "matchRange: spasi ganda");
+check(matchRange("Budi", "") === null && matchRange("Budi", "x") === null, "matchRange: kosong/tidak ketemu -> null");
+
 console.log(gagal ? `\n${gagal} GAGAL` : "\nsemua tes lolos");
 process.exit(gagal ? 1 : 0);

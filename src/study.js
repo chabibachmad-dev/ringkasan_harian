@@ -6,6 +6,7 @@
 import { t } from "./i18n.js";
 import { clearDeviceLogin, isDeviceToken, readDeviceLogin, saveDeviceLogin, studyCall, studyHooks } from "./study-client.js";
 import { openFormDialog } from "./study-form.js";
+import { filterRanked, matchRange } from "./study-search.js";
 import { BOT_WA_NUMBER, formatWaNumber, waLink } from "./study-bot.js";
 import { fileToAvatarBase64 } from "./study-avatar.js";
 import { renderAiMarkdown, typesetMath } from "./markdown.js";
@@ -119,6 +120,7 @@ const CUSTOM = "__custom";
 const S = {
   notif: { unread: 0, items: [], loading: false, error: "", available: true, forId: "" }, // notifikasi suka & komentar (migrasi 0034)
   speak: null, // latihan speaking: { player, creds, list, session, turns, ... } (migrasi 0035)
+  boardQuery: "", // kata kunci kotak cari leaderboard (hanya di memori; kosong saat keluar dari tab)
   boardMode: "total", // papan leaderboard: "total" | "today" (poin didapat hari ini)
   avatarBusy: false,
   avatarMsg: "",
@@ -553,6 +555,7 @@ function render() {
   const body = $("study-body");
   if (!body) return;
   setTopbar();
+  if (S.view !== "home" || S.tab !== "board") S.boardQuery = ""; // kata kunci cari leaderboard hilang saat keluar dari tab
   if (S.view === "home") renderHome(body);
   else if (S.view === "profile") renderProfile(body);
   else if (S.view === "quiz") renderQuiz(body);
@@ -622,6 +625,52 @@ function tickQuizTimer() {
   }
 }
 
+// Isi daftar leaderboard sesuai mode (Total / Hari ini) dan kata kunci. Nomor peringkat = peringkat ASLI (urutan penuh), bukan urutan hasil saring.
+const hlName = (name, q) => {
+  const r = matchRange(name, q);
+  const n = String(name ?? "");
+  return r ? `${esc(n.slice(0, r[0]))}<u class="study-hl">${esc(n.slice(r[0], r[1]))}</u>${esc(n.slice(r[1]))}` : esc(n);
+};
+function boardListHtml() {
+  const players = S.overview?.players || [];
+  const q = S.boardQuery;
+  const capNow = dailyCapOf();
+  const todayMode = capNow !== null && S.boardMode === "today";
+  const ranked = todayMode
+    ? players
+        .filter((p) => (p.todayPoints ?? 0) > 0)
+        .sort((a, b) => (b.todayPoints ?? 0) - (a.todayPoints ?? 0) || String(a.name).localeCompare(String(b.name)))
+    : players;
+  if (todayMode && !ranked.length) {
+    return `<p class="status-text">${esc(L("study_board_today_empty"))}</p><p class="study-hint">${esc(L(capNow > 0 ? "study_board_today_hint" : "study_board_today_hint_nocap", { cap: fmt(capNow) }))}</p>`;
+  }
+  const shown = filterRanked(ranked, q);
+  const rows = shown
+    .map(({ p, rank }) => {
+      const meta = todayMode
+        ? `${esc(gradeText(p.grade, p.classLevel))}${capNow > 0 && p.todayPoints >= capNow ? ` · ${esc(L("study_daily_max"))}` : ""}`
+        : `${esc(gradeText(p.grade, p.classLevel))} · ${fmt(p.sessionsDone)} ${esc(L("study_col_done").toLowerCase())}`;
+      return `
+      <button type="button" class="study-board-row ${rank <= 3 ? "is-top" : ""}" data-act="open-public" data-id="${esc(p.id)}">
+        <span class="study-rank">${rank}</span>
+        ${avatarHtml(p.id, p.name, "study-avatar--sm", true)}
+        <span class="study-board-main"><span class="study-name">${hlName(p.name, q)}</span><small class="study-board-meta">${meta}</small></span>
+        <span class="study-pts">${todayMode ? "+" : ""}${fmt(todayMode ? p.todayPoints : p.totalPoints)}<small>${esc(L("study_pts"))}</small></span>
+      </button>`;
+    })
+    .join("");
+  const hint = todayMode ? L(capNow > 0 ? "study_board_today_hint" : "study_board_today_hint_nocap", { cap: fmt(capNow) }) : L("study_board_hint");
+  return `${shown.length ? `<div class="study-board" role="table">${rows}</div>` : `<p class="status-text" role="status">${esc(L("study_player_no_match"))}</p>`}<p class="study-hint">${esc(hint)}</p>`;
+}
+
+function onBoardQuery(input) {
+  S.boardQuery = input.value;
+  const list = $("study-board-list");
+  if (list) list.innerHTML = boardListHtml(); // hanya daftar yang digambar ulang, kotak cari tetap (fokus tidak hilang)
+  const clear = document.querySelector("#study-body .study-board-clear");
+  if (clear) clear.hidden = !S.boardQuery;
+}
+
 function renderHome(body) {
   if (S.overviewError && !S.overview) {
     body.innerHTML = `
@@ -638,43 +687,19 @@ function renderHome(body) {
     return;
   }
   const players = S.overview.players || [];
-  const rows = players
-    .map(
-      (p, i) => `
-      <button type="button" class="study-board-row ${i < 3 ? "is-top" : ""}" data-act="open-public" data-id="${esc(p.id)}">
-        <span class="study-rank">${i + 1}</span>
-        ${avatarHtml(p.id, p.name, "study-avatar--sm", true)}
-        <span class="study-board-main"><span class="study-name">${esc(p.name)}</span><small class="study-board-meta">${esc(gradeText(p.grade, p.classLevel))} · ${fmt(p.sessionsDone)} ${esc(L("study_col_done").toLowerCase())}</small></span>
-        <span class="study-pts">${fmt(p.totalPoints)}<small>${esc(L("study_pts"))}</small></span>
-      </button>`
-    )
-    .join("");
   const capNow = dailyCapOf();
   const todayMode = capNow !== null && S.boardMode === "today";
-  const todayRows = players
-    .filter((p) => (p.todayPoints ?? 0) > 0)
-    .sort((a, b) => (b.todayPoints ?? 0) - (a.todayPoints ?? 0) || String(a.name).localeCompare(String(b.name)))
-    .map(
-      (p, i) => `
-      <button type="button" class="study-board-row ${i < 3 ? "is-top" : ""}" data-act="open-public" data-id="${esc(p.id)}">
-        <span class="study-rank">${i + 1}</span>
-        ${avatarHtml(p.id, p.name, "study-avatar--sm", true)}
-        <span class="study-board-main"><span class="study-name">${esc(p.name)}</span><small class="study-board-meta">${esc(gradeText(p.grade, p.classLevel))}${capNow > 0 && p.todayPoints >= capNow ? ` · ${esc(L("study_daily_max"))}` : ""}</small></span>
-        <span class="study-pts">+${fmt(p.todayPoints)}<small>${esc(L("study_pts"))}</small></span>
-      </button>`
-    )
-    .join("");
   const modeBtn = (id, label) =>
     `<button type="button" role="tab" class="study-tab ${(todayMode ? "today" : "total") === id ? "is-on" : ""}" aria-selected="${(todayMode ? "today" : "total") === id ? "true" : "false"}" data-act="board-mode" data-mode="${id}">${esc(label)}</button>`;
   const modeTabs = capNow === null || players.length === 0 ? "" : `<div class="study-tabs study-tabs--sub" role="tablist">${modeBtn("total", L("study_board_total"))}${modeBtn("today", L("study_board_today"))}</div>`;
+  const searchBox =
+    players.length === 0
+      ? ""
+      : `<div class="study-board-search"><svg class="study-board-search-ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/></svg><input type="search" id="study-board-q" class="study-board-q" value="${esc(S.boardQuery)}" placeholder="${esc(L("study_player_search_ph"))}" aria-label="${esc(L("study_player_search_ph"))}" autocomplete="off" autocapitalize="off" spellcheck="false" enterkeyhint="search" data-board-q><button type="button" class="study-board-clear" data-act="board-clear" aria-label="${esc(L("study_board_clear"))}" ${S.boardQuery ? "" : "hidden"}>&#x2715;</button></div>`;
   const boardHtml =
     players.length === 0
       ? `<p class="status-text">${esc(L("study_board_empty"))}</p>`
-      : todayMode
-        ? `${modeTabs}${todayRows ? `<div class="study-board" role="table">${todayRows}</div>` : `<p class="status-text">${esc(L("study_board_today_empty"))}</p>`}
-      <p class="study-hint">${esc(L(capNow > 0 ? "study_board_today_hint" : "study_board_today_hint_nocap", { cap: fmt(capNow) }))}</p>`
-        : `${modeTabs}<div class="study-board" role="table">${rows}</div>
-      <p class="study-hint">${esc(L("study_board_hint"))}</p>`;
+      : `${modeTabs}${searchBox}<div id="study-board-list">${boardListHtml()}</div>`;
   const tab = (id, label) =>
     `<button type="button" role="tab" id="study-tab-${id}" class="study-tab ${S.tab === id ? "is-on" : ""}" aria-selected="${S.tab === id ? "true" : "false"}" data-act="tab" data-tab="${id}">${esc(label)}</button>`;
   body.innerHTML = `
@@ -940,6 +965,11 @@ async function onBodyClick(e) {
   if (act === "tab") return switchTab(btn.dataset.tab);
   if (act === "notif-open") return openNotifItem(Number(btn.dataset.i));
   if (act === "notif-reload") return openNotifications();
+  if (act === "board-clear") {
+    S.boardQuery = "";
+    render();
+    return $("study-board-q")?.focus();
+  }
   if (act === "board-mode") {
     S.boardMode = btn.dataset.mode === "today" ? "today" : "total";
     return render();
@@ -2564,6 +2594,8 @@ async function toggleComments(key) {
 }
 
 function onBodyInput(e) {
+  const bq = e.target.closest?.("input[data-board-q]");
+  if (bq) return onBoardQuery(bq);
   if (e.target?.id === "cls-input") return classroom.onInput(e.target);
   if (e.target?.id === "study-speak-input" && S.speak) {
     S.speak.draft = e.target.value;
