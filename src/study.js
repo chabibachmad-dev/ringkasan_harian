@@ -499,7 +499,8 @@ function studyMenuItems() {
 
 const menuHasNotif = () => !!$("screen-study") && !$("screen-study").hidden && !!S.viewer && S.notif.available && S.view !== "quiz";
 const currentTheme = () => (ctx.getTheme?.() === "dark" ? "dark" : "light");
-const MENU_ICONS = { bell: BELL_SVG, gear: ICON_SETTINGS, sun: ICON_SUN, moon: ICON_MOON, "": "" };
+// fungsi (bukan konstanta): BELL_SVG dideklarasikan jauh di bawah; membacanya saat modul dimuat memicu ReferenceError (TDZ) dan mematikan seluruh aplikasi
+const menuIcon = (name) => ({ bell: BELL_SVG, gear: ICON_SETTINGS, sun: ICON_SUN, moon: ICON_MOON })[name] || "";
 
 function renderStudyMenu() {
   const m = $("study-menu");
@@ -514,7 +515,7 @@ function renderStudyMenu() {
   });
   const hadFocus = m.contains(document.activeElement) ? document.activeElement.getAttribute("data-act") : "";
   m.innerHTML = rows
-    .map((r) => `<button type="button" role="menuitem" class="study-menu-item" data-act="${r.act}"><span class="study-menu-ico" aria-hidden="true">${MENU_ICONS[r.icon] || ""}</span><span class="study-menu-label">${esc(r.label)}</span>${r.count ? `<span class="study-menu-count">${countText(r.count)}</span>` : ""}</button>`)
+    .map((r) => `<button type="button" role="menuitem" class="study-menu-item" data-act="${r.act}"><span class="study-menu-ico" aria-hidden="true">${menuIcon(r.icon)}</span><span class="study-menu-label">${esc(r.label)}</span>${r.count ? `<span class="study-menu-count">${countText(r.count)}</span>` : ""}</button>`)
     .join("");
   if (hadFocus) m.querySelector(`[data-act="${hadFocus}"]`)?.focus();
 }
