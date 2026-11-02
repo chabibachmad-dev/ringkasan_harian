@@ -1538,7 +1538,7 @@ Deno.serve(async (req) => {
       }
       // ownerId (opsional) = hanya materi buatan pemain itu (kolom creator_id; baris tanpa pembuat hanya muncul tanpa ownerId).
       if (body.ownerId !== undefined && body.ownerId !== null && !isUuid(body.ownerId)) return fail("Pemain tidak valid.");
-      let q = admin.from("study_materials").select("id,title,subject,grade,class_level,detail,creator_name,created_at").order("created_at", { ascending: false }).limit(MATERIAL_PAGE + 1);
+      let q = admin.from("study_materials").select("id,title,subject,grade,class_level,detail,creator_id,creator_name,created_at").order("created_at", { ascending: false }).limit(MATERIAL_PAGE + 1);
       if (before) q = q.lt("created_at", before);
       if (body.ownerId) q = q.eq("creator_id", body.ownerId);
       const { data, error } = await q;

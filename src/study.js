@@ -1824,8 +1824,8 @@ function scopeList(list) {
 }
 // ownerId untuk kueri: kosong = semua pemain.
 const scopeOwner = () => (tlAll() ? undefined : S.viewer?.id || undefined);
-// Pengaman tampilan bila server lama belum menyaring ownerId (bukan pengganti saringan di kueri).
-const scopedItems = (list) => (tlAll() || !S.viewer ? list.items : list.items.filter((i) => i.creatorId === S.viewer.id));
+// Penyaringan dilakukan di server (ownerId); klien tidak menyaring ulang (creatorId bisa kosong pada baris lama).
+const scopedItems = (list) => list.items;
 function scopeFeed(feed) {
   if (feed !== S.feed) return;
   if (!scopeList(feed)) return;
