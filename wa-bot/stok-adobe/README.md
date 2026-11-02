@@ -15,6 +15,7 @@ Bot **menyiapkan** paket (ikon SVG + latar/pola JPEG + CSV metadata + lembar pra
 ## Isi modul
 - `ikon-mesin.py` : mesin ikon (Python + `skia-pathops`): 24 ikon Ramadan/Lebaran bawaan + DSL JSON untuk ikon baru. Semua ikon: satu bentuk gabungan, tanpa goresan, jalur tertutup, di dalam kotak 64x64.
 - `latar-mesin.mjs` : 6 latar/pola (5400x3600, 19,4 MP) dengan `@napi-rs/canvas`.
+- `ikon3d-blender.py` + `ikon3d-pilih.mjs` : OPSI render 3D SEJATI dengan Blender (ekstrusi + bevel + material + 3 lampu area + bayangan, Cycles CPU, denoise). `ikon3d-pilih.mjs` memilih mesin lewat `STOK_3D` dan otomatis jatuh ke render JS bila Blender tidak ada, gagal, atau melewati batas waktu.
 - `ikon3d.mjs` : render 3D murni JS (tanpa Chromium/Blender): siluet SVG -> jarak ke tepi -> bidang tinggi membulat -> normal -> cahaya (difus, kilap Blinn-Phong, rim) + bayangan lembut + latar abu terang. Bahan: `clay`, `kilap`, `logam`; palet: zamrud, emas, nila, koral, langit, mawar, krem. Ini render 2,5D tampak depan, BUKAN model 3D penuh; kualitasnya di bawah render Blender profesional.
 - `metadata.js` : judul (maks 70, tanpa koma), kata kunci (maks 50, unik, tanpa merek), CSV persis header templat Adobe, validasi; AI menulis metadata dan hasilnya selalu divalidasi, bila gagal dipakai bawaan katalog.
 - `stok-adobe.js` : perintah, rencana, riwayat (mencegah gambar mirip dan membatasi paket per pekan), pembuat paket, penangan WA (`tanganiStokWa`).
@@ -28,7 +29,7 @@ Bot **menyiapkan** paket (ikon SVG + latar/pola JPEG + CSV metadata + lembar pra
 `pip install skia-pathops` (disarankan di venv; isi `STOK_PYTHON=/jalur/venv/bin/python`), `npm i @napi-rs/canvas`, lalu panggil `tanganiStokWa` dari penangan pesan WA (lihat prompt Claude Code). Tes: `node test-stok-adobe.mjs` (bagian Python dan canvas dilewati bila tidak terpasang).
 
 ## Ikon 3D: yang perlu diketahui
-- Ikon 3D adalah **JPEG ilustrasi** (bukan vektor): saat mengunggah pilih tipe Illustration dan **jangan** centang "This is an icon". Syarat ilustrasi Adobe: JPEG, sRGB, 4-100 MP, maks 45 MB; keluaran 2400x2400 = 5,76 MP.
+- Ikon 3D adalah **JPEG ilustrasi** (bukan vektor): saat mengunggah pilih tipe Illustration dan **jangan** centang "This is an icon". Syarat ilustrasi Adobe: JPEG, sRGB, 4-100 MP, maks 45 MB; keluaran JS 2400x2400 = 5,76 MP (Blender 2048x2048 = 4,19 MP).
 - Bentuknya sama dengan ikon datar yang sudah diunggah, dan Adobe menganggap variasi kecil dari desain yang sama sebagai mirip (maks 3 versi). Bot menambahkan catatan ini pada rencana. Mulai dengan 4-6 ikon 3D dan lihat hasil review; subjek yang belum punya versi datar lebih aman.
 - Judul diawali "3D ...", kata kunci memuat "3d icon, 3d render, 3d illustration, clay render, ...". AI yang menulis metadata selalu divalidasi.
 - Label AI: ikon digambar program (bukan generator gambar), tetapi program ditulis dengan bantuan AI; putuskan dan konsisten (saran aman: centang "Created using generative AI tools").
@@ -38,3 +39,19 @@ Bot **menyiapkan** paket (ikon SVG + latar/pola JPEG + CSV metadata + lembar pra
 - Ikon susunan AI (tema baru) belum teruji kualitasnya; selalu periksa pratinjau.
 - Latar bawaan hanya 6 desain; tema baru untuk latar butuh desain baru yang kita buat bersama (variasi warna dari desain yang sama dianggap mirip).
 - Tidak ada jaminan lolos review atau laku; penghasilan stok umumnya datang dari portofolio besar yang konsisten.
+
+## Ikon 3D dengan Blender (opsional)
+Bawaan tetap render JS (cepat, tanpa pemasangan). Untuk hasil 3D sungguhan (ketebalan, tepi membulat, bayangan jatuh yang nyata):
+
+1. Pasang salah satu: (a) program Blender (`sudo apt install blender`, atau unduh dari blender.org) lalu `export BLENDER_BIN=/usr/bin/blender`; atau (b) modul Python: `python3 -m venv ~/venv-bpy && ~/venv-bpy/bin/pip install bpy` lalu `export STOK_BPY_PYTHON=~/venv-bpy/bin/python` (unduhan sekitar 400 MB, terpasang sekitar 1 GB).
+2. `export STOK_3D=blender` (atau `auto` = pakai Blender bila terdeteksi). Tanpa itu, bot memakai render JS.
+3. Opsional: `STOK_BLENDER_SAMPEL=32` (makin tinggi makin halus dan lambat), `STOK_BLENDER_TIMEOUT_MS=600000`.
+
+Uji manual satu ikon: `blender -b -P stok-adobe/ikon3d-blender.py -- --svg ikon.svg --keluar hasil.jpg --warna "#10b981" --bahan clay` (bahan: clay, kilap, logam; ukuran bawaan 2048 px = 4,2 MP, memenuhi syarat minimal 4 MP).
+
+Yang perlu diketahui:
+- **Lambat di CPU**: sekitar 3,5 menit per ikon (2048 px, 32 sampel, 2 inti). Satu paket 6 ikon 3D bisa 20 menit lebih. Blender dijalankan sebagai proses anak asinkron (bot tetap menjawab pesan lain) dan satu per satu; gunakan jumlah ikon 3D kecil (4-6) dan sampel lebih rendah bila mesin lemah.
+- **Bentuk dari SVG**: ikon yang berupa siluet padat (masjid, hilal, hadiah, bedug) hasilnya paling bagus. Ikon bergaya garis tipis (ketupat, lentera) terpotong-potong menjadi lempengan karena pembuatnya memotong banyak celah; periksa pratinjau sebelum diunggah.
+- Beberapa lubang sempit (jendela menara masjid) tampak gelap karena tidak terkena cahaya; ini normal untuk rendering fisik, tetapi periksa pratinjau.
+- Hasil tetap JPEG ilustrasi (bukan vektor): tipe Illustration, jangan centang "This is an icon", dan beri label AI.
+- Blender gagal atau melebihi batas waktu: bot memakai render JS dan menulis "Info 3D" pada ringkasan paket.

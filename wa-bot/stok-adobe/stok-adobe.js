@@ -9,14 +9,15 @@ import { spawnSync } from "node:child_process";
 import { createCanvas, loadImage } from "@napi-rs/canvas";
 import { LATAR, renderLatar } from "./latar-mesin.mjs";
 import { buatCsv, metadataUntuk, bersihkanJudul, bersihkanKataKunci } from "./metadata.js";
-import { render3d, URUTAN_PALET } from "./ikon3d.mjs";
+import { URUTAN_PALET } from "./ikon3d.mjs";
+import { render3dPilih } from "./ikon3d-pilih.mjs";
 
 const SINI = path.dirname(fileURLToPath(import.meta.url));
 export const MESIN_IKON = path.join(SINI, "ikon-mesin.py");
 // yang SUDAH diunggah pemilik pada paket pertama (supaya bot tidak membuat ulang gambar yang sama; Adobe menolak konten mirip)
 export const SUDAH_DIUNGGAH = {
   ikon: ["hilal", "hilal-bintang", "masjid", "menara", "lentera", "ketupat", "kurma", "tasbih", "sajadah", "bedug", "alquran", "peci", "hadiah", "bintang-8", "minuman", "buka-puasa", "jam", "kalender", "amplop-thr", "kotak-donasi", "koin-hilal", "sahur", "weker-sahur", "kembang-api"],
-  ikon3d: [],
+  ikon3d: ["masjid", "hilal-bintang", "lentera", "menara", "ketupat", "hilal"],
   latar: ["batik-kawung-sogan", "batik-truntum-biru", "pola-islami-hijau-emas", "latar-malam-ramadan", "latar-lebaran-ketupat", "latar-abstrak-gradien"]
 };
 export const BATAS_PAKET = { ikon: 24, latar: 6 };
@@ -180,7 +181,7 @@ Bot tidak mengunggah apa pun.
 export async function buatPaket({ rencana, llm, folder, python, tanggal }) {
   const id = `${tanggal}-${Date.now().toString(36)}`, kerja = path.join(folder, `paket-${id}`);
   const dIkon = path.join(kerja, "ikon"), dLatar = path.join(kerja, "latar"); fs.mkdirSync(kerja, { recursive: true });
-  const lapor = { ikon: [], ikon3d: [], latar: [], gagal: [] }, pratinjau = [], dIkon3d = path.join(kerja, "ikon3d");
+  const lapor = { ikon: [], ikon3d: [], latar: [], gagal: [], info: [] }, pratinjau = [], dIkon3d = path.join(kerja, "ikon3d");
   if (rencana.ikon.length) {
     const dSvg = rencana.tiga ? path.join(kerja, "_svg") : dIkon;
     const hasil = jalankanPython(["render", "--keluar", dSvg], { python, masuk: JSON.stringify({ ikon: rencana.ikon.map((i) => ({ nama: i.nama, spek: i.spek })) }) });
@@ -191,7 +192,8 @@ export async function buatPaket({ rencana, llm, folder, python, tanggal }) {
       if (rencana.tiga) {
         try {
           const nama3 = h.nama.slice(0, 23), berkas3 = path.join(dIkon3d, `3d-${nama3}.jpg`), i3 = nomor++;
-          await render3d({ svg: fs.readFileSync(h.berkas, "utf8"), keluar: berkas3, palet: URUTAN_PALET[i3 % URUTAN_PALET.length], bahan: i3 % 2 ? "kilap" : "clay" });
+          const r3 = await render3dPilih({ svg: fs.readFileSync(h.berkas, "utf8"), keluar: berkas3, palet: URUTAN_PALET[i3 % URUTAN_PALET.length], bahan: i3 % 2 ? "kilap" : "clay" });
+          if (r3.catatan) lapor.info.push(`${h.nama}: ${r3.catatan}`);
           const meta = await metadataUntuk({ llm, berkas: path.basename(berkas3), subjek: `3D ${it.judul}`, jenis: "ikon3d", tema: rencana.temaAsli, judulBawaan: `3D ${it.judul}`, kataBawaan: tambahKata3d(it.kata, rencana.tema) });
           lapor.ikon3d.push({ ...meta, nama: h.nama, jalur: berkas3 }); pratinjau.push({ nama: `3d-${h.nama}`, berkas: berkas3 });
         } catch (e) { lapor.gagal.push(`${h.nama} (3D): ${String(e.message).slice(0, 100)}`); }
@@ -254,7 +256,7 @@ export async function tanganiStokWa(o) {
       const h = antrean ? await antrean.jalankan(kerja) : await kerja();
       riwayat.paket.push({ tanggal, tema: t.rencana.temaAsli, ikon: h.ikon, ikon3d: h.ikon3d, latar: h.latar }); simpanRiwayat(folder, riwayat);
       if (h.pratinjau) await (kirimGambar || kirimDokumen)(h.pratinjau, path.basename(h.pratinjau), "Pratinjau: periksa dulu sebelum mengunggah.");
-      const ket = [`Paket siap: ${h.ikon.length} ikon, ${h.ikon3d.length} ikon 3D, ${h.latar.length} latar. Kata kunci: ${[...h.lapor.ikon, ...h.lapor.ikon3d, ...h.lapor.latar].filter((m) => m.sumber === "ai").length} dari AI, sisanya dari katalog.`, ...(h.lapor.gagal.length ? [`Gagal: ${h.lapor.gagal.join("; ")}`] : []), "Unggah dan Submit kamu kerjakan sendiri (petunjuk ada di dalam zip)."].join("\n");
+      const ket = [`Paket siap: ${h.ikon.length} ikon, ${h.ikon3d.length} ikon 3D, ${h.latar.length} latar. Kata kunci: ${[...h.lapor.ikon, ...h.lapor.ikon3d, ...h.lapor.latar].filter((m) => m.sumber === "ai").length} dari AI, sisanya dari katalog.`, ...(h.lapor.gagal.length ? [`Gagal: ${h.lapor.gagal.join("; ")}`] : []), ...((h.lapor.info || []).length ? [`Info 3D: ${[...new Set(h.lapor.info.map((x) => x.split(": ").slice(1).join(": ")))].join("; ")}`] : []), "Unggah dan Submit kamu kerjakan sendiri (petunjuk ada di dalam zip)."].join("\n");
       await kirimDokumen(h.zip, path.basename(h.zip), ket);
     } catch (e) { await kirimTeks(`Maaf, paket gagal dibuat (${String(e.message).slice(0, 140)}).`); }
     return true;
