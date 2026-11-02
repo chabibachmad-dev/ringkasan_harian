@@ -15,7 +15,7 @@ import { pointsFormula, studyCardFileName } from "./study-text.js";
 import { recognitionSupported, synthSupported, startListening, speakText, stopSpeaking, unlockSpeech, recorderSupported, startRecording, releaseMic, micHeld, idleAudio, playWav, speechToken, audioPlayable } from "./study-voice.js";
 import { renderLessonCard, renderRoomCard, shareOrSaveCard } from "./study-card.js";
 import { countText, headerMenuRows, menuDot } from "./app-header.js";
-import { ICON_MOON, ICON_SUN, ICON_SETTINGS } from "./icons.js";
+import { ICON_MOON, ICON_SUN, ICON_SETTINGS, ICON_USER_PLUS, ICON_BOOK_OPEN, ICON_TROPHY, ICON_MIC } from "./icons.js";
 import { createMatChatSheet, newChat } from "./study-matchat.js";
 import { CLASS_SOURCE_LIMIT, checkPdfFile, createClassroom } from "./study-class.js";
 import { allowedClasses, allowedMaterialGrades, classesOf, classPercent, computePoints, formatClock, gradeText, lessonClasses, lessonGrades, PRACTICE_QUESTIONS as PRACTICE_COUNT, questionContextLine, timeLimitSeconds } from "../supabase/functions/_shared/study-core.ts";
@@ -500,7 +500,7 @@ function studyMenuItems() {
 const menuHasNotif = () => !!$("screen-study") && !$("screen-study").hidden && !!S.viewer && S.notif.available && S.view !== "quiz";
 const currentTheme = () => (ctx.getTheme?.() === "dark" ? "dark" : "light");
 // fungsi (bukan konstanta): BELL_SVG dideklarasikan jauh di bawah; membacanya saat modul dimuat memicu ReferenceError (TDZ) dan mematikan seluruh aplikasi
-const menuIcon = (name) => ({ bell: BELL_SVG, gear: ICON_SETTINGS, sun: ICON_SUN, moon: ICON_MOON })[name] || "";
+const menuIcon = (name) => ({ bell: BELL_SVG, gear: ICON_SETTINGS, sun: ICON_SUN, moon: ICON_MOON, "user-plus": ICON_USER_PLUS, "book-open": ICON_BOOK_OPEN, trophy: ICON_TROPHY, mic: ICON_MIC })[name] || "";
 
 function renderStudyMenu() {
   const m = $("study-menu");

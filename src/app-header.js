@@ -18,12 +18,15 @@ export function applyThemeTo(doc, theme) {
   if (meta) meta.setAttribute("content", themeColor(theme));
 }
 
+// Ikon baris menu halaman: act -> nama ikon (dibaca lewat menuIcon() di study.js).
+export const PAGE_ICONS = { "new-player": "user-plus", "new-lesson": "book-open", rooms: "trophy", speak: "mic" };
+
 // Baris menu. Urutan: Notifikasi, aksi halaman (Pemain baru, ...), Pengaturan, Tema.
 // `labels` = teks sudah diterjemahkan; `pageItems` = [[act, label], ...] dari halaman.
 export function headerMenuRows({ theme, unread = 0, hasNotif = false, hasSettings = false, pageItems = [], labels }) {
   const rows = [];
   if (hasNotif) rows.push({ act: "menu-notif", icon: "bell", label: labels.notif, count: unread > 0 ? unread : 0 });
-  for (const [act, label] of pageItems) rows.push({ act, icon: "", label });
+  for (const [act, label] of pageItems) rows.push({ act, icon: PAGE_ICONS[act] || "", label });
   if (hasSettings) rows.push({ act: "menu-settings", icon: "gear", label: labels.settings });
   rows.push({
     act: "menu-theme",

@@ -1,7 +1,8 @@
 // Tes bilah atas baru (src/app-header.js + struktur index.html/study.js).  node test-app-header.mjs
 import fs from "node:fs";
 import { applyThemeTo, countText, headerMenuRows, menuDot, nextLang, nextTheme, resolveTheme, themeColor } from "../src/app-header.js";
-import { ICON_MOON, ICON_SUN, ICON_SETTINGS } from "../src/icons.js";
+import { PAGE_ICONS } from "../src/app-header.js";
+import { ICON_USER_PLUS, ICON_BOOK_OPEN, ICON_TROPHY, ICON_MIC, ICON_MOON, ICON_SUN, ICON_SETTINGS } from "../src/icons.js";
 
 let gagal = 0;
 const check = (c, n) => { console.log(`${c ? "ok" : "GAGAL"}: ${n}`); if (!c) gagal++; };
@@ -47,5 +48,13 @@ check([ICON_MOON, ICON_SUN, ICON_SETTINGS, MENU_SVG, BELL_SVG].every(noHard), "i
 check(/\.study-menu-icon \{[^}]*stroke: currentColor/.test(css) && /\.study-bell \{[^}]*stroke: currentColor/.test(css), "ikon hamburger & lonceng pakai stroke: currentColor");
 check(/\.detail-topbar-row \.study-menu-btn[\s\S]{0,200}flex: none/.test(css) && /#screen-study \.detail-title \{[^}]*min-width: 0[^}]*text-overflow: ellipsis/.test(css), "tombol flex:none, judul min-width:0 + ellipsis");
 check(/@media \(max-width: 640px\)[\s\S]{0,600}\.study-menu \{[\s\S]{0,200}position: fixed/.test(css), "di HP menu jadi panel dari kanan");
+// setiap item menu punya ikon, dan ikonnya terpasang di menuIcon()
+const allRows = headerMenuRows({ theme: "light", unread: 1, hasNotif: true, hasSettings: true, pageItems: [["new-player", "a"], ["new-lesson", "b"], ["rooms", "c"], ["speak", "d"]], labels: L });
+check(allRows.every((r) => r.icon), `setiap item menu punya ikon (${allRows.map((r) => r.icon).join(",")})`);
+const menuIconSrc = studySrc.match(/const menuIcon = [^\n]+/)[0];
+check(allRows.every((r) => menuIconSrc.includes(r.icon === "moon" || r.icon === "sun" || r.icon === "bell" || r.icon === "gear" ? r.icon : `"${r.icon}"`) || menuIconSrc.includes(`${r.icon}:`)), "menuIcon() memetakan semua nama ikon");
+check(Object.keys(PAGE_ICONS).length === 4, "4 ikon halaman");
+for (const [n, v] of Object.entries({ ICON_USER_PLUS, ICON_BOOK_OPEN, ICON_TROPHY, ICON_MIC })) check(/stroke="currentColor"/.test(v) && /stroke-width="1.8"/.test(v) && /stroke-linecap="round"/.test(v) && /stroke-linejoin="round"/.test(v) && /width="20"/.test(v) && noHard(v), `${n}: garis 1.8, round, 20px, currentColor`);
+check(/menuIcon = \(name\) =>/.test(studySrc) && !/^const MENU_ICONS/m.test(studySrc), "ikon dibaca lewat fungsi menuIcon (bukan konstanta tingkat-atas)");
 if (gagal) { console.log(`\n${gagal} tes GAGAL`); process.exit(1); }
 console.log("\nSemua tes app-header lolos");
