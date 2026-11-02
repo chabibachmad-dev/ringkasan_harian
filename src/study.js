@@ -1376,6 +1376,18 @@ async function parentGate(playerId) {
   };
 }
 
+// Pemilih pemain yang bisa dicari (menggantikan dropdown): kolom cari, daftar urut alfabet, "Masuk sebagai: Nama (jenjang)".
+// Murni di klien dari daftar yang sudah dimuat; verifikasi PIN tetap di server.
+function playerField(players, selectedKey = "study_player_picked") {
+  return {
+    type: "player",
+    players: players.map((p) => ({ id: p.id, name: p.name, sub: gradeText(p.grade, p.classLevel) })),
+    searchPlaceholder: L("study_player_search_ph"),
+    noMatch: L("study_player_no_match"),
+    selectedLabel: (p) => L(selectedKey, { name: p.name, grade: p.sub })
+  };
+}
+
 async function openEditLevel() {
   const me = S.player;
   if (!me) return;
@@ -1473,9 +1485,9 @@ function openLessonForm(fixedPlayer) {
       {
         key: "playerId",
         label: L("study_player"),
-        type: "select",
+        
         value: fixedPlayer?.id || players[0]?.id,
-        options: players.map((p) => ({ value: p.id, label: `${p.name} (${gradeText(p.grade, p.classLevel)})` })),
+        ...playerField(players),
         show: () => !fixed
       },
       { key: "pin", label: L("study_pin"), type: "pin", show: () => !fixed },
@@ -1620,9 +1632,9 @@ async function openPracticeForm(material) {
       {
         key: "playerId",
         label: L("study_player"),
-        type: "select",
+        
         value: (fixed || players[0]).id,
-        options: players.map((p) => ({ value: p.id, label: `${p.name} (${gradeText(p.grade, p.classLevel)})` })),
+        ...playerField(players),
         show: () => !fixed
       },
       { key: "pin", label: L("study_pin"), type: "pin", show: () => !fixed },
@@ -2140,7 +2152,7 @@ function openViewerLogin() {
     cancelLabel: L("study_cancel"),
     busyLabel: L("study_loading"),
     fields: [
-      { key: "playerId", label: L("study_player"), type: "select", value: first.id, options: players.map((p) => ({ value: p.id, label: `${p.name} (${gradeText(p.grade, p.classLevel)})` })) },
+      { key: "playerId", label: L("study_player"), value: first.id, ...playerField(players, "study_player_selected") },
       { key: "pin", label: L("study_pin"), type: "pin" }
     ],
     extra: [
@@ -2779,7 +2791,7 @@ function openMaterialCreate() {
     cancelLabel: L("study_cancel"),
     busyLabel: L("study_mat_generating"),
     fields: [
-      { key: "playerId", label: L("study_player"), type: "select", value: me?.id || S.viewer?.id || players[0].id, options: players.map((p) => ({ value: p.id, label: `${p.name} (${gradeText(p.grade, p.classLevel)})` })), show: () => !me },
+      { key: "playerId", label: L("study_player"), value: me?.id || S.viewer?.id || players[0].id, ...playerField(players), show: () => !me },
       { key: "pin", label: L("study_pin"), type: "pin", show: () => !me },
       {
         key: "grade",
@@ -3326,7 +3338,7 @@ async function joinRoomFlow(roomId) {
     cancelLabel: L("study_cancel"),
     busyLabel: L("study_loading"),
     fields: [
-      { key: "playerId", label: L("study_player"), type: "select", value: first.id, options: players.map((p) => ({ value: p.id, label: `${p.name} (${gradeText(p.grade, p.classLevel)})` })), show: () => !me },
+      { key: "playerId", label: L("study_player"), value: first.id, ...playerField(players), show: () => !me },
       { key: "pin", label: L("study_pin"), type: "pin", show: () => !me }
     ],
     extra: me
@@ -3429,7 +3441,7 @@ function openRoomCreate() {
     cancelLabel: L("study_cancel"),
     busyLabel: L("study_room_creating"),
     fields: [
-      { key: "playerId", label: L("study_player"), type: "select", value: first.id, options: players.map((p) => ({ value: p.id, label: `${p.name} (${gradeText(p.grade, p.classLevel)})` })), show: () => !me },
+      { key: "playerId", label: L("study_player"), value: first.id, ...playerField(players), show: () => !me },
       { key: "pin", label: L("study_pin"), type: "pin", show: () => !me },
       {
         key: "subject",
@@ -4143,7 +4155,7 @@ async function onSettingsClick(e) {
       cancelLabel: L("study_cancel"),
       busyLabel: L("study_busy_saving"),
       fields: [
-        { key: "playerId", label: L("study_player"), type: "select", options: players.map((p) => ({ value: p.id, label: `${p.name} (${gradeText(p.grade, p.classLevel)})` })) },
+        { key: "playerId", label: L("study_player"), ...playerField(players) },
         { key: "points", label: L("study_penalty_points"), type: "number", min: 1 },
         { key: "reason", label: L("study_penalty_reason"), type: "text", maxlength: 200 }
       ],
@@ -4213,7 +4225,7 @@ async function onSettingsClick(e) {
       cancelLabel: L("study_cancel"),
       busyLabel: L("study_busy_saving"),
       fields: [
-        { key: "playerId", label: L("study_pick_player"), type: "select", value: players[0].id, options: players.map((p) => ({ value: p.id, label: `${p.name} (${gradeText(p.grade, p.classLevel)})` })) },
+        { key: "playerId", label: L("study_pick_player"), value: players[0].id, ...playerField(players) },
         { key: "playerPin", label: L("study_pin"), type: "pin" }
       ],
       onSubmit: async (v) => {
@@ -4421,7 +4433,7 @@ async function openSpeak() {
     cancelLabel: L("study_cancel"),
     busyLabel: L("study_loading"),
     fields: [
-      { key: "playerId", label: L("study_player"), type: "select", value: first.id, options: players.map((p) => ({ value: p.id, label: `${p.name} (${gradeText(p.grade, p.classLevel)})` })) },
+      { key: "playerId", label: L("study_player"), value: first.id, ...playerField(players) },
       { key: "pin", label: L("study_pin"), type: "pin" }
     ],
     extra: [

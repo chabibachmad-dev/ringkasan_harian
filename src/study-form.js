@@ -9,9 +9,13 @@
 //   // "checks" = daftar kotak centang: options [{value,label}], value = array nilai yang terpilih awal, allLabel = teks "pilih semua";
 //   //            nilainya (values[key]) berupa array nilai yang tercentang.
 //   // options / help boleh berupa fungsi (values) => ...; onOptionsChange(values) => nilai pilihan saat daftar opsi berubah
+//   type "player" = pemilih pemain yang bisa dicari (menggantikan dropdown): players: [{ id, name, sub }], value = id awal,
+//            searchPlaceholder, noMatch, selectedLabel(p) = teks "Masuk sebagai ..."; nilainya (values[key]) = id pemain.
 //   extra: [{ label, onClick(values) }],          // tombol tambahan di bawah isian
 //   onSubmit: async (values) => ({ ok: true, value? }) | ({ ok: false, error })
 // }) -> Promise: nilai hasil onSubmit (value ?? values) bila berhasil, null bila dibatalkan.
+
+import { filterPlayers } from "./study-search.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 const val = (x, values) => (typeof x === "function" ? x(values) : x);
@@ -53,7 +57,103 @@ export function openFormDialog(cfg) {
       return v;
     };
 
+    // Pemilih pemain yang bisa dicari: kolom cari + daftar yang bisa digulir (baris >= 44px); nilai disimpan di <input hidden>.
+    const buildPlayerField = (f) => {
+      const wrap = document.createElement("div");
+      wrap.className = "study-field study-player-picker";
+      const caption = document.createElement("span");
+      caption.className = "study-field-label";
+      caption.textContent = f.label || "";
+      const hidden = document.createElement("input");
+      hidden.type = "hidden";
+      const search = document.createElement("input");
+      search.type = "search";
+      search.className = "study-player-search";
+      search.autocomplete = "off";
+      search.setAttribute("autocapitalize", "off");
+      search.setAttribute("enterkeyhint", "done");
+      search.placeholder = f.searchPlaceholder || "";
+      search.setAttribute("aria-label", f.searchPlaceholder || f.label || "");
+      const chosen = document.createElement("div");
+      chosen.className = "study-player-chosen";
+      chosen.setAttribute("aria-live", "polite");
+      const list = document.createElement("ul");
+      list.className = "study-player-list";
+      list.setAttribute("role", "listbox");
+      const help = document.createElement("span");
+      help.className = "study-field-help";
+      wrap.append(caption, chosen, search, list, help);
+      form.appendChild(wrap);
+      const all = f.players || [];
+      // nilai awal: yang diberikan pemanggil, bila tidak ada pemain pertama dalam daftar (seperti dropdown sebelumnya)
+      const want = f.value !== undefined && f.value !== null && all.some((p) => String(p.id) === String(f.value)) ? String(f.value) : "";
+      hidden.value = want || (all[0] ? String(all[0].id) : "");
+      let shown = [];
+      let active = -1;
+      const picked = () => all.find((p) => String(p.id) === hidden.value) || null;
+      const paint = () => {
+        const p = picked();
+        chosen.textContent = p ? (f.selectedLabel ? f.selectedLabel(p) : p.name) : "";
+        chosen.hidden = !p;
+        shown = filterPlayers(all, search.value);
+        list.innerHTML = "";
+        if (shown.length === 0) {
+          const li = document.createElement("li");
+          li.className = "study-player-empty";
+          li.textContent = f.noMatch || "";
+          list.appendChild(li);
+        }
+        shown.forEach((pl, i) => {
+          const li = document.createElement("li");
+          li.setAttribute("role", "option");
+          const b = document.createElement("button");
+          b.type = "button";
+          const sel = String(pl.id) === hidden.value;
+          b.className = `study-player-row${sel ? " is-selected" : ""}${i === active ? " is-active" : ""}`;
+          b.innerHTML = `<span class="study-player-name">${esc(pl.name)}</span><span class="study-player-sub">${esc(pl.sub || "")}</span>${sel ? '<span class="study-player-check" aria-hidden="true">✓</span>' : ""}`;
+          li.setAttribute("aria-selected", sel ? "true" : "false");
+          b.addEventListener("click", () => choose(pl));
+          li.appendChild(b);
+          list.appendChild(li);
+        });
+        const cur = list.querySelector(".is-active, .is-selected");
+        if (cur && typeof cur.scrollIntoView === "function") cur.scrollIntoView({ block: "nearest" });
+      };
+      const choose = (pl) => {
+        hidden.value = String(pl.id);
+        active = -1;
+        paint();
+        hidden.dispatchEvent(new Event("change", { bubbles: true })); // field lain yang bergantung pada pemain ikut dihitung ulang
+        // fokus pindah ke isian berikutnya (mis. kolom PIN)
+        const idx = fields.indexOf(f);
+        const next = fields.slice(idx + 1).map((g) => els.get(g.key)).find((e) => e && e.input && e.input.type !== "hidden" && e.input.type !== "select" && !e.wrap.hidden);
+        if (next) setTimeout(() => next.input.focus(), 0);
+      };
+      search.addEventListener("input", () => {
+        active = -1;
+        paint();
+      });
+      search.addEventListener("keydown", (ev) => {
+        if (ev.key === "ArrowDown" || ev.key === "ArrowUp") {
+          ev.preventDefault();
+          if (shown.length === 0) return;
+          active = ev.key === "ArrowDown" ? (active + 1) % shown.length : (active - 1 + shown.length) % shown.length;
+          paint();
+        } else if (ev.key === "Enter") {
+          ev.preventDefault(); // Enter memilih, bukan mengirim formulir
+          const pl = shown[active >= 0 ? active : 0];
+          if (pl && (active >= 0 || search.value.trim())) choose(pl);
+        }
+      });
+      paint();
+      els.set(f.key, { wrap, input: hidden, help, f, search });
+    };
+
     for (const f of fields) {
+      if (f.type === "player") {
+        buildPlayerField(f);
+        continue;
+      }
       const wrap = document.createElement("label");
       wrap.className = "study-field";
       if (f.type === "note") {
@@ -221,6 +321,10 @@ export function openFormDialog(cfg) {
       cancelBtn.disabled = b;
       okBtn.textContent = b ? cfg.busyLabel || "…" : cfg.okLabel || "OK";
       for (const e of els.values()) {
+        if (e.search) {
+          e.search.disabled = b;
+          e.wrap.classList.toggle("is-busy", b);
+        }
         if (e.input) e.input.disabled = b;
         for (const c of e.checks || []) c.disabled = b;
         if (e.allBox) e.allBox.disabled = b;
@@ -274,6 +378,6 @@ export function openFormDialog(cfg) {
     if (typeof dlg.showModal === "function") dlg.showModal();
     else dlg.setAttribute("open", "");
     const first = [...els.values()].find((e) => e.input && !e.wrap.hidden);
-    if (first && first.input.type !== "select") first.input.focus();
+    if (first && first.input.type !== "select" && first.input.type !== "hidden") first.input.focus();
   });
 }
