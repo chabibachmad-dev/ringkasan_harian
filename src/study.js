@@ -4129,11 +4129,12 @@ function renderSettings(data) {
     </form>
 
     <h3 class="sys-subtitle">${esc(L("study_set_rewards"))}</h3>
+    <p class="study-row-meta">${esc(L("study_reward_help"))}</p>
     ${items
       .map(
         (it) => `
       <div class="study-row">
-        <div class="study-row-main"><div class="study-row-title">${esc(it.name)}</div><div class="study-row-meta">${fmt(it.cost)} ${esc(L("study_pts"))}</div></div>
+        <div class="study-row-main"><div class="study-row-title">${esc(it.name)}</div><div class="study-row-meta">${fmt(it.cost)} ${esc(L("study_pts"))}${it.shared ? ` · ${esc(L("study_reward_shared"))}` : ""}</div></div>
         <div class="study-row-btns">
           <button type="button" class="secondary-btn" data-sact="edit-reward" data-id="${esc(it.id)}">${esc(L("study_set_edit"))}</button>
           <button type="button" class="secondary-btn" data-sact="delete-reward" data-id="${esc(it.id)}">${esc(L("study_set_delete"))}</button>

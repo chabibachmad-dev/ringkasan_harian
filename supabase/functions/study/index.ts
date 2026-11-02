@@ -136,6 +136,8 @@ import {
   buildMaterialPrompt,
   buildMaterialChatPrompt,
   buildQuestionChatPrompt,
+  rewardManageableBy,
+  rewardVisibleToPlayer,
   questionContextLine,
   questionLang,
   QUESTION_CHAT_PER_PLAYER_HOUR,
@@ -316,9 +318,29 @@ const publicSettings = (s: Row, items: Row[]) => ({
   redeemItems: items.map((i) => ({ id: i.id, name: i.name, cost: i.cost }))
 });
 
+// Hadiah. Kolom owner_parent_id (migrasi 0045) bisa belum ada: kueri jatuh ke bentuk lama (semua hadiah dianggap bersama).
+async function allItems(admin: Admin): Promise<{ rows: Row[]; hasOwner: boolean }> {
+  const q = (cols: string) => admin.from("study_redeem_items").select(cols).order("sort", { ascending: true }).order("cost", { ascending: true });
+  const r = await q("id,name,cost,owner_parent_id");
+  if (!r.error) return { rows: (r.data ?? []) as Row[], hasOwner: true };
+  const old = await q("id,name,cost");
+  return { rows: ((old.data ?? []) as Row[]).map((x) => ({ ...x, owner_parent_id: null })), hasOwner: false };
+}
+const itemOut = (rows: Row[]): Row[] => rows.map((i) => ({ id: i.id, name: i.name, cost: i.cost, shared: !i.owner_parent_id }));
+
+// Hadiah bersama saja (tanpa pemilik): untuk data publik.
 async function loadItems(admin: Admin): Promise<Row[]> {
-  const { data } = await admin.from("study_redeem_items").select("id,name,cost").order("sort", { ascending: true }).order("cost", { ascending: true });
-  return data ?? [];
+  return itemOut((await allItems(admin)).rows.filter((i) => !i.owner_parent_id));
+}
+// Hadiah yang boleh dilihat/ditukar satu anak: bersama + milik orang tua yang tertaut ke anak itu.
+async function loadItemsForPlayer(admin: Admin, playerId: string): Promise<Row[]> {
+  const { data: links } = await admin.from("study_parent_children").select("parent_id").eq("player_id", playerId);
+  const parentIds = ((links ?? []) as Row[]).map((l) => String(l.parent_id));
+  return itemOut((await allItems(admin)).rows.filter((i) => rewardVisibleToPlayer(i.owner_parent_id, parentIds)));
+}
+// Hadiah yang dikelola satu orang tua: bersama + miliknya. Hadiah orang tua lain tidak terlihat.
+async function loadItemsForParent(admin: Admin, parentId: string): Promise<Row[]> {
+  return itemOut((await allItems(admin)).rows.filter((i) => rewardManageableBy(i.owner_parent_id, parentId)));
 }
 
 async function loadSettings(admin: Admin): Promise<Row | null> {
@@ -1035,7 +1057,7 @@ Deno.serve(async (req) => {
         admin.from("study_sessions").select("*").eq("player_id", p.id).order("created_at", { ascending: false }).limit(50),
         admin.from("study_redemptions").select("*").eq("player_id", p.id).order("created_at", { ascending: false }).limit(100),
         admin.from("study_ledger").select("kind,points,note,meta,created_at").eq("player_id", p.id).in("kind", ["session", "competition", "competition_bonus", "penalty", "bonus"]).order("created_at", { ascending: false }).limit(300),
-        loadItems(admin),
+        loadItemsForPlayer(admin, p.id as string),
         loadDaily(admin, p.id)
       ]);
       const ledgerRows = (ledger.data ?? []) as Row[];
@@ -1288,6 +1310,9 @@ Deno.serve(async (req) => {
       const auth = await checkPlayerPin(admin, body.playerId, body.pin);
       if (auth instanceof Response) return auth;
       if (!isUuid(body.itemId)) return fail("Hadiah tidak valid.");
+      // hadiah milik orang tua hanya boleh ditukar anak yang tertaut ke orang tua itu (dicek di server, bukan hanya disembunyikan di klien)
+      const allowed = await loadItemsForPlayer(admin, auth.player.id as string);
+      if (!allowed.some((i) => i.id === body.itemId)) return fail("Hadiah sudah tidak tersedia.", 404);
       const { data, error } = await admin.rpc("study_redeem", { p_player: auth.player.id, p_item: body.itemId });
       if (error) {
         if (/SALDO_KURANG/.test(error.message)) return fail("Poin belum cukup untuk hadiah ini.", 409, { insufficient: true });
@@ -1303,7 +1328,7 @@ Deno.serve(async (req) => {
       if (par instanceof Response) return par;
       const kids = await linkedChildIds(admin, par.parent.id);
       const [items, pending, players] = await Promise.all([
-        loadItems(admin),
+        loadItemsForParent(admin, par.parent.id as string),
         kids.length ? admin.from("study_redemptions").select("id,player_id,item_name,cost,created_at").eq("status", "pending").in("player_id", kids).order("created_at", { ascending: true }).limit(200) : Promise.resolve({ data: [] as Row[] }),
         kids.length ? admin.from("study_players").select("id,name,grade,class_level").in("id", kids).order("name", { ascending: true }) : Promise.resolve({ data: [] as Row[] })
       ]);
@@ -1334,7 +1359,7 @@ Deno.serve(async (req) => {
       if (!parsed.ok) return fail(parsed.error);
       const { error } = await admin.from("study_settings").update(parsed.value).eq("id", 1);
       if (error) return fail(error.message, 500);
-      const [s, items] = await Promise.all([loadSettings(admin), loadItems(admin)]);
+      const [s, items] = await Promise.all([loadSettings(admin), loadItemsForParent(admin, par.parent.id as string)]);
       return json({ ok: true, settings: publicSettings(s as Row, items) });
     }
 
@@ -1345,25 +1370,37 @@ Deno.serve(async (req) => {
       const cost = body.cost;
       if (!name) return fail("Nama hadiah wajib diisi.");
       if (typeof cost !== "number" || !Number.isInteger(cost) || cost < 1 || cost > 10_000_000) return fail("Poin hadiah harus bilangan bulat positif.");
+      const { rows, hasOwner } = await allItems(admin);
       if (body.id !== undefined && body.id !== null && body.id !== "") {
         if (!isUuid(body.id)) return fail("Hadiah tidak valid.");
+        const cur = rows.find((i) => i.id === body.id);
+        if (!cur) return fail("Hadiah tidak ditemukan.", 404);
+        if (!rewardManageableBy(cur.owner_parent_id, par.parent.id as string)) return fail("Hadiah ini milik orang tua lain.", 403);
         const { error } = await admin.from("study_redeem_items").update({ name, cost }).eq("id", body.id);
         if (error) return fail(error.message, 500);
+        await logParent(admin, par.parent, "reward_edit", null, `${name} (${cost})`);
       } else {
-        const { data: last } = await admin.from("study_redeem_items").select("sort").order("sort", { ascending: false }).limit(1).maybeSingle();
-        const { error } = await admin.from("study_redeem_items").insert({ name, cost, sort: (last?.sort ?? 0) + 1 });
+        const { data: lastRow } = await admin.from("study_redeem_items").select("sort").order("sort", { ascending: false }).limit(1).maybeSingle();
+        const row: Row = { name, cost, sort: (lastRow?.sort ?? 0) + 1 };
+        if (hasOwner) row.owner_parent_id = par.parent.id; // sebelum migrasi 0045: hadiah tetap bersama seperti dulu
+        const { error } = await admin.from("study_redeem_items").insert(row);
         if (error) return fail(error.message, 500);
+        await logParent(admin, par.parent, "reward_add", null, `${name} (${cost})`);
       }
-      return json({ ok: true, items: await loadItems(admin) });
+      return json({ ok: true, items: await loadItemsForParent(admin, par.parent.id as string) });
     }
 
     if (action === "redeem_item_delete") {
       const par = await checkParent(admin, body);
       if (par instanceof Response) return par;
       if (!isUuid(body.id)) return fail("Hadiah tidak valid.");
+      const cur = (await allItems(admin)).rows.find((i) => i.id === body.id);
+      if (!cur) return fail("Hadiah tidak ditemukan.", 404);
+      if (!rewardManageableBy(cur.owner_parent_id, par.parent.id as string)) return fail("Hadiah ini milik orang tua lain.", 403);
       const { error } = await admin.from("study_redeem_items").delete().eq("id", body.id);
       if (error) return fail(error.message, 500);
-      return json({ ok: true, items: await loadItems(admin) });
+      await logParent(admin, par.parent, "reward_delete", null, String(cur.name));
+      return json({ ok: true, items: await loadItemsForParent(admin, par.parent.id as string) });
     }
 
     if (action === "redeem_mark") {

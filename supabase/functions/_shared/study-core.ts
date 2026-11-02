@@ -893,6 +893,13 @@ export function cleanChatReply(text: string): string {
   return t;
 }
 
+// ================================================================ Hadiah per orang tua
+// owner_parent_id null = hadiah bersama (lama): terlihat semua anak, bisa dikelola orang tua mana pun.
+// Hadiah milik orang tua: terlihat/bisa ditukar hanya oleh anak yang tertaut ke orang tua itu; dikelola hanya oleh pemiliknya.
+export const rewardVisibleToPlayer = (ownerParentId: string | null | undefined, linkedParentIds: string[]): boolean =>
+  !ownerParentId || linkedParentIds.includes(ownerParentId);
+export const rewardManageableBy = (ownerParentId: string | null | undefined, parentId: string): boolean => !ownerParentId || ownerParentId === parentId;
+
 // ================================================================ "Cek dengan AI" untuk satu soal di halaman Hasil
 // Konteks soal dibangun di SERVER dari baris study_questions milik pemain (bukan dari kiriman klien), lalu dikirim ke AI.
 // Chat ini hanya membaca: tidak mengubah skor, status benar/salah, atau kunci jawaban.
