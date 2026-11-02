@@ -616,7 +616,7 @@ function renderHome(body) {
     ${S.tab === "timeline" ? "" : viewerBarHtml()}
     <div role="tabpanel">${S.tab === "materi" ? materialsHtml() : S.tab === "class" ? classesHtml() : S.tab === "timeline" ? timelineHtml() : boardHtml}</div>`;
   // kegiatan baru (pelajaran/kompetisi/materi selesai) sejak timeline dimuat: segarkan diam-diam
-  if (S.tab === "timeline" && S.feed && S.feed.stale && !S.feed.loading) setTimeout(() => S.feed && loadFeed(S.feed, "refresh"), 0);
+  if (S.tab === "timeline" && S.feed && !S.feed.loading && (S.feed.stale || S.feed.scopeKey !== tlScopeKey())) setTimeout(() => S.feed && loadFeed(S.feed, "refresh"), 0);
 }
 
 function renderProfile(body) {
@@ -836,6 +836,11 @@ function renderResult(body) {
 function onBodyChange(e) {
   const pref = e.target.closest?.("input[data-speak-pref]");
   if (pref) return onSpeakPref(pref);
+  const tl = e.target.closest?.("input[data-tl-all]");
+  if (tl) {
+    setTlAll(tl.checked);
+    return loadFeed(S.feed, "first"); // cakupan berubah: kueri ulang + gambar ulang
+  }
   const input = e.target.closest?.('input[type="radio"][data-q]');
   if (!input || !S.quiz) return;
   const idx = Number(input.dataset.q);
@@ -1776,12 +1781,61 @@ function rerenderIfShown(feed) {
   if (shownFeed() === feed) render();
 }
 
+// ---- cakupan timeline beranda: "Semua pemain" (ON) atau hanya kiriman pemain yang masuk (OFF, bawaan).
+// Hanya tampilan + hemat data (saringan ownerId di kueri); BUKAN batas privasi: Study terbuka tanpa kode akses.
+const tlMem = new Map(); // cadangan bila localStorage tidak tersedia
+const tlKey = (id) => `study_timeline_semua_${id || "tamu"}`;
+function tlAll() {
+  const id = S.viewer?.id || "";
+  try {
+    const v = localStorage.getItem(tlKey(id));
+    if (v === "1") return true;
+    if (v === "0") return false;
+  } catch (_e) {
+    /* penyimpanan tidak tersedia: pakai memori */
+  }
+  return tlMem.get(id) === true; // tanpa nilai tersimpan = MATI
+}
+function setTlAll(on) {
+  const id = S.viewer?.id || "";
+  tlMem.set(id, !!on);
+  try {
+    localStorage.setItem(tlKey(id), on ? "1" : "0");
+  } catch (_e) {
+    /* abaikan */
+  }
+}
+const tlScopeKey = () => `${tlAll() ? 1 : 0}:${S.viewer?.id || ""}`;
+// Samakan feed beranda dengan cakupan sekarang; berubah (toggle/ganti pemain/masuk/keluar) = daftar lama dibuang.
+function scopeFeed(feed) {
+  if (feed !== S.feed) return;
+  const all = tlAll();
+  feed.needLogin = !all && !S.viewer;
+  const key = tlScopeKey();
+  if (feed.scopeKey === key) return;
+  feed.scopeKey = key;
+  feed.ownerId = all ? null : S.viewer?.id || null;
+  feed.items = [];
+  feed.hasMore = false;
+  feed.loaded = false;
+  feed.error = "";
+  feed.comments = {};
+}
+
 // mode: "first" (kosongkan lalu muat), "refresh" (muat ulang, isi lama tetap tampil sampai data baru datang), "more" (halaman berikutnya)
 async function loadFeed(feed, mode = "first") {
-  if (!feed || feed.loading) return;
+  if (!feed) return;
+  scopeFeed(feed);
+  if (feed.loading) return;
+  feed.stale = false;
+  if (feed.needLogin) {
+    feed.error = "";
+    feed.loaded = true;
+    return rerenderIfShown(feed);
+  }
   feed.loading = true;
   feed.error = "";
-  feed.stale = false;
+  const scope = feed.scopeKey;
   if (mode === "first") {
     feed.items = [];
     feed.hasMore = false;
@@ -1795,6 +1849,7 @@ async function loadFeed(feed, mode = "first") {
     ...viewerParams()
   });
   feed.loading = false;
+  if (feed.scopeKey !== scope) return loadFeed(feed, "first"); // cakupan berubah saat memuat: hasil ini sudah basi
   if (!res.ok) {
     if (res.pinWrong || res.locked) S.viewer = null;
     feed.error = errText(res);
@@ -1813,6 +1868,7 @@ async function loadFeed(feed, mode = "first") {
 // Ambil ulang semua kartu yang sudah tampil (mis. setelah masuk, supaya status "disukai" benar).
 async function refreshFeed(feed) {
   if (!feed) return;
+  if (feed === S.feed && (feed.scopeKey !== tlScopeKey() || feed.needLogin)) return loadFeed(feed, "first");
   const want = Math.max(feed.items.length, 1);
   let items = [];
   let more = true;
@@ -1822,6 +1878,7 @@ async function refreshFeed(feed) {
     items = items.concat(res.items);
     more = res.hasMore;
   }
+  if (feed === S.feed && feed.scopeKey !== tlScopeKey()) return loadFeed(feed, "first");
   feed.items = items;
   feed.hasMore = more;
   feed.loaded = true;
@@ -2107,7 +2164,13 @@ function feedBodyHtml(feed, emptyKey = "study_feed_empty") {
 function timelineHtml() {
   if (!S.feed) S.feed = newFeed(null, null);
   const composeBar = `<button type="button" class="study-compose-bar" data-act="new-lesson">${S.viewer ? avatarHtml(S.viewer.id, S.viewer.name, "study-avatar--sm", true) : '<span class="study-avatar study-avatar--sm" aria-hidden="true">+</span>'}<span class="study-compose-text">${esc(L("study_compose_ph"))}</span></button>`;
-  return `${viewerBarHtml()}${composeBar}${feedBodyHtml(S.feed)}`;
+  const on = tlAll();
+  const toggle = `<label class="study-tl-toggle"><span class="study-tl-toggle-text"><strong>${esc(L("study_tl_all"))}</strong><small>${esc(L(on ? "study_tl_all_on" : "study_tl_all_off"))}</small></span><input type="checkbox" role="switch" data-tl-all ${on ? "checked" : ""} aria-label="${esc(L("study_tl_all"))}"><span class="study-tl-switch" aria-hidden="true"></span></label>`;
+  scopeFeed(S.feed);
+  const body = S.feed.needLogin
+    ? `<p class="status-text">${esc(L("study_tl_need_login"))}</p>`
+    : feedBodyHtml(S.feed, on ? "study_feed_empty" : "study_tl_mine_empty");
+  return `${viewerBarHtml()}${toggle}${composeBar}${body}`;
 }
 
 // Tabel ringkas (profil publik, tab Solo & Kompetisi): satu baris per kegiatan, ketuk = detil.
