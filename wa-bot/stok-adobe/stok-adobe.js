@@ -86,7 +86,22 @@ export function sudahAda(r) {
   return { ikon, latar, ikon3d, video };
 }
 export const hariLalu = (tgl, n) => { const d = new Date(`${tgl}T00:00:00Z`); d.setUTCDate(d.getUTCDate() - n); return d.toISOString().slice(0, 10); };
-export function jumlahPaketPekanIni(r, tanggal) { const batas = hariLalu(tanggal, 6); return (r.paket || []).filter((p) => p.tanggal >= batas && p.tanggal <= tanggal).length; }
+/** Jumlah berkas (ikon + ikon 3D + latar + video) dalam satu catatan paket. */
+export const jumlahBerkasPaket = (p) => ["ikon", "ikon3d", "latar", "video"].reduce((n, k) => n + (Array.isArray(p?.[k]) ? p[k].length : 0), 0);
+/** Paket 7 hari terakhir yang benar-benar menghasilkan berkas (paket kosong lama tidak dihitung). */
+export function paketPekanIni(r, tanggal) { const batas = hariLalu(tanggal, 6); return (r.paket || []).filter((p) => p.tanggal >= batas && p.tanggal <= tanggal && jumlahBerkasPaket(p) > 0); }
+export function jumlahPaketPekanIni(r, tanggal) { return paketPekanIni(r, tanggal).length; }
+const NAMA_JENIS = { ikon: "ikon", ikon3d: "ikon 3D", latar: "latar", video: "video" };
+export const jenisPaket = (p) => Object.keys(NAMA_JENIS).filter((k) => (p[k] || []).length).map((k) => `${p[k].length} ${NAMA_JENIS[k]}`).join(", ");
+export function teksRiwayat(r, tanggal, maks = 2) {
+  const a = sudahAda(r), pk = paketPekanIni(r, tanggal), sisa = Math.max(0, maks - pk.length);
+  return [
+    `Paket 7 hari terakhir: ${pk.length} (batas ${maks}, sisa jatah ${sisa}).`,
+    ...pk.map((p, i) => `${i + 1}. ${p.tanggal} - ${p.tema || "umum"} - ${jenisPaket(p)} (${jumlahBerkasPaket(p)} berkas)`),
+    `Seluruhnya sudah dibuat/diunggah: ${a.ikon.size} ikon, ${a.ikon3d.size} ikon 3D, ${a.latar.size} latar, ${a.video.size} video.`,
+    "Hanya paket yang menghasilkan berkas yang dihitung; paket gagal/kosong tidak."
+  ].join("\n");
+}
 
 // ---------- katalog ikon (dari mesin Python) ----------
 export function jalankanPython(args, { python = process.env.STOK_PYTHON || "python3", masuk, timeout = 120000 } = {}) {
@@ -279,7 +294,7 @@ export async function tanganiStokWa(o) {
   if (p.aksi === "batal") { tunda.delete(chatId); await kirimTeks("Rencana dibatalkan."); return true; }
   const riwayat = muatRiwayat(folder);
   if (p.aksi === "riwayat") {
-    const a = sudahAda(riwayat); await kirimTeks(`Sudah dibuat/diunggah: ${a.ikon.size} ikon, ${a.ikon3d.size} ikon 3D, ${a.latar.size} latar, ${a.video.size} video. Paket 7 hari terakhir: ${jumlahPaketPekanIni(riwayat, tanggal)} (batas ${konfig.maksPekan ?? 2}).`); return true;
+    await kirimTeks(teksRiwayat(riwayat, tanggal, konfig.maksPekan ?? 2)); return true;
   }
   if (p.aksi === "rencana") {
     const maks = konfig.maksPekan ?? 2;
@@ -296,7 +311,11 @@ export async function tanganiStokWa(o) {
     const kerja = () => buatPaket({ rencana: t.rencana, llm: deps.llm, folder, python, tanggal, videoOpsi: konfig.videoOpsi || {} });
     try {
       const h = antrean ? await antrean.jalankan(kerja) : await kerja();
-      riwayat.paket.push({ tanggal, tema: t.rencana.temaAsli, ikon: h.ikon, ikon3d: h.ikon3d, latar: h.latar, video: h.video }); simpanRiwayat(folder, riwayat);
+      const catatan = { tanggal, tema: t.rencana.temaAsli, ikon: h.ikon, ikon3d: h.ikon3d, latar: h.latar, video: h.video };
+      if (jumlahBerkasPaket(catatan) === 0) { // paket kosong: tidak dicatat, tidak dihitung batas, zip kosong tidak dikirim
+        await kirimTeks(`Paket tidak menghasilkan satu pun berkas, jadi tidak dihitung ke batas ${konfig.maksPekan ?? 2} paket per 7 hari dan tidak dicatat di riwayat.${h.lapor.gagal.length ? `\nGagal: ${h.lapor.gagal.join("; ")}` : ""}`); return true;
+      }
+      riwayat.paket.push(catatan); simpanRiwayat(folder, riwayat);
       if (h.pratinjau) await (kirimGambar || kirimDokumen)(h.pratinjau, path.basename(h.pratinjau), "Pratinjau: periksa dulu sebelum mengunggah.");
       const ket = [`Paket siap: ${h.ikon.length} ikon, ${h.ikon3d.length} ikon 3D, ${h.latar.length} latar, ${h.video.length} video. Kata kunci: ${[...h.lapor.ikon, ...h.lapor.ikon3d, ...h.lapor.latar, ...h.lapor.video].filter((m) => m.sumber === "ai").length} dari AI, sisanya dari katalog.`, ...(h.lapor.gagal.length ? [`Gagal: ${h.lapor.gagal.join("; ")}`] : []), ...((h.lapor.info || []).length ? [`Info 3D: ${[...new Set(h.lapor.info.map((x) => x.split(": ").slice(1).join(": ")))].join("; ")}`] : []), "Unggah dan Submit kamu kerjakan sendiri (petunjuk ada di dalam zip)."].join("\n");
       await kirimDokumen(h.zip, path.basename(h.zip), ket);

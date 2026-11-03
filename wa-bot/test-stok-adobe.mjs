@@ -60,6 +60,46 @@ else {
   check(hariLalu("2026-11-01", 6) === "2026-10-26", "hariLalu");
   const r0 = { paket: [{ tanggal: "2026-10-30", ikon: ["x"], latar: [] }, { tanggal: "2026-10-01" }] };
   check(jumlahPaketPekanIni(r0, "2026-11-01") === 1 && sudahAda(r0).ikon.has("x") && sudahAda(r0).ikon.has("hilal"), "riwayat: hitung pekan dan gabung seed");
+  // paket kosong/gagal tidak dihitung dan tidak dicatat (tanpa python: buatPaket disuntik lewat antrean)
+  {
+    const { jumlahBerkasPaket, teksRiwayat } = M; const tanggal = "2026-11-01";
+    const lapor0 = { ikon: [], ikon3d: [], latar: [], video: [], gagal: ["x (ikon 3D): render gagal"], info: [] };
+    const kosong = { id: "k", zip: "/tmp/tidak-ada.zip", pratinjau: null, lapor: lapor0, ikon: [], ikon3d: [], latar: [], video: [] };
+    const isi = { ...kosong, lapor: { ...lapor0, gagal: [] }, ikon3d: ["hilal"] };
+    const rc = { ikon: [], latar: [], video: [], temaAsli: "natal", tiga: true };
+    const fk = fs.mkdtempSync(path.join(os.tmpdir(), "adobe-kosong-"));
+    const lg = { teks: [], dok: [] };
+    const b = (antrean) => ({ chatId: "k1", adalahPemilik: true, folder: fk, tanggal, konfig: { maksPekan: 2 }, antrean, kirimTeks: async (t) => lg.teks.push(t), kirimDokumen: async (z, n, kt) => lg.dok.push(kt) });
+    check(jumlahBerkasPaket({ tanggal, ikon: [], ikon3d: [], latar: [] }) === 0 && jumlahBerkasPaket({ video: ["a"] }) === 1, "jumlahBerkasPaket");
+    check(jumlahPaketPekanIni({ paket: [{ tanggal, ikon: [], ikon3d: [], latar: [], video: [] }, { tanggal, video: ["a"] }] }, tanggal) === 1, "paket kosong lama di riwayat tidak dihitung");
+    // paket kosong (0 hasil)
+    _tunda.set("k1", { rencana: rc, waktu: Date.now() });
+    await tanganiStokWa({ ...b({ jalankan: async () => kosong }), teks: "/adobe setuju" });
+    check(muatRiwayat(fk).paket.length === 0 && lg.dok.length === 0 && /tidak menghasilkan satu pun berkas/.test(lg.teks.at(-1)) && /render gagal/.test(lg.teks.at(-1)), "paket kosong: tidak dicatat, tidak ada zip, alasan dilaporkan");
+    // paket gagal (melempar galat)
+    _tunda.set("k1", { rencana: rc, waktu: Date.now() });
+    await tanganiStokWa({ ...b({ jalankan: async () => { throw new Error("mesin mati"); } }), teks: "/adobe setuju" });
+    check(muatRiwayat(fk).paket.length === 0 && /gagal dibuat/.test(lg.teks.at(-1)), "paket gagal: tidak dicatat");
+    // dua paket kosong tidak menghabiskan jatah; paket valid dihitung
+    for (let i = 0; i < 2; i++) { _tunda.set("k1", { rencana: rc, waktu: Date.now() }); await tanganiStokWa({ ...b({ jalankan: async () => kosong }), teks: "/adobe setuju" }); }
+    await tanganiStokWa({ ...b(null), teks: "/adobe ikon 3d natal 1" });
+    check(!/Batas 2 paket/.test(lg.teks.at(-1)), "paket kosong tidak menghabiskan batas");
+    _tunda.delete("k1");
+    for (let i = 0; i < 2; i++) { _tunda.set("k1", { rencana: rc, waktu: Date.now() }); await tanganiStokWa({ ...b({ jalankan: async () => isi }), teks: "/adobe setuju" }); }
+    check(muatRiwayat(fk).paket.length === 2 && lg.dok.length === 2, "paket valid dicatat dan zip dikirim");
+    await tanganiStokWa({ ...b(null), teks: "/adobe ikon 3d natal 1" });
+    check(/Batas 2 paket per 7 hari/.test(lg.teks.at(-1)), "batas 2 paket tetap berlaku untuk paket valid");
+    await tanganiStokWa({ ...b(null), teks: "/adobe video natal 1 paksa" });
+    check(/Rencana paket/.test(lg.teks.at(-1)) && _tunda.has("k1"), "kata paksa tetap melewati batas");
+    _tunda.delete("k1");
+    // /adobe riwayat
+    await tanganiStokWa({ ...b(null), teks: "/adobe riwayat" });
+    const tr = lg.teks.at(-1);
+    check(/Paket 7 hari terakhir: 2 \(batas 2, sisa jatah 0\)/.test(tr) && new RegExp(`1\\. ${tanggal} - natal - 1 ikon 3D \\(1 berkas\\)`).test(tr), "riwayat: tanggal, jenis, jumlah berkas, sisa jatah");
+    const lama = { paket: [{ tanggal: "2026-10-01", ikon: ["a"] }, { tanggal, ikon: [], ikon3d: [], latar: [], video: [] }] };
+    check(/: 0 \(batas 2, sisa jatah 2\)/.test(teksRiwayat(lama, tanggal, 2)), "riwayat: paket lama >7 hari dan paket kosong tidak tampil");
+    fs.rmSync(fk, { recursive: true, force: true });
+  }
   // tanpa kenal python: berhenti di sini
   if (!adaPy) console.log("python/skia-pathops tidak ada: tes mesin ikon dilewati");
   else {
