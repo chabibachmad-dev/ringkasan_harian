@@ -2,7 +2,7 @@
 import fs from "node:fs";
 import { applyThemeTo, countText, headerMenuRows, menuDot, nextLang, nextTheme, resolveTheme, themeColor } from "../src/app-header.js";
 import { PAGE_ICONS } from "../src/app-header.js";
-import { ICON_USER_PLUS, ICON_BOOK_OPEN, ICON_TROPHY, ICON_MIC, ICON_MOON, ICON_SUN, ICON_SETTINGS } from "../src/icons.js";
+import { ICON_USER_PLUS, ICON_BOOK_OPEN, ICON_TROPHY, ICON_MIC, ICON_FLASK, ICON_MOON, ICON_SUN, ICON_SETTINGS } from "../src/icons.js";
 
 let gagal = 0;
 const check = (c, n) => { console.log(`${c ? "ok" : "GAGAL"}: ${n}`); if (!c) gagal++; };
@@ -55,12 +55,12 @@ const scrimCss = css.match(/\.study-menu-scrim:not\(\[hidden\]\) \{[^}]*\}/)[0];
 check(/background: transparent/.test(scrimCss) && !/rgba\(0, 0, 0, 0\.45\)/.test(css) && /position: fixed/.test(scrimCss), "lapisan penangkap ketukan transparan (tanpa latar gelap)");
 check(/\.study-menu-item \{[^}]*min-height: 44px/.test(css), "tinggi baris menu minimal 44px");
 // setiap item menu punya ikon, dan ikonnya terpasang di menuIcon()
-const allRows = headerMenuRows({ theme: "light", unread: 1, hasNotif: true, hasSettings: true, pageItems: [["new-player", "a"], ["new-lesson", "b"], ["rooms", "c"], ["speak", "d"]], labels: L });
+const allRows = headerMenuRows({ theme: "light", unread: 1, hasNotif: true, hasSettings: true, pageItems: [["new-player", "a"], ["new-lesson", "b"], ["rooms", "c"], ["speak", "d"], ["lab", "e"]], labels: L });
 check(allRows.every((r) => r.icon), `setiap item menu punya ikon (${allRows.map((r) => r.icon).join(",")})`);
 const menuIconSrc = studySrc.match(/const menuIcon = [^\n]+/)[0];
 check(allRows.every((r) => menuIconSrc.includes(r.icon === "moon" || r.icon === "sun" || r.icon === "bell" || r.icon === "gear" ? r.icon : `"${r.icon}"`) || menuIconSrc.includes(`${r.icon}:`)), "menuIcon() memetakan semua nama ikon");
-check(Object.keys(PAGE_ICONS).length === 4, "4 ikon halaman");
-for (const [n, v] of Object.entries({ ICON_USER_PLUS, ICON_BOOK_OPEN, ICON_TROPHY, ICON_MIC })) check(/stroke="currentColor"/.test(v) && /stroke-width="1.8"/.test(v) && /stroke-linecap="round"/.test(v) && /stroke-linejoin="round"/.test(v) && /width="20"/.test(v) && noHard(v), `${n}: garis 1.8, round, 20px, currentColor`);
+check(Object.keys(PAGE_ICONS).length === 5, "5 ikon halaman");
+for (const [n, v] of Object.entries({ ICON_USER_PLUS, ICON_BOOK_OPEN, ICON_TROPHY, ICON_MIC, ICON_FLASK })) check(/stroke="currentColor"/.test(v) && /stroke-width="1.8"/.test(v) && /stroke-linecap="round"/.test(v) && /stroke-linejoin="round"/.test(v) && /width="20"/.test(v) && noHard(v), `${n}: garis 1.8, round, 20px, currentColor`);
 check(/menuIcon = \(name\) =>/.test(studySrc) && !/^const MENU_ICONS/m.test(studySrc), "ikon dibaca lewat fungsi menuIcon (bukan konstanta tingkat-atas)");
 // Pemain Baru tanpa "+" (ikon sudah ada); sub-tab leaderboard bawaan "Hari ini"
 const i18nSrc = fs.readFileSync(new URL("../src/i18n.js", import.meta.url), "utf8");

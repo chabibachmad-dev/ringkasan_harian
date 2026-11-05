@@ -19,7 +19,7 @@ export function applyThemeTo(doc, theme) {
 }
 
 // Ikon baris menu halaman: act -> nama ikon (dibaca lewat menuIcon() di study.js).
-export const PAGE_ICONS = { "new-player": "user-plus", "new-lesson": "book-open", rooms: "trophy", speak: "mic" };
+export const PAGE_ICONS = { "new-player": "user-plus", "new-lesson": "book-open", rooms: "trophy", speak: "mic", lab: "flask" };
 
 // Baris menu. Urutan: Notifikasi, aksi halaman (Pemain baru, ...), Pengaturan, Tema.
 // `labels` = teks sudah diterjemahkan; `pageItems` = [[act, label], ...] dari halaman.

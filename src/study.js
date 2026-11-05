@@ -15,7 +15,8 @@ import { pointsFormula, studyCardFileName } from "./study-text.js";
 import { recognitionSupported, synthSupported, startListening, speakText, stopSpeaking, unlockSpeech, recorderSupported, startRecording, releaseMic, micHeld, idleAudio, playWav, speechToken, audioPlayable } from "./study-voice.js";
 import { renderLessonCard, renderRoomCard, shareOrSaveCard } from "./study-card.js";
 import { countText, headerMenuRows, menuDot } from "./app-header.js";
-import { ICON_MOON, ICON_SUN, ICON_SETTINGS, ICON_USER_PLUS, ICON_BOOK_OPEN, ICON_TROPHY, ICON_MIC } from "./icons.js";
+import { bukaLabKimia } from "./lab-kimia/ui.js";
+import { ICON_MOON, ICON_SUN, ICON_SETTINGS, ICON_USER_PLUS, ICON_BOOK_OPEN, ICON_TROPHY, ICON_MIC, ICON_FLASK } from "./icons.js";
 import { createMatChatSheet, newChat } from "./study-matchat.js";
 import { CLASS_SOURCE_LIMIT, checkPdfFile, createClassroom } from "./study-class.js";
 import { allowedClasses, allowedMaterialGrades, classesOf, classPercent, computePoints, formatClock, gradeText, lessonClasses, lessonGrades, PRACTICE_QUESTIONS as PRACTICE_COUNT, questionContextLine, timeLimitSeconds } from "../supabase/functions/_shared/study-core.ts";
@@ -119,6 +120,7 @@ const CUSTOM = "__custom";
 // view: "home" | "profile" | "quiz" | "result". PIN hanya hidup di memori (hilang saat layar Study ditinggalkan).
 const S = {
   notif: { unread: 0, items: [], loading: false, error: "", available: true, forId: "" }, // notifikasi suka & komentar (migrasi 0034)
+  lab: null, // Laboratorium Kimia: handle dari bukaLabKimia() selama view "lab" terbuka
   speak: null, // latihan speaking: { player, creds, list, session, turns, ... } (migrasi 0035)
   boardQuery: "", // kata kunci kotak cari leaderboard (hanya di memori; kosong saat keluar dari tab)
   boardMode: "today", // papan leaderboard: "today" (bawaan, poin didapat hari ini) | "total"; hanya di memori, kembali ke "today" tiap masuk Study
@@ -307,6 +309,7 @@ export function hideStudyScreen() {
   classroom.dispose();
   stopSpeakIO();
   S.speak = null;
+  dropLab();
   stopPoll();
   syncQuizTimer();
   syncNotif();
@@ -348,6 +351,7 @@ export function rerenderStudy() {
   render();
   if (reopen) getMatSheet().open();
   if (reopenQ) getQSheet().open();
+  S.lab?.ubahBahasa(ctx.getLang?.());
 }
 
 function onBack() {
@@ -381,6 +385,10 @@ function onBack() {
       S.view = "home";
       render();
     } else if (S.view === "speaklist") loadSpeakList();
+    return;
+  }
+  if (S.view === "lab") {
+    S.lab?.tutup();
     return;
   }
   if (S.view === "speaklist") {
@@ -475,7 +483,8 @@ function setTopbar() {
       roomresult: L("study_room_result_title"),
       notif: L("study_notif_title"),
       speaklist: L("study_speak_title"),
-      speak: L("study_speak_title")
+      speak: L("study_speak_title"),
+      lab: L("study_lab_title")
     };
     title.textContent = titles[S.view] || L("study_title");
   }
@@ -494,14 +503,15 @@ function studyMenuItems() {
     ["new-player", L("study_new_player")],
     ["new-lesson", L("study_new_lesson")],
     ["rooms", L("study_rooms_btn")],
-    ...(S.overview?.speak ? [["speak", L("study_speak_btn")]] : [])
+    ...(S.overview?.speak ? [["speak", L("study_speak_btn")]] : []),
+    ["lab", L("study_lab_btn")]
   ];
 }
 
 const menuHasNotif = () => !!$("screen-study") && !$("screen-study").hidden && !!S.viewer && S.notif.available && S.view !== "quiz";
 const currentTheme = () => (ctx.getTheme?.() === "dark" ? "dark" : "light");
 // fungsi (bukan konstanta): BELL_SVG dideklarasikan jauh di bawah; membacanya saat modul dimuat memicu ReferenceError (TDZ) dan mematikan seluruh aplikasi
-const menuIcon = (name) => ({ bell: BELL_SVG, gear: ICON_SETTINGS, sun: ICON_SUN, moon: ICON_MOON, "user-plus": ICON_USER_PLUS, "book-open": ICON_BOOK_OPEN, trophy: ICON_TROPHY, mic: ICON_MIC })[name] || "";
+const menuIcon = (name) => ({ bell: BELL_SVG, gear: ICON_SETTINGS, sun: ICON_SUN, moon: ICON_MOON, "user-plus": ICON_USER_PLUS, "book-open": ICON_BOOK_OPEN, trophy: ICON_TROPHY, mic: ICON_MIC, flask: ICON_FLASK })[name] || "";
 
 function renderStudyMenu() {
   const m = $("study-menu");
@@ -571,6 +581,8 @@ function render() {
   else if (S.view === "notif") renderNotif(body);
   else if (S.view === "speaklist") renderSpeakList(body);
   else if (S.view === "speak") renderSpeakChat(body);
+  else if (S.view === "lab") renderLab(body);
+  if (S.view !== "lab") dropLab();
   if (S.view !== "class") classroom.dispose(); // suara & mikrofon guru berhenti begitu keluar dari layar kelas
   // diskusi AI hanya hidup selama layar materi yang sama masih terbuka
   if (S.qChat && (S.view !== "result" || S.result?.session?.id !== S.qChat.sessionId)) dropQChat();
@@ -977,6 +989,7 @@ async function onBodyClick(e) {
     return render();
   }
   if (act === "check-ai") return openQuestionChat(Number(btn.dataset.idx));
+  if (act === "lab") return openLab();
   if (act === "speak") return openSpeak();
   if (act === "speak-new") return openSpeakNew();
   if (act === "speak-open") return openSpeakSession(id);
@@ -2033,6 +2046,45 @@ const ownerIdOf = (it) => (it.kind === "lesson" ? it.playerId : it.kind === "mat
 const isOwnItem = (it) => !!S.viewer && !!ownerIdOf(it) && S.viewer.id === ownerIdOf(it);
 
 // Tumpukan layar: layar yang dibuka dari kartu/baris (profil publik, hasil, materi, daftar room) kembali ke tempat asalnya.
+// ---------------------------------------------------------------- Laboratorium Kimia
+// Modul mandiri (src/lab-kimia): dipasang sekali di badan halaman; render() berikutnya tidak membangunnya ulang.
+function openLab() {
+  pushView();
+  S.view = "lab";
+  render();
+  window.scrollTo(0, 0);
+}
+
+function renderLab(body) {
+  if (S.lab && body.contains(S.lab.host)) return;
+  dropLab();
+  const host = document.createElement("div");
+  body.replaceChildren(host);
+  const lab = bukaLabKimia({
+    tempat: host,
+    bahasa: ctx.getLang?.() === "en" ? "en" : "id",
+    pemain: S.player?.name || S.viewer?.name || "umum",
+    tanpaHeader: true, // judul & tombol kembali memakai header aplikasi
+    onTutup: () => {
+      if (S.lab !== lab) return;
+      S.lab = null;
+      if (!popView()) {
+        S.view = "home";
+        render();
+      }
+    }
+  });
+  lab.host = host;
+  S.lab = lab;
+}
+
+function dropLab() {
+  if (!S.lab) return;
+  const lab = S.lab;
+  S.lab = null;
+  lab.host?.remove();
+}
+
 function pushView() {
   S.stack.push({ view: S.view, scroll: window.scrollY, pub: S.pub, rr: S.rr, material: S.material });
 }
