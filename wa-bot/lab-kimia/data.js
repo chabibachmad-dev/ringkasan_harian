@@ -1,3 +1,4 @@
+import { SENYAWA_LANJUT, PAKAI_LAMA, PAKAI_UNSUR as PAKAI_UNSUR_DATA } from "./senyawa-lanjut.js";
 // Data Laboratorium Kimia: 118 unsur (ID/EN) + daftar senyawa nyata yang aman dan edukatif.
 // Tidak ada pustaka luar. Dipakai oleh core.js, render.js, ui.js dan tes.
 
@@ -193,7 +194,7 @@ export const PER_Z = new Map(UNSUR.map((u) => [u.z, u]));
 
 // Senyawa nyata yang dikenal (hanya zat umum/edukatif; tidak ada resep, tidak ada bahan peledak atau senjata kimia).
 // [rumus, nama ID, nama EN, wujud, warna, keterangan ID, keterangan EN, berbahaya]
-export const SENYAWA = [
+const SENYAWA_DASAR = [
   ["H2O", "Air", "Water", "cair", "#6fc3ff", "Zat paling melimpah di permukaan Bumi; diminum dan dipakai setiap hari.", "The most abundant substance on Earth's surface; we drink and use it every day.", false],
   ["H2O2", "Hidrogen peroksida", "Hydrogen peroxide", "cair", "#cfe8ff", "Larutan yang sangat encer dipakai sebagai antiseptik; yang pekat berbahaya.", "Very dilute solutions are used as antiseptic; concentrated ones are dangerous.", true],
   ["CO2", "Karbon dioksida", "Carbon dioxide", "gas", "#dfe6ee", "Gas yang kita embuskan dan dipakai tumbuhan untuk fotosintesis.", "The gas we exhale and plants use for photosynthesis.", false],
@@ -201,9 +202,9 @@ export const SENYAWA = [
   ["CH4", "Metana", "Methane", "gas", "#e3e9ef", "Penyusun utama gas alam dan gas rawa.", "The main part of natural gas and marsh gas.", false],
   ["C3H8", "Propana", "Propane", "gas", "#e3e9ef", "Bahan bakar gas dalam tabung (elpiji).", "A fuel gas sold in cylinders (LPG).", false],
   ["C2H4", "Etena", "Ethene", "gas", "#e9f2e3", "Gas yang dihasilkan buah dan membantu pematangannya.", "A gas given off by fruit that helps it ripen.", false],
-  ["C2H6O", "Etanol", "Ethanol", "cair", "#e7f3fb", "Alkohol untuk pelarut dan pembersih tangan.", "An alcohol used as solvent and hand sanitizer.", false],
-  ["C2H4O2", "Asam asetat", "Acetic acid", "cair", "#f3ecd0", "Zat asam dalam cuka dapur yang encer.", "The sour part of diluted kitchen vinegar.", false],
-  ["CH2O3", "Asam karbonat", "Carbonic acid", "cair", "#cfe3ff", "Terbentuk saat karbon dioksida larut di air; ada di minuman bersoda.", "Forms when carbon dioxide dissolves in water; found in fizzy drinks.", false],
+  ["C2H5OH", "Etanol", "Ethanol", "cair", "#e7f3fb", "Alkohol untuk pelarut dan pembersih tangan.", "An alcohol used as solvent and hand sanitizer.", false],
+  ["CH3COOH", "Asam asetat", "Acetic acid", "cair", "#f3ecd0", "Zat asam dalam cuka dapur yang encer.", "The sour part of diluted kitchen vinegar.", false],
+  ["H2CO3", "Asam karbonat", "Carbonic acid", "cair", "#cfe3ff", "Terbentuk saat karbon dioksida larut di air; ada di minuman bersoda.", "Forms when carbon dioxide dissolves in water; found in fizzy drinks.", false],
   ["C6H12O6", "Glukosa", "Glucose", "padat", "#fff6e0", "Gula sederhana, sumber energi bagi tubuh.", "A simple sugar and an energy source for the body.", false],
   ["C12H22O11", "Sukrosa", "Sucrose", "padat", "#fffaf0", "Gula pasir yang kita pakai memaniskan makanan.", "Table sugar used to sweeten food.", false],
   ["NH3", "Amonia", "Ammonia", "gas", "#e2f0e8", "Gas berbau tajam untuk membuat pupuk; berbahaya bila dihirup banyak.", "A sharp-smelling gas used to make fertilizer; harmful in large amounts.", true],
@@ -217,7 +218,7 @@ export const SENYAWA = [
   ["SO2", "Belerang dioksida", "Sulfur dioxide", "gas", "#f2eebc", "Gas berbau tajam dari gunung berapi; berbahaya.", "A sharp gas from volcanoes; harmful.", true],
   ["CaCO3", "Kalsium karbonat", "Calcium carbonate", "padat", "#f4f1ea", "Penyusun batu kapur, kerang, dan kulit telur.", "Makes up limestone, seashells and eggshells.", false],
   ["CaO", "Kalsium oksida", "Calcium oxide", "padat", "#f1f1ec", "Kapur tohor untuk bahan bangunan.", "Quicklime used in building materials.", true],
-  ["CaH2O2", "Kalsium hidroksida", "Calcium hydroxide", "padat", "#f6f4ee", "Kapur sirih; basa yang agak kuat.", "Slaked lime; a fairly strong base.", false],
+  ["Ca(OH)2", "Kalsium hidroksida", "Calcium hydroxide", "padat", "#f6f4ee", "Kapur sirih; basa yang agak kuat.", "Slaked lime; a fairly strong base.", false],
   ["MgO", "Magnesium oksida", "Magnesium oxide", "padat", "#f7f7f5", "Serbuk putih tahan panas; bahan lapisan tungku.", "A heat-proof white powder; used to line furnaces.", false],
   ["Fe2O3", "Besi(III) oksida", "Iron(III) oxide", "padat", "#b5502a", "Karat berwarna cokelat kemerahan pada besi yang basah.", "The reddish-brown rust on wet iron.", false],
   ["Fe3O4", "Besi(II,III) oksida", "Iron(II,III) oxide", "padat", "#2b2b33", "Magnetit, mineral hitam yang ditarik magnet.", "Magnetite, a black mineral that sticks to magnets.", false],
@@ -234,16 +235,23 @@ export const SENYAWA = [
   ["KCl", "Kalium klorida", "Potassium chloride", "padat", "#f8f8f8", "Pupuk dan bahan garam pengganti.", "Fertilizer and an ingredient in salt substitutes.", false],
 ];
 
+// Daftar lengkap: baris dasar diberi contoh pemakaian (indeks 8 = ID, 9 = EN), lalu senyawa tambahan.
+export const SENYAWA = [
+  ...SENYAWA_DASAR.map((r) => { const p = PAKAI_LAMA[r[0]]; if (!p) throw new Error("pakai kosong: " + r[0]); return [...r, p[0], p[1]]; }),
+  ...SENYAWA_LANJUT,
+];
+export const PAKAI_UNSUR = PAKAI_UNSUR_DATA;
+
 // Bentuk unsur bebas yang punya nama khusus: kunci "simbol+jumlah".
 export const BENTUK_UNSUR = {
-  H2: { id: "Gas hidrogen", en: "Hydrogen gas", wujud: "gas" },
-  N2: { id: "Gas nitrogen", en: "Nitrogen gas", wujud: "gas" },
-  O2: { id: "Gas oksigen", en: "Oxygen gas", wujud: "gas" },
-  O3: { id: "Ozon", en: "Ozone", wujud: "gas" },
-  F2: { id: "Gas fluor", en: "Fluorine gas", wujud: "gas" },
-  Cl2: { id: "Gas klor", en: "Chlorine gas", wujud: "gas" },
-  Br2: { id: "Cairan brom", en: "Liquid bromine", wujud: "cair" },
-  I2: { id: "Iodin padat", en: "Solid iodine", wujud: "padat" },
-  S8: { id: "Belerang", en: "Sulfur", wujud: "padat" },
-  C60: { id: "Fulerena", en: "Fullerene", wujud: "padat" },
+  H2: { id: "Gas hidrogen", en: "Hydrogen gas", wujud: "gas", pakai: ["Bahan bakar roket dan mobil sel hidrogen, serta bahan pembuat amonia untuk pupuk.", "Rocket and hydrogen-car fuel, and the raw material of ammonia for fertilizer."] },
+  N2: { id: "Gas nitrogen", en: "Nitrogen gas", wujud: "gas", pakai: ["Mengisi 78% udara; juga mengisi kantong keripik agar tidak cepat apek, dan bahan pembuat pupuk.", "Makes up 78% of air; also fills crisp packets to keep them fresh, and is a raw material for fertilizer."] },
+  O2: { id: "Gas oksigen", en: "Oxygen gas", wujud: "gas", pakai: ["Dihirup untuk bernapas, tabung oksigen di rumah sakit, dan membantu las menyala.", "Breathed in to live, hospital oxygen tanks, and it helps welding flames burn."] },
+  O3: { id: "Ozon", en: "Ozone", wujud: "gas", pakai: ["Lapisan ozon di langit menahan sinar ultraviolet; di pabrik dipakai membersihkan air.", "The ozone layer high up blocks ultraviolet light; factories use it to clean water."] },
+  F2: { id: "Gas fluor", en: "Fluorine gas", wujud: "gas", bahaya: true, pakai: ["Sangat reaktif sehingga hanya dipakai ahli di industri. Senyawanya (fluorida) ada di pasta gigi.", "So reactive that only experts use it in industry. Its compounds (fluorides) are in toothpaste."] },
+  Cl2: { id: "Gas klor", en: "Chlorine gas", wujud: "gas", bahaya: true, pakai: ["Pemurni air kolam dan air minum secara terkendali, serta bahan pembuat plastik PVC.", "Purifies pool and drinking water in a controlled way, and makes PVC plastic."] },
+  Br2: { id: "Cairan brom", en: "Liquid bromine", wujud: "cair", bahaya: true, pakai: ["Bahan pembuat obat, pewarna, dan penghambat api di industri.", "A raw material for medicines, dyes and flame retardants in industry."] },
+  I2: { id: "Iodin padat", en: "Solid iodine", wujud: "padat", pakai: ["Larutan iodin (obat merah-cokelat) untuk antiseptik luka.", "Iodine solution, the brown antiseptic for cuts."] },
+  S8: { id: "Belerang", en: "Sulfur", wujud: "padat", pakai: ["Kepala korek api, vulkanisasi karet ban, dan bahan pembuat asam sulfat.", "Matchheads, vulcanizing tyre rubber and the starting material for sulfuric acid."] },
+  C60: { id: "Fulerena", en: "Fullerene", wujud: "padat", pakai: ["Bahan riset nano; molekul karbon berbentuk bola seperti bola sepak.", "A nanotechnology research material; a carbon molecule shaped like a football."] },
 };

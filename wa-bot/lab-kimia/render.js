@@ -15,7 +15,7 @@ export const TEKS_RENDER = {
     nyata: "SENYAWA NYATA", fiksi: "ZAT KHAYALAN", unsur: "UNSUR", warna: "Warna", massaRumus: "Massa rumus", proton: "Jumlah proton", kode: "Kode", simbol: "Simbol",
     bahaya: "Berbahaya di dunia nyata. Jangan dicoba di rumah; hanya ahli di laboratorium.",
     footNyata: "Hasil simulasi, bukan resep percobaan.", footFiksi: "Zat khayalan dari permainan, tidak ada di dunia nyata.", footUnsur: "Laboratorium Kimia",
-    catatanMassa: "( ) = nomor massa isotop paling stabil", kelipatan: "kali", wujudLabel: "Wujud",
+    catatanMassa: "( ) = nomor massa isotop paling stabil", kelipatan: "kali", wujudLabel: "Wujud", pakaiLabel: "CONTOH DI DUNIA NYATA", bintang: "BINTANG",
   },
   en: {
     judulTabel: "PERIODIC TABLE", subTabel: "118 chemical elements", unsurKimia: "CHEMICAL ELEMENT",
@@ -25,7 +25,7 @@ export const TEKS_RENDER = {
     nyata: "REAL COMPOUND", fiksi: "IMAGINARY SUBSTANCE", unsur: "ELEMENT", warna: "Colour", massaRumus: "Formula mass", proton: "Total protons", kode: "Code", simbol: "Symbol",
     bahaya: "Dangerous in real life. Do not try at home; experts in a laboratory only.",
     footNyata: "A simulation, not an experiment recipe.", footFiksi: "An imaginary substance from a game, not found in real life.", footUnsur: "Chemistry Lab",
-    catatanMassa: "( ) = mass number of the most stable isotope", kelipatan: "x", wujudLabel: "State",
+    catatanMassa: "( ) = mass number of the most stable isotope", kelipatan: "x", wujudLabel: "State", pakaiLabel: "REAL-WORLD EXAMPLE", bintang: "STARS",
   },
 };
 const tr = (b) => TEKS_RENDER[b] || TEKS_RENDER.id;
@@ -133,6 +133,10 @@ function tataHasil(ctx, h, bahasa, mulai) {
   for (const [lab, val] of info) { gambarTeks(ctx, lab + ":", 28, y, 2, WARNA.redup); gambarTeks(ctx, val, 28 + ukurTeks(lab + ": ", 2), y, 2, WARNA.teks); y += 20; }
   y += 8;
   for (const l of bungkus(h.deskripsi[bahasa] || h.deskripsi.id, 30)) { gambarTeks(ctx, l, 28, y, 2, WARNA.teks); y += 18; }
+  if (h.pakai) {
+    y += 8; gambarTeks(ctx, t.pakaiLabel, 28, y, 1, WARNA.hijau); y += 14;
+    for (const l of bungkus(h.pakai[bahasa] || h.pakai.id, 30)) { gambarTeks(ctx, l, 28, y, 2, WARNA.teks); y += 18; }
+  }
   if (h.bahaya) { y += 6; for (const l of bungkus(t.bahaya, 30)) { gambarTeks(ctx, l, 28, y, 2, WARNA.merah); y += 18; } }
   y += 10;
   gambarTeks(ctx, h.tipe === "fiksi" ? t.footFiksi : h.tipe === "nyata" ? t.footNyata : t.footUnsur, c / 2, y, 1, WARNA.redup, "tengah"); y += 20;

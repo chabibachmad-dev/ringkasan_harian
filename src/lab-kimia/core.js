@@ -1,6 +1,6 @@
 // Mesin racik Laboratorium Kimia (murni, tanpa DOM): rumus, senyawa nyata, zat fiktif, nama, warna, sprite pixel.
 // Bahan boleh sebanyak apa pun (jenis unsur tidak dibatasi); hasil selalu sama untuk bahan yang sama (deterministik).
-import { UNSUR, PER_SIMBOL, SENYAWA, KATEGORI, BENTUK_UNSUR } from "./data.js";
+import { UNSUR, PER_SIMBOL, SENYAWA, KATEGORI, BENTUK_UNSUR, PAKAI_UNSUR } from "./data.js";
 
 export const BATAS_JUMLAH = 999; // jumlah atom per jenis unsur
 
@@ -45,6 +45,13 @@ export function parseRumus(s) {
     } else throw new Error("karakter tak dikenal: " + c);
   }
   return st[0];
+}
+
+/** Pecah rumus tertulis (mis. "Ca5(PO4)3OH") menjadi potongan [teks, angka] untuk digambar dengan angka bawah. */
+export function pecahTampilan(rumus) {
+  const out = [];
+  for (const m of String(rumus).matchAll(/([A-Z][a-z]?|\(|\))(\d*)/g)) out.push([m[1], m[2] ? Number(m[2]) : 1]);
+  return out;
 }
 
 /** Urutan Hill: bila ada C -> C, H, lalu abjad; selain itu abjad semua. */
@@ -297,7 +304,8 @@ export function racik(bahan) {
     const wujud = bentuk ? bentuk.wujud : u.wujud === "tak-diketahui" ? "padat" : u.wujud;
     const warna = warnaKategori(sim);
     return {
-      ...dasar, tipe: "unsur", nama: bentuk ? { id: bentuk.id, en: bentuk.en } : { ...u.nama }, wujud, warna, warnaNama: namaWarna(warna),
+      ...dasar, tipe: "unsur", bahaya: !!(bentuk && bentuk.bahaya), nama: bentuk ? { id: bentuk.id, en: bentuk.en } : { ...u.nama }, wujud, warna, warnaNama: namaWarna(warna),
+      pakai: bentuk ? { id: bentuk.pakai[0], en: bentuk.pakai[1] } : PAKAI_UNSUR[sim] ? { id: PAKAI_UNSUR[sim][0], en: PAKAI_UNSUR[sim][1] } : null,
       deskripsi: { id: `Hanya satu jenis unsur (${u.nama.id}). Campurkan dengan unsur lain untuk membuat senyawa!`, en: `Only one kind of element (${u.nama.en}). Mix in another element to make a compound!` },
       kode: null, simbolFiksi: null, sprite: buatSprite({ kunci, warna, aksen: terangkan(warna, 0.3), wujud }),
     };
@@ -306,12 +314,17 @@ export function racik(bahan) {
   // senyawa nyata
   const nyata = cariSenyawa(counts);
   if (nyata) {
-    const [, id, en, wujud, warna, kid, ken, bahaya] = nyata.baris;
+    const [, id, en, wujud, warna, kid, ken, bahaya, pid, pen] = nyata.baris;
     const { kedua } = dasarWarna(counts);
-    // tampilkan rumus seperti penulisan umum (NaOH, H2SO4), bukan urutan Hill
-    const urutan = [...new Set([...nyata.baris[0].matchAll(/[A-Z][a-z]?/g)].map((m) => m[0]))], pecahUmum = urutan.map((s) => [s, counts.get(s)]);
+    // tampilkan rumus seperti penulisan umum (NaOH, Ca(OH)2, H2SO4), bukan urutan Hill; untuk kelipatan (H4O2) pakai jumlah atom sebenarnya
+    let pecahUmum, rumusUmum;
+    if (nyata.kelipatan === 1) { pecahUmum = pecahTampilan(nyata.baris[0]); rumusUmum = nyata.baris[0]; }
+    else {
+      const urutan = [...new Set([...nyata.baris[0].matchAll(/[A-Z][a-z]?/g)].map((m) => m[0]))];
+      pecahUmum = urutan.map((s) => [s, counts.get(s)]); rumusUmum = pecahUmum.map(([s, n]) => s + (n > 1 ? n : "")).join("");
+    }
     return {
-      ...dasar, pecah: pecahUmum, rumus: pecahUmum.map(([s, n]) => s + (n > 1 ? n : "")).join(""), rumusUnicode: unicodeDariPecah(pecahUmum), tipe: "nyata", nama: { id, en }, wujud, warna, warnaNama: namaWarna(warna), bahaya, kelipatan: nyata.kelipatan, rumusDasar: rumusTeks(parseRumus(nyata.baris[0])),
+      ...dasar, pecah: pecahUmum, rumus: rumusUmum, rumusUnicode: unicodeDariPecah(pecahUmum), tipe: "nyata", pakai: pid ? { id: pid, en: pen || pid } : null, nama: { id, en }, wujud, warna, warnaNama: namaWarna(warna), bahaya, kelipatan: nyata.kelipatan, rumusDasar: nyata.baris[0],
       deskripsi: { id: kid, en: ken }, kode: null, simbolFiksi: null,
       sprite: buatSprite({ kunci: rumusTeks(parseRumus(nyata.baris[0])), warna, aksen: kedua || terangkan(warna, 0.3), wujud }),
     };

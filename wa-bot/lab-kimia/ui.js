@@ -1,8 +1,9 @@
 // Antarmuka Laboratorium Kimia: tabel periodik pixel + popup + simpan PNG/PDF, laboratorium racik, koleksi.
 // Pemakaian: const lab = bukaLabKimia({ tempat: elemen, bahasa: "id", pemain: "nama", onTutup: () => {} });
 // Tidak butuh pustaka luar. Warna mengikuti <html data-theme="dark|light"> atau prefers-color-scheme.
-import { UNSUR, PER_SIMBOL, KATEGORI } from "./data.js";
-import { racik, bahanAcak, buatSprite, BATAS_JUMLAH } from "./core.js";
+import { UNSUR, PER_SIMBOL, KATEGORI, BENTUK_UNSUR } from "./data.js";
+import { racik, bahanAcak, buatSprite, BATAS_JUMLAH, normalisasi, rumusTeks } from "./core.js";
+import { bersihRumus, periksaRumus, aturanGabung, soalAcak, soalTerpenuhi, catatSalah, catatBenar, bintangUntuk, skorBersih } from "./tantangan.js";
 import { gambarTabel, UKURAN_TABEL, gambarKartuUnsur, UKURAN_KARTU_UNSUR, gambarKartuHasil, ukuranKartuHasil, gambarSprite, WARNA } from "./render.js";
 import { buatPdf } from "./pdf.js";
 
@@ -20,6 +21,11 @@ const TEKS = {
     gagal: "Gagal menyimpan berkas", dibagikan: "Berkas dibagikan", diunduh: "Berkas diunduh", catatanLab: "Senyawa nyata dikenali otomatis; kombinasi lain menjadi zat khayalan (hanya permainan).",
     padat: "padat", cair: "cair", gas: "gas", "tak-diketahui": "belum diketahui",
     tipeNyata: "Senyawa nyata", tipeFiksi: "Zat khayalan", tipeUnsur: "Unsur",
+    modeTantangan: "Tantangan", modeBebas: "Bebas", tipTantangan: "Tulis rumus kimia dari bahan di meja, lalu tekan Gabungkan. Contoh: karbon 1 + oksigen 2 → CO2. Benar di percobaan pertama = 3 bintang.",
+    rumusLabel: "Rumus kimia yang kamu tulis", rumusPlaceholder: "contoh: CO2", gabung: "Gabungkan!", skorBeruntun: "Beruntun", skorTerbaik: "terbaik",
+    soalAcak: "Soal acak", soalGanti: "Ganti soal", soalPetunjuk: "Lihat petunjuk", soalTutup: "Tutup soal", soalBuat: "Buatlah:", soalBahan: "Bahan:", soalSelesai: "Soal selesai! +1 bintang bonus",
+    berhasil: "Berhasil!", rumusSalah: "Rumusnya belum tepat", rumusKosong: "Tulis rumusnya dulu", rumusTulisSalah: "Rumusnya belum bisa dibaca", tidakBisa: "Tidak bisa digabung", kenapa: "Kenapa?", tip: "Tip", tulisUlang: "Coba lagi. Tidak ada hukuman, boleh mencoba sebanyak yang kamu mau.",
+    pakaiJudul: "Contoh di dunia nyata", percobaanKe: "Percobaan ke", bintangKata: "bintang", sudahAda: "Sudah ada di Koleksi, jadi tidak ada bintang tambahan.", penulisanUmum: "Penulisan yang umum:",
   },
   en: {
     judul: "Chemistry Lab", tabTabel: "Periodic Table", tabLab: "Laboratory", tabKoleksi: "Collection",
@@ -34,6 +40,11 @@ const TEKS = {
     gagal: "Could not save the file", dibagikan: "File shared", diunduh: "File downloaded", catatanLab: "Real compounds are recognised automatically; any other combination becomes an imaginary substance (just a game).",
     padat: "solid", cair: "liquid", gas: "gas", "tak-diketahui": "unknown",
     tipeNyata: "Real compound", tipeFiksi: "Imaginary substance", tipeUnsur: "Element",
+    modeTantangan: "Challenge", modeBebas: "Free play", tipTantangan: "Write the chemical formula of the ingredients on the bench, then press Combine. Example: carbon 1 + oxygen 2 → CO2. Right on the first try = 3 stars.",
+    rumusLabel: "The chemical formula you write", rumusPlaceholder: "example: CO2", gabung: "Combine!", skorBeruntun: "Streak", skorTerbaik: "best",
+    soalAcak: "Random task", soalGanti: "Another task", soalPetunjuk: "Show hint", soalTutup: "Close task", soalBuat: "Make:", soalBahan: "Ingredients:", soalSelesai: "Task done! +1 bonus star",
+    berhasil: "Well done!", rumusSalah: "That formula is not right yet", rumusKosong: "Write the formula first", rumusTulisSalah: "The formula cannot be read yet", tidakBisa: "Cannot be combined", kenapa: "Why?", tip: "Tip", tulisUlang: "Try again. There is no penalty; try as many times as you like.",
+    pakaiJudul: "Real-world examples", percobaanKe: "Attempt", bintangKata: "stars", sudahAda: "Already in the Collection, so no extra stars.", penulisanUmum: "The usual way to write it:",
   },
 };
 
@@ -109,6 +120,31 @@ html[data-theme="dark"] .lk-bahaya{color:#ff8787;border-color:#ff8787}
 .lk-modal{background:var(--lk-bg);color:var(--lk-fg);border-radius:18px;max-width:420px;width:100%;max-height:calc(100dvh - 32px);overflow:auto;padding:14px}
 .lk-modal canvas.lk-kartu-img{width:100%;height:auto;display:block;border-radius:10px}
 .lk-toast{position:fixed;left:50%;bottom:20px;transform:translateX(-50%);background:var(--lk-fg);color:var(--lk-bg);padding:10px 16px;border-radius:999px;font-size:13px;font-weight:700;z-index:10000;max-width:90vw}
+.lk-mode{display:flex;border:1.5px solid var(--lk-line);border-radius:12px;overflow:hidden;margin:4px 0 10px}
+.lk-mode button{flex:1;border:0;background:none;min-height:44px;font-weight:700;font-size:13px}
+.lk-mode button[aria-pressed="true"]{background:var(--lk-fg);color:var(--lk-bg)}
+.lk-skor{display:flex;gap:14px;flex-wrap:wrap;align-items:center;font-size:13px;font-weight:700;margin:2px 2px 8px}
+.lk-skor-b{color:#d9a600}.lk-skor-m{color:var(--lk-mut);font-weight:600}
+.lk-soal{background:var(--lk-card);border:1.5px dashed var(--lk-line);border-radius:14px;padding:10px 12px;margin:0 0 10px}
+.lk-soal:empty{display:none}
+.lk-soal-j{font-weight:800;font-size:15px}.lk-soal-p{font-size:13px;color:var(--lk-mut);margin:4px 0}
+.lk-rumus-box{margin:12px 0 4px}.lk-rumus-box label{display:block;font-size:13px;font-weight:700;margin-bottom:4px}
+.lk-rumus-in{width:100%;border:1.5px solid var(--lk-line);border-radius:12px;min-height:48px;padding:0 12px;background:none;color:inherit;font:inherit;font-size:18px;font-weight:700;letter-spacing:.03em}
+.lk-rumus-in:focus-visible{outline:2px solid var(--lk-acc);outline-offset:2px}
+.lk-prev{min-height:26px;font-size:20px;font-weight:800;color:var(--lk-acc);margin:4px 2px}.lk-prev sub{font-size:.65em;color:#d9a600}
+.lk-umpan{border-radius:16px;padding:12px 14px;margin-top:12px;font-size:14px;line-height:1.5;border:1.5px solid}
+.lk-umpan p{margin:6px 0}.lk-umpan ul{margin:6px 0;padding-left:20px}
+.lk-umpan.salah{background:#fff4e0;color:#5c3b00;border-color:#e8a020}.lk-umpan.tidak{background:#ffe9e9;color:#6b1a1a;border-color:#e03131}
+html[data-theme="dark"] .lk-umpan.salah{background:#3a2c10;color:#ffe3a6}html[data-theme="dark"] .lk-umpan.tidak{background:#3a1a1a;color:#ffc9c9}
+@media (prefers-color-scheme:dark){html:not([data-theme="light"]) .lk-umpan.salah{background:#3a2c10;color:#ffe3a6}html:not([data-theme="light"]) .lk-umpan.tidak{background:#3a1a1a;color:#ffc9c9}}
+.lk-umpan-j{font-weight:800;font-size:15px}.lk-tip{font-size:13px}
+.lk-ok{background:#e3f9e5;color:#12351a;border:1.5px solid #2b8a3e;border-radius:12px;padding:8px 12px;margin-bottom:10px}
+html[data-theme="dark"] .lk-ok{background:#143020;color:#c9f5d1}
+@media (prefers-color-scheme:dark){html:not([data-theme="light"]) .lk-ok{background:#143020;color:#c9f5d1}}
+.lk-ok-j{font-weight:800;font-size:15px}.lk-ok-c{font-size:12px;margin-top:2px}
+.lk-bintang{color:#e8a600;letter-spacing:2px}
+.lk-pakai{background:var(--lk-bg);border:1.5px solid var(--lk-line);border-radius:12px;padding:8px 12px;margin:10px 0}
+.lk-pakai h4{margin:0 0 4px;font-size:12px;color:var(--lk-mut);text-transform:uppercase;letter-spacing:.05em}.lk-pakai p{margin:0;font-size:14px;line-height:1.5}
 @media (prefers-reduced-motion:no-preference){.lk-hasil{animation:lkMuncul .25s ease-out}@keyframes lkMuncul{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}}
 `;
 
@@ -123,7 +159,7 @@ function h(tag, attrs, ...kids) {
   return e;
 }
 
-const KUNCI_SIMPAN = "lk_koleksi_v1";
+const KUNCI_SIMPAN = "lk_koleksi_v1", KUNCI_SKOR = "lk_skor_v1", KUNCI_MODE = "lk_mode_v1";
 function bacaKoleksi(pemain) { try { const v = JSON.parse(localStorage.getItem(KUNCI_SIMPAN + ":" + pemain) || "[]"); return Array.isArray(v) ? v : []; } catch { return []; } }
 function tulisKoleksi(pemain, v) { try { localStorage.setItem(KUNCI_SIMPAN + ":" + pemain, JSON.stringify(v)); return true; } catch { return false; } }
 
@@ -144,7 +180,9 @@ const slug = (s) => String(s).normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCa
 
 export function bukaLabKimia(opsi = {}) {
   const tempat = opsi.tempat || document.body;
-  const S = { bahasa: opsi.bahasa === "en" ? "en" : "id", tab: opsi.tab || "tabel", bahan: new Map(), filter: null, zoom: 1, hasil: null, cari: "", pemain: opsi.pemain || "umum", koleksi: null, hapusSiap: false };
+  const S = { bahasa: opsi.bahasa === "en" ? "en" : "id", tab: opsi.tab || "tabel", bahan: new Map(), filter: null, zoom: 1, umpan: null, cari: "", pemain: opsi.pemain || "umum", koleksi: null, hapusSiap: false,
+    mode: "tantangan", skor: skorBersih(null), soal: null, soalPetunjuk: false, rumus: "", percobaan: { kunci: "", n: 0 } };
+  try { const m = localStorage.getItem(KUNCI_MODE); if (m === "bebas" || m === "tantangan") S.mode = m; S.skor = skorBersih(JSON.parse(localStorage.getItem(KUNCI_SKOR + ":" + S.pemain) || "null")); } catch {}
   S.koleksi = bacaKoleksi(S.pemain);
   if (!document.getElementById("lk-gaya")) { const st = document.createElement("style"); st.id = "lk-gaya"; st.textContent = CSS; document.head.append(st); }
   const root = h("section", { class: "lk", "aria-label": TEKS[S.bahasa].judul });
@@ -248,10 +286,21 @@ export function bukaLabKimia(opsi = {}) {
   function tambahBahan(sim, n = 1) {
     const baru = Math.min(BATAS_JUMLAH, (S.bahan.get(sim) || 0) + n);
     if (baru <= 0) S.bahan.delete(sim); else S.bahan.set(sim, baru);
-    S.hasil = null;
+    S.umpan = null;
   }
+  const simpanSkor = () => { try { localStorage.setItem(KUNCI_SKOR + ":" + S.pemain, JSON.stringify(S.skor)); } catch {} };
+  const ubahMode = (m) => { S.mode = m; S.umpan = null; try { localStorage.setItem(KUNCI_MODE, m); } catch {} tampil(); };
+  const bintangTeks = (n) => "★".repeat(Math.max(0, n)) + "☆".repeat(Math.max(0, 3 - n));
+  function pratinjauRumus(teks) {
+    const bersih = bersihRumus(teks), out = [];
+    for (const bag of bersih.split(/(\d+)/)) { if (!bag) continue; out.push(/^\d+$/.test(bag) ? h("sub", null, bag) : bag); }
+    return out;
+  }
+
   function tampilLab(isi) {
-    const meja = h("div", { class: "lk-meja", "aria-live": "polite" }), total = h("div", { class: "lk-total" }), hasilBox = h("div"), tombolRacik = h("button", { class: "lk-btn utama", type: "button" }, t("racik"));
+    const tantangan = S.mode === "tantangan";
+    const meja = h("div", { class: "lk-meja", "aria-live": "polite" }), total = h("div", { class: "lk-total" }), hasilBox = h("div", { "aria-live": "polite" });
+    const tombolRacik = h("button", { class: "lk-btn utama", type: "button" }, t(tantangan ? "gabung" : "racik"));
     const grid = buatGrid((u) => { tambahBahan(u.simbol); segarkan(); });
     const tandai = () => grid.querySelectorAll(".lk-sel").forEach((b) => { const n = S.bahan.get(b.dataset.z && UNSUR[b.dataset.z - 1].simbol); if (n) b.setAttribute("data-n", n); else b.removeAttribute("data-n"); });
     const saring = () => {
@@ -268,38 +317,105 @@ export function bukaLabKimia(opsi = {}) {
       for (const [sim, n] of S.bahan) {
         const u = PER_SIMBOL.get(sim), w = KATEGORI[u.kategori].warna;
         const inp = h("input", { type: "number", inputmode: "numeric", min: 1, max: BATAS_JUMLAH, value: n, "aria-label": `${t("jumlah")} ${namaU(u)}`, onchange: (e) => {
-          const v = Math.max(0, Math.min(BATAS_JUMLAH, Math.floor(Number(e.target.value)) || 0)); if (v) S.bahan.set(sim, v); else S.bahan.delete(sim); S.hasil = null; segarkan();
+          const v = Math.max(0, Math.min(BATAS_JUMLAH, Math.floor(Number(e.target.value)) || 0)); if (v) S.bahan.set(sim, v); else S.bahan.delete(sim); S.umpan = null; segarkan();
         } });
         meja.append(h("div", { class: "lk-row" },
           h("span", { class: "lk-mini", style: `background:${w}` }, u.simbol), h("span", { class: "lk-nm" }, `${namaU(u)}`),
           h("span", { class: "lk-step" },
             h("button", { type: "button", "aria-label": `${t("kurangi")} ${namaU(u)}`, onclick: () => { tambahBahan(sim, -1); segarkan(); } }, "−"), inp,
             h("button", { type: "button", "aria-label": `${t("tambah")} ${namaU(u)}`, onclick: () => { tambahBahan(sim, 1); segarkan(); } }, "+")),
-          h("button", { class: "lk-btn kecil", type: "button", "aria-label": `${t("hapus")} ${namaU(u)}`, onclick: () => { S.bahan.delete(sim); S.hasil = null; segarkan(); } }, "×")));
+          h("button", { class: "lk-btn kecil", type: "button", "aria-label": `${t("hapus")} ${namaU(u)}`, onclick: () => { S.bahan.delete(sim); S.umpan = null; segarkan(); } }, "×")));
       }
       let atom = 0; for (const n of S.bahan.values()) atom += n;
       total.textContent = S.bahan.size ? `${S.bahan.size} ${t("jenisBahan")} · ${atom} ${t("atom")}` : "";
-      tombolRacik.disabled = !S.bahan.size; kosongBtn.disabled = !S.bahan.size;
+      tombolRacik.disabled = !S.bahan.size; kosongBtn.disabled = !S.bahan.size && !S.rumus;
     }
     function segarkan() { segarkanMeja(); tandai(); tampilHasil(); }
-    function tampilHasil() { hasilBox.replaceChildren(); if (S.hasil) hasilBox.append(kartuHasilDom(S.hasil)); }
+    function tampilHasil() { hasilBox.replaceChildren(); if (S.umpan) hasilBox.append(umpanDom(S.umpan)); }
 
     const cari = h("input", { class: "lk-search", type: "search", placeholder: t("cari"), "aria-label": t("cari"), value: S.cari, oninput: (e) => { S.cari = e.target.value; saring(); },
       onkeydown: (e) => { if (e.key === "Enter") { const b = [...grid.querySelectorAll(".lk-sel")].find((x) => !x.classList.contains("dim")); if (b && S.cari.trim()) { b.click(); } } } });
-    const kosongBtn = h("button", { class: "lk-btn", type: "button", onclick: () => { S.bahan.clear(); S.hasil = null; segarkan(); } }, t("kosongkan"));
-    const acakBtn = h("button", { class: "lk-btn", type: "button", onclick: () => { S.bahan.clear(); for (const b of bahanAcak()) S.bahan.set(b.simbol, b.jumlah); S.hasil = null; segarkan(); } }, t("acak"));
-    tombolRacik.addEventListener("click", () => {
+    const kosongBtn = h("button", { class: "lk-btn", type: "button", onclick: () => { S.bahan.clear(); S.umpan = null; S.rumus = ""; if (rumusIn) { rumusIn.value = ""; prev.replaceChildren(); } segarkan(); } }, t("kosongkan"));
+    const acakBtn = h("button", { class: "lk-btn", type: "button", onclick: () => {
+      S.bahan.clear(); for (const b of bahanAcak()) S.bahan.set(b.simbol, b.jumlah); S.umpan = null; S.rumus = ""; if (rumusIn) { rumusIn.value = ""; prev.replaceChildren(); } segarkan();
+    } }, t("acak"));
+
+    // ----- bagian khusus Tantangan -----
+    let rumusIn = null, prev = null, skorEl = null, soalBox = null;
+    const segarkanSkor = () => { if (skorEl) skorEl.replaceChildren(h("span", { class: "lk-skor-b" }, `★ ${S.skor.bintang}`), h("span", null, `${t("skorBeruntun")} ${S.skor.beruntun}`), h("span", { class: "lk-skor-m" }, `${t("skorTerbaik")} ${S.skor.terbaik}`)); };
+    const segarkanSoal = () => {
+      if (!soalBox) return; soalBox.replaceChildren(); if (!S.soal) return;
+      const so = S.soal;
+      soalBox.append(...[
+        h("div", { class: "lk-soal-j" }, `${t("soalBuat")} ${so.nama[S.bahasa] || so.nama.id}`),
+        h("div", { class: "lk-soal-p" }, so.petunjuk[S.bahasa] || so.petunjuk.id),
+        S.soalPetunjuk ? h("div", { class: "lk-soal-p" }, `${t("soalBahan")} ${so.unsur.map((s) => `${namaU(PER_SIMBOL.get(s))} (${s})`).join(", ")}`) : null,
+        h("div", { class: "lk-bar" },
+          S.soalPetunjuk ? null : h("button", { class: "lk-btn kecil", type: "button", onclick: () => { S.soalPetunjuk = true; segarkanSoal(); } }, t("soalPetunjuk")),
+          h("button", { class: "lk-btn kecil", type: "button", onclick: soalBaru }, t("soalGanti")),
+          h("button", { class: "lk-btn kecil", type: "button", onclick: () => { S.soal = null; segarkanSoal(); } }, t("soalTutup")))].filter(Boolean));
+    };
+    function soalBaru() {
+      S.soal = soalAcak(Math.random, S.koleksi.filter((x) => x.s > 0).map((x) => x.k)); S.soalPetunjuk = false;
+      S.bahan.clear(); S.umpan = null; S.rumus = ""; if (rumusIn) { rumusIn.value = ""; prev.replaceChildren(); }
+      segarkanSoal(); segarkan();
+    }
+
+    function gabungkan() {
       const daftar = [...S.bahan].map(([simbol, jumlah]) => ({ simbol, jumlah })); if (!daftar.length) return;
-      const hasil = racik(daftar), selesai = () => { S.hasil = hasil; simpanKoleksi(hasil, daftar); tampilHasil(); hasilBox.firstChild?.scrollIntoView?.({ block: "nearest", behavior: "smooth" }); };
+      const counts = normalisasi(daftar), kunci = rumusTeks(counts);
+      if (S.percobaan.kunci !== kunci) S.percobaan = { kunci, n: 0 };
+      const cek = periksaRumus(counts, S.rumus);
+      if (cek.status !== "cocok") {
+        if (cek.kode !== "kosong") { S.percobaan.n++; S.skor = catatSalah(S.skor); simpanSkor(); segarkanSkor(); }
+        S.umpan = { jenis: cek.status === "tulis" ? "tulis" : "tidak-cocok", ...cek }; tampilHasil(); rumusIn?.focus(); return;
+      }
+      const atur = aturanGabung(counts);
+      if (!atur.bisa) { S.umpan = { jenis: "tidak-bisa", atur }; tampilHasil(); return; }
+      const hasil = atur.hasil;
+      const selesai = () => {
+        const percobaan = S.percobaan.n + 1, ada = S.koleksi.find((x) => x.k === hasil.kunci), baru = !(ada && ada.s > 0);
+        const soalOk = soalTerpenuhi(S.soal, hasil);
+        const { skor, bintang } = catatBenar(S.skor, { percobaan, baru, bonus: soalOk ? 1 : 0 });
+        S.skor = skor; simpanSkor();
+        simpanKoleksi(hasil, daftar, baru ? bintangUntuk(percobaan) : 0);
+        if (soalOk) { S.soal = null; segarkanSoal(); }
+        S.percobaan = { kunci, n: 0 };
+        S.umpan = { jenis: "hasil", hasil, bintang, baru, soalOk, percobaan, teks: cek.teks };
+        segarkanSkor(); tampilHasil(); hasilBox.firstChild?.scrollIntoView?.({ block: "nearest", behavior: "smooth" });
+      };
+      if (matchMedia("(prefers-reduced-motion:reduce)").matches) return selesai();
+      animasi(hasilBox, daftar, t("meraciknya"), selesai);
+    }
+    tombolRacik.addEventListener("click", () => {
+      if (tantangan) return gabungkan();
+      const daftar = [...S.bahan].map(([simbol, jumlah]) => ({ simbol, jumlah })); if (!daftar.length) return;
+      const hasil = racik(daftar), selesai = () => { S.umpan = { jenis: "hasil", hasil }; simpanKoleksi(hasil, daftar, 0); tampilHasil(); hasilBox.firstChild?.scrollIntoView?.({ block: "nearest", behavior: "smooth" }); };
       if (matchMedia("(prefers-reduced-motion:reduce)").matches) return selesai();
       animasi(hasilBox, daftar, t("meraciknya"), selesai);
     });
-    isi.append(
-      h("p", { class: "lk-hint" }, t("catatanLab")),
+
+    const mode = h("div", { class: "lk-mode", role: "group", "aria-label": t("tabLab") },
+      h("button", { type: "button", "aria-pressed": tantangan ? "true" : "false", onclick: () => ubahMode("tantangan") }, t("modeTantangan")),
+      h("button", { type: "button", "aria-pressed": tantangan ? "false" : "true", onclick: () => ubahMode("bebas") }, t("modeBebas")));
+    const kepala = [mode, h("p", { class: "lk-hint" }, t(tantangan ? "tipTantangan" : "catatanLab"))];
+    if (tantangan) { skorEl = h("div", { class: "lk-skor" }); soalBox = h("div", { class: "lk-soal" }); kepala.push(skorEl, soalBox); }
+
+    let blokRumus = null;
+    if (tantangan) {
+      prev = h("div", { class: "lk-prev", "aria-live": "polite" });
+      rumusIn = h("input", { class: "lk-rumus-in", type: "text", value: S.rumus, placeholder: t("rumusPlaceholder"), "aria-label": t("rumusLabel"), id: "lk-rumus", autocomplete: "off", autocapitalize: "off", autocorrect: "off", spellcheck: "false", enterkeyhint: "go",
+        oninput: (e) => { S.rumus = e.target.value; prev.replaceChildren(...pratinjauRumus(S.rumus)); kosongBtn.disabled = !S.bahan.size && !S.rumus; },
+        onkeydown: (e) => { if (e.key === "Enter") { e.preventDefault(); gabungkan(); } } });
+      prev.replaceChildren(...pratinjauRumus(S.rumus));
+      blokRumus = h("div", { class: "lk-rumus-box" }, h("label", { for: "lk-rumus" }, t("rumusLabel")), rumusIn, prev);
+    }
+
+    isi.append(...[...kepala,
       cari, h("div", { class: "lk-gridwrap" }, grid),
-      h("h3", null, t("meja")), meja, total,
-      h("div", { class: "lk-bar" }, tombolRacik, acakBtn, kosongBtn), hasilBox);
-    saring(); segarkan();
+      h("h3", null, t("meja")), meja, total, blokRumus,
+      h("div", { class: "lk-bar" }, tombolRacik, acakBtn, tantangan ? h("button", { class: "lk-btn", type: "button", onclick: soalBaru }, t("soalAcak")) : null, kosongBtn), hasilBox].filter(Boolean));
+    saring(); segarkan(); segarkanSkor(); segarkanSoal();
   }
 
   // animasi labu bergelembung (± 1 detik)
@@ -319,8 +435,26 @@ export function bukaLabKimia(opsi = {}) {
     requestAnimationFrame(lanjut);
   }
 
-  // ---------- kartu hasil (DOM) ----------
-  function kartuHasilDom(hasil, dalamModal) {
+  // ---------- kartu hasil & umpan (DOM) ----------
+  function umpanDom(u) {
+    const bhs = S.bahasa, pil = (o) => (o && (o[bhs] || o.id)) || "";
+    if (u.jenis === "hasil") return kartuHasilDom(u.hasil, null, u);
+    if (u.jenis === "tulis" || u.jenis === "tidak-cocok") {
+      return h("div", { class: "lk-umpan salah", role: "status" },
+        h("div", { class: "lk-umpan-j" }, `✎ ${t(u.kode === "kosong" ? "rumusKosong" : u.jenis === "tulis" ? "rumusTulisSalah" : "rumusSalah")}`),
+        h("p", null, pil(u.pesan)),
+        u.detail && u.detail.length ? h("ul", null, u.detail.map((d) => h("li", null, pil(d)))) : null,
+        u.tip ? h("p", { class: "lk-tip" }, `${t("tip")}: ${pil(u.tip)}`) : null,
+        h("p", { class: "lk-foot", style: "text-align:left" }, t("tulisUlang")));
+    }
+    const a = u.atur;
+    return h("div", { class: "lk-umpan tidak", role: "status" },
+      h("div", { class: "lk-umpan-j" }, `⚠ ${t("tidakBisa")}`),
+      h("p", null, h("b", null, t("kenapa") + " "), pil(a.alasan)),
+      a.tip ? h("p", { class: "lk-tip" }, `${t("tip")}: ${pil(a.tip)}`) : null,
+      a.contoh ? h("p", { class: "lk-tip" }, pil(a.contoh)) : null);
+  }
+  function kartuHasilDom(hasil, dalamModal, extra) {
     const sk = 14, c = h("canvas", { class: "lk-spr", width: 16 * sk, height: 16 * sk, role: "img", "aria-label": hasil.nama[S.bahasa] || hasil.nama.id });
     gambarSprite(c.getContext("2d"), hasil.sprite, 0, 0, sk);
     const nama = hasil.nama.id === hasil.nama.en ? hasil.nama.id : (hasil.nama[S.bahasa] || hasil.nama.id);
@@ -331,11 +465,22 @@ export function bukaLabKimia(opsi = {}) {
       hasil.tipe === "fiksi" ? [h("dt", null, t("kode")), h("dd", null, hasil.kode), h("dt", null, t("simbol")), h("dd", null, hasil.simbolFiksi)] : null);
     const ukuran = ukuranKartuHasil(hasil, S.bahasa), berkas = slug(nama);
     const T = TEKS_RENDER_LABEL(S.bahasa);
-    return h("div", { class: "lk-hasil" },
+    let banner = null;
+    if (extra && extra.jenis === "hasil" && extra.percobaan != null) {
+      const dasar = extra.baru ? bintangUntuk(extra.percobaan) : 0, catatan = [];
+      if (extra.baru) catatan.push(`${t("percobaanKe")} ${extra.percobaan}: +${dasar} ${t("bintangKata")}`); else catatan.push(t("sudahAda"));
+      if (extra.soalOk) catatan.push(t("soalSelesai"));
+      if (extra.teks && hasil.kelipatan === 1 && extra.teks !== hasil.rumus) catatan.push(`${t("penulisanUmum")} ${hasil.rumus}`);
+      banner = h("div", { class: "lk-ok" },
+        h("div", { class: "lk-ok-j" }, `✔ ${t("berhasil")} `, dasar ? h("span", { class: "lk-bintang", role: "img", "aria-label": `${dasar} ${t("bintangKata")}` }, bintangTeks(dasar)) : null),
+        catatan.map((x) => h("div", { class: "lk-ok-c" }, x)));
+    }
+    return h("div", { class: "lk-hasil" }, banner,
       h("div", { style: "text-align:center" }, h("span", { class: "lk-tipe " + hasil.tipe }, t(hasil.tipe === "nyata" ? "tipeNyata" : hasil.tipe === "fiksi" ? "tipeFiksi" : "tipeUnsur"))),
       c, h("div", { class: "lk-nama" }, nama), rumus,
       hasil.kelipatan > 1 ? h("div", { class: "lk-foot" }, `${hasil.kelipatan} × ${hasil.rumusDasar}`) : null,
       dl, h("p", { class: "lk-desc" }, hasil.deskripsi[S.bahasa] || hasil.deskripsi.id),
+      hasil.pakai ? h("div", { class: "lk-pakai" }, h("h4", null, t("pakaiJudul")), h("p", null, hasil.pakai[S.bahasa] || hasil.pakai.id)) : null,
       hasil.bahaya ? h("div", { class: "lk-bahaya", role: "note" }, T.bahaya) : null,
       h("div", { class: "lk-bar" },
         h("button", { class: "lk-btn utama", type: "button", onclick: () => simpan(() => blobPng(ukuran, (cx) => gambarKartuHasil(cx, hasil, S.bahasa)), `${berkas}.png`) }, t("simpanGambar")),
@@ -348,10 +493,12 @@ export function bukaLabKimia(opsi = {}) {
     : { bahaya: "Berbahaya di dunia nyata. Jangan dicoba di rumah; hanya ahli di laboratorium.", footNyata: "Hasil simulasi, bukan resep percobaan.", footFiksi: "Zat khayalan dari permainan, tidak ada di dunia nyata." });
 
   // ---------- koleksi ----------
-  function simpanKoleksi(hasil, daftar) {
-    if (hasil.tipe === "unsur") return;
-    const k = hasil.kunci; if (S.koleksi.some((x) => x.k === k)) return;
-    S.koleksi.push({ k, b: daftar.map((d) => [d.simbol, d.jumlah]), t: Date.now() });
+  function simpanKoleksi(hasil, daftar, s = 0) {
+    const k = hasil.kunci;
+    if (hasil.tipe === "unsur" && !BENTUK_UNSUR[k]) return;
+    const ada = S.koleksi.find((x) => x.k === k);
+    if (ada) { if (s > (ada.s || 0)) { ada.s = s; tulisKoleksi(S.pemain, S.koleksi); } return; }
+    S.koleksi.push({ k, b: daftar.map((d) => [d.simbol, d.jumlah]), t: Date.now(), s });
     if (S.koleksi.length > 200) S.koleksi = S.koleksi.slice(-200);
     tulisKoleksi(S.pemain, S.koleksi); toast(t("tersimpan"));
   }
@@ -362,7 +509,7 @@ export function bukaLabKimia(opsi = {}) {
       const hasil = racik(item.b.map(([simbol, jumlah]) => ({ simbol, jumlah }))); if (!hasil) continue;
       const cv = h("canvas", { width: 64, height: 64 }); gambarSprite(cv.getContext("2d"), hasil.sprite, 0, 0, 4);
       const nama = hasil.nama.id === hasil.nama.en ? hasil.nama.id : (hasil.nama[S.bahasa] || hasil.nama.id);
-      grid.append(h("button", { type: "button", class: "lk-kartu", "aria-label": nama, onclick: () => { let m; m = modal(kartuHasilDom(hasil, { tutup: () => m.tutup() }), nama); } }, cv, nama));
+      grid.append(h("button", { type: "button", class: "lk-kartu", "aria-label": nama, onclick: () => { let m; m = modal(kartuHasilDom(hasil, { tutup: () => m.tutup() }), nama); } }, cv, nama, item.s ? h("div", { class: "lk-bintang" }, bintangTeks(item.s)) : null));
     }
     const hapus = h("button", { class: "lk-btn", type: "button", style: "margin-top:14px", onclick: (e) => {
       if (!S.hapusSiap) { S.hapusSiap = true; e.currentTarget.textContent = t("yakin"); setTimeout(() => { S.hapusSiap = false; if (e.currentTarget.isConnected) e.currentTarget.textContent = t("hapusSemua"); }, 3000); return; }
