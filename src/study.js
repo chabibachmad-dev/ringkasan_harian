@@ -16,7 +16,7 @@ import { recognitionSupported, synthSupported, startListening, speakText, stopSp
 import { renderLessonCard, renderRoomCard, shareOrSaveCard } from "./study-card.js";
 import { countText, headerMenuRows, menuDot } from "./app-header.js";
 import { bukaLabKimia } from "./lab-kimia/ui.js";
-import { ICON_MOON, ICON_SUN, ICON_SETTINGS, ICON_USER_PLUS, ICON_BOOK_OPEN, ICON_TROPHY, ICON_MIC, ICON_FLASK } from "./icons.js";
+import { ICON_MOON, ICON_SUN, ICON_SETTINGS, ICON_USER_PLUS, ICON_BOOK_OPEN, ICON_TROPHY, ICON_MIC, ICON_FLASK, ICON_CALCULATOR } from "./icons.js";
 import { createMatChatSheet, newChat } from "./study-matchat.js";
 import { CLASS_SOURCE_LIMIT, checkPdfFile, createClassroom } from "./study-class.js";
 import { allowedClasses, allowedMaterialGrades, classesOf, classPercent, computePoints, formatClock, gradeText, lessonClasses, lessonGrades, PRACTICE_QUESTIONS as PRACTICE_COUNT, questionContextLine, timeLimitSeconds } from "../supabase/functions/_shared/study-core.ts";
@@ -121,6 +121,7 @@ const CUSTOM = "__custom";
 const S = {
   notif: { unread: 0, items: [], loading: false, error: "", available: true, forId: "" }, // notifikasi suka & komentar (migrasi 0034)
   lab: null, // Laboratorium Kimia: handle dari bukaLabKimia() selama view "lab" terbuka
+  mtk: null, // Latihan Matematika: { player, host, handle, today, cap, note } (modul src/latihan-mtk; poin dilaporkan ke aksi server mtk_points, migrasi 0046)
   speak: null, // latihan speaking: { player, creds, list, session, turns, ... } (migrasi 0035)
   boardQuery: "", // kata kunci kotak cari leaderboard (hanya di memori; kosong saat keluar dari tab)
   boardMode: "today", // papan leaderboard: "today" (bawaan, poin didapat hari ini) | "total"; hanya di memori, kembali ke "today" tiap masuk Study
@@ -391,6 +392,11 @@ function onBack() {
     S.lab?.tutup();
     return;
   }
+  if (S.view === "mtk") {
+    if (S.mtk?.handle) S.mtk.handle.tutup(); // memanggil onTutup -> closeMtk
+    else closeMtk();
+    return;
+  }
   if (S.view === "speaklist") {
     stopSpeakIO();
     S.speak = null;
@@ -484,7 +490,8 @@ function setTopbar() {
       notif: L("study_notif_title"),
       speaklist: L("study_speak_title"),
       speak: L("study_speak_title"),
-      lab: L("study_lab_title")
+      lab: L("study_lab_title"),
+      mtk: L("study_mtk_title")
     };
     title.textContent = titles[S.view] || L("study_title");
   }
@@ -504,14 +511,15 @@ function studyMenuItems() {
     ["new-lesson", L("study_new_lesson")],
     ["rooms", L("study_rooms_btn")],
     ...(S.overview?.speak ? [["speak", L("study_speak_btn")]] : []),
-    ["lab", L("study_lab_btn")]
+    ["lab", L("study_lab_btn")],
+    ["mtk", L("study_mtk_btn")]
   ];
 }
 
 const menuHasNotif = () => !!$("screen-study") && !$("screen-study").hidden && !!S.viewer && S.notif.available && S.view !== "quiz";
 const currentTheme = () => (ctx.getTheme?.() === "dark" ? "dark" : "light");
 // fungsi (bukan konstanta): BELL_SVG dideklarasikan jauh di bawah; membacanya saat modul dimuat memicu ReferenceError (TDZ) dan mematikan seluruh aplikasi
-const menuIcon = (name) => ({ bell: BELL_SVG, gear: ICON_SETTINGS, sun: ICON_SUN, moon: ICON_MOON, "user-plus": ICON_USER_PLUS, "book-open": ICON_BOOK_OPEN, trophy: ICON_TROPHY, mic: ICON_MIC, flask: ICON_FLASK })[name] || "";
+const menuIcon = (name) => ({ bell: BELL_SVG, gear: ICON_SETTINGS, sun: ICON_SUN, moon: ICON_MOON, "user-plus": ICON_USER_PLUS, "book-open": ICON_BOOK_OPEN, trophy: ICON_TROPHY, mic: ICON_MIC, flask: ICON_FLASK, calculator: ICON_CALCULATOR })[name] || "";
 
 function renderStudyMenu() {
   const m = $("study-menu");
@@ -582,7 +590,14 @@ function render() {
   else if (S.view === "speaklist") renderSpeakList(body);
   else if (S.view === "speak") renderSpeakChat(body);
   else if (S.view === "lab") renderLab(body);
+  else if (S.view === "mtk") renderMtk(body);
   if (S.view !== "lab") dropLab();
+  if (S.view !== "mtk" && S.mtk) {
+    // keluar dari layar latihan lewat jalan lain (mis. keluar akun): lepaskan pendengar papan ketik modul
+    const h = S.mtk.handle;
+    S.mtk = null;
+    h?.tutup();
+  }
   if (S.view !== "class") classroom.dispose(); // suara & mikrofon guru berhenti begitu keluar dari layar kelas
   // diskusi AI hanya hidup selama layar materi yang sama masih terbuka
   if (S.qChat && (S.view !== "result" || S.result?.session?.id !== S.qChat.sessionId)) dropQChat();
@@ -991,6 +1006,7 @@ async function onBodyClick(e) {
   if (act === "check-ai") return openQuestionChat(Number(btn.dataset.idx));
   if (act === "lab") return openLab();
   if (act === "speak") return openSpeak();
+  if (act === "mtk") return openMtk();
   if (act === "speak-new") return openSpeakNew();
   if (act === "speak-open") return openSpeakSession(id);
   if (act === "speak-del") return deleteSpeakSession(id);
@@ -4451,6 +4467,128 @@ async function onSettingsClick(e) {
     });
     if (ok) reloadSettings();
   }
+}
+
+// ================================================================ Latihan Matematika (modul src/latihan-mtk, dimuat saat dibuka)
+// Soal dibuat & dinilai di perangkat; poin dilaporkan lewat aksi server `mtk_points`, yang membatasinya
+// (maks 6 poin per soal, (sesiId, nomor) hanya sekali, batas harian). Poin masuk saldo & leaderboard.
+async function openMtk() {
+  const players = S.overview?.players || [];
+  if (!players.length) return window.alert(L("study_no_players"));
+  const me = loggedIn(players);
+  if (me) return enterMtk(me);
+  const first = players[0];
+  const out = await openFormDialog({
+    title: L("study_mtk_title"),
+    intro: L("study_mtk_intro"),
+    okLabel: L("study_mtk_open"),
+    cancelLabel: L("study_cancel"),
+    busyLabel: L("study_loading"),
+    fields: [
+      { key: "playerId", label: L("study_player"), value: first.id, ...playerField(players) },
+      { key: "pin", label: L("study_pin"), type: "pin" }
+    ],
+    extra: [
+      {
+        label: L("study_forgot_pin"),
+        onClick: (v) => {
+          const pl = players.find((p) => p.id === v.playerId);
+          if (pl) openResetPin(pl);
+        }
+      }
+    ],
+    onSubmit: async (v) => {
+      if (!validCred(v.pin)) return { ok: false, error: L("study_pin_invalid") };
+      const res = await studyCall("player_verify", { playerId: v.playerId, pin: v.pin });
+      if (!res.ok) return { ok: false, error: errText(res) };
+      return { ok: true, value: { player: players.find((p) => p.id === v.playerId), pin: v.pin } };
+    }
+  });
+  if (!out) return;
+  await adoptLogin(out.player, out.pin);
+  enterMtk(out.player);
+}
+
+function enterMtk(player) {
+  pushView();
+  S.mtk = { player, host: null, handle: null, today: null, cap: null, note: "", chain: Promise.resolve(), lang: "" };
+  S.view = "mtk";
+  render();
+  window.scrollTo(0, 0);
+}
+
+function closeMtk() {
+  S.mtk = null;
+  if (S.feed) S.feed.stale = true;
+  if (!popView()) {
+    S.view = "home";
+    render();
+  }
+}
+
+function paintMtkNote() {
+  const m = S.mtk;
+  const el = m?.host?.querySelector(".study-mtk-note");
+  if (!el) return;
+  el.textContent = m.note || (m.today === null ? "" : m.cap ? L("study_mtk_today", { n: m.today, cap: m.cap }) : L("study_mtk_today_free", { n: m.today }));
+}
+
+// Kirim satu poin ke server, berurutan (satu per satu) supaya batas harian dihitung rapi; gagal jaringan dicoba sekali lagi.
+function reportMtkPoints(m, poin, info) {
+  const creds = credOf(m.player);
+  if (!creds) return;
+  const params = { playerId: m.player.id, pin: creds, sesiId: String(info?.sesiId ?? ""), nomor: Number.isInteger(info?.nomor) ? info.nomor : 0, poin, topik: info?.topik, kelas: info?.kelas, tingkat: info?.tingkat };
+  m.chain = m.chain.then(async () => {
+    let res = await studyCall("mtk_points", params);
+    if (!res.ok && res.network) res = await studyCall("mtk_points", params);
+    if (S.mtk !== m) return;
+    if (res.ok) {
+      m.today = res.today ?? m.today;
+      m.cap = res.cap ?? null;
+      m.note = res.capped || (res.cap && res.today >= res.cap) ? L("study_mtk_capped") : "";
+    } else {
+      m.note = res.mtkUnavailable ? L("study_mtk_off") : res.network ? L("study_mtk_fail") : errText(res);
+    }
+    paintMtkNote();
+  });
+}
+
+function renderMtk(body) {
+  const m = S.mtk;
+  if (!m) return;
+  const lang = ctx.getLang?.() === "en" ? "en" : "id";
+  if (m.host && body.contains(m.host)) {
+    if (m.lang !== lang) m.handle?.ubahBahasa(lang);
+    m.lang = lang;
+    paintMtkNote();
+    return;
+  }
+  body.innerHTML = "";
+  m.host = document.createElement("div");
+  body.append(m.host);
+  const note = document.createElement("p");
+  note.className = "study-mtk-note muted";
+  note.setAttribute("role", "status");
+  body.append(note);
+  m.lang = lang;
+  const p = m.player;
+  import("./latihan-mtk/ui.js")
+    .then(({ bukaLatihanMatematika }) => {
+      if (S.mtk !== m || m.handle) return;
+      m.handle = bukaLatihanMatematika({
+        tempat: m.host,
+        bahasa: lang,
+        pemain: p.id,
+        kelas: p.grade === "SD" && p.classLevel ? p.classLevel : undefined,
+        onPoin: (poin, info) => reportMtkPoints(m, poin, info),
+        onTutup: () => {
+          if (S.mtk === m) closeMtk();
+        }
+      });
+    })
+    .catch(() => {
+      if (S.mtk === m) m.host.textContent = L("study_mtk_fail");
+    });
 }
 
 // ================================================================ Speaking (latihan mengobrol bahasa Inggris dengan tutor AI)

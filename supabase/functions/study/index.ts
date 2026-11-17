@@ -85,6 +85,8 @@
 //   (RIWAYAT TERLIHAT OLEH SEMUA PEMAIN: speak_list/speak_get/speak_tts boleh untuk percakapan siapa pun; speak_turn/transcribe/end/delete hanya pemilik)
 //   speak_get           { playerId, pin, sessionId }                          -> { session, turns:[{idx,role,body,correction,tip,at}] }
 //                         overview.speak = false bila migrasi belum dijalankan; aksi speak_* lalu menjawab { ok:true, unavailable:true }.
+//   -- LATIHAN MATEMATIKA (migrasi 0046): soal dibuat & dinilai di perangkat, jadi poinnya DIBATASI server. Butuh PIN/token pemain.
+//   mtk_points          { playerId, pin, sesiId, nomor, poin, topik?, kelas?, tingkat? } -> { awarded, duplicate, capped, today, cap }   (poin per soal maks 6; (sesiId,nomor) hanya dicatat sekali, nomor 0 = bonus sesi; batas harian study_settings.mtk_daily_cap, bawaan 100, 0 = tanpa batas; cap null = tanpa batas)
 //   -- materi pelajaran buatan AI (tab "Materi"); DAFTAR & ISI bisa dibaca semua orang tanpa PIN, membuat butuh PIN pemain
 //   material_list       { before?, ownerId? }                                          -> { items:[{id,title,subject,grade,detail,creatorName,createdAt}], hasMore }
 //   material_get        { materialId }                                       -> { material:{...,content} }
@@ -209,6 +211,7 @@ function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { ...corsHeaders, "Content-Type": "application/json" } });
 }
 const fail = (error: string, status = 400, extra: Row = {}) => json({ ok: false, error, ...extra }, status);
+const MTK_MAX_POINTS_PER_QUESTION = 6; // latihan matematika: batas poin per soal (poin dilaporkan klien)
 const isUuid = (v: unknown): v is string => typeof v === "string" && UUID_RE.test(v);
 
 function pacificDate(): string {
@@ -2584,6 +2587,35 @@ Deno.serve(async (req) => {
       const { error } = action === "speak_delete" ? await q.delete().eq("id", loaded.session.id) : await q.update({ ended_at: loaded.session.ended_at ?? new Date().toISOString() }).eq("id", loaded.session.id);
       if (error) return fail(error.message, 500);
       return json({ ok: true });
+    }
+
+    // ------------------------------------------------------------ latihan matematika: poin dilaporkan klien, dibatasi di sini (migrasi 0046)
+    if (action === "mtk_points") {
+      const auth = await checkPlayerPin(admin, body.playerId, body.pin);
+      if (auth instanceof Response) return auth;
+      const sesiId = typeof body.sesiId === "string" ? body.sesiId.trim() : "";
+      if (!/^[A-Za-z0-9_-]{4,40}$/.test(sesiId)) return fail("Sesi latihan tidak valid.");
+      const nomor = body.nomor;
+      if (typeof nomor !== "number" || !Number.isInteger(nomor) || nomor < 0 || nomor > 50) return fail("Nomor soal tidak valid.");
+      const poin = body.poin;
+      if (typeof poin !== "number" || !Number.isFinite(poin)) return fail("Poin tidak valid.");
+      const pts = Math.min(MTK_MAX_POINTS_PER_QUESTION, Math.floor(poin)); // klien tidak dipercaya: maksimal 6 per soal
+      const kelas = typeof body.kelas === "number" && Number.isInteger(body.kelas) && body.kelas >= 1 && body.kelas <= 6 ? body.kelas : null;
+      const { data, error } = await admin.rpc("study_mtk_award", {
+        p_player: auth.player.id,
+        p_sesi: sesiId,
+        p_nomor: nomor,
+        p_poin: pts,
+        p_topik: cleanLine(body.topik, 40) ?? "",
+        p_kelas: kelas,
+        p_tingkat: cleanLine(body.tingkat, 12) ?? ""
+      });
+      if (error) {
+        if (/DATA_TIDAK_VALID/.test(error.message)) return fail("Data poin tidak valid.");
+        if (/function .*study_mtk_award|does not exist|schema cache|study_ledger_kind_check|mtk_daily_cap/i.test(error.message)) return fail("Poin latihan matematika belum aktif: jalankan migrasi 0046_study_latihan_mtk.sql di Supabase.", 500, { mtkUnavailable: true });
+        return fail(error.message, 500);
+      }
+      return json({ ok: true, ...(data as Row) });
     }
 
     if (action === "speak_list") {
