@@ -158,7 +158,7 @@ const HELP = [
   "/voice wag on|off|id|eng|kor|arb|jawa  — balasan grup WA berupa suara/teks + bahasa suara",
   "/persona  — gaya bot WA: lihat, <bot> <teks>, grup santai|resmi <nama>, reset",
   "/tebak  — gudang tebak-tebakan (tambah, impor, daftar, menunggu)",
-  "/wa2  — nomor WhatsApp kedua (status, kode, qr)",
+  "/wa2  — WA kedua (kode, qr); /wa1 qr — tautkan ulang utama",
   "/grup  — grup WA yang dijawab bot: lihat, semua, tambah, hapus",
   "/humor  — humor per grup WA: pantun harian, roasting ringan, balas chat acak, chat otomatis, mode latihan",
   "/gambar <deskripsi>  — buat gambar; /gambar grup on|off = izinkan di grup WA\n/video <deskripsi>  — video bernarasi; kirim FOTO + keterangan \"jadikan video salju\" = foto hidup\n/env  — ubah kunci gambar (token Cloudflare, jatah) dari sini",
@@ -1176,6 +1176,19 @@ Suara khusus satu grup: /suara grup wanita <nama grup> • /suara grup (daftar) 
       if (!deps.resetPin) return void (await reply("Reset PIN orang tua tidak tersedia di versi bot ini."));
       return void (await reply(await withAction(chatId, "typing", () => deps.resetPin.handle(arg))));
     }
+    if (name === "wa1" || name === "nomor1" || name === "wautama") {
+      const w = deps.wa1;
+      if (!w) return void (await reply("Penautan ulang nomor utama tidak tersedia di versi bot ini."));
+      if (/^(qr|barcode)$/i.test(arg.trim())) {
+        try {
+          const img = await withAction(chatId, "upload_photo", () => w.qr());
+          return void (await sendFiles(chatId, [img], deps.wa1QrCaption || "QR penautan NOMOR UTAMA (Ayyubi). Di HP nomor utama: WhatsApp → Perangkat Tertaut → Tautkan Perangkat → pindai QR ini dari HP/laptop LAIN (bukan dari HP yang sama). Kalau bot lama masih tercantum di Perangkat Tertaut, keluarkan dulu. Jangan bagikan QR ini ke siapa pun. QR berlaku ±1 menit; kalau gagal kirim /wa1 qr lagi."));
+        } catch (e) {
+          return void (await reply(`⚠️ ${e instanceof Error ? e.message : e}`));
+        }
+      }
+      return void (await reply(w.describe()));
+    }
     if (name === "wa2" || name === "nomor2") {
       const w = deps.wa2;
       if (!w) return void (await reply("Nomor kedua tidak tersedia di versi bot ini."));
@@ -1513,7 +1526,7 @@ Suara khusus satu grup: /suara grup wanita <nama grup> • /suara grup (daftar) 
   }
 
   const HANDLER_DEADLINE_MS = 10 * 60_000;
-  const FAST_COMMANDS = new Set(["dokumen", "dok", "doc", "arsip", "status", "id", "help", "start", "ingat", "catatan", "lupa", "memori", "note", "penyedia", "provider", "skill", "skil", "lokal", "tanya", "pasar", "emas", "ihsg", "ingatkan", "remind", "pengingat", "reminder", "cadangan", "backup", "kesehatan", "sehat", "health", "urutan", "route", "rute", "nodin", "notadinas", "kas", "laporankas", "voice", "wa2", "nomor2", "grup", "group", "gambar", "image", "img", "video", "vidio", "vid", "metaai", "env", "stopmotion", "stop_motion", "edit", "ubah", "musik", "music", "edu", "channel", "yt", "tema"]);
+  const FAST_COMMANDS = new Set(["dokumen", "dok", "doc", "arsip", "status", "id", "help", "start", "ingat", "catatan", "lupa", "memori", "note", "penyedia", "provider", "skill", "skil", "lokal", "tanya", "pasar", "emas", "ihsg", "ingatkan", "remind", "pengingat", "reminder", "cadangan", "backup", "kesehatan", "sehat", "health", "urutan", "route", "rute", "nodin", "notadinas", "kas", "laporankas", "voice", "wa1", "nomor1", "wautama", "wa2", "nomor2", "grup", "group", "gambar", "image", "img", "video", "vidio", "vid", "metaai", "env", "stopmotion", "stop_motion", "edit", "ubah", "musik", "music", "edu", "channel", "yt", "tema"]);
   function isFastUpdate(u) {
     const m = u?.message;
     if (!m) return false;
@@ -1643,6 +1656,7 @@ Suara khusus satu grup: /suara grup wanita <nama grup> • /suara grup (daftar) 
           { command: "video", description: "Buat video bernarasi dari deskripsi (gratis); /video grup on|off" },
           { command: "stopmotion", description: "Foto-foto berurutan jadi video stop motion" },
           { command: "musik", description: "Musik latar video: daftar lagu & cara minta" },
+          { command: "wa1", description: "Nomor WhatsApp utama: status dan QR tautan ulang" },
           { command: "wa2", description: "Nomor WhatsApp kedua: status dan kode tautan" },
           { command: "kas", description: "Laporan kas bulanan (Saldo Rekening & Register Kas)" },
           { command: "nodin", description: "Konsep Nota Dinas LPJ Bendahara (PDF + Word)" },

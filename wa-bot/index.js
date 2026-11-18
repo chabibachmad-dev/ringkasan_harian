@@ -100,6 +100,7 @@ import { MAIN_ACCOUNT, SECOND_ACCOUNT, acctFields, createAccountRouter, isPaired
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createOfficeFeed, readOfficeConfig, chatLabel, reasonText, aiReason, ollamaReason, ollamaJobLabel, officeVideoStages } from "./office-feed.js";
 import { qrToPng } from "./qr-png.js";
+import { createMainRelink, relinkState } from "./wa-main-relink.js";
 import { createGroupList } from "./group-list.js";
 import { createVideoGen, readVideoConfig, videoSentNote, photoVideoSentNote, storySentNote, morphSentNote, VIDEO_TEXT } from "./video-gen.js";
 const VIDEO_NOPHOTO_TEXT = VIDEO_TEXT.nophoto;
@@ -4972,6 +4973,23 @@ function wipeAuthDir(dir) {
   fs.rmSync(path.resolve(dir), { recursive: true, force: true });
 }
 
+// /wa1 qr: tautkan ulang NOMOR UTAMA lewat Telegram setelah sesinya logout. Sesi lama TIDAK dihapus, hanya diganti nama
+// (auth_session_lama_<waktu>, sudah masuk .gitignore lewat pola auth_session_*/).
+const mainRelink = createMainRelink({
+  acct: MAIN_ACCOUNT_DEF,
+  isOpen: () => waOpen,
+  userId: () => (currentSock?.user?.id ? String(currentSock.user.id).split(":")[0].split("@")[0] : null),
+  startConnect: () => connect(MAIN_ACCOUNT_DEF),
+  moveAuthDir: () => {
+    const dir = path.resolve(MAIN_ACCOUNT_DEF.authDir);
+    if (!fs.existsSync(dir)) return null;
+    const to = `${dir}_lama_${new Date().toISOString().replace(/[:.]/g, "-")}`;
+    fs.renameSync(dir, to);
+    return path.basename(to);
+  },
+  qrToPng
+});
+
 async function connect(acct = MAIN_ACCOUNT_DEF) {
   if (acct.secondary) {
     if (acct.connecting) return;
@@ -5020,7 +5038,7 @@ async function connect(acct = MAIN_ACCOUNT_DEF) {
   sock.ev.on("connection.update", (update) => {
     const { connection, lastDisconnect, qr } = update;
 
-    if (qr && acct.secondary) acct.lastQr = { qr, at: Date.now() };
+    if (qr) acct.lastQr = { qr, at: Date.now() }; // nomor utama juga: dipakai /wa1 qr
     if (qr) {
       if (acct.secondary && acct.mode === "qr") {
         // Mode QR (/wa2 qr): gambarnya dikirim ke Telegram saat diminta; tidak membuat kode tautan.
@@ -5076,6 +5094,11 @@ async function connect(acct = MAIN_ACCOUNT_DEF) {
           setTimeout(() => connect(acct).catch((err) => console.error(`Gagal menyambung ulang ${acct.label}:`, err instanceof Error ? err.message : String(err))), 5000);
         }
       } else if (loggedOut) {
+        acct.loggedOutAt = Date.now();
+        if (!acct.secondary && !acct.logoutNotified) {
+          acct.logoutNotified = true;
+          sendToOwner("⚠️ Nomor utama (Ayyubi) logout / dicabut dari WhatsApp. Kirim /wa1 qr ke bot Telegram ini untuk menautkan ulang dengan QR.").catch(() => {});
+        }
         console.error(
           `\n❌ Sesi WhatsApp${acct.secondary ? ` (${acct.label})` : ""} logout/dicabut dari HP (atau sesi tidak valid lagi).\n` +
             `   Hapus folder wa-bot/${acct.authDir}/ lalu jalankan ulang bot ini untuk menautkan ulang.\n`
@@ -5097,6 +5120,9 @@ async function connect(acct = MAIN_ACCOUNT_DEF) {
       acct.pairing = false;
       acct.idle = false;
       acct.idleNotified = false;
+      acct.loggedOutAt = 0;
+      acct.relinkAt = 0;
+      acct.logoutNotified = false;
       console.log(`\n✅ WhatsApp${acct.secondary ? ` ${acct.label}` : ""} tersambung (${sock.user?.id || "?"}). Bot siap jalan.\n`);
       if (acct.secondary) sendToOwner(`✅ ${acct.label} tersambung (${(sock.user?.id || "?").split(":")[0].split("@")[0]}).`).catch(() => {});
     }
@@ -5263,7 +5289,10 @@ async function buildBotStatusText() {
   const now = Date.now();
   const lines = [`📊 *Status Ayyubi*`, `Bot hidup: ${fmtDuration(process.uptime() * 1000)}`, ""];
 
-  lines.push(`💬 WhatsApp: ${currentSock ? "tersambung" : "⚠️ terputus (menyambung ulang...)"}`);
+  {
+    const st = relinkState(MAIN_ACCOUNT_DEF, waOpen);
+    lines.push(`💬 WhatsApp: ${st === "tersambung" ? "tersambung" : st === "logout" ? "❌ logout/dicabut (kirim /wa1 qr untuk menautkan ulang)" : st === "menunggu-pindai" ? "⏳ menunggu QR dipindai (/wa1 qr)" : "⚠️ terputus (menyambung ulang...)"}`);
+  }
   if (WA2_ACCOUNT_DEF) lines.push(`📱 ${WA2_ACCOUNT_DEF.label}: ${wa2StatusWord()}`);
   lines.push(
     `🤖 Auto-reply: ${AUTO_REPLY_ACTIVE ? `aktif (mesin ${WA_AI_ENGINE})` : "mati"}`
@@ -6587,6 +6616,10 @@ const telegram = createTelegram({
     humorReview: { decide: (arg) => humor.decide(arg) },
     humor: { handle: (arg) => humor.handle(arg, { secondAliases: [String(wa2Config.botName || "").trim().split(/\s+/)[0]] }) },
     resetPin: { handle: (arg) => resetPinPemilik({ supabase, nama: arg }) },
+    wa1: {
+      describe: () => mainRelink.describe(),
+      qr: async () => ({ data: await mainRelink.qr(), name: "qr-nomor-utama.png", mime: "image/png", photo: true })
+    },
     wa2: {
       describe: () => describeWa2(),
       qr: async () => ({ data: await wa2QrImage(), name: "qr-nomor-2.png", mime: "image/png", photo: true }),
