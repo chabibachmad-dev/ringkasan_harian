@@ -198,12 +198,12 @@ export function createDriver({ config, log = console }) {
     return page;
   }
   async function loggedIn() {
-    // Sudah login bila komposer status muncul & bukan ajakan "Masuk untuk Menulis Status".
+    // Sudah login bila kotak tulis status (komposer warga) muncul. Tamu hanya melihat
+    // "Masuk untuk Menulis Status" tanpa kotak itu, jadi keberadaan kotak = sudah login.
     return await page.evaluate(() => {
+      if (document.querySelector('textarea, [placeholder*="pikirkan" i]')) return true;
       const t = document.body.innerText || "";
-      if (/Masuk untuk Menulis Status/i.test(t)) return false;
-      return /Perbarui Status|Apa yang sedang Anda pikirkan/i.test(t) ||
-        !!document.querySelector('textarea, [placeholder*="pikirkan" i]');
+      return /Perbarui Status/i.test(t) && !/Masuk untuk Menulis Status/i.test(t);
     }).catch(() => false);
   }
   // Pastikan komposer status terbuka & kembalikan locator kotak teksnya.
