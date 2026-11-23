@@ -58,7 +58,10 @@ export const ENV_KEYS = {
   VIDEO_STOP_MAX_PHOTOS: { secret: false, hint: "foto maksimum per sesi /stopmotion (6-120)", validate: intIn(6, 120) },
   VIDEO_STOP_MAX_FPS: { secret: false, hint: "gambar per detik maksimum stop motion (4-24)", validate: intIn(4, 24) },
   VIDEO_MUSIC_VOLUME: { secret: false, hint: "volume musik latar video (10-100, bawaan 60)", validate: intIn(10, 100) },
-  VIDEO_MUSIC_DEFAULT: { secret: false, hint: "1 = semua video otomatis diberi musik dari folder musik/ (bila ada lagunya); 0 = hanya bila diminta" , validate: intIn(0, 1) }
+  VIDEO_MUSIC_DEFAULT: { secret: false, hint: "1 = semua video otomatis diberi musik dari folder musik/ (bila ada lagunya); 0 = hanya bila diminta" , validate: intIn(0, 1) },
+  RUANGKITA_USERNAME: { secret: false, hint: "username akun RuangKita untuk bot persona bapak-bapak", validate: (v) => (v.trim().length >= 2 ? null : "username minimal 2 karakter") },
+  RUANGKITA_PASSWORD: { secret: true, hint: "password akun RuangKita (disamarkan)", validate: (v) => (v.length >= 1 ? null : "password kosong") },
+  RUANGKITA_BIO: { secret: false, hint: "bio akun RuangKita (ditandai 'dijalankan bot')", validate: (v) => (v.length <= 160 ? null : "bio maksimal 160 karakter") }
 };
 
 export const maskValue = (value, secret) => {

@@ -295,8 +295,15 @@ export function createRuangkita({
     } catch {}
   }
 
+  // Ambil kredensial & bio terbaru dari process.env (supaya /env berlaku tanpa restart).
+  function refreshCreds() {
+    if (process.env.RUANGKITA_USERNAME != null) config.username = String(process.env.RUANGKITA_USERNAME).trim();
+    if (process.env.RUANGKITA_PASSWORD != null) config.password = String(process.env.RUANGKITA_PASSWORD);
+    if (process.env.RUANGKITA_BIO) config.bio = String(process.env.RUANGKITA_BIO).slice(0, 160);
+  }
   async function ensureDriver() { if (!driver) driver = driverFactory({ config, log }); return driver; }
   async function ensureLogin() {
+    refreshCreds();
     await ensureDriver();
     const r = await driver.login();
     if (!r.already) { const b = await driver.setBio(config.bio); if (!b.ok) log.warn?.("[ruangkita] bio belum terpasang otomatis:", b.reason); }
@@ -359,6 +366,7 @@ export function createRuangkita({
   }
 
   async function handle(arg) {
+    refreshCreds();
     const c = parseCommand(arg);
     switch (c.kind) {
       case "status": return statusText();

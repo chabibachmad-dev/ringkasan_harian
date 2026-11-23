@@ -134,9 +134,9 @@ ok("penolakan: kunci di luar daftar putih, nilai salah/berbahaya; .env utuh; .en
 }
 ok("IMAGE_PROVIDERS dan IMAGE_OWNER_DAILY=0 dapat diatur lewat /env");
 
-// --- kunci yang diizinkan hanya pembuat gambar & video
-assert.deepEqual(Object.keys(ENV_KEYS).filter((k) => !/^(CLOUDFLARE_|GEMINI_IMAGE|OPENROUTER_IMAGE|IMAGE_|VIDEO_)/.test(k)), []);
-ok("daftar putih hanya berisi kunci pembuat gambar & video");
+// --- kunci yang diizinkan hanya pembuat gambar, video, & RuangKita
+assert.deepEqual(Object.keys(ENV_KEYS).filter((k) => !/^(CLOUDFLARE_|GEMINI_IMAGE|OPENROUTER_IMAGE|IMAGE_|VIDEO_|RUANGKITA_)/.test(k)), []);
+ok("daftar putih hanya berisi kunci pembuat gambar, video & RuangKita");
 
 // --- berlaku langsung pada pembuat gambar
 {
