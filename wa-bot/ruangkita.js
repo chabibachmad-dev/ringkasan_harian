@@ -38,12 +38,17 @@ export function readRuangkitaConfig(env = process.env) {
     minGapMin: clamp(toInt(env.RUANGKITA_MIN_GAP_MIN, 3), 1, 180),
     maxPerHour: clamp(toInt(env.RUANGKITA_MAX_PER_HOUR, 8), 1, 60),
     postPerDay: clamp(toInt(env.RUANGKITA_POST_PER_DAY, 3), 0, 40),
-    reply: toBool(env.RUANGKITA_REPLY, true),       // balas komentar di status sendiri + chat inbox
-    likeOthers: toBool(env.RUANGKITA_LIKE, true),   // suka/komentar status orang lain
+    replyComments: toBool(env.RUANGKITA_REPLY, true),       // balas komentar di status sendiri
+    inbox: toBool(env.RUANGKITA_INBOX, true),               // balas chat/inbox pribadi
+    likeOthers: toBool(env.RUANGKITA_LIKE, true),           // suka status orang lain
+    commentOthers: toBool(env.RUANGKITA_COMMENT_OTHERS, true), // komentar status orang lain
+    mentions: toBool(env.RUANGKITA_MENTIONS, true),         // balas saat di-mention / di-"colek"
+    engagePerHour: clamp(toInt(env.RUANGKITA_ENGAGE_PER_HOUR, 4), 0, 30), // maks like+komentar ke orang lain / jam
     // jam aktif lokal (bot "tidur" di luar jam ini, biar manusiawi). "" = sepanjang hari.
     activeFrom: clamp(toInt(env.RUANGKITA_ACTIVE_FROM, 6), 0, 23),
     activeTo: clamp(toInt(env.RUANGKITA_ACTIVE_TO, 23), 0, 23),
     headless: toBool(env.RUANGKITA_HEADLESS, true),
+    displayName: (env.RUANGKITA_DISPLAYNAME || "").trim(), // nama tampilan akun (untuk kenali status sendiri)
   };
 }
 
@@ -158,6 +163,11 @@ export function createPersona({ generate, random = Math.random, log = console } 
       const t = await run(PERSONA_RULES, ctx, 0.85);
       return jadulkan(t || `Wah ${author || "nak"}, sabar ya. ${pickJoke(random)}`).slice(0, 300);
     },
+    async comment({ author = "", text = "" } = {}) {
+      const ctx = `Status dari "${author || "warga"}": "${String(text).slice(0, 300)}". Tulis SATU komentar singkat, ramah, nyambung & lucu ala bapak-bapak. Tanpa tanda kutip.`;
+      const t = await run(PERSONA_RULES, ctx, 0.85);
+      return jadulkan(t || `Mantap ${author || "nak"}! ${pickJoke(random)}`).slice(0, 220);
+    },
   };
 }
 
@@ -171,6 +181,8 @@ export function parseCommand(arg = "") {
   if (["on", "nyala", "aktif", "mulai"].includes(a)) return { kind: "on" };
   if (["off", "mati", "stop", "berhenti"].includes(a)) return { kind: "off" };
   if (["uji", "test", "cek", "dryrun"].includes(a)) return { kind: "uji" };
+  if (["lihat", "intip", "scan"].includes(a)) return { kind: "lihat" };
+  if (["fitur", "mode", "aktifkan"].includes(a)) return { kind: "fitur", text: tail };
   if (["post", "status!", "posting", "tulis"].includes(a)) return { kind: "post", text: tail };
   if (["jeda", "gap"].includes(a)) return { kind: "jeda", min: toInt(tail, NaN) };
   if (["batas", "limit"].includes(a)) return { kind: "batas", n: toInt(tail, NaN) };
@@ -313,8 +325,126 @@ export function createDriver({ config, log = console }) {
     await page.waitForTimeout(1200);
     return { ok: true };
   }
+  // ---- Pindai kartu kiriman di beranda (nama penulis, teks, tombol, apakah milik kita) ----
+  async function scanPosts(me, limit = 20) {
+    return await page.evaluate(({ me, limit }) => {
+      const norm = (s) => (s || "").replace(/\s+/g, " ").trim();
+      const out = [];
+      const bars = [...document.querySelectorAll("button")].filter((b) => /^Komentar$/.test(norm(b.innerText)));
+      for (const kom of bars) {
+        // naik ke kartu: elemen yang memuat tombol Suka+Komentar+Bagikan & nama penulis
+        let card = kom, author = "", text = "";
+        for (let i = 0; i < 12 && card; i++) {
+          card = card.parentElement; if (!card) break;
+          const btns = [...card.querySelectorAll("button")].map((b) => norm(b.innerText));
+          if (btns.includes("Suka") && btns.includes("Komentar") && btns.includes("Bagikan")) {
+            const nameBtn = [...card.querySelectorAll("button")].find((b) => { const t = norm(b.innerText); return t && t.length < 40 && !/^(Suka|Komentar|Bagikan|Colek|Tandai Foto|Lihat)/.test(t); });
+            author = nameBtn ? norm(nameBtn.innerText) : "";
+            text = norm(card.innerText).replace(/^.*?(Suka · Komentar.*)$/, "");
+            break;
+          }
+        }
+        if (!card) continue;
+        const idx = out.length;
+        card.setAttribute("data-rk-idx", String(idx));
+        const liked = !![...card.querySelectorAll("button")].find((b) => /^Suka$/.test(norm(b.innerText)) && /text-\[#3B5998\]|font-bold|aria-pressed/.test(b.className + (b.getAttribute("aria-pressed") || "")));
+        out.push({ idx, author, mine: !!me && author.toLowerCase() === me.toLowerCase(), text: norm(card.innerText).slice(0, 200), liked });
+        if (out.length >= limit) break;
+      }
+      return out;
+    }, { me, limit }).catch(() => []);
+  }
+  const cardLoc = (idx) => page.locator(`[data-rk-idx="${idx}"]`).first();
+
+  async function likePost(idx) {
+    const card = cardLoc(idx);
+    const b = card.getByRole("button", { name: /^Suka$/i }).first();
+    if (!(await b.count())) return { ok: false, reason: "tombol Suka tidak ada" };
+    await b.click({ timeout: 8000 }).catch(() => {});
+    await page.waitForTimeout(500);
+    return { ok: true };
+  }
+
+  // Buka kotak komentar sebuah kartu & kembalikan locator kotaknya.
+  async function openCommentBox(idx) {
+    const card = cardLoc(idx);
+    const kom = card.getByRole("button", { name: /^Komentar$/i }).first();
+    if (await kom.count()) { await kom.click().catch(() => {}); await page.waitForTimeout(900); }
+    // kotak komentar: textarea / input / contenteditable di dalam kartu
+    for (const sel of ['textarea', 'input[placeholder*="omentar" i]', 'input[placeholder*="alas" i]', '[contenteditable="true"]']) {
+      const box = card.locator(sel).first();
+      if (await box.count()) { try { await box.waitFor({ state: "visible", timeout: 2500 }); return box; } catch {} }
+    }
+    return null;
+  }
+  async function commentOnPost(idx, text) {
+    const box = await openCommentBox(idx);
+    if (!box) return { ok: false, reason: "kotak komentar tidak ketemu (perlu verifikasi selector)" };
+    await box.click().catch(() => {});
+    await box.fill(text, { timeout: 10_000 }).catch(async () => { await box.type(text, { delay: 15 }).catch(() => {}); });
+    await page.waitForTimeout(500);
+    const card = cardLoc(idx);
+    let send = card.getByRole("button", { name: /^(Kirim|Balas|Komentar|Bagikan)$/i }).last();
+    if (await send.count()) await send.click({ timeout: 8000 }).catch(() => {});
+    else await box.press("Enter").catch(() => {});
+    await page.waitForTimeout(1200);
+    return { ok: true };
+  }
+
+  // Baca komentar pada kartu (untuk balas komentar di status sendiri). Mengembalikan [{who,text}].
+  async function readComments(idx) {
+    const card = cardLoc(idx);
+    const more = card.getByRole("button", { name: /Lihat \d+ komentar/i }).first();
+    if (await more.count()) { await more.click().catch(() => {}); await page.waitForTimeout(900); }
+    return await cardLoc(idx).evaluate((el) => {
+      const norm = (s) => (s || "").replace(/\s+/g, " ").trim();
+      // heuristik: komentar = baris dengan nama tebal + teks, setelah bar aksi
+      const items = [];
+      const strongs = [...el.querySelectorAll('strong,[class*="font-bold"],[class*="font-semibold"],a')];
+      for (const s of strongs) {
+        const who = norm(s.innerText); if (!who || who.length > 40) continue;
+        const sib = s.parentElement ? norm(s.parentElement.innerText).replace(who, "").trim() : "";
+        if (sib && sib.length > 1 && !/^(Suka|Balas|·)/.test(sib)) items.push({ who, text: sib.slice(0, 200) });
+      }
+      return items.slice(-10);
+    }).catch(() => []);
+  }
+
+  // Inbox / Obrolan: buka dock, kembalikan ringkasan thread (read-only untuk mode intip).
+  async function readInbox() {
+    const ob = page.getByRole("button", { name: /Obrolan|Pesan Masuk|Inbox/i }).first();
+    if (await ob.count()) { await ob.click().catch(() => {}); await page.waitForTimeout(1200); }
+    return await page.evaluate(() => {
+      const norm = (s) => (s || "").replace(/\s+/g, " ").trim();
+      const nodes = [...document.querySelectorAll('[class*="chat"], [class*="inbox"], [class*="conversation"], li, a')].slice(0, 200);
+      const seen = new Set(), out = [];
+      for (const n of nodes) {
+        const t = norm(n.innerText); if (!t || t.length < 2 || t.length > 120 || seen.has(t)) continue;
+        if (/belum ada|tidak ada pesan/i.test(t)) continue;
+        seen.add(t); out.push(t);
+        if (out.length >= 15) break;
+      }
+      return out;
+    }).catch(() => []);
+  }
+
+  // Notifikasi (untuk mention / colek).
+  async function readNotifications() {
+    const nf = page.getByRole("button", { name: /^Notif$/i }).first();
+    if (await nf.count()) { await nf.click().catch(() => {}); await page.waitForTimeout(1200); }
+    return await page.evaluate(() => {
+      const norm = (s) => (s || "").replace(/\s+/g, " ").trim();
+      const out = [];
+      for (const n of [...document.querySelectorAll('[class*="notif"] *, li, a')].slice(0, 200)) {
+        const t = norm(n.innerText); if (t && t.length > 3 && t.length < 160) out.push(t);
+        if (out.length >= 20) break;
+      }
+      return [...new Set(out)];
+    }).catch(() => []);
+  }
+
   async function close() { try { await browser?.close(); } catch {} browser = context = page = null; }
-  return { login, readFeed, setBio, postStatus, close, isOpen: () => !!page };
+  return { login, readFeed, setBio, postStatus, scanPosts, likePost, commentOnPost, openCommentBox, readComments, readInbox, readNotifications, close, isOpen: () => !!page };
 }
 
 // ---------------------------------------------------------------- orkestrator + kontrol Telegram
@@ -331,20 +461,37 @@ export function createRuangkita({
   const STATE_KEY = "ruangkita";
   const persona = createPersona({ generate, random, log });
   const limiter = createLimiter({ minGapMs: config.minGapMin * 60_000, maxPerHour: config.maxPerHour, postPerDay: config.postPerDay, now });
+  // pembatas terpisah untuk interaksi ke orang lain (like/komentar) biar tidak agresif
+  const engageLimiter = createLimiter({ minGapMs: config.minGapMin * 60_000, maxPerHour: config.engagePerHour, postPerDay: 999, now });
   let driver = null;
   let running = false;      // loop hidup
   let enabled = config.enabled;
   let loopHandle = null;
   let lastError = "";
   let lastAction = "";
+  let turn = 0;             // untuk rotasi jenis aksi
+  const handled = new Set(); // id item yang sudah ditangani (komentar, like, inbox, notif)
+  const flags = { replyComments: config.replyComments, inbox: config.inbox, likeOthers: config.likeOthers, commentOthers: config.commentOthers, mentions: config.mentions };
+  const hkey = (kind, s) => `${kind}:${String(s).replace(/\s+/g, " ").trim().slice(0, 80).toLowerCase()}`;
+  const seen = (k) => handled.has(k);
+  const mark = (k) => { handled.add(k); if (handled.size > 800) { const arr = [...handled]; handled.clear(); arr.slice(-500).forEach((x) => handled.add(x)); } };
 
-  async function saveState() { try { await state?.set(STATE_KEY, { enabled, acts: limiter.dump(), minGapMin: config.minGapMin, maxPerHour: config.maxPerHour }); } catch {} }
+  async function saveState() {
+    try { await state?.set(STATE_KEY, { enabled, acts: limiter.dump(), engageActs: engageLimiter.dump(), minGapMin: config.minGapMin, maxPerHour: config.maxPerHour, flags, handled: [...handled].slice(-500) }); } catch {}
+  }
   async function loadState() {
     try {
       const s = await state?.get(STATE_KEY);
-      if (s) { enabled = !!s.enabled; limiter.load(s.acts); if (s.minGapMin) config.minGapMin = s.minGapMin; if (s.maxPerHour) config.maxPerHour = s.maxPerHour; }
+      if (s) {
+        enabled = !!s.enabled; limiter.load(s.acts); engageLimiter.load(s.engageActs);
+        if (s.minGapMin) config.minGapMin = s.minGapMin; if (s.maxPerHour) config.maxPerHour = s.maxPerHour;
+        if (s.flags) Object.assign(flags, s.flags);
+        if (Array.isArray(s.handled)) s.handled.forEach((k) => handled.add(k));
+      }
     } catch {}
   }
+  function whoAmI() { return config.displayName || config.username || ""; }
+  async function jitterSleep() { await sleep(3000 + Math.round(random() * 9000)); } // jeda 3–12 dtk antar sub-aksi
 
   // Ambil kredensial & bio terbaru dari process.env (supaya /env berlaku tanpa restart).
   function refreshCreds() {
@@ -368,22 +515,96 @@ export function createRuangkita({
     return text;
   }
 
+  // Balas komentar baru di status SENDIRI (dengan jeda; tiap komentar cuma dibalas sekali).
+  async function replyOwnComments(max = 2) {
+    const me = whoAmI(); if (!me) return 0;
+    const posts = (await driver.scanPosts(me, 25)).filter((p) => p.mine);
+    let done = 0;
+    for (const p of posts) {
+      if (done >= max || !limiter.canAct("reply")) break;
+      const comments = await driver.readComments(p.idx);
+      for (const cm of comments) {
+        if (done >= max) break;
+        if (!cm.who || cm.who.toLowerCase() === me.toLowerCase()) continue;
+        const k = hkey("c", p.idx + "|" + cm.who + "|" + cm.text);
+        if (seen(k)) continue;
+        const text = await persona.reply({ author: cm.who, text: cm.text, where: "komentar status saya" });
+        await jitterSleep();
+        const r = await driver.commentOnPost(p.idx, text);
+        mark(k);
+        if (r.ok) { limiter.record("reply"); lastAction = `balas komentar ${cm.who}`; done++; await saveState(); }
+        else { lastError = "balas komentar: " + (r.reason || "gagal"); break; }
+      }
+    }
+    return done;
+  }
+
+  // Suka + sesekali komentar status ORANG LAIN (pakai engageLimiter).
+  async function engageOthers(max = 2) {
+    const me = whoAmI();
+    const posts = (await driver.scanPosts(me, 20)).filter((p) => !p.mine && p.author);
+    let done = 0;
+    for (const p of posts) {
+      if (done >= max || !engageLimiter.canAct()) break;
+      const likeKey = hkey("like", p.idx + "|" + p.author + "|" + p.text.slice(0, 40));
+      if (flags.likeOthers && !p.liked && !seen(likeKey)) {
+        await jitterSleep();
+        const r = await driver.likePost(p.idx); mark(likeKey);
+        if (r.ok) { engageLimiter.record(); lastAction = `suka status ${p.author}`; done++; await saveState(); }
+      }
+      // komentar ke orang lain lebih jarang (1 dari ~3) agar natural
+      const cKey = hkey("co", p.idx + "|" + p.author + "|" + p.text.slice(0, 40));
+      if (flags.commentOthers && !seen(cKey) && random() < 0.34 && engageLimiter.canAct() && done < max) {
+        const text = await persona.comment({ author: p.author, text: p.text });
+        await jitterSleep();
+        const r = await driver.commentOnPost(p.idx, text); mark(cKey);
+        if (r.ok) { engageLimiter.record(); lastAction = `komentar ke ${p.author}`; done++; await saveState(); }
+        else lastError = "komentar orang lain: " + (r.reason || "gagal");
+      }
+    }
+    return done;
+  }
+
+  // Rotasi jenis aksi tiap siklus supaya tidak monoton & tidak nyepam satu kanal.
   async function cycle() {
     if (!enabled) return;
     const t = now();
     if (!withinActiveHours(config, t)) return;        // di luar jam aktif: diam
-    if (!limiter.canAct("post")) return;
     try {
       await ensureLogin();
-      // v1: aksi utama = posting status berkala. Balas komentar/inbox & like ditambah
-      // setelah selector balasan diverifikasi lewat mode uji (lihat catatan modul).
-      if (limiter.canAct("post")) await doPost();
+      const kinds = ["post"];
+      if (flags.replyComments) kinds.push("reply");
+      if (flags.mentions) kinds.push("mention");
+      if (flags.inbox) kinds.push("inbox");
+      if (flags.likeOthers || flags.commentOthers) kinds.push("engage");
+      // mulai dari giliran berikutnya, jalankan maksimal satu jenis yang "boleh" per siklus
+      for (let i = 0; i < kinds.length; i++) {
+        const kind = kinds[(turn + i) % kinds.length];
+        if (kind === "post" && limiter.canAct("post")) { await doPost(); break; }
+        if (kind === "reply" && limiter.canAct("reply")) { if (await replyOwnComments(2)) break; }
+        if (kind === "mention" && limiter.canAct("reply")) { if (await doMentions(2)) break; }
+        if (kind === "inbox" && limiter.canAct("reply")) { if (await doInbox(2)) break; }
+        if (kind === "engage" && engageLimiter.canAct()) { if (await engageOthers(2)) break; }
+      }
+      turn++;
       lastError = "";
     } catch (e) {
       lastError = String(e?.message || e);
       log.warn?.("[ruangkita] siklus gagal:", lastError);
       try { await driver?.close(); } catch {} driver = null;   // paksa login ulang berikutnya
     }
+  }
+
+  // Inbox & mention: DETEKSI dulu (balas menyusul setelah struktur login diverifikasi lewat
+  // /ruangkita lihat). Sengaja tidak menandai item sebagai "selesai" agar tidak ada yang hilang.
+  let pendingInbox = 0, pendingMentions = 0;
+  async function doInbox() {
+    try { const threads = await driver.readInbox(); pendingInbox = threads.length; } catch {}
+    return 0; // belum membalas otomatis
+  }
+  async function doMentions() {
+    try { const n = await driver.readNotifications(); pendingMentions = n.filter((x) => /menyebut|mention|colek|membalas|komentar di|menandai/i.test(x)).length; } catch {}
+    return 0; // belum membalas otomatis
   }
 
   function scheduleNext() {
@@ -401,18 +622,32 @@ export function createRuangkita({
   }
   function stop() { running = false; if (loopHandle) clearTimeout(loopHandle); }
 
+  const onoff = (b) => (b ? "✅" : "⬜");
+  function featureText() {
+    return [
+      `${onoff(flags.replyComments)} balas komentar di status saya`,
+      `${onoff(flags.likeOthers)} suka status orang lain`,
+      `${onoff(flags.commentOthers)} komentar status orang lain`,
+      `${onoff(flags.inbox)} balas chat/inbox  ${flags.inbox ? "(deteksi dulu)" : ""}`,
+      `${onoff(flags.mentions)} balas mention/colek  ${flags.mentions ? "(deteksi dulu)" : ""}`,
+    ].join("\n");
+  }
   function statusText() {
-    const s = limiter.stats();
+    const s = limiter.stats(), e = engageLimiter.stats();
     return [
       `🧓 RuangKita — ${enabled ? "AKTIF" : "MATI"}`,
-      `Akun: ${config.username || "(RUANGKITA_USERNAME belum diisi)"}`,
-      `Jeda min: ${config.minGapMin} mnt · Batas: ${config.maxPerHour}/jam · Post: ${s.postsToday}/${config.postPerDay} hari ini`,
+      `Akun: ${config.username || "(belum diisi)"}${config.displayName ? ` (tampil: ${config.displayName})` : ""}`,
+      `Jeda min: ${config.minGapMin} mnt · Post: ${s.postsToday}/${config.postPerDay} hari ini · Aksi: ${s.lastHour}/${config.maxPerHour} per jam`,
+      `Interaksi ke orang lain: ${e.lastHour}/${config.engagePerHour} per jam`,
       `Jam aktif: ${config.activeFrom}:00–${config.activeTo}:00 WITA`,
-      `Aksi 1 jam terakhir: ${s.lastHour} · ${s.lastActionMsAgo != null ? Math.round(s.lastActionMsAgo / 60000) + " mnt lalu" : "belum ada"}`,
+      (pendingInbox || pendingMentions) ? `📥 Terdeteksi: ${pendingInbox} chat, ${pendingMentions} mention (balas otomatis menyusul verifikasi)` : "",
       lastAction ? `Terakhir: ${lastAction}` : "",
       lastError ? `⚠️ Error terakhir: ${lastError}` : "",
       "",
-      "Perintah: /ruangkita on | off | uji | post [teks] | jeda <mnt> | batas <n>/jam | bio <teks>",
+      "Fitur:",
+      featureText(),
+      "",
+      "Perintah: on | off | uji | lihat | post [teks] | fitur <nama> on|off | jeda <mnt> | batas <n> | bio <teks>",
     ].filter(Boolean).join("\n");
   }
 
@@ -425,9 +660,45 @@ export function createRuangkita({
         if (!config.username || !config.password) return "⚠️ Isi dulu RUANGKITA_USERNAME & RUANGKITA_PASSWORD lewat /env, lalu /ruangkita on.";
         enabled = true; await saveState();
         if (running && !loopHandle) scheduleNext();
-        return "🧓 RuangKita AKTIF. Bot akan posting berkala dengan jeda acak & batas aman. Pantau: /ruangkita status";
+        return "🧓 RuangKita AKTIF. Dengan jeda acak & batas aman, bot akan: posting status, balas komentar di status Anda, suka & komentar status orang lain. Chat & mention dideteksi dulu (balas otomatis menyusul verifikasi — jalankan /ruangkita lihat).\n\n" + featureText() + "\n\nPantau: /ruangkita status";
       }
       case "off": { enabled = false; if (loopHandle) { clearTimeout(loopHandle); loopHandle = null; } await saveState(); return "🧓 RuangKita DIMATIKAN. Tidak ada aksi baru. Hidupkan lagi: /ruangkita on"; }
+      case "fitur": {
+        const parts = (c.text || "").toLowerCase().split(/\s+/);
+        const map = { komentar: "replyComments", balas: "replyComments", suka: "likeOthers", like: "likeOthers", komentarorang: "commentOthers", inbox: "inbox", chat: "inbox", mention: "mentions", colek: "mentions" };
+        const key = map[parts[0]];
+        if (!key) return "Fitur:\n" + featureText() + "\n\nUbah: /ruangkita fitur <komentar|suka|komentarorang|inbox|mention> on|off";
+        const val = ["on", "nyala", "aktif", "ya", "1"].includes(parts[1]) ? true : ["off", "mati", "tidak", "0"].includes(parts[1]) ? false : !flags[key];
+        flags[key] = val; await saveState();
+        return `${val ? "✅ dinyalakan" : "⬜ dimatikan"}: ${parts[0]}\n\n` + featureText();
+      }
+      case "lihat": {
+        try {
+          await ensureLogin();
+          const me = whoAmI();
+          const posts = await driver.scanPosts(me, 15);
+          const mine = posts.filter((p) => p.mine), lain = posts.filter((p) => !p.mine);
+          let komSaya = [];
+          for (const p of mine.slice(0, 3)) { const cs = await driver.readComments(p.idx); komSaya.push(`• status saya: ${p.text.slice(0, 40)}… → ${cs.length} komentar`); }
+          const inbox = await driver.readInbox().catch(() => []);
+          const notif = await driver.readNotifications().catch(() => []);
+          return [
+            `🔎 MODE INTIP (tanpa menulis apa pun) — login sebagai ${config.username}`,
+            `Nama tampilan terdeteksi: ${me || "(kosong — isi /env RUANGKITA_DISPLAYNAME=Nama Anda agar status sendiri dikenali)"}`,
+            ``,
+            `Status di beranda: ${posts.length} (punya saya: ${mine.length}, orang lain: ${lain.length})`,
+            komSaya.length ? komSaya.join("\n") : "",
+            ``,
+            `Contoh status orang lain yang bisa disuka/dikomentari:`,
+            lain.slice(0, 4).map((p) => `• ${p.author}: ${p.text.replace(/^.*?· /, "").slice(0, 50)}`).join("\n") || "(tidak ada)",
+            ``,
+            `Inbox terdeteksi (${inbox.length}): ${inbox.slice(0, 4).join(" | ").slice(0, 160) || "-"}`,
+            `Notif terdeteksi (${notif.length}): ${notif.slice(0, 4).join(" | ").slice(0, 160) || "-"}`,
+            ``,
+            `Kalau daftar di atas benar, saya lanjutkan balas inbox & mention otomatis. Nyalakan aksi: /ruangkita on`,
+          ].filter((x) => x !== "").join("\n");
+        } catch (e) { return `⚠️ Intip gagal: ${String(e?.message || e)}`; }
+      }
       case "uji": {
         try {
           const r = await ensureLogin();
@@ -459,5 +730,5 @@ export function createRuangkita({
     }
   }
 
-  return { handle, start, stop, statusText, describe: statusText, isEnabled: () => enabled, _internal: { persona, limiter, doPost } };
+  return { handle, start, stop, statusText, describe: statusText, isEnabled: () => enabled, _internal: { persona, limiter, engageLimiter, doPost, replyOwnComments, engageOthers, flags, handled } };
 }

@@ -6,6 +6,7 @@ import {
 } from "./ruangkita.js";
 
 let n = 0; const ok = (m) => { n++; console.log("  ✓", m); };
+const stubDriver = () => ({ login: async () => ({ ok: true }), readFeed: async () => [], setBio: async () => ({ ok: true }), postStatus: async () => ({ ok: true }), scanPosts: async () => [], likePost: async () => ({ ok: true }), commentOnPost: async () => ({ ok: true }), readComments: async () => [], readInbox: async () => [], readNotifications: async () => [], close: async () => {}, isOpen: () => true });
 
 // --- config ---
 {
@@ -112,7 +113,8 @@ let n = 0; const ok = (m) => { n++; console.log("  ✓", m); };
 {
   const kv = new Map();
   const state = { get: async (k) => kv.get(k) ?? null, set: async (k, v) => void kv.set(k, v) };
-  const rk = createRuangkita({ config: readRuangkitaConfig({}), generate: null, state, driverFactory: () => ({ login: async () => ({ ok: true }), readFeed: async () => [], setBio: async () => ({ ok: true }), postStatus: async () => ({ ok: true }), close: async () => {}, isOpen: () => true }) });
+  const stubDriver = () => ({ login: async () => ({ ok: true }), readFeed: async () => [], setBio: async () => ({ ok: true }), postStatus: async () => ({ ok: true }), scanPosts: async () => [], likePost: async () => ({ ok: true }), commentOnPost: async () => ({ ok: true }), readComments: async () => [], readInbox: async () => [], readNotifications: async () => [], close: async () => {}, isOpen: () => true });
+  const rk = createRuangkita({ config: readRuangkitaConfig({}), generate: null, state, driverFactory: stubDriver });
   const r1 = await rk.handle("on");
   assert.match(r1, /Isi dulu RUANGKITA_USERNAME/, "on ditolak tanpa kredensial");
   ok("orkestrator: on butuh kredensial");
@@ -123,7 +125,7 @@ let n = 0; const ok = (m) => { n++; console.log("  ✓", m); };
   const rk2 = createRuangkita({
     config: readRuangkitaConfig({ RUANGKITA_USERNAME: "wak", RUANGKITA_PASSWORD: "x" }),
     generate: async () => ({ text: "status uji" }), state: state2,
-    driverFactory: () => ({ login: async () => ({ ok: true, already: false }), readFeed: async () => ["a"], setBio: async () => ({ ok: true }), postStatus: async (t) => { posted = t; return { ok: true }; }, close: async () => {}, isOpen: () => true }),
+    driverFactory: () => ({ login: async () => ({ ok: true, already: false }), readFeed: async () => ["a"], setBio: async () => ({ ok: true }), postStatus: async (t) => { posted = t; return { ok: true }; }, scanPosts: async () => [], likePost: async () => ({ ok: true }), commentOnPost: async () => ({ ok: true }), readComments: async () => [], readInbox: async () => [], readNotifications: async () => [], close: async () => {}, isOpen: () => true }),
   });
   const ron = await rk2.handle("on");
   assert.match(ron, /AKTIF/);
@@ -131,6 +133,84 @@ let n = 0; const ok = (m) => { n++; console.log("  ✓", m); };
   assert.match(rp, /Diposting/); assert.equal(posted, "status uji");
   assert.ok(kv2.get("ruangkita")?.enabled === true, "state tersimpan");
   ok("orkestrator: on + post + state persist");
+}
+
+// --- balas komentar di status sendiri: dedupe + hanya status mine ---
+{
+  const kv = new Map();
+  const state = { get: async (k) => kv.get(k) ?? null, set: async (k, v) => void kv.set(k, v) };
+  const comments = []; let scanCalls = 0;
+  const driver = {
+    login: async () => ({ ok: true }), setBio: async () => ({ ok: true }), postStatus: async () => ({ ok: true }),
+    readFeed: async () => [], close: async () => {}, isOpen: () => true,
+    scanPosts: async () => { scanCalls++; return [{ idx: 0, author: "Wak", mine: true, text: "status saya", liked: false }, { idx: 1, author: "Bob", mine: false, text: "halo dunia", liked: false }]; },
+    readComments: async (idx) => (idx === 0 ? [{ who: "Alice", text: "keren wak" }, { who: "Wak", text: "makasih" }] : []),
+    likePost: async () => ({ ok: true }),
+    commentOnPost: async (idx, text) => { comments.push({ idx, text }); return { ok: true }; },
+    readInbox: async () => [], readNotifications: async () => [],
+  };
+  const rk = createRuangkita({
+    config: { ...readRuangkitaConfig({ RUANGKITA_USERNAME: "wak", RUANGKITA_PASSWORD: "x" }), displayName: "Wak" },
+    generate: async () => ({ text: "hehe bisa aja" }), state, driverFactory: () => driver,
+    sleep: async () => {}, random: () => 0.9,
+  });
+  // perlu login sekali (set driver aktif)
+  await rk.handle("uji").catch(() => {});
+  const done = await rk._internal.replyOwnComments(5);
+  assert.equal(done, 1, "membalas 1 komentar (punya orang lain di status sendiri)");
+  assert.equal(comments.length, 1); assert.equal(comments[0].idx, 0);
+  assert.ok(!/["]/.test(comments[0].text), "teks balasan sudah di-jadul-kan");
+  // tidak membalas komentar dari diri sendiri ("Wak")
+  // panggil lagi: komentar yang sama tidak dibalas dua kali (dedupe)
+  const again = await rk._internal.replyOwnComments(5);
+  assert.equal(again, 0, "dedupe: komentar sama tak dibalas ulang");
+  ok("replyOwnComments: balas sekali, lewati diri sendiri, dedupe");
+}
+
+// --- engageOthers: suka status orang lain + dedupe, hormati batas ---
+{
+  const kv = new Map();
+  const state = { get: async (k) => kv.get(k) ?? null, set: async (k, v) => void kv.set(k, v) };
+  const likes = [], coms = [];
+  const driver = {
+    login: async () => ({ ok: true }), setBio: async () => ({ ok: true }), postStatus: async () => ({ ok: true }),
+    readFeed: async () => [], close: async () => {}, isOpen: () => true,
+    scanPosts: async () => [{ idx: 0, author: "Wak", mine: true, text: "x", liked: false }, { idx: 1, author: "Bob", mine: false, text: "halo", liked: false }, { idx: 2, author: "Cici", mine: false, text: "pagi", liked: false }],
+    readComments: async () => [], likePost: async (idx) => { likes.push(idx); return { ok: true }; },
+    commentOnPost: async (idx, t) => { coms.push({ idx, t }); return { ok: true }; },
+    readInbox: async () => [], readNotifications: async () => [],
+  };
+  let clock = 2_000_000_000_000;
+  const rk = createRuangkita({
+    config: { ...readRuangkitaConfig({ RUANGKITA_USERNAME: "wak", RUANGKITA_PASSWORD: "x", RUANGKITA_ENGAGE_PER_HOUR: "5" }), displayName: "Wak" },
+    generate: async () => ({ text: "mantap" }), state, driverFactory: () => driver,
+    sleep: async () => {}, random: () => 0.99, now: () => clock, // >0.34 -> tidak komentar, hanya like
+  });
+  await rk.handle("uji").catch(() => {});
+  const d1 = await rk._internal.engageOthers(5);
+  assert.equal(d1, 1, "1 like per siklus (jeda minimum berlaku)");
+  clock += 4 * 60_000;
+  const d2 = await rk._internal.engageOthers(5);
+  assert.equal(d2, 1, "like kedua setelah jeda");
+  assert.deepEqual(likes.sort(), [1, 2], "hanya status orang lain yang disuka, bukan milik sendiri");
+  assert.equal(coms.length, 0, "random 0.99 -> tidak komentar");
+  clock += 4 * 60_000;
+  const d3 = await rk._internal.engageOthers(5);
+  assert.equal(d3, 0, "dedupe: tidak menyukai ulang");
+  ok("engageOthers: like orang lain (berjeda), lewati milik sendiri, dedupe");
+}
+
+// --- perintah fitur on/off ---
+{
+  const kv = new Map();
+  const state = { get: async (k) => kv.get(k) ?? null, set: async (k, v) => void kv.set(k, v) };
+  const rk = createRuangkita({ config: readRuangkitaConfig({}), generate: null, state, driverFactory: stubDriver });
+  assert.equal(rk._internal.flags.likeOthers, true);
+  const r = await rk.handle("fitur suka off");
+  assert.match(r, /dimatikan/); assert.equal(rk._internal.flags.likeOthers, false);
+  await rk.handle("fitur suka on");
+  assert.equal(rk._internal.flags.likeOthers, true);
+  ok("perintah /ruangkita fitur suka on|off");
 }
 
 console.log(`\nSEMUA LULUS (${n} grup assert) ✅`);
