@@ -236,20 +236,26 @@ export function createDriver({ config, log = console }) {
     await page.waitForTimeout(2500);
     if (await loggedIn()) return { ok: true, already: true };
     if (!config.username || !config.password) throw new Error("RUANGKITA_USERNAME / RUANGKITA_PASSWORD belum diisi di .env");
-    // buka form masuk bila perlu
-    const masuk = page.getByRole("button", { name: /^Masuk$/i }).first();
-    if (await masuk.count()) { await masuk.click().catch(() => {}); await page.waitForTimeout(1000); }
-    // Target kotak username SPESIFIK lewat placeholder "Username (wajib)" — jangan kotak pencarian.
-    let user = page.getByPlaceholder(/Username/i).first();
-    if (!(await user.count())) user = page.locator('input#sidebar-username, input[name="username"], input[autocomplete*="username"]').first();
-    let pass = page.getByPlaceholder(/^Password/i).first();
-    if (!(await pass.count())) pass = page.locator('input[type="password"]').first();
+    // Form login sidebar selalu tampil untuk tamu: id #sidebar-username / #sidebar-password.
+    let user = page.locator("#sidebar-username").first();
+    let pass = page.locator("#sidebar-password").first();
+    if (!(await user.count())) {
+      // kalau tak ada, coba buka lewat tombol "Masuk" lalu pakai placeholder
+      const masuk = page.getByRole("button", { name: /^Masuk$/i }).first();
+      if (await masuk.count()) { await masuk.click().catch(() => {}); await page.waitForTimeout(1000); }
+      user = page.getByPlaceholder(/Username/i).first();
+      pass = page.locator('input[type="password"]').first();
+    }
     if (!(await user.count()) || !(await pass.count())) throw new Error("Form login (kotak Username/Password) tidak ditemukan di halaman.");
     await user.fill(config.username, { timeout: 15_000 });
     await pass.fill(config.password, { timeout: 15_000 });
-    // tombol "Masuk" di dalam form (submit)
-    const submit = page.getByRole("button", { name: /^(Masuk|Login)$/i }).last();
-    if (await submit.count()) await submit.click().catch(() => {}); else await pass.press("Enter").catch(() => {});
+    // Submit: tombol di DALAM form yang memuat kotak password (bukan tombol 'Masuk' lain di halaman).
+    const form = page.locator("form:has(#sidebar-password)").first();
+    const submit = (await form.count())
+      ? form.getByRole("button", { name: /Masuk|Login/i }).first()
+      : page.getByRole("button", { name: /^(Masuk|Login)$/i }).first();
+    if (await submit.count()) await submit.click({ timeout: 10_000 }).catch(() => {});
+    else await pass.press("Enter").catch(() => {});
     // tunggu hasil: entah komposer muncul, atau pesan error
     await page.waitForFunction(() => {
       const t = document.body.innerText || "";
