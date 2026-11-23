@@ -198,11 +198,28 @@ export function createDriver({ config, log = console }) {
     return page;
   }
   async function loggedIn() {
-    // dianggap sudah login bila ada komposer status ("Tulis Status"/textarea) & tak ada tombol "Masuk" utama
+    // Sudah login bila komposer status muncul & bukan ajakan "Masuk untuk Menulis Status".
     return await page.evaluate(() => {
       const t = document.body.innerText || "";
-      return /Tulis Status|Apa yang kamu pikirkan|Perbarui Status/i.test(t) || !!document.querySelector("textarea");
+      if (/Masuk untuk Menulis Status/i.test(t)) return false;
+      return /Perbarui Status|Apa yang sedang Anda pikirkan/i.test(t) ||
+        !!document.querySelector('textarea, [placeholder*="pikirkan" i]');
     }).catch(() => false);
+  }
+  // Pastikan komposer status terbuka & kembalikan locator kotak teksnya.
+  async function openComposer() {
+    // kotak teks berdasarkan placeholder (lebih tahan perubahan daripada tag)
+    const byPlaceholder = page.getByPlaceholder(/Apa yang sedang Anda pikirkan/i).first();
+    try { await byPlaceholder.waitFor({ state: "visible", timeout: 8000 }); return byPlaceholder; } catch {}
+    // kalau belum muncul, coba klik pemicunya (judul/teks komposer), lalu tunggu lagi
+    for (const name of [/Perbarui Status/i, /Apa yang sedang Anda pikirkan/i, /Status Saya/i]) {
+      const trg = page.getByText(name).first();
+      if (await trg.count()) { await trg.click().catch(() => {}); await page.waitForTimeout(800); }
+      if (await byPlaceholder.count()) { try { await byPlaceholder.waitFor({ state: "visible", timeout: 4000 }); return byPlaceholder; } catch {} }
+    }
+    const ta = page.locator('textarea, input[placeholder*="pikirkan" i]').first();
+    if (await ta.count()) return ta;
+    return null;
   }
   async function login() {
     await open();
@@ -250,16 +267,22 @@ export function createDriver({ config, log = console }) {
   }
   async function postStatus(text) {
     await page.goto(config.url + "/", { waitUntil: "domcontentloaded" });
-    await page.waitForTimeout(1500);
-    const box = page.locator("textarea").first();
-    if (!(await box.count())) throw new Error("Kotak tulis status tidak ditemukan (mungkin belum login).");
+    await page.waitForTimeout(2500);
+    if (!(await loggedIn())) throw new Error("Sesi belum login saat akan posting. Coba /ruangkita uji dulu.");
+    const box = await openComposer();
+    if (!box) throw new Error("Kotak tulis status tidak ditemukan (komposer tidak terbuka).");
     await box.click().catch(() => {});
     await box.fill(text, { timeout: 15_000 });
-    await page.waitForTimeout(600);
-    const kirim = page.getByRole("button", { name: /Kirim|Bagikan|Posting|Perbarui/i }).first();
-    if (!(await kirim.count())) throw new Error("Tombol kirim status tidak ditemukan.");
-    await kirim.click();
-    await page.waitForTimeout(2000);
+    await page.waitForTimeout(700);
+    // tombol kirim: "Bagikan" (utama), atau sinonim; harus aktif (tidak disabled)
+    let kirim = page.getByRole("button", { name: /^Bagikan$/i }).first();
+    if (!(await kirim.count())) kirim = page.getByRole("button", { name: /Bagikan|Kirim|Posting|Perbarui/i }).first();
+    if (!(await kirim.count())) throw new Error('Tombol "Bagikan" tidak ditemukan.');
+    await kirim.click({ timeout: 10_000 });
+    // tunggu sampai "Membagikan..." selesai / kotak kosong lagi
+    await page.waitForTimeout(500);
+    await page.waitForFunction(() => !/Membagikan\.\.\./i.test(document.body.innerText || ""), { timeout: 15_000 }).catch(() => {});
+    await page.waitForTimeout(1200);
     return { ok: true };
   }
   async function close() { try { await browser?.close(); } catch {} browser = context = page = null; }
