@@ -221,6 +221,15 @@ export function createDriver({ config, log = console }) {
     if (await ta.count()) return ta;
     return null;
   }
+  async function failureReason() {
+    return await page.evaluate(() => {
+      const t = (document.body.innerText || "");
+      if (/Verify you are human|Cloudflare|Checking your browser|Sedang memeriksa/i.test(t)) return "situs menampilkan tantangan Cloudflare";
+      const m = t.match(/Password yang Anda masukkan salah|belum terdaftar|Username dan password wajib|Gagal masuk[^.\n]*/i);
+      if (m) return m[0];
+      return "";
+    }).catch(() => "");
+  }
   async function login() {
     await open();
     await page.goto(config.url + "/", { waitUntil: "domcontentloaded", timeout: 60_000 });
@@ -229,16 +238,29 @@ export function createDriver({ config, log = console }) {
     if (!config.username || !config.password) throw new Error("RUANGKITA_USERNAME / RUANGKITA_PASSWORD belum diisi di .env");
     // buka form masuk bila perlu
     const masuk = page.getByRole("button", { name: /^Masuk$/i }).first();
-    if (await masuk.count()) { await masuk.click().catch(() => {}); await page.waitForTimeout(800); }
-    const user = page.locator('input[type="text"], input:not([type]), input[autocomplete*="username"]').first();
-    const pass = page.locator('input[type="password"]').first();
+    if (await masuk.count()) { await masuk.click().catch(() => {}); await page.waitForTimeout(1000); }
+    // Target kotak username SPESIFIK lewat placeholder "Username (wajib)" — jangan kotak pencarian.
+    let user = page.getByPlaceholder(/Username/i).first();
+    if (!(await user.count())) user = page.locator('input#sidebar-username, input[name="username"], input[autocomplete*="username"]').first();
+    let pass = page.getByPlaceholder(/^Password/i).first();
+    if (!(await pass.count())) pass = page.locator('input[type="password"]').first();
+    if (!(await user.count()) || !(await pass.count())) throw new Error("Form login (kotak Username/Password) tidak ditemukan di halaman.");
     await user.fill(config.username, { timeout: 15_000 });
     await pass.fill(config.password, { timeout: 15_000 });
-    await (page.getByRole("button", { name: /Masuk|Login/i }).first()).click().catch(() => {});
-    await page.waitForTimeout(3500);
-    const ok = await loggedIn();
-    if (!ok) throw new Error("Login gagal — cek username/password, atau situs menampilkan tantangan (Cloudflare). Coba /ruangkita uji lagi.");
-    return { ok: true, already: false };
+    // tombol "Masuk" di dalam form (submit)
+    const submit = page.getByRole("button", { name: /^(Masuk|Login)$/i }).last();
+    if (await submit.count()) await submit.click().catch(() => {}); else await pass.press("Enter").catch(() => {});
+    // tunggu hasil: entah komposer muncul, atau pesan error
+    await page.waitForFunction(() => {
+      const t = document.body.innerText || "";
+      return /Perbarui Status|Apa yang sedang Anda pikirkan/i.test(t) ||
+        /Password yang Anda masukkan salah|belum terdaftar|Gagal masuk|Verify you are human|Cloudflare/i.test(t) ||
+        !!document.querySelector('[placeholder*="pikirkan" i]');
+    }, { timeout: 15_000 }).catch(() => {});
+    await page.waitForTimeout(1200);
+    if (await loggedIn()) return { ok: true, already: false };
+    const why = await failureReason();
+    throw new Error(`Login gagal${why ? " — " + why : " — cek username/password"}. Coba /ruangkita uji lagi.`);
   }
   async function readFeed(limit = 12) {
     // Ringkasan beranda untuk mode uji: nama + cuplikan status teratas (read-only).
