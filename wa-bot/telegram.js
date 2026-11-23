@@ -161,6 +161,7 @@ const HELP = [
   "/wa2  — WA kedua (kode, qr); /wa1 qr — tautkan ulang utama",
   "/grup  — grup WA yang dijawab bot: lihat, semua, tambah, hapus",
   "/humor  — humor per grup WA: pantun harian, roasting ringan, balas chat acak, chat otomatis, mode latihan",
+  "/ruangkita  — bot persona bapak-bapak di akun RuangKita: on, off, uji, post, jeda, batas, bio (/rk)",
   "/gambar <deskripsi>  — buat gambar; /gambar grup on|off = izinkan di grup WA\n/video <deskripsi>  — video bernarasi; kirim FOTO + keterangan \"jadikan video salju\" = foto hidup\n/env  — ubah kunci gambar (token Cloudflare, jatah) dari sini",
   "/kas  — laporan kas bulanan: konfirmasi angka, submit, simpan (/kas bantuan)",
   "/nodin  — konsep Nota Dinas LPJ (PDF + Word), otomatis tiap tanggal 1 (/nodin cek)",
@@ -1167,6 +1168,10 @@ Suara khusus satu grup: /suara grup wanita <nama grup> • /suara grup (daftar) 
     if (name === "humor" || name === "lucu") {
       if (!deps.humor) return void (await reply("Mode humor tidak tersedia di versi bot ini."));
       return void (await reply(await withAction(chatId, "typing", () => deps.humor.handle(arg))));
+    }
+    if (name === "ruangkita" || name === "rk") {
+      if (!deps.ruangkita) return void (await reply("Bot RuangKita tidak tersedia di versi bot ini."));
+      return void (await reply(await withAction(chatId, "typing", () => deps.ruangkita.handle(arg))));
     }
     if (name === "grup" || name === "group") {
       if (!deps.groups) return void (await reply("Pengaturan grup tidak tersedia di versi bot ini."));

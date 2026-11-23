@@ -128,6 +128,7 @@ import { createKbIngestWorker, readKbConfig } from "./kb-ingest.js";
 import { createKbRetrievalWorker } from "./kb-retrieval.js";
 import { createDocFolderWorker } from "./doc-folder.js";
 import { createKomitmen, parseKomitmenCommand } from "./komitmen.js";
+import { createRuangkita, readRuangkitaConfig } from "./ruangkita.js";
 import { createAcuanLibrary } from "./acuan-lib.js";
 import { guardDocAnswer } from "./docguard.js";
 import { createLocalDocs, parseDokumenCommand } from "./local-docs.js";
@@ -6192,6 +6193,17 @@ humor
 setInterval(() => {
   humor.check().catch((e) => console.error("🎋 Pemeriksaan pantun error:", e instanceof Error ? e.message : String(e)));
 }, 60_000);
+// Bot persona "bapak-bapak lucu" untuk akun RuangKita (ruangkita.online).
+// Login & beraksi lewat tampilan asli situs (Playwright), tidak menyentuh Firebase pembuat.
+// Kontrol: /ruangkita di Telegram. Bawaan MATI; butuh RUANGKITA_USERNAME/PASSWORD di .env.
+const ruangkita = createRuangkita({
+  config: readRuangkitaConfig(process.env),
+  generate: (opts) => llmFallback.generate(opts),
+  state: strictStateStore,
+  log: console,
+});
+ruangkita.start().catch((e) => console.error("🧓 RuangKita gagal start:", e instanceof Error ? e.message : String(e)));
+
 const nodin = createNodin({
   config: readNodinConfig(process.env, BOT_DIR),
   state: strictStateStore,
@@ -6614,6 +6626,7 @@ const telegram = createTelegram({
     },
     groups: { handle: (arg) => groupList.handle(arg, { secondAliases: [String(wa2Config.botName || "").trim().split(/\s+/)[0]] }) },
     humorReview: { decide: (arg) => humor.decide(arg) },
+    ruangkita: { handle: (arg) => ruangkita.handle(arg) },
     humor: { handle: (arg) => humor.handle(arg, { secondAliases: [String(wa2Config.botName || "").trim().split(/\s+/)[0]] }) },
     resetPin: { handle: (arg) => resetPinPemilik({ supabase, nama: arg }) },
     wa1: {
