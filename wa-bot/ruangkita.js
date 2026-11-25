@@ -13,7 +13,7 @@
 //
 // Keterbukaan: bio akun ditandai "dijalankan bot" saat login (RUANGKITA_BIO).
 
-const DEFAULT_URL = "https://ruangkita.online";
+const DEFAULT_URL = "https://temandulu.site"; // situs rebrand dari ruangkita.online
 const DEFAULT_BIO = "Akun ini dijalankan bot AI (persona bapak-bapak) 🤖 — kelola oleh pemilik.";
 const TZ = "Asia/Makassar";
 
@@ -269,21 +269,24 @@ export function createDriver({ config, log = console }) {
     await page.waitForTimeout(2500);
     if (await loggedIn()) return { ok: true, already: true };
     if (!config.username || !config.password) throw new Error("RUANGKITA_USERNAME / RUANGKITA_PASSWORD belum diisi di .env");
-    // Form login sidebar selalu tampil untuk tamu: id #sidebar-username / #sidebar-password.
-    let user = page.locator("#sidebar-username").first();
-    let pass = page.locator("#sidebar-password").first();
-    if (!(await user.count())) {
-      // kalau tak ada, coba buka lewat tombol "Masuk" lalu pakai placeholder
+    // id form: TemanDulu (#auth-username-input/#auth-password-input) atau RuangKita lama (#sidebar-*).
+    const userSel = "#auth-username-input, #sidebar-username";
+    const passSel = "#auth-password-input, #sidebar-password";
+    let user = page.locator(userSel).first();
+    // Form login bisa berupa modal: buka lewat tombol "Masuk" bila kotaknya belum tampil.
+    if (!(await user.count()) || !(await user.isVisible().catch(() => false))) {
       const masuk = page.getByRole("button", { name: /^Masuk$/i }).first();
-      if (await masuk.count()) { await masuk.click().catch(() => {}); await page.waitForTimeout(1000); }
-      user = page.getByPlaceholder(/Username/i).first();
-      pass = page.locator('input[type="password"]').first();
+      if (await masuk.count()) { await masuk.click().catch(() => {}); await page.waitForTimeout(1200); }
+      user = page.locator(userSel).first();
     }
+    if (!(await user.count())) user = page.getByPlaceholder(/Username|Wajib diisi|dimas/i).first();
+    let pass = page.locator(passSel).first();
+    if (!(await pass.count())) pass = page.locator('input[type="password"]').first();
     if (!(await user.count()) || !(await pass.count())) throw new Error("Form login (kotak Username/Password) tidak ditemukan di halaman.");
     await user.fill(config.username, { timeout: 15_000 });
     await pass.fill(config.password, { timeout: 15_000 });
-    // Submit: tombol di DALAM form yang memuat kotak password (bukan tombol 'Masuk' lain di halaman).
-    const form = page.locator("form:has(#sidebar-password)").first();
+    // Submit: tombol di DALAM form yang memuat kotak password.
+    const form = page.locator("form:has(input[type=password])").first();
     const submit = (await form.count())
       ? form.getByRole("button", { name: /Masuk|Login/i }).first()
       : page.getByRole("button", { name: /^(Masuk|Login)$/i }).first();
@@ -519,6 +522,7 @@ export function createRuangkita({
     if (process.env.RUANGKITA_USERNAME != null) config.username = String(process.env.RUANGKITA_USERNAME).trim();
     if (process.env.RUANGKITA_PASSWORD != null) config.password = String(process.env.RUANGKITA_PASSWORD);
     if (process.env.RUANGKITA_BIO) config.bio = String(process.env.RUANGKITA_BIO).slice(0, 160);
+    if (process.env.RUANGKITA_URL) config.url = String(process.env.RUANGKITA_URL).trim().replace(/\/+$/, "");
   }
   async function ensureDriver() { if (!driver) driver = driverFactory({ config, log }); return driver; }
   async function ensureLogin() {

@@ -61,7 +61,8 @@ export const ENV_KEYS = {
   VIDEO_MUSIC_DEFAULT: { secret: false, hint: "1 = semua video otomatis diberi musik dari folder musik/ (bila ada lagunya); 0 = hanya bila diminta" , validate: intIn(0, 1) },
   RUANGKITA_USERNAME: { secret: false, hint: "username akun RuangKita untuk bot persona bapak-bapak", validate: (v) => (v.trim().length >= 2 ? null : "username minimal 2 karakter") },
   RUANGKITA_PASSWORD: { secret: true, hint: "password akun RuangKita (disamarkan)", validate: (v) => (v.length >= 1 ? null : "password kosong") },
-  RUANGKITA_BIO: { secret: false, hint: "bio akun RuangKita (ditandai 'dijalankan bot')", validate: (v) => (v.length <= 160 ? null : "bio maksimal 160 karakter") }
+  RUANGKITA_BIO: { secret: false, hint: "bio akun RuangKita (ditandai 'dijalankan bot')", validate: (v) => (v.length <= 160 ? null : "bio maksimal 160 karakter") },
+  RUANGKITA_URL: { secret: false, hint: "alamat situs (mis. https://temandulu.site)", validate: (v) => (/^https?:\/\/.+/.test(v.trim()) ? null : "harus diawali http:// atau https://") }
 };
 
 export const maskValue = (value, secret) => {

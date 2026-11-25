@@ -11,7 +11,7 @@ const stubDriver = () => ({ login: async () => ({ ok: true }), readFeed: async (
 // --- config ---
 {
   const c = readRuangkitaConfig({});
-  assert.equal(c.enabled, false); assert.equal(c.url, "https://ruangkita.online");
+  assert.equal(c.enabled, false); assert.equal(c.url, "https://temandulu.site");
   assert.equal(c.minGapMin, 3); assert.equal(c.maxPerHour, 8); assert.equal(c.postPerDay, 3);
   const c2 = readRuangkitaConfig({ RUANGKITA_ENABLED: "1", RUANGKITA_MIN_GAP_MIN: "0", RUANGKITA_MAX_PER_HOUR: "999", RUANGKITA_URL: "https://x.test/" });
   assert.equal(c2.enabled, true); assert.equal(c2.minGapMin, 1, "clamp bawah"); assert.equal(c2.maxPerHour, 60, "clamp atas"); assert.equal(c2.url, "https://x.test");
