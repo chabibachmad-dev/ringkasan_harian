@@ -2,7 +2,7 @@
 import assert from "node:assert";
 import {
   readRuangkitaConfig, createLimiter, pickDelayMs, jadulkan, pickJoke, JOKE_BANK,
-  createPersona, parseCommand, withinActiveHours, createRuangkita,
+  createPersona, parseCommand, withinActiveHours, createRuangkita, pickRiddle, RIDDLE_BANK,
 } from "./ruangkita.js";
 
 let n = 0; const ok = (m) => { n++; console.log("  ✓", m); };
@@ -198,6 +198,39 @@ const stubDriver = () => ({ login: async () => ({ ok: true }), readFeed: async (
   const d3 = await rk._internal.engageOthers(5);
   assert.equal(d3, 0, "dedupe: tidak menyukai ulang");
   ok("engageOthers: like orang lain (berjeda), lewati milik sendiri, dedupe");
+}
+
+// --- tebak-tebakan: format & command ---
+{
+  assert.equal(parseCommand("tebak").kind, "tebak");
+  assert.equal(parseCommand("tebakan").kind, "tebak");
+  assert.ok(RIDDLE_BANK.includes(pickRiddle(() => 0)));
+  const p = createPersona({ generate: null }); // fallback
+  const r = await p.riddle();
+  assert.ok(r.startsWith("Wak Kaji punya tebakan:"), "awalan tebakan benar");
+  assert.ok(r.includes("...") || r.includes("…"), "ada pemisah pertanyaan-jawaban");
+  assert.ok(!/["]/.test(r), "tanpa tanda kutip");
+  const p2 = createPersona({ generate: async () => ({ text: "Apa yg loading terus? ...Perasaanmu 😅" }) });
+  const r2 = await p2.riddle();
+  assert.ok(r2.startsWith("Wak Kaji punya tebakan:") && !/[😅]/u.test(r2), "LLM dibungkus awalan + jadul");
+  ok("tebak-tebakan: awalan, fallback, command");
+}
+
+// --- doPost mode tebak memakai persona.riddle ---
+{
+  const kv = new Map();
+  const state = { get: async (k) => kv.get(k) ?? null, set: async (k, v) => void kv.set(k, v) };
+  let posted = "";
+  const rk = createRuangkita({
+    config: { ...readRuangkitaConfig({ RUANGKITA_USERNAME: "wak", RUANGKITA_PASSWORD: "x" }), riddleRatio: 1 },
+    generate: async ({ messages }) => ({ text: String(messages[0].content).includes("TEBAK") ? "Apa yg makin diisi makin kosong? ...Pulsa" : "status biasa" }),
+    state, driverFactory: () => ({ login: async () => ({ ok: true }), setBio: async () => ({ ok: true }), postStatus: async (t) => { posted = t; return { ok: true }; }, readFeed: async () => [], scanPosts: async () => [], likePost: async () => ({ ok: true }), commentOnPost: async () => ({ ok: true }), readComments: async () => [], readInbox: async () => [], readNotifications: async () => [], close: async () => {}, isOpen: () => true }),
+    sleep: async () => {},
+  });
+  await rk.handle("uji").catch(() => {});
+  await rk.handle("tebak");
+  assert.ok(posted.startsWith("Wak Kaji punya tebakan:"), "perintah tebak memposting format tebakan");
+  ok("doPost mode tebak");
 }
 
 // --- perintah fitur on/off ---

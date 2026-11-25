@@ -49,6 +49,7 @@ export function readRuangkitaConfig(env = process.env) {
     activeTo: clamp(toInt(env.RUANGKITA_ACTIVE_TO, 23), 0, 23),
     headless: toBool(env.RUANGKITA_HEADLESS, true),
     displayName: (env.RUANGKITA_DISPLAYNAME || "").trim(), // nama tampilan akun (untuk kenali status sendiri)
+    riddleRatio: clamp(toInt(env.RUANGKITA_RIDDLE_PCT, 40), 0, 100) / 100, // peluang status jadi tebak-tebakan
   };
 }
 
@@ -168,7 +169,26 @@ export function createPersona({ generate, random = Math.random, log = console } 
       const t = await run(PERSONA_RULES, ctx, 0.85);
       return jadulkan(t || `Mantap ${author || "nak"}! ${pickJoke(random)}`).slice(0, 220);
     },
+    async riddle() {
+      const t = await run(PERSONA_RULES + "\nKhusus: buat TEBAK-TEBAKAN (riddle) receh bapak-bapak. Format: pertanyaan singkat, lalu ' ...' lalu jawaban yang lucu/plesetan. Nuansa nostalgia warnet/modem/BlackBerry/2009 boleh.",
+        "Buat SATU tebak-tebakan lucu bapak-bapak. Tulis HANYA bagian pertanyaan lalu jawaban dipisah ' ...' (tanpa menulis 'Wak Kaji punya tebakan'). Tanpa tanda kutip. Maksimal 2 kalimat.", 0.95);
+      const body = t || pickRiddle(random);
+      return jadulkan(`Wak Kaji punya tebakan: ${body}`).slice(0, 480);
+    },
   };
+}
+
+// Cadangan tebak-tebakan lokal (original).
+export const RIDDLE_BANK = [
+  "Hewan apa yang paling setia nungguin tiap malam tapi gak pernah dibales? ...Notifikasi. Dicuekin tetap muncul :))",
+  "Kenapa sinyal warnet dulu mirip mantan? ...Pas dibutuhin ilang, pas udah move on malah full bar.",
+  "Benda apa yang makin diisi makin kosong? ...Pulsa, nak.",
+  "Apa bedanya kamu sama download 56k? ...Gak ada, sama-sama gagal di 99%.",
+  "Kenapa modem jadul gak pernah bohong? ...Soalnya kalau lemot ya ngaku lemot, gak kayak janji.",
+  "Kursi apa yang bikin orang betah berjam-jam tanpa gaji? ...Kursi warnet, nak.",
+];
+export function pickRiddle(random = Math.random) {
+  return RIDDLE_BANK[Math.floor(random() * RIDDLE_BANK.length)];
 }
 
 // ---------------------------------------------------------------- parser perintah Telegram
@@ -184,6 +204,7 @@ export function parseCommand(arg = "") {
   if (["lihat", "intip", "scan"].includes(a)) return { kind: "lihat" };
   if (["fitur", "mode", "aktifkan"].includes(a)) return { kind: "fitur", text: tail };
   if (["post", "status!", "posting", "tulis"].includes(a)) return { kind: "post", text: tail };
+  if (["tebak", "tebakan", "teka", "riddle"].includes(a)) return { kind: "tebak" };
   if (["jeda", "gap"].includes(a)) return { kind: "jeda", min: toInt(tail, NaN) };
   if (["batas", "limit"].includes(a)) return { kind: "batas", n: toInt(tail, NaN) };
   if (["bio"].includes(a)) return { kind: "bio", text: tail };
@@ -508,10 +529,12 @@ export function createRuangkita({
     return r;
   }
 
-  async function doPost(seed = "") {
-    const text = await persona.status(seed);
+  async function doPost(seed = "", kind = "auto") {
+    // kind: "status" | "tebak" | "auto" (auto = sesekali tebak-tebakan)
+    const asRiddle = kind === "tebak" || (kind === "auto" && !seed && random() < config.riddleRatio);
+    const text = asRiddle ? await persona.riddle() : await persona.status(seed);
     await driver.postStatus(text);
-    limiter.record("post"); lastAction = `post: ${text.slice(0, 60)}`; await saveState();
+    limiter.record("post"); lastAction = `${asRiddle ? "tebakan" : "post"}: ${text.slice(0, 60)}`; await saveState();
     return text;
   }
 
@@ -647,7 +670,7 @@ export function createRuangkita({
       "Fitur:",
       featureText(),
       "",
-      "Perintah: on | off | uji | lihat | post [teks] | fitur <nama> on|off | jeda <mnt> | batas <n> | bio <teks>",
+      "Perintah: on | off | uji | lihat | post [teks] | tebak | fitur <nama> on|off | jeda <mnt> | batas <n> | bio <teks>",
     ].filter(Boolean).join("\n");
   }
 
@@ -709,7 +732,11 @@ export function createRuangkita({
         } catch (e) { return `⚠️ Uji gagal: ${String(e?.message || e)}`; }
       }
       case "post": {
-        try { await ensureLogin(); const text = await doPost(c.text || ""); return `✅ Diposting:\n"${text}"`; }
+        try { await ensureLogin(); const text = await doPost(c.text || "", c.text ? "status" : "auto"); return `✅ Diposting:\n"${text}"`; }
+        catch (e) { return `⚠️ Gagal posting: ${String(e?.message || e)}`; }
+      }
+      case "tebak": {
+        try { await ensureLogin(); const text = await doPost("", "tebak"); return `✅ Diposting:\n"${text}"`; }
         catch (e) { return `⚠️ Gagal posting: ${String(e?.message || e)}`; }
       }
       case "jeda": {
